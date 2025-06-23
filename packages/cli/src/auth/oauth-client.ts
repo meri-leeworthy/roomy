@@ -59,13 +59,20 @@ export class RoomyOAuthClient {
   private callbackServer?: ReturnType<typeof createServer>;
 
   constructor() {
+    // Use localhost client_id with query parameters as per AT Protocol development guidelines
+    const redirectUri = 'http://127.0.0.1:8080/callback';
+    const scope = 'atproto transition:generic transition:chat.bsky';
+    
     this.config = {
-      client_id: 'https://roomy.space/oauth-client-cli.json',
+      client_id: `http://localhost/?redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}`,
       client_name: 'Roomy CLI',
       client_uri: 'https://roomy.space',
-      redirect_uris: ['http://localhost:3000/callback'],
-      scope: 'atproto transition:generic transition:chat.bsky',
-      handleResolver: 'https://resolver.roomy.chat'
+      redirect_uris: [redirectUri],
+      scope,
+      handleResolver: 'https://resolver.roomy.chat',
+      token_endpoint_auth_method: 'none' as const,
+      grant_types: ['authorization_code', 'refresh_token'] as const,
+      response_types: ['code'] as const
     };
 
     // Ensure OAuth storage directory exists
@@ -88,8 +95,8 @@ export class RoomyOAuthClient {
     return new Promise((resolve, reject) => {
       const app = express();
       
-      // Start callback server
-      this.callbackServer = app.listen(3000, () => {
+      // Start callback server on port 8080
+      this.callbackServer = app.listen(8080, () => {
         console.log('🔐 Starting OAuth authorization...');
       });
 
