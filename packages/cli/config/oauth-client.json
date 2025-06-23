@@ -1,0 +1,8 @@
+{
+  "client_id": "https://roomy.space/oauth-client-cli.json",
+  "client_name": "Roomy CLI",
+  "client_uri": "https://roomy.space",
+  "redirect_uris": ["http://localhost:3000/callback"],
+  "scope": "atproto transition:generic transition:chat.bsky",
+  "handleResolver": "https://resolver.roomy.chat"
+}
