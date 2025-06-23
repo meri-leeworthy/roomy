@@ -1,11 +1,11 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { SessionManager } from '../../auth/session-manager.js';
+import { OAuthSessionManager } from '../../auth/oauth-session-manager.js';
 
 export const logoutCommand = new Command('logout')
   .description('Logout from Roomy')
   .action(async () => {
-    const sessionManager = new SessionManager();
+    const sessionManager = new OAuthSessionManager();
     
     try {
       const session = await sessionManager.loadSession();

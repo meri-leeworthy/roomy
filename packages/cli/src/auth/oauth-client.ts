@@ -1,57 +1,12 @@
-import { NodeOAuthClient } from '@atproto/oauth-client-node';
-import type { NodeSavedStateStore, NodeSavedSessionStore } from '@atproto/oauth-client-node';
-import { SimpleStore, type Value } from '@atproto-labs/simple-store';
+import { NodeOAuthClient, type RuntimeLock } from '@atproto/oauth-client-node';
 import { Agent } from '@atproto/api';
 import express from 'express';
 import open from 'open';
 import { createServer } from 'http';
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import type { OAuthConfig } from '../types/index.js';
-
-// File-based implementation of SimpleStore
-class FileStore<K extends string, V extends Value> implements SimpleStore<K, V> {
-  constructor(private filePath: string) {}
-
-  async get(key: K): Promise<V | undefined> {
-    try {
-      const data = JSON.parse(readFileSync(this.filePath, 'utf-8')) as Record<string, V>;
-      return data[key];
-    } catch {
-      return undefined;
-    }
-  }
-
-  async set(key: K, value: V): Promise<void> {
-    let data: Record<string, V> = {};
-    try {
-      data = JSON.parse(readFileSync(this.filePath, 'utf-8')) as Record<string, V>;
-    } catch {
-      // File doesn't exist or is invalid, start with empty object
-    }
-    data[key] = value;
-    writeFileSync(this.filePath, JSON.stringify(data, null, 2));
-  }
-
-  async del(key: K): Promise<void> {
-    try {
-      const data = JSON.parse(readFileSync(this.filePath, 'utf-8')) as Record<string, V>;
-      delete data[key];
-      writeFileSync(this.filePath, JSON.stringify(data, null, 2));
-    } catch {
-      // File doesn't exist, nothing to delete
-    }
-  }
-
-  async clear(): Promise<void> {
-    try {
-      unlinkSync(this.filePath);
-    } catch {
-      // File doesn't exist, already cleared
-    }
-  }
-}
+import { FileSessionStore, FileStateStore, FileRuntimeLock } from './stores.js';
 
 export class RoomyOAuthClient {
   private client: NodeOAuthClient;
@@ -75,19 +30,25 @@ export class RoomyOAuthClient {
       response_types: ['code'] as const
     };
 
-    // Ensure OAuth storage directory exists
-    const oauthDir = join(homedir(), '.roomy-cli', 'oauth');
-    mkdirSync(oauthDir, { recursive: true });
+    // Set up OAuth storage directory
+    const oauthDir = join(homedir(), '.roomy-cli');
 
-    // Create store instances
-    const stateStore: NodeSavedStateStore = new FileStore(join(oauthDir, 'state.json'));
-    const sessionStore: NodeSavedSessionStore = new FileStore(join(oauthDir, 'session.json'));
+    // Create store instances according to AT Protocol requirements
+    const sessionStore = new FileSessionStore(oauthDir);
+    const stateStore = new FileStateStore(oauthDir);
+    
+    // Create runtime lock for preventing concurrent token refreshes
+    const fileRuntimeLock = new FileRuntimeLock(oauthDir);
+    const requestLock: RuntimeLock = async (key, fn) => {
+      return await fileRuntimeLock.lock(key, () => Promise.resolve(fn()));
+    };
 
     this.client = new NodeOAuthClient({
       clientMetadata: this.config,
       handleResolver: this.config.handleResolver,
+      sessionStore,
       stateStore,
-      sessionStore
+      requestLock
     });
   }
 

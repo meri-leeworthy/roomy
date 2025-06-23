@@ -1,4 +1,9 @@
 import { Command } from 'commander';
+import inquirer from 'inquirer';
+import chalk from 'chalk';
+import { OAuthSessionManager } from '../../auth/oauth-session-manager.js';
+import { RoomyJazzClient } from '../../jazz/client.js';
+import type { MessageOptions } from '../../types/index.js';
 
 export const sendCommand = new Command('send')
   .description('Send a message to a Roomy channel')
@@ -8,6 +13,119 @@ export const sendCommand = new Command('send')
   .option('-t, --thread <thread>', 'Thread ID (optional)')
   .option('-r, --reply <messageId>', 'Reply to message ID (optional)')
   .action(async (options) => {
-    console.log('🚧 Send command - Coming soon!');
-    console.log('Options:', options);
+    const sessionManager = new OAuthSessionManager();
+    
+    try {
+      // Check authentication
+      const session = await sessionManager.loadSession();
+      if (!session) {
+        console.error(chalk.red('❌ Not logged in. Run: roomy login'));
+        process.exit(1);
+      }
+
+      if (!session.passphrase) {
+        console.error(chalk.red('❌ No Jazz passphrase found. Please log in again.'));
+        process.exit(1);
+      }
+
+      // Initialize Jazz client
+      console.log(chalk.blue('🎵 Connecting to Jazz...'));
+      const jazzClient = new RoomyJazzClient();
+      await jazzClient.initialize(session.passphrase);
+
+      // Get or select space
+      let spaceId = options.space;
+      let selectedSpace;
+      if (!spaceId) {
+        const spaces = await jazzClient.loadSpaces();
+        if (spaces.length === 0) {
+          console.error(chalk.red('❌ No spaces found. Join a space first on https://roomy.space'));
+          process.exit(1);
+        }
+
+        const { chosenSpace } = await inquirer.prompt([{
+          type: 'list',
+          name: 'chosenSpace',
+          message: 'Select a space:',
+          choices: spaces.map(space => ({
+            name: `${space.name} (${space.members?.length || 0} members)`,
+            value: space
+          }))
+        }]);
+        selectedSpace = chosenSpace;
+        spaceId = selectedSpace.id;
+      } else {
+        // Find space by name or ID
+        const spaces = await jazzClient.loadSpaces();
+        selectedSpace = spaces.find(s => s.id === spaceId || s.name === spaceId);
+        if (!selectedSpace) {
+          console.error(chalk.red(`❌ Space "${spaceId}" not found.`));
+          process.exit(1);
+        }
+      }
+
+      // Get or select channel
+      let channelId = options.channel;
+      let selectedChannel;
+      if (!channelId) {
+        const channels = await jazzClient.loadChannels(spaceId);
+        if (channels.length === 0) {
+          console.error(chalk.red('❌ No channels found in this space.'));
+          process.exit(1);
+        }
+
+        const { chosenChannel } = await inquirer.prompt([{
+          type: 'list',
+          name: 'chosenChannel',
+          message: 'Select a channel:',
+          choices: channels.map(channel => ({
+            name: `#${channel.name}`,
+            value: channel
+          }))
+        }]);
+        selectedChannel = chosenChannel;
+        channelId = selectedChannel.id;
+      } else {
+        // Find channel by name or ID
+        const channels = await jazzClient.loadChannels(spaceId);
+        selectedChannel = channels.find(c => c.id === channelId || c.name === channelId);
+        if (!selectedChannel) {
+          console.error(chalk.red(`❌ Channel "${channelId}" not found.`));
+          process.exit(1);
+        }
+      }
+
+      // Get message content
+      let message = options.message;
+      if (!message) {
+        const { messageContent } = await inquirer.prompt([{
+          type: 'input',
+          name: 'messageContent',
+          message: 'Enter your message:',
+          validate: (input: string) => {
+            if (!input.trim()) return 'Message cannot be empty';
+            return true;
+          }
+        }]);
+        message = messageContent;
+      }
+
+      // Prepare message options
+      const messageOptions: MessageOptions = {};
+      if (options.thread) messageOptions.threadId = options.thread;
+      if (options.reply) messageOptions.replyTo = options.reply;
+
+      // Send message
+      console.log(chalk.blue('📨 Sending message...'));
+      await jazzClient.sendMessage(channelId, message, messageOptions);
+
+      console.log(chalk.green(`✅ Message sent to #${selectedChannel.name} in ${selectedSpace.name}!`));
+      
+      // Disconnect
+      await jazzClient.disconnect();
+      
+    } catch (error) {
+      console.error(chalk.red(`❌ Failed to send message: ${error instanceof Error ? error.message : 'Unknown error'}`));
+      process.exit(1);
+    }
   });
