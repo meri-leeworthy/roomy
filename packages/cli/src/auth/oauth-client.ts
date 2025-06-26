@@ -1,5 +1,4 @@
 import { NodeOAuthClient, type RuntimeLock } from '@atproto/oauth-client-node';
-import { Agent } from '@atproto/api';
 import express from 'express';
 import open from 'open';
 import { createServer } from 'http';

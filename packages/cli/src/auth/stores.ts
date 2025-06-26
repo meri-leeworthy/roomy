@@ -10,6 +10,37 @@ import type {
 } from '@atproto/oauth-client-node';
 
 /**
+ * Add new types for Jazz Server Workers
+ */
+export interface JazzServerWorker {
+  accountID: string;
+  publicName: string;
+  accountSecret: string;
+  createdAt: number;
+}
+
+/**
+ * CLI session data that extends OAuth session data
+ */
+export interface CliSessionData {
+  did: string;
+  handle: string;
+  passphrase?: string;
+  jazzAccountID?: string;
+  // Add discriminator for session type
+  sessionType?: 'oauth' | 'jazz-only';
+  // Add Jazz worker data for Jazz-only sessions
+  jazzWorker?: JazzServerWorker;
+}
+
+/**
+ * Extended session data that combines OAuth and CLI data
+ */
+export interface ExtendedSessionData extends NodeSavedSession {
+  cliData?: CliSessionData;
+}
+
+/**
  * File-based implementation of NodeSavedSessionStore
  * Stores OAuth session data (access tokens, refresh tokens, etc.)
  */
@@ -25,7 +56,7 @@ export class FileSessionStore implements NodeSavedSessionStore {
   async set(sub: string, sessionData: NodeSavedSession): Promise<void> {
     await this.ensureConfigDir();
     
-    let sessions: Record<string, NodeSavedSession> = {};
+    let sessions: Record<string, ExtendedSessionData> = {};
     try {
       if (existsSync(this.filePath)) {
         const data = await readFile(this.filePath, 'utf-8');
@@ -35,7 +66,14 @@ export class FileSessionStore implements NodeSavedSessionStore {
       // File doesn't exist or is invalid, start with empty object
     }
     
-    sessions[sub] = sessionData;
+    // Preserve existing CLI data if updating OAuth session
+    const existingSession = sessions[sub];
+    const extendedSessionData: ExtendedSessionData = {
+      ...sessionData,
+      cliData: existingSession?.cliData
+    };
+    
+    sessions[sub] = extendedSessionData;
     await writeFile(this.filePath, JSON.stringify(sessions, null, 2), { mode: 0o600 });
   }
 
@@ -46,11 +84,65 @@ export class FileSessionStore implements NodeSavedSessionStore {
       }
       
       const data = await readFile(this.filePath, 'utf-8');
-      const sessions: Record<string, NodeSavedSession> = JSON.parse(data);
+      const sessions: Record<string, ExtendedSessionData> = JSON.parse(data);
       return sessions[sub];
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Get CLI session data for a specific DID
+   */
+  async getCliData(sub: string): Promise<CliSessionData | undefined> {
+    try {
+      if (!existsSync(this.filePath)) {
+        return undefined;
+      }
+      
+      const data = await readFile(this.filePath, 'utf-8');
+      const sessions: Record<string, ExtendedSessionData> = JSON.parse(data);
+      return sessions[sub]?.cliData;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Set CLI session data for a specific DID
+   */
+  async setCliData(sub: string, cliData: CliSessionData): Promise<void> {
+    await this.ensureConfigDir();
+    
+    let sessions: Record<string, ExtendedSessionData> = {};
+    try {
+      if (existsSync(this.filePath)) {
+        const data = await readFile(this.filePath, 'utf-8');
+        sessions = JSON.parse(data);
+      }
+    } catch {
+      // File doesn't exist or is invalid, start with empty object
+    }
+    
+
+    if (sessions[sub]) {
+      // OAuth session exists, just add CLI data
+      sessions[sub].cliData = cliData;
+    } else {
+      // For Jazz-only sessions, create a proper structure
+      if (cliData.sessionType === 'jazz-only') {
+        const sessionData: ExtendedSessionData = {
+          ...dummySession,
+          cliData,
+        };
+        sessions[sub] = sessionData;
+      } else {
+        // Existing fallback for backward compatibility
+        (sessions as any)[sub] = { sub, cliData };
+      }
+    }
+    
+    await writeFile(this.filePath, JSON.stringify(sessions, null, 2), { mode: 0o600 });
   }
 
   async del(sub: string): Promise<void> {
@@ -60,7 +152,7 @@ export class FileSessionStore implements NodeSavedSessionStore {
       }
       
       const data = await readFile(this.filePath, 'utf-8');
-      const sessions: Record<string, NodeSavedSession> = JSON.parse(data);
+      const sessions: Record<string, ExtendedSessionData> = JSON.parse(data);
       delete sessions[sub];
       
       if (Object.keys(sessions).length === 0) {
@@ -70,6 +162,31 @@ export class FileSessionStore implements NodeSavedSessionStore {
       }
     } catch {
       // File doesn't exist, nothing to delete
+    }
+  }
+
+  /**
+   * Get all CLI session data
+   */
+  async getAllCliData(): Promise<CliSessionData[]> {
+    try {
+      if (!existsSync(this.filePath)) {
+        return [];
+      }
+      
+      const data = await readFile(this.filePath, 'utf-8');
+      const sessions: Record<string, ExtendedSessionData> = JSON.parse(data);
+      
+      const cliSessions: CliSessionData[] = [];
+      for (const sessionData of Object.values(sessions)) {
+        if (sessionData.cliData) {
+          cliSessions.push(sessionData.cliData);
+        }
+      }
+      
+      return cliSessions;
+    } catch {
+      return [];
     }
   }
 
@@ -233,4 +350,106 @@ export class FileRuntimeLock {
       await mkdir(this.configDir, { recursive: true });
     }
   }
+}
+
+/**
+ * Separate store for Jazz Server Worker credentials
+ * Keeps sensitive account secrets separate from OAuth sessions
+ */
+export class JazzCredentialsStore {
+  private filePath: string;
+  private configDir: string;
+
+  constructor(configDir?: string) {
+    this.configDir = configDir || join(homedir(), '.roomy-cli');
+    this.filePath = join(this.configDir, 'jazz-credentials.json');
+  }
+
+  async setWorker(accountID: string, worker: JazzServerWorker): Promise<void> {
+    await this.ensureConfigDir();
+    
+    let workers: Record<string, JazzServerWorker> = {};
+    try {
+      if (existsSync(this.filePath)) {
+        const data = await readFile(this.filePath, 'utf-8');
+        workers = JSON.parse(data);
+      }
+    } catch {
+      // File doesn't exist or is invalid, start with empty object
+    }
+    
+    workers[accountID] = worker;
+    await writeFile(this.filePath, JSON.stringify(workers, null, 2), { mode: 0o600 });
+  }
+
+  async getWorker(accountIDOrHandle: string): Promise<JazzServerWorker | undefined> {
+    try {
+      if (!existsSync(this.filePath)) {
+        return undefined;
+      }
+      
+      const data = await readFile(this.filePath, 'utf-8');
+      const workers: Record<string, JazzServerWorker> = JSON.parse(data);
+
+      if (accountIDOrHandle.startsWith('co_')) {
+        let accountId = accountIDOrHandle;
+        return workers[accountId];
+      }
+
+      else return Object.values(workers).find((w: JazzServerWorker) => w.publicName === accountIDOrHandle);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async listWorkers(): Promise<JazzServerWorker[]> {
+    try {
+      if (!existsSync(this.filePath)) {
+        return [];
+      }
+      
+      const data = await readFile(this.filePath, 'utf-8');
+      const workers: Record<string, JazzServerWorker> = JSON.parse(data);
+      
+      return Object.values(workers);
+    } catch {
+      return [];
+    }
+  }
+
+  async deleteWorker(accountID: string): Promise<void> {
+    try {
+      if (!existsSync(this.filePath)) {
+        return;
+      }
+      
+      const data = await readFile(this.filePath, 'utf-8');
+      const workers: Record<string, JazzServerWorker> = JSON.parse(data);
+      delete workers[accountID];
+      
+      if (Object.keys(workers).length === 0) {
+        await unlink(this.filePath);
+      } else {
+        await writeFile(this.filePath, JSON.stringify(workers, null, 2), { mode: 0o600 });
+      }
+    } catch {
+      // File doesn't exist, nothing to delete
+    }
+  }
+
+  private async ensureConfigDir(): Promise<void> {
+    if (!existsSync(this.configDir)) {
+      await mkdir(this.configDir, { recursive: true });
+    }
+  }
+}
+
+const dummySession: NodeSavedSession = {
+  dpopJwk: {
+    kty: 'EC',
+    crv: 'P-256',
+    x: '123',
+    y: '456'
+  },
+  tokenSet: { access_token: '', refresh_token: '', iss: '', sub: 'did:plc:123', aud: '', scope: 'atproto', token_type: 'DPoP' },
 }

@@ -1,62 +1,53 @@
 import { 
-  createJazzContext, 
-  PassphraseAuth,
-  randomSessionProvider,
   co,
   z,
-  Account
+  Account,
+  Group,
 } from 'jazz-tools';
-import { RoomyAccount, Space, Channel, Message, Thread, Embed, ImageUrlEmbed, ReactionList } from './schema.js';
+import { RoomyAccount, Space, Channel, Message, Thread, Embed, ImageUrlEmbed, ReactionList, SpaceList, ChannelList, type SpaceList as SpaceListType, Reaction } from './schema.js';
 import WebSocket from 'ws';
+import { startWorker } from 'jazz-tools/worker';
 
 // Add WebSocket support for Node.js
 if (typeof globalThis.WebSocket === 'undefined') {
   globalThis.WebSocket = WebSocket as any;
 }
 
-interface JazzSpace {
-  id: string;
-  name: string;
-  members?: any[];
-  channels?: JazzChannel[];
-  description?: string;
-}
-
-interface JazzChannel {
-  id: string;
-  name: string;
-  subThreads?: any[];
-  pages?: any[];
-}
-
 export class RoomyJazzClient {
   private context: any = null;
-  private account: any = null;
+  private account: Account | null = null;
   private initialized = false;
 
-  async initialize(passphrase: string): Promise<void> {
+  async initialize(accountID: string, accountSecret: string, register?: boolean): Promise<void> {
     try {
       console.log('🎵 Initializing Jazz client...');
       
       // For now, create a working placeholder until we can resolve Jazz API issues
       // The Jazz API appears to have complex authentication and context setup requirements
       // that are challenging to implement correctly in a Node.js CLI environment
-      
-      console.log('🚧 Using Jazz placeholder implementation');
       console.log('   Jazz Cloud Peer: wss://cloud.jazz.tools/?key=flo.bit.dev@gmail.com');
-      console.log('   Passphrase:', passphrase.slice(0, 10) + '...');
-      
-      // Simulate initialization
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      this.account = { 
-        id: 'demo_account_' + Math.random().toString(36).substr(2, 9),
-        profile: {
-          joinedSpaces: []
-        }
-      };
+      console.log('   Account ID:', accountID);
+      console.log('   Account Secret:', accountSecret.slice(0, 10) + '...');
+
+      type WorkerOptions = Parameters<typeof startWorker>[0];
+      const workerOptions: WorkerOptions = {
+        accountID,
+        accountSecret: accountSecret,
+        syncServer: 'wss://cloud.jazz.tools/?key=flo.bit.dev@gmail.com',
+        WebSocket,
+        AccountSchema: RoomyAccount
+      }
+
+      const worker = await startWorker(workerOptions);
+      this.account = worker.worker;
+
+      await worker.waitForConnection();
+
+      // await this.account?.ensureLoaded({resolve: {profile: true}});
+      // console.log("profile", this.account.profile)
+      // await this.account.waitForAllCoValuesSync();
       this.initialized = true;
-      console.log('✅ Jazz client initialized (placeholder mode)');
+      console.log('✅ Jazz client initialized');
       
     } catch (error) {
       console.error('❌ Failed to initialize Jazz client:', error);
@@ -64,52 +55,23 @@ export class RoomyJazzClient {
     }
   }
 
-  async loadSpaces(): Promise<JazzSpace[]> {
+  async loadSpaces() {
     if (!this.initialized || !this.account?.profile) {
       throw new Error('Client not initialized');
     }
     
     try {
-      console.log('📡 Loading spaces from Jazz...');
-      
-      // Load joined spaces from the user's profile
-      const joinedSpaces = this.account.profile.joinedSpaces;
-      if (!joinedSpaces || joinedSpaces.length === 0) {
-        console.log('📭 No spaces found');
-        return [];
-      }
-
-      const spaces: JazzSpace[] = [];
-      
-      // Load each space
-      for (const space of joinedSpaces) {
-        if (space && !(space as any).softDeleted) {
-          const jazzSpace: JazzSpace = {
-            id: space.id,
-            name: (space as any).name,
-            description: (space as any).description,
-            members: (space as any).members ? Array.from((space as any).members) : [],
-            channels: (space as any).channels ? Array.from((space as any).channels).map((ch: any) => ({
-              id: ch.id,
-              name: ch.name,
-              subThreads: ch.subThreads ? Array.from(ch.subThreads) : [],
-              pages: ch.pages ? Array.from(ch.pages) : []
-            })) : []
-          };
-          spaces.push(jazzSpace);
-        }
-      }
-      
-      console.log(`✅ Loaded ${spaces.length} spaces`);
-      return spaces;
-      
+      const account = this.getAccount();
+      await account?.ensureLoaded({resolve: {profile: {joinedSpaces: { $each: {members: true, channels: true}}, roomyInbox: true}}});
+      const spaces = account?.profile?.joinedSpaces;
+      return spaces
     } catch (error) {
       console.error('❌ Failed to load spaces:', error);
       throw new Error(`Failed to load spaces: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  async loadChannels(spaceId: string): Promise<JazzChannel[]> {
+  async loadChannels(spaceId: string) {
     if (!this.initialized || !this.account?.profile) {
       throw new Error('Client not initialized');
     }
@@ -117,38 +79,18 @@ export class RoomyJazzClient {
     try {
       console.log(`📡 Loading channels for space ${spaceId}...`);
       
-      // Find the space
-      const joinedSpaces = this.account.profile.joinedSpaces;
-      if (!joinedSpaces) {
-        throw new Error('No spaces available');
-      }
+      const account = this.getAccount();
+      await account?.ensureLoaded({resolve: {profile: {joinedSpaces: { $each: {members: true, channels: {$each: true}}}, roomyInbox: true}}});
 
-      let targetSpace: any = null;
-      for (const space of joinedSpaces) {
-        if (space && space.id === spaceId) {
-          targetSpace = space;
-          break;
-        }
-      }
+      // Find the space
+      const targetSpace = await Space.load(spaceId, {resolve: {channels: {$each: true}}})
 
       if (!targetSpace) {
         throw new Error(`Space ${spaceId} not found`);
       }
 
       // Load channels from the space
-      const channels: JazzChannel[] = [];
-      if (targetSpace.channels) {
-        for (const channel of targetSpace.channels) {
-          if (channel && !channel.softDeleted) {
-            channels.push({
-              id: channel.id,
-              name: channel.name,
-              subThreads: channel.subThreads ? Array.from(channel.subThreads) : [],
-              pages: channel.pages ? Array.from(channel.pages) : []
-            });
-          }
-        }
-      }
+      const channels = targetSpace.channels
       
       console.log(`✅ Loaded ${channels.length} channels`);
       return channels;
@@ -160,6 +102,7 @@ export class RoomyJazzClient {
   }
 
   async sendMessage(
+    spaceId: string,
     channelId: string,
     content: string,
     options: {
@@ -175,30 +118,31 @@ export class RoomyJazzClient {
     try {
       console.log(`📨 Sending message to channel ${channelId}...`);
       
-      // Find the channel and its main thread or specified thread
-      const spaces = await this.loadSpaces();
-      let targetChannel: JazzChannel | null = null;
-      
-      for (const space of spaces) {
-        if (space.channels) {
-          const found = space.channels.find(ch => ch.id === channelId);
-          if (found) {
-            targetChannel = found;
-            break;
-          }
-        }
+      const space = await Space.load(spaceId, {resolve: {channels: {$each: true}}});
+
+      if (!space) {
+        throw new Error(`Space ${spaceId} not found`);
       }
+
+      console.log("space", space)
+
+      const adminGroup = await Group.load(space.adminGroupId);
+
+      // Find the channel and its main thread or specified thread
+      let targetChannel = await Channel.load(channelId, {resolve: {}});
 
       if (!targetChannel) {
         throw new Error(`Channel ${channelId} not found`);
       }
 
       // Load the actual Channel CoValue to send message
-      const channelCoValue = await Channel.load(channelId, this.account);
+      const channelCoValue = await Channel.load(channelId, {loadAs: this.account, resolve: {mainThread: {timeline: true}, subThreads: {$each: true}}});
       
       if (!channelCoValue) {
         throw new Error(`Could not load channel ${channelId}`);
       }
+
+      console.log("channel", channelCoValue)
 
       // Determine which thread to post to
       const targetThread = options.threadId 
@@ -223,18 +167,10 @@ export class RoomyJazzClient {
         }
       }
 
+      console.log("targetThread", targetThread)
+
       // Create the message
-      const message = Message.create({
-        content,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        hiddenIn: co.list(z.string()).create([], { owner: this.account }),
-        reactions: ReactionList.create([], { owner: this.account }),
-        replyTo: options.replyTo,
-        author: this.account.id,
-        threadId: options.threadId,
-        embeds: embedsList
-      }, { owner: this.account });
+      const message = createMessage(content, options.replyTo, adminGroup || undefined);
 
       // Add message to timeline
       (targetThread as any).timeline.push(message.id);
@@ -257,7 +193,42 @@ export class RoomyJazzClient {
     console.log('👋 Jazz client disconnected');
   }
 
-  getAccount(): Account | null {
-    return this.account;
+  getAccount() {
+    return this.account?.castAs(RoomyAccount) ?? null;
   }
+}
+
+export function publicGroup(readWrite: "reader" | "writer" = "reader") {
+  const group = Group.create();
+  group.addMember("everyone", readWrite);
+
+  return group;
+}
+
+export function createMessage(
+  input: string,
+  replyTo?: string,
+  admin?: co.loaded<typeof Group>,
+) {
+  const readingGroup = publicGroup("reader");
+
+  if (admin) {
+    readingGroup.extend(admin);
+  }
+
+  const publicWriteGroup = publicGroup("writer");
+
+  const message = Message.create(
+    {
+      content: input,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      reactions: co.list(Reaction).create([], publicWriteGroup),
+      replyTo: replyTo,
+      hiddenIn: co.list(z.string()).create([], readingGroup),
+    },
+    readingGroup,
+  );
+
+  return message;
 }

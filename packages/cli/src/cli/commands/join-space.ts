@@ -1,11 +1,15 @@
-import { Command } from 'commander';
-import chalk from 'chalk';
 import { OAuthSessionManager } from '../../auth/oauth-session-manager.js';
 import { RoomyJazzClient } from '../../jazz/client.js';
 import { CliSessionData } from '../../auth/stores.js';
+import { Command } from 'commander';
+import chalk from 'chalk';
+import { RoomyAccount, Space } from '../../jazz/schema.js';
+import { Account } from 'jazz-tools';
 
-export const spacesCommand = new Command('spaces')
-  .description('List joined spaces')
+export const joinSpaceCommand = new Command('join-space')
+  .description('Join a space')
+  .option('-s, --space <space>', 'Space ID')
+  .option('-i, --invite <invite>', 'Invite ID')
   .option('-w, --worker <handle>', 'Use Jazz Server Worker')
   .action(async (options) => {
     const sessionManager = new OAuthSessionManager();
@@ -36,7 +40,6 @@ export const spacesCommand = new Command('spaces')
         session = await sessionManager.loadSession();
       }
 
-      // Check authentication
       if (!session) {
         console.error(chalk.red('❌ Not logged in. Run: roomy login'));
         process.exit(1);
@@ -57,43 +60,56 @@ export const spacesCommand = new Command('spaces')
       
       await jazzClient.initialize(session.jazzAccountID, session.passphrase);
 
-      const spaces = await jazzClient.loadSpaces();
-
-      if (!spaces) {
-        console.log(chalk.yellow('📭 No spaces found. Join a space first on https://roomy.space'));
-        process.exit(0);
-      }
-      
-      if (spaces?.length === 0) {
-        console.log(chalk.yellow('📭 No spaces found. Join a space first on https://roomy.space'));
-        process.exit(0);
+      // Get account
+      const account = jazzClient.getAccount();
+      if (!account) {
+        console.error(chalk.red('❌ No account found. Please log in again.'));
+        process.exit(1);
       }
 
-      console.log(chalk.green(`\n📌 Your spaces (${spaces.length}):`));
-      console.log(chalk.gray('─'.repeat(50)));
-      
-      for (const space of spaces) {
-        if (!space) {
-          continue;
-        }
-        const memberCount = space?.members?.length || 0;
-        const channelCount = space?.channels?.length || 0;
-        
-        console.log(`${chalk.cyan('●')} ${chalk.bold(space?.name)}`);
-        console.log(`  ${chalk.gray('ID:')} ${space?.id}`);
-        console.log(`  ${chalk.gray('Members:')} ${memberCount}`);
-        console.log(`  ${chalk.gray('Channels:')} ${channelCount}`);
-        if (space.description) {
-          console.log(`  ${chalk.gray('Description:')} ${space.description}`);
-        }
-        console.log('');
+      account.ensureLoaded({resolve: {profile: true}});
+
+      if (!options.space) {
+        console.error(chalk.red('❌ No space ID provided.'));
+        process.exit(1);
       }
 
-      // Disconnect
+      // if (!options.invite) {
+      //   console.error(chalk.red('❌ No invite ID provided.'));
+      //   process.exit(1);
+      // }
+
+      let loadedSpace = await Space.load(options.space, {resolve: {channels: true, members: true}});
+
+      if (!loadedSpace) {
+        console.error(chalk.red('❌ Space not found.'));
+        process.exit(1);
+      }
+
+      console.log(loadedSpace)
+
+      console.log(chalk.green('🎵 Joining space: ' + options.space));
+      // await account.acceptInvite(options.space, options.invite, Space)
+
+      console.log(account)
+      await account.ensureLoaded({resolve: {profile: {joinedSpaces: { $each: true}}}});
+      console.log(account.profile)
+
+      account.profile?.joinedSpaces?.push(loadedSpace as any);
+      console.log(account.profile?.joinedSpaces)
+      await account.ensureLoaded({resolve: {profile: {joinedSpaces: { $each: true}}}});
+
+      // some kind of problem with access to the added account/profile being unauthorised
+      // 
+
+
+      loadedSpace.members?.push(account);
+      console.log(chalk.green('✅ Joined space: ' + options.space));
+      await account.waitForAllCoValuesSync();
       await jazzClient.disconnect();
-      
+      process.exit(0);
     } catch (error) {
-      console.error(chalk.red(`❌ Failed to load spaces: ${error instanceof Error ? error.message : 'Unknown error'}`));
+      console.error(chalk.red('❌ Failed to join space: ' + error));
       process.exit(1);
     }
-  });
+  })

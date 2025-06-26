@@ -6,6 +6,8 @@ import { logoutCommand } from './cli/commands/logout.js';
 import { sendCommand } from './cli/commands/send.js';
 import { spacesCommand } from './cli/commands/spaces.js';
 import { channelsCommand } from './cli/commands/channels.js';
+import { createWorkerCommand } from './cli/commands/create-worker.js';
+import { joinSpaceCommand } from './cli/commands/join-space.js';
 
 program
   .name('roomy')
@@ -17,6 +19,8 @@ program.addCommand(logoutCommand);
 program.addCommand(sendCommand);
 program.addCommand(spacesCommand);
 program.addCommand(channelsCommand);
+program.addCommand(createWorkerCommand);
+program.addCommand(joinSpaceCommand);
 
 // Global error handling
 process.on('unhandledRejection', (error) => {

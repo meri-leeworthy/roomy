@@ -1,4 +1,5 @@
-import { co, z } from "jazz-tools";
+import { co, z, Account, CoMapSchema, CoListSchema, CoList } from "jazz-tools";
+import { publicGroup } from "./utils";
 
 export const Reaction = co.map({
   emoji: z.string(),
@@ -70,7 +71,20 @@ export const Category = co.map({
   softDeleted: z.boolean().optional(),
 });
 
-export const Space = co.map({
+export const Space: CoMapSchema<{
+  name: z.z.ZodString,
+  imageUrl: z.ZodOptional<z.z.ZodString>,
+  description: z.ZodOptional<z.z.ZodString>,
+  channels: ChannelList,
+  categories: CoListSchema<typeof Category>,
+  members: CoListSchema<any>,
+  version: z.ZodOptional<z.z.ZodNumber>,
+  creatorId: z.z.ZodString,
+  adminGroupId: z.z.ZodString,
+  threads: CoListSchema<typeof Thread>,
+  pages: CoListSchema<typeof Page>,
+  bans: CoListSchema<z.z.ZodString>
+}> = co.map({
   name: z.string(),
 
   imageUrl: z.string().optional(),
@@ -94,7 +108,12 @@ export const Space = co.map({
   bans: co.list(z.string()),
 });
 
-export const SpaceList = co.list(Space);
+export type ChannelList = CoListSchema<typeof Channel>;
+
+export type SpaceListSchema = CoListSchema<typeof Space>;
+export type SpaceList = CoList<typeof Space._output>;
+
+export const SpaceList: SpaceListSchema = co.list(Space);
 
 export const LastReadList = co.record(z.string(), z.date());
 
@@ -140,23 +159,33 @@ export const RoomyAccount = co
     profile: RoomyProfile,
     root: RoomyRoot,
   })
-  .withMigration((account, creationProps?: { name: string }) => {
+  .withMigration((account: Account, creationProps?: { name: string }) => {
+    console.log('Migrating RoomyAccount');
+    try {
     if (account.root === undefined) {
       account.root = RoomyRoot.create({
         lastRead: LastReadList.create({}),
       });
     }
 
-    if (account.profile === undefined) {
+    if (!account.profile || !("joinedSpaces" in account.profile)) {
       account.profile = RoomyProfile.create(
         {
           name: creationProps?.name ?? getRandomUsername(),
           joinedSpaces: SpaceList.create([]),
           roomyInbox: co.list(InboxItem).create([]),
-        }
+        },
+        publicGroup("reader")
       );
     }
+  } catch (error) {
+    console.error('Error migrating RoomyAccount:', error);
+  }
+
+    console.log('Migrating RoomyAccount done');
   });
+
+
 
 export const SpaceMigrationReference = co.record(z.string(), z.string());
 export const IDList = co.list(z.string());
