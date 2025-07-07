@@ -19,7 +19,11 @@
   } from "$lib/jazz/schema";
   import { Account, co } from "jazz-tools";
   import MessageToolbar from "./Message/MessageToolbar.svelte";
-  import { makeSpaceAdmin, messageHasAdmin, publicGroup } from "$lib/jazz/utils";
+  import {
+    makeSpaceAdmin,
+    messageHasAdmin,
+    publicGroup,
+  } from "$lib/jazz/utils";
   import MessageReactions from "./Message/MessageReactions.svelte";
   import ChatInput from "./ChatInput.svelte";
   import MessageRepliedTo from "./Message/MessageRepliedTo.svelte";
@@ -30,6 +34,7 @@
   import { convertReactionsToEmojis } from "$lib/utils/reactions";
   import { dev } from "$app/environment";
   import MessageThreadBadge from "./Message/MessageThreadBadge.svelte";
+  import VideoUrlEmbed from "./Message/embeds/VideoUrlEmbed.svelte";
 
   let {
     messageId,
@@ -80,7 +85,10 @@
     new CoState(RoomyProfile, message.current?._edits.content?.by?.profile?.id),
   );
 
-  let isImportedMessage = $derived(message.current?.author?.startsWith("discord:") || message.current?.author?.startsWith("app:"));
+  let isImportedMessage = $derived(
+    message.current?.author?.startsWith("discord:") ||
+      message.current?.author?.startsWith("app:"),
+  );
 
   const authorData = $derived.by(() => {
     // if the message has an author in the format of discord:username:avatarUrl,
@@ -230,7 +238,6 @@
   });
 </script>
 
-
 {#if shouldShow}
   <div
     id={message.current?.id}
@@ -354,7 +361,7 @@
           {setReplyTo}
           isAdmin={dev && (isAdmin ?? false)}
           makeAdmin={() => {
-            if(space?.id && message.current?._edits.content?.by?.id) {
+            if (space?.id && message.current?._edits.content?.by?.id) {
               makeSpaceAdmin(space.id, message.current._edits.content.by.id);
             }
           }}
@@ -373,11 +380,17 @@
           {#if embed?.type === "imageUrl"}
             <ImageUrlEmbed embedId={embed.embedId} />
           {/if}
+          {#if embed?.type === "videoUrl"}
+            <VideoUrlEmbed embedId={embed.embedId} />
+          {/if}
         {/each}
       </div>
 
       {#if message.current?.threadId && message.current.threadId !== threadId}
-        <MessageThreadBadge threadId={message.current.threadId} spaceId={space?.id ?? ""} />
+        <MessageThreadBadge
+          threadId={message.current.threadId}
+          spaceId={space?.id ?? ""}
+        />
       {/if}
 
       <MessageReactions {reactions} {toggleReaction} />
