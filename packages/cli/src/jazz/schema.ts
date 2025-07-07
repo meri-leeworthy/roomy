@@ -1,5 +1,5 @@
 import { co, z, Account, CoMapSchema, CoListSchema, CoList } from "jazz-tools";
-import { publicGroup } from "./utils";
+import { publicGroup } from "./utils.js";
 
 export const Reaction = co.map({
   emoji: z.string(),

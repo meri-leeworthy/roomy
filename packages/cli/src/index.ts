@@ -28,4 +28,4 @@ process.on('unhandledRejection', (error) => {
   process.exit(1);
 });
 
-program.parse();
+program.parse(process.argv);

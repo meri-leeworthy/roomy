@@ -1,99 +1,74 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { OAuthSessionManager } from '../../auth/oauth-session-manager.js';
 import { RoomyJazzClient } from '../../jazz/client.js';
-import { CliSessionData } from '../../auth/stores.js';
+import { getCredentials } from '../../auth/utils.js';
+import { JazzAccountCredentials } from '../../auth/stores.js';
 
 export const spacesCommand = new Command('spaces')
   .description('List joined spaces')
   .option('-w, --worker <handle>', 'Use Jazz Server Worker')
   .action(async (options) => {
-    const sessionManager = new OAuthSessionManager();
-    const jazzClient = new RoomyJazzClient();
-
     try {
-      let session: CliSessionData | null = null;
-      if (options.worker) {
-        console.log(chalk.yellow('🎵 Using Jazz Server Worker: ' + options.worker));
-
-        let worker = await sessionManager.getJazzCredentials(options.worker);
-        if (!worker) {
-          console.error(chalk.red('❌ Jazz Server Worker not found. Please create one first.'));
-          process.exit(1);
-        }
-
-        console.log(chalk.green('🎵 Using Jazz Server Worker: ' + worker.publicName));
-        console.log(worker)
-        session = {
-          did: `jazz:${worker.accountID}`,
-          handle: worker.publicName,
-          passphrase: worker.accountSecret,
-          jazzAccountID: worker.accountID,
-          sessionType: 'jazz-only',
-          jazzWorker: worker,
-        }
-      } else {
-        session = await sessionManager.loadSession();
-      }
-
-      // Check authentication
-      if (!session) {
-        console.error(chalk.red('❌ Not logged in. Run: roomy login'));
-        process.exit(1);
-      }
-
-      if (!session.jazzAccountID) {
-        console.error(chalk.red('❌ No Jazz account ID found. Please log in again.'));
-        process.exit(1);
-      }
-
-      if (!session.passphrase) {
-        console.error(chalk.red('❌ No Jazz passphrase found. Please log in again.'));
-        process.exit(1);
-      }
+      let credentials = await getCredentials(options);
 
       // Initialize Jazz client
       console.log(chalk.blue('🎵 Connecting to Jazz...'));
-      
-      await jazzClient.initialize(session.jazzAccountID, session.passphrase);
 
-      const spaces = await jazzClient.loadSpaces();
-
-      if (!spaces) {
-        console.log(chalk.yellow('📭 No spaces found. Join a space first on https://roomy.space'));
-        process.exit(0);
-      }
-      
-      if (spaces?.length === 0) {
-        console.log(chalk.yellow('📭 No spaces found. Join a space first on https://roomy.space'));
-        process.exit(0);
-      }
-
-      console.log(chalk.green(`\n📌 Your spaces (${spaces.length}):`));
-      console.log(chalk.gray('─'.repeat(50)));
-      
-      for (const space of spaces) {
-        if (!space) {
-          continue;
-        }
-        const memberCount = space?.members?.length || 0;
-        const channelCount = space?.channels?.length || 0;
-        
-        console.log(`${chalk.cyan('●')} ${chalk.bold(space?.name)}`);
-        console.log(`  ${chalk.gray('ID:')} ${space?.id}`);
-        console.log(`  ${chalk.gray('Members:')} ${memberCount}`);
-        console.log(`  ${chalk.gray('Channels:')} ${channelCount}`);
-        if (space.description) {
-          console.log(`  ${chalk.gray('Description:')} ${space.description}`);
-        }
-        console.log('');
-      }
-
-      // Disconnect
-      await jazzClient.disconnect();
-      
+      await listSpaces(credentials);
     } catch (error) {
-      console.error(chalk.red(`❌ Failed to load spaces: ${error instanceof Error ? error.message : 'Unknown error'}`));
+      console.error(
+        chalk.red(
+          `❌ Failed to load spaces: ${error instanceof Error ? error.message : 'Unknown error'}`
+        )
+      );
       process.exit(1);
     }
   });
+
+export async function listSpaces(credentials: JazzAccountCredentials) {
+  const jazzClient = new RoomyJazzClient();
+  await jazzClient.initialize(credentials);
+
+  const spaces = await jazzClient.loadSpaces();
+
+  if (!spaces) {
+    console.log(
+      chalk.yellow(
+        '📭 No spaces found. Join a space first on https://roomy.space'
+      )
+    );
+    process.exit(0);
+  }
+
+  if (spaces?.length === 0) {
+    console.log(
+      chalk.yellow(
+        '📭 No spaces found. Join a space first on https://roomy.space'
+      )
+    );
+    process.exit(0);
+  }
+
+  console.log(chalk.green(`\n📌 Your spaces (${spaces.length}):`));
+  console.log(chalk.gray('─'.repeat(50)));
+
+  for (const space of spaces) {
+    if (!space) {
+      continue;
+    }
+    const memberCount = space?.members?.length || 0;
+    const channelCount = space?.channels?.length || 0;
+
+    console.log(`${chalk.cyan('●')} ${chalk.bold(space?.name)}`);
+    console.log(`  ${chalk.gray('ID:')} ${space?.id}`);
+    console.log(`  ${chalk.gray('Members:')} ${memberCount}`);
+    console.log(`  ${chalk.gray('Channels:')} ${channelCount}`);
+    if (space.description) {
+      console.log(`  ${chalk.gray('Description:')} ${space.description}`);
+    }
+    console.log('');
+  }
+
+  // Disconnect
+  await jazzClient.disconnect();
+}

@@ -1,4 +1,4 @@
-import { NodeOAuthClient, type RuntimeLock } from '@atproto/oauth-client-node';
+import { NodeOAuthClient, OAuthSession, type RuntimeLock } from '@atproto/oauth-client-node';
 import express from 'express';
 import open from 'open';
 import { createServer } from 'http';
@@ -6,6 +6,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import type { OAuthConfig } from '../types/index.js';
 import { FileSessionStore, FileStateStore, FileRuntimeLock } from './stores.js';
+import { AtprotoHandleResolverNode } from '@atproto-labs/handle-resolver-node';
 
 export class RoomyOAuthClient {
   private client: NodeOAuthClient;
@@ -51,7 +52,14 @@ export class RoomyOAuthClient {
     });
   }
 
-  async authorize(handle: string): Promise<any> {
+  async getHandleResolver() {
+    return new AtprotoHandleResolverNode({
+      fetch: fetch,
+      // fallbackNameservers: ['https://resolver.roomy.chat']
+    });
+  }
+
+  async authorize(handle: string): Promise<OAuthSession> {
     return new Promise((resolve, reject) => {
       const app = express();
       
@@ -64,7 +72,10 @@ export class RoomyOAuthClient {
       app.get('/callback', async (req, res) => {
         try {
           const searchParams = new URLSearchParams(req.url?.split('?')[1]);
+          console.log("searchParams", searchParams)
           const result = await this.client.callback(searchParams);
+
+          console.log("client", this.client)
           
           res.send(`
             <html>

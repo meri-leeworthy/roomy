@@ -2,35 +2,42 @@ import { writeFile, readFile, unlink, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import type { 
-  NodeSavedSession, 
-  NodeSavedSessionStore, 
-  NodeSavedState, 
-  NodeSavedStateStore 
+import type {
+  NodeSavedSession,
+  NodeSavedSessionStore,
+  NodeSavedState,
+  NodeSavedStateStore,
 } from '@atproto/oauth-client-node';
 
 /**
- * Add new types for Jazz Server Workers
+ * Add new types for Jazz Workers
  */
-export interface JazzServerWorker {
-  accountID: string;
+export interface JazzWorker {
   publicName: string;
-  accountSecret: string;
+  credentials: JazzAccountCredentials;
   createdAt: number;
 }
+
+export type JazzAccountCredentials =
+  | {
+      type: 'passphrase';
+      passphrase: string;
+    }
+  | {
+      type: 'worker';
+      accountID: string;
+      accountSecret: string;
+    };
 
 /**
  * CLI session data that extends OAuth session data
  */
 export interface CliSessionData {
   did: string;
-  handle: string;
-  passphrase?: string;
-  jazzAccountID?: string;
+  handle?: string;
   // Add discriminator for session type
   sessionType?: 'oauth' | 'jazz-only';
-  // Add Jazz worker data for Jazz-only sessions
-  jazzWorker?: JazzServerWorker;
+  jazzWorker: JazzWorker;
 }
 
 /**
@@ -55,7 +62,7 @@ export class FileSessionStore implements NodeSavedSessionStore {
 
   async set(sub: string, sessionData: NodeSavedSession): Promise<void> {
     await this.ensureConfigDir();
-    
+
     let sessions: Record<string, ExtendedSessionData> = {};
     try {
       if (existsSync(this.filePath)) {
@@ -65,16 +72,18 @@ export class FileSessionStore implements NodeSavedSessionStore {
     } catch {
       // File doesn't exist or is invalid, start with empty object
     }
-    
+
     // Preserve existing CLI data if updating OAuth session
     const existingSession = sessions[sub];
     const extendedSessionData: ExtendedSessionData = {
       ...sessionData,
-      cliData: existingSession?.cliData
+      cliData: existingSession?.cliData,
     };
-    
+
     sessions[sub] = extendedSessionData;
-    await writeFile(this.filePath, JSON.stringify(sessions, null, 2), { mode: 0o600 });
+    await writeFile(this.filePath, JSON.stringify(sessions, null, 2), {
+      mode: 0o600,
+    });
   }
 
   async get(sub: string): Promise<NodeSavedSession | undefined> {
@@ -82,7 +91,7 @@ export class FileSessionStore implements NodeSavedSessionStore {
       if (!existsSync(this.filePath)) {
         return undefined;
       }
-      
+
       const data = await readFile(this.filePath, 'utf-8');
       const sessions: Record<string, ExtendedSessionData> = JSON.parse(data);
       return sessions[sub];
@@ -99,7 +108,7 @@ export class FileSessionStore implements NodeSavedSessionStore {
       if (!existsSync(this.filePath)) {
         return undefined;
       }
-      
+
       const data = await readFile(this.filePath, 'utf-8');
       const sessions: Record<string, ExtendedSessionData> = JSON.parse(data);
       return sessions[sub]?.cliData;
@@ -113,7 +122,7 @@ export class FileSessionStore implements NodeSavedSessionStore {
    */
   async setCliData(sub: string, cliData: CliSessionData): Promise<void> {
     await this.ensureConfigDir();
-    
+
     let sessions: Record<string, ExtendedSessionData> = {};
     try {
       if (existsSync(this.filePath)) {
@@ -123,7 +132,6 @@ export class FileSessionStore implements NodeSavedSessionStore {
     } catch {
       // File doesn't exist or is invalid, start with empty object
     }
-    
 
     if (sessions[sub]) {
       // OAuth session exists, just add CLI data
@@ -141,8 +149,10 @@ export class FileSessionStore implements NodeSavedSessionStore {
         (sessions as any)[sub] = { sub, cliData };
       }
     }
-    
-    await writeFile(this.filePath, JSON.stringify(sessions, null, 2), { mode: 0o600 });
+
+    await writeFile(this.filePath, JSON.stringify(sessions, null, 2), {
+      mode: 0o600,
+    });
   }
 
   async del(sub: string): Promise<void> {
@@ -150,15 +160,17 @@ export class FileSessionStore implements NodeSavedSessionStore {
       if (!existsSync(this.filePath)) {
         return;
       }
-      
+
       const data = await readFile(this.filePath, 'utf-8');
       const sessions: Record<string, ExtendedSessionData> = JSON.parse(data);
       delete sessions[sub];
-      
+
       if (Object.keys(sessions).length === 0) {
         await unlink(this.filePath);
       } else {
-        await writeFile(this.filePath, JSON.stringify(sessions, null, 2), { mode: 0o600 });
+        await writeFile(this.filePath, JSON.stringify(sessions, null, 2), {
+          mode: 0o600,
+        });
       }
     } catch {
       // File doesn't exist, nothing to delete
@@ -173,17 +185,17 @@ export class FileSessionStore implements NodeSavedSessionStore {
       if (!existsSync(this.filePath)) {
         return [];
       }
-      
+
       const data = await readFile(this.filePath, 'utf-8');
       const sessions: Record<string, ExtendedSessionData> = JSON.parse(data);
-      
+
       const cliSessions: CliSessionData[] = [];
       for (const sessionData of Object.values(sessions)) {
         if (sessionData.cliData) {
           cliSessions.push(sessionData.cliData);
         }
       }
-      
+
       return cliSessions;
     } catch {
       return [];
@@ -212,7 +224,7 @@ export class FileStateStore implements NodeSavedStateStore {
 
   async set(key: string, internalState: NodeSavedState): Promise<void> {
     await this.ensureConfigDir();
-    
+
     let states: Record<string, NodeSavedState & { timestamp: number }> = {};
     try {
       if (existsSync(this.filePath)) {
@@ -222,7 +234,7 @@ export class FileStateStore implements NodeSavedStateStore {
     } catch {
       // File doesn't exist or is invalid, start with empty object
     }
-    
+
     // Clean up expired states (older than 1 hour)
     const now = Date.now();
     const oneHour = 60 * 60 * 1000;
@@ -231,9 +243,11 @@ export class FileStateStore implements NodeSavedStateStore {
         delete states[stateKey];
       }
     }
-    
+
     states[key] = { ...internalState, timestamp: now };
-    await writeFile(this.filePath, JSON.stringify(states, null, 2), { mode: 0o600 });
+    await writeFile(this.filePath, JSON.stringify(states, null, 2), {
+      mode: 0o600,
+    });
   }
 
   async get(key: string): Promise<NodeSavedState | undefined> {
@@ -241,15 +255,16 @@ export class FileStateStore implements NodeSavedStateStore {
       if (!existsSync(this.filePath)) {
         return undefined;
       }
-      
+
       const data = await readFile(this.filePath, 'utf-8');
-      const states: Record<string, NodeSavedState & { timestamp: number }> = JSON.parse(data);
+      const states: Record<string, NodeSavedState & { timestamp: number }> =
+        JSON.parse(data);
       const stateData = states[key];
-      
+
       if (!stateData) {
         return undefined;
       }
-      
+
       // Check if state has expired (older than 1 hour)
       const now = Date.now();
       const oneHour = 60 * 60 * 1000;
@@ -257,7 +272,7 @@ export class FileStateStore implements NodeSavedStateStore {
         await this.del(key);
         return undefined;
       }
-      
+
       // Remove timestamp before returning
       const { timestamp, ...state } = stateData;
       return state;
@@ -271,15 +286,18 @@ export class FileStateStore implements NodeSavedStateStore {
       if (!existsSync(this.filePath)) {
         return;
       }
-      
+
       const data = await readFile(this.filePath, 'utf-8');
-      const states: Record<string, NodeSavedState & { timestamp: number }> = JSON.parse(data);
+      const states: Record<string, NodeSavedState & { timestamp: number }> =
+        JSON.parse(data);
       delete states[key];
-      
+
       if (Object.keys(states).length === 0) {
         await unlink(this.filePath);
       } else {
-        await writeFile(this.filePath, JSON.stringify(states, null, 2), { mode: 0o600 });
+        await writeFile(this.filePath, JSON.stringify(states, null, 2), {
+          mode: 0o600,
+        });
       }
     } catch {
       // File doesn't exist, nothing to delete
@@ -308,7 +326,7 @@ export class FileRuntimeLock {
     const lockFile = join(this.configDir, `lock-${key}.json`);
     const lockData = {
       timestamp: Date.now(),
-      pid: process.pid
+      pid: process.pid,
     };
 
     // Check for existing lock
@@ -316,13 +334,16 @@ export class FileRuntimeLock {
       try {
         const existingLock = JSON.parse(await readFile(lockFile, 'utf-8'));
         const lockAge = Date.now() - existingLock.timestamp;
-        
+
         // If lock is older than 45 seconds, consider it stale
         if (lockAge < 45000) {
           throw new Error(`Lock already exists for key: ${key}`);
         }
       } catch (error) {
-        if (error instanceof Error && error.message.includes('Lock already exists')) {
+        if (
+          error instanceof Error &&
+          error.message.includes('Lock already exists')
+        ) {
           throw error;
         }
         // JSON parse error, proceed to create new lock
@@ -365,10 +386,10 @@ export class JazzCredentialsStore {
     this.filePath = join(this.configDir, 'jazz-credentials.json');
   }
 
-  async setWorker(accountID: string, worker: JazzServerWorker): Promise<void> {
+  async setWorker(accountID: string, worker: JazzWorker): Promise<void> {
     await this.ensureConfigDir();
-    
-    let workers: Record<string, JazzServerWorker> = {};
+
+    let workers: Record<string, JazzWorker> = {};
     try {
       if (existsSync(this.filePath)) {
         const data = await readFile(this.filePath, 'utf-8');
@@ -377,40 +398,43 @@ export class JazzCredentialsStore {
     } catch {
       // File doesn't exist or is invalid, start with empty object
     }
-    
+
     workers[accountID] = worker;
-    await writeFile(this.filePath, JSON.stringify(workers, null, 2), { mode: 0o600 });
+    await writeFile(this.filePath, JSON.stringify(workers, null, 2), {
+      mode: 0o600,
+    });
   }
 
-  async getWorker(accountIDOrHandle: string): Promise<JazzServerWorker | undefined> {
+  async getWorker(accountIDOrHandle: string): Promise<JazzWorker | undefined> {
     try {
       if (!existsSync(this.filePath)) {
         return undefined;
       }
-      
+
       const data = await readFile(this.filePath, 'utf-8');
-      const workers: Record<string, JazzServerWorker> = JSON.parse(data);
+      const workers: Record<string, JazzWorker> = JSON.parse(data);
 
       if (accountIDOrHandle.startsWith('co_')) {
         let accountId = accountIDOrHandle;
         return workers[accountId];
-      }
-
-      else return Object.values(workers).find((w: JazzServerWorker) => w.publicName === accountIDOrHandle);
+      } else
+        return Object.values(workers).find(
+          (w: JazzWorker) => w.publicName === accountIDOrHandle
+        );
     } catch {
       return undefined;
     }
   }
 
-  async listWorkers(): Promise<JazzServerWorker[]> {
+  async listWorkers(): Promise<JazzWorker[]> {
     try {
       if (!existsSync(this.filePath)) {
         return [];
       }
-      
+
       const data = await readFile(this.filePath, 'utf-8');
-      const workers: Record<string, JazzServerWorker> = JSON.parse(data);
-      
+      const workers: Record<string, JazzWorker> = JSON.parse(data);
+
       return Object.values(workers);
     } catch {
       return [];
@@ -422,15 +446,17 @@ export class JazzCredentialsStore {
       if (!existsSync(this.filePath)) {
         return;
       }
-      
+
       const data = await readFile(this.filePath, 'utf-8');
-      const workers: Record<string, JazzServerWorker> = JSON.parse(data);
+      const workers: Record<string, JazzWorker> = JSON.parse(data);
       delete workers[accountID];
-      
+
       if (Object.keys(workers).length === 0) {
         await unlink(this.filePath);
       } else {
-        await writeFile(this.filePath, JSON.stringify(workers, null, 2), { mode: 0o600 });
+        await writeFile(this.filePath, JSON.stringify(workers, null, 2), {
+          mode: 0o600,
+        });
       }
     } catch {
       // File doesn't exist, nothing to delete
@@ -449,7 +475,15 @@ const dummySession: NodeSavedSession = {
     kty: 'EC',
     crv: 'P-256',
     x: '123',
-    y: '456'
+    y: '456',
   },
-  tokenSet: { access_token: '', refresh_token: '', iss: '', sub: 'did:plc:123', aud: '', scope: 'atproto', token_type: 'DPoP' },
-}
+  tokenSet: {
+    access_token: '',
+    refresh_token: '',
+    iss: '',
+    sub: 'did:plc:123',
+    aud: '',
+    scope: 'atproto',
+    token_type: 'DPoP',
+  },
+};

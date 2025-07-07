@@ -38,17 +38,19 @@ export function createMessage(
   if (embeds && embeds.length > 0) {
     embedsList = co.list(Embed).create([], readingGroup);
     for (const embed of embeds) {
-      const imageUrlEmbed = ImageUrlEmbed.create(
-        { url: embed.data.url },
-        readingGroup,
-      );
-
-      embedsList.push(
-        Embed.create(
-          { type: "imageUrl", embedId: imageUrlEmbed.id },
+      if (embed.type === "imageUrl" && embed.data.url) {
+        const imageUrlEmbed = ImageUrlEmbed.create(
+          { url: embed.data.url },
           readingGroup,
-        ),
-      );
+        );
+
+        embedsList.push(
+          Embed.create(
+            { type: "imageUrl", embedId: imageUrlEmbed.id },
+            readingGroup,
+          ),
+        );
+      }
     }
   }
   const publicWriteGroup = publicGroup("writer");
