@@ -55,13 +55,13 @@
     return true;
   }
 
-  async function removeProfileRecord() {
-    await user.agent?.com.atproto.repo.deleteRecord({
-      collection: "chat.roomy.profile",
-      repo: user.agent.assertDid,
-      rkey: "self",
-    });
-  }
+  // async function removeProfileRecord() {
+  //   await user.agent?.com.atproto.repo.deleteRecord({
+  //     collection: "chat.roomy.profile",
+  //     repo: user.agent.assertDid,
+  //     rkey: "self",
+  //   });
+  // }
 
   async function checkProfileRecord() {
     try {

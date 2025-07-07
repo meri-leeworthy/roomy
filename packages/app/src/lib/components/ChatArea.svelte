@@ -9,7 +9,7 @@
   import ChatMessage from "./ChatMessage.svelte";
   import { Virtualizer } from "virtua/svelte";
   import { page } from "$app/state";
-  import { onMount, setContext } from "svelte";
+  import { setContext } from "svelte";
   import { Account, co } from "jazz-tools";
   import type { Space } from "$lib/jazz/schema";
   import Icon from "@iconify/svelte";

@@ -1,10 +1,11 @@
-<script module>
+<script lang="ts" module>
   let editor: Editor;
   export function setInputFocus() {
     if (!editor) return;
     editor.commands.focus();
   }
 </script>
+
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { Editor, Extension } from "@tiptap/core";
@@ -56,7 +57,7 @@
         defaultProtocol: "https",
       }),
       initKeyboardShortcutHandler({ onEnter: wrappedOnEnter }),
-    ]
+    ];
 
     if (users) {
       extensions.push(initUserMention({ users }) as Extension);
@@ -64,7 +65,7 @@
     if (context) {
       extensions.push(initSpaceContextMention({ context }) as Extension);
     }
-    
+
     tiptap = new Editor({
       element,
       extensions,
@@ -79,7 +80,7 @@
         content = ctx.editor.getHTML();
       },
     });
-    editor = tiptap
+    editor = tiptap;
     if (setFocus) {
       // focus at the end of the content
       tiptap?.commands.focus();
