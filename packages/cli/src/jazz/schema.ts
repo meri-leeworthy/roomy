@@ -1,5 +1,5 @@
-import { co, z, Account, CoMapSchema, CoListSchema, CoList } from "jazz-tools";
-import { publicGroup } from "./utils.js";
+import { co, z, Account, CoMapSchema, CoListSchema, CoList } from 'jazz-tools';
+import { publicGroup } from './utils.js';
 
 export const Reaction = co.map({
   emoji: z.string(),
@@ -11,8 +11,12 @@ export const ImageUrlEmbed = co.map({
   url: z.string(),
 });
 
+export const VideoUrlEmbed = co.map({
+  url: z.string(),
+});
+
 export const Embed = co.map({
-  type: z.enum(["imageUrl"]),
+  type: z.enum(['imageUrl', 'videoUrl']),
   embedId: z.string(),
 });
 
@@ -72,18 +76,18 @@ export const Category = co.map({
 });
 
 export const Space: CoMapSchema<{
-  name: z.z.ZodString,
-  imageUrl: z.ZodOptional<z.z.ZodString>,
-  description: z.ZodOptional<z.z.ZodString>,
-  channels: ChannelList,
-  categories: CoListSchema<typeof Category>,
-  members: CoListSchema<any>,
-  version: z.ZodOptional<z.z.ZodNumber>,
-  creatorId: z.z.ZodString,
-  adminGroupId: z.z.ZodString,
-  threads: CoListSchema<typeof Thread>,
-  pages: CoListSchema<typeof Page>,
-  bans: CoListSchema<z.z.ZodString>
+  name: z.z.ZodString;
+  imageUrl: z.ZodOptional<z.z.ZodString>;
+  description: z.ZodOptional<z.z.ZodString>;
+  channels: ChannelList;
+  categories: CoListSchema<typeof Category>;
+  members: CoListSchema<any>;
+  version: z.ZodOptional<z.z.ZodNumber>;
+  creatorId: z.z.ZodString;
+  adminGroupId: z.z.ZodString;
+  threads: CoListSchema<typeof Thread>;
+  pages: CoListSchema<typeof Page>;
+  bans: CoListSchema<z.z.ZodString>;
 }> = co.map({
   name: z.string(),
 
@@ -126,7 +130,7 @@ export const InboxItem = co.map({
 
   read: z.boolean().optional(),
 
-  type: z.enum(["reply", "mention"]),
+  type: z.enum(['reply', 'mention']),
 });
 
 export const RoomyProfile = co.profile({
@@ -144,13 +148,22 @@ export const RoomyRoot = co.map({
 });
 
 function getRandomUsername(): string {
-  const adjectives = ['happy', 'clever', 'bright', 'swift', 'bold', 'kind', 'wise', 'cool'];
+  const adjectives = [
+    'happy',
+    'clever',
+    'bright',
+    'swift',
+    'bold',
+    'kind',
+    'wise',
+    'cool',
+  ];
   const nouns = ['cat', 'dog', 'bird', 'fish', 'bear', 'wolf', 'fox', 'deer'];
-  
+
   const adjective = adjectives[Math.floor(Math.random() * adjectives.length)];
   const noun = nouns[Math.floor(Math.random() * nouns.length)];
   const number = Math.floor(Math.random() * 1000);
-  
+
   return `${adjective}-${noun}-${number}`;
 }
 
@@ -162,30 +175,28 @@ export const RoomyAccount = co
   .withMigration((account: Account, creationProps?: { name: string }) => {
     console.log('Migrating RoomyAccount');
     try {
-    if (account.root === undefined) {
-      account.root = RoomyRoot.create({
-        lastRead: LastReadList.create({}),
-      });
-    }
+      if (account.root === undefined) {
+        account.root = RoomyRoot.create({
+          lastRead: LastReadList.create({}),
+        });
+      }
 
-    if (!account.profile || !("joinedSpaces" in account.profile)) {
-      account.profile = RoomyProfile.create(
-        {
-          name: creationProps?.name ?? getRandomUsername(),
-          joinedSpaces: SpaceList.create([]),
-          roomyInbox: co.list(InboxItem).create([]),
-        },
-        publicGroup("reader")
-      );
+      if (!account.profile || !('joinedSpaces' in account.profile)) {
+        account.profile = RoomyProfile.create(
+          {
+            name: creationProps?.name ?? getRandomUsername(),
+            joinedSpaces: SpaceList.create([]),
+            roomyInbox: co.list(InboxItem).create([]),
+          },
+          publicGroup('reader')
+        );
+      }
+    } catch (error) {
+      console.error('Error migrating RoomyAccount:', error);
     }
-  } catch (error) {
-    console.error('Error migrating RoomyAccount:', error);
-  }
 
     console.log('Migrating RoomyAccount done');
   });
-
-
 
 export const SpaceMigrationReference = co.record(z.string(), z.string());
 export const IDList = co.list(z.string());

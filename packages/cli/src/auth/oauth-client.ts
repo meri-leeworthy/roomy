@@ -1,4 +1,8 @@
-import { NodeOAuthClient, OAuthSession, type RuntimeLock } from '@atproto/oauth-client-node';
+import {
+  NodeOAuthClient,
+  OAuthSession,
+  type RuntimeLock,
+} from '@atproto/oauth-client-node';
 import express from 'express';
 import open from 'open';
 import { createServer } from 'http';
@@ -17,7 +21,7 @@ export class RoomyOAuthClient {
     // Use localhost client_id with query parameters as per AT Protocol development guidelines
     const redirectUri = 'http://127.0.0.1:8080/callback';
     const scope = 'atproto transition:generic transition:chat.bsky';
-    
+
     this.config = {
       client_id: `http://localhost/?redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}`,
       client_name: 'Roomy CLI',
@@ -25,9 +29,9 @@ export class RoomyOAuthClient {
       redirect_uris: [redirectUri],
       scope,
       handleResolver: 'https://resolver.roomy.chat',
-      token_endpoint_auth_method: 'none' as const,
-      grant_types: ['authorization_code', 'refresh_token'] as const,
-      response_types: ['code'] as const
+      token_endpoint_auth_method: 'none',
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
     };
 
     // Set up OAuth storage directory
@@ -36,7 +40,7 @@ export class RoomyOAuthClient {
     // Create store instances according to AT Protocol requirements
     const sessionStore = new FileSessionStore(oauthDir);
     const stateStore = new FileStateStore(oauthDir);
-    
+
     // Create runtime lock for preventing concurrent token refreshes
     const fileRuntimeLock = new FileRuntimeLock(oauthDir);
     const requestLock: RuntimeLock = async (key, fn) => {
@@ -48,7 +52,7 @@ export class RoomyOAuthClient {
       handleResolver: this.config.handleResolver,
       sessionStore,
       stateStore,
-      requestLock
+      requestLock,
     });
   }
 
@@ -62,7 +66,7 @@ export class RoomyOAuthClient {
   async authorize(handle: string): Promise<OAuthSession> {
     return new Promise((resolve, reject) => {
       const app = express();
-      
+
       // Start callback server on port 8080
       this.callbackServer = app.listen(8080, () => {
         console.log('🔐 Starting OAuth authorization...');
@@ -72,11 +76,11 @@ export class RoomyOAuthClient {
       app.get('/callback', async (req, res) => {
         try {
           const searchParams = new URLSearchParams(req.url?.split('?')[1]);
-          console.log("searchParams", searchParams)
+          console.log('searchParams', searchParams);
           const result = await this.client.callback(searchParams);
 
-          console.log("client", this.client)
-          
+          console.log('client', this.client);
+
           res.send(`
             <html>
               <body>
@@ -86,7 +90,7 @@ export class RoomyOAuthClient {
               </body>
             </html>
           `);
-          
+
           this.callbackServer?.close();
           resolve(result.session);
         } catch (error) {
@@ -104,8 +108,9 @@ export class RoomyOAuthClient {
       });
 
       // Start authorization flow
-      this.client.authorize(handle, { scope: this.config.scope })
-        .then(url => {
+      this.client
+        .authorize(handle, { scope: this.config.scope })
+        .then((url) => {
           console.log(`🌐 Opening browser for authorization: ${handle}`);
           open(url.toString());
         })

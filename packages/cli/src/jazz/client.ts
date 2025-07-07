@@ -7,10 +7,11 @@ import {
   Thread,
   Embed,
   ImageUrlEmbed,
-  ReactionList,
-  SpaceList,
-  ChannelList,
-  type SpaceList as SpaceListType,
+  VideoUrlEmbed,
+  // ReactionList,
+  // SpaceList,
+  // ChannelList,
+  // type SpaceList as SpaceListType,
   Reaction,
   Timeline,
 } from './schema.js';
@@ -257,7 +258,7 @@ export class RoomyJazzClient {
     options: {
       threadId?: string;
       replyTo?: string;
-      embeds?: Array<{ type: 'imageUrl'; url: string }>;
+      embeds?: Array<{ type: 'imageUrl' | 'videoUrl'; url: string }>;
       createdAt?: Date;
     } = {}
   ): Promise<co.loaded<typeof Message>> {
@@ -325,6 +326,19 @@ export class RoomyJazzClient {
               {
                 type: 'imageUrl' as const,
                 embedId: imageEmbed.id,
+              },
+              readingGroup
+            );
+            embedsList.push(embedObj);
+          } else if (embed.type === 'videoUrl') {
+            const videoEmbed = VideoUrlEmbed.create(
+              { url: embed.url },
+              readingGroup
+            );
+            const embedObj = Embed.create(
+              {
+                type: 'videoUrl' as const,
+                embedId: videoEmbed.id,
               },
               readingGroup
             );

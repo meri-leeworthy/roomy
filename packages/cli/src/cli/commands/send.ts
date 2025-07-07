@@ -200,7 +200,7 @@ async function sendMessage(
       const sessionManager = new OAuthSessionManager();
       const agent = await sessionManager.getAgent();
 
-      const uploadResult = await jazzClient.uploadImage(agent, image.path, {
+      const uploadResult = await jazzClient.uploadMedia(agent, image.path, {
         maxSize: parseInt(image.maxSize),
         quality: parseInt(image.quality),
       });

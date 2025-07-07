@@ -4,6 +4,7 @@ import { CliSessionData, JazzAccountCredentials } from '../../auth/stores.js';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { Space } from '../../jazz/schema.js';
+import { getCredentials } from '../../auth/utils.js';
 
 export const joinSpaceCommand = new Command('join-space')
   .description('Join a space')
@@ -11,49 +12,9 @@ export const joinSpaceCommand = new Command('join-space')
   .option('-i, --invite <invite>', 'Invite ID')
   .option('-w, --worker <handle>', 'Use Jazz Server Worker')
   .action(async (options) => {
-    const sessionManager = new OAuthSessionManager();
-    const jazzClient = new RoomyJazzClient();
-    let credentials: JazzAccountCredentials;
-
     try {
-      let session: CliSessionData | null = null;
-      if (options.worker) {
-        console.log(
-          chalk.yellow('🎵 Using Jazz Server Worker: ' + options.worker)
-        );
-
-        let worker = await sessionManager.getJazzCredentials(options.worker);
-        if (!worker) {
-          console.error(
-            chalk.red(
-              '❌ Jazz Server Worker not found. Please create one first.'
-            )
-          );
-          process.exit(1);
-        }
-
-        console.log(
-          chalk.green('🎵 Using Jazz Server Worker: ' + worker.publicName)
-        );
-        console.log(worker);
-
-        credentials = worker.credentials;
-      } else {
-        session = await sessionManager.loadSession();
-        credentials = {
-          type: 'passphrase',
-          passphrase: session?.passphrase || '',
-        };
-      }
-
-      if (!credentials) {
-        console.error(chalk.red('❌ Not logged in. Run: roomy login'));
-        process.exit(1);
-      }
-
-      // Initialize Jazz client
-      console.log(chalk.blue('🎵 Connecting to Jazz...'));
-
+      const credentials = await getCredentials(options);
+      const jazzClient = new RoomyJazzClient();
       await jazzClient.initialize(credentials);
 
       // Get account
