@@ -31,6 +31,7 @@
     createThread,
     isSpaceAdmin,
     type ImageUrlEmbedCreate,
+    type VideoUrlEmbedCreate,
   } from "$lib/jazz/utils";
   import { user } from "$lib/user.svelte";
   import { replyTo } from "./ChatMessage.svelte";
@@ -120,6 +121,36 @@
     if (page.params.thread) {
       me.current.root.lastRead[page.params.thread] = new Date();
     }
+  }
+
+  function getVideoThumbnail(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const video = document.createElement("video");
+      video.src = URL.createObjectURL(file);
+      video.crossOrigin = "anonymous";
+      video.muted = true; // required for autoplay
+      video.currentTime = 0;
+
+      video.addEventListener("loadeddata", () => {
+        // Wait until some data is loaded so we can capture a frame
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth / 2; // scale it down
+        canvas.height = video.videoHeight / 2;
+
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return reject(new Error("Canvas context not available"));
+
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((blob) => {
+          if (!blob)
+            return reject(new Error("Failed to create thumbnail blob"));
+          const url = URL.createObjectURL(blob);
+          resolve(url);
+        }, "image/jpeg");
+      });
+
+      video.addEventListener("error", reject);
+    });
   }
 
   // Initialize tab based on hash if present
@@ -239,17 +270,26 @@
 
     isSendingMessage = true;
 
-    let filesUrls: ImageUrlEmbedCreate[] = [];
+    let filesUrls: (ImageUrlEmbedCreate | VideoUrlEmbedCreate)[] = [];
     // upload files
     for (const file of filesInMessage) {
-      const uploadedFile = await user.uploadBlob(file);
-
-      filesUrls.push({
-        type: "imageUrl",
-        data: {
-          url: uploadedFile.url,
-        },
-      });
+      if (file.type.startsWith("video/")) {
+        const uploadedFile = await user.uploadVideo(file);
+        filesUrls.push({
+          type: "videoUrl",
+          data: {
+            url: uploadedFile.url,
+          },
+        });
+      } else {
+        const uploadedFile = await user.uploadBlob(file);
+        filesUrls.push({
+          type: "imageUrl",
+          data: {
+            url: uploadedFile.url,
+          },
+        });
+      }
     }
 
     const message = createMessage(
@@ -361,7 +401,14 @@
 
   function processImageFile(file: File) {
     filesInMessage.push(file);
-    previewImages.push(URL.createObjectURL(file));
+
+    if (file.type.startsWith("video/")) {
+      getVideoThumbnail(file).then((thumbnail) => {
+        previewImages.push(thumbnail);
+      });
+    } else {
+      previewImages.push(URL.createObjectURL(file));
+    }
   }
 
   function removeImageFile(index: number) {

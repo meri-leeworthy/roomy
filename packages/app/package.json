@@ -24,6 +24,9 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "lint-staged": "lint-staged"
   },
+  "dependencies": {
+    "hls.js": "^1.6.6"
+  },
   "devDependencies": {
     "@atproto/api": "^0.14.9",
     "@atproto/lexicon": "^0.4.5",
@@ -54,6 +57,7 @@
     "@tiptap/extension-link": "^2.11.5",
     "@tiptap/extension-mention": "^2.11.5",
     "@tiptap/extension-placeholder": "^2.11.5",
+    "@tiptap/html": "^2.14.0",
     "@tiptap/pm": "^2.11.5",
     "@tiptap/starter-kit": "^2.11.5",
     "@tiptap/suggestion": "^2.11.5",
@@ -69,7 +73,10 @@
     "date-fns": "^4.1.0",
     "emoji-picker-element": "^1.26.1",
     "file-saver": "^2.0.5",
+    "flexsearch": "^0.8.164",
     "jazz-inspector-element": "^0.14.21",
+    "jazz-svelte": "^0.14.21",
+    "jazz-tools": "^0.14.21",
     "js-base64": "^3.7.7",
     "jszip": "^3.10.1",
     "linkify-it": "^5.0.0",
@@ -87,6 +94,7 @@
     "svelte-render-scan": "^1.0.4",
     "svelte-tiptap": "^2.1.0",
     "tailwindcss": "^4.0.0",
+    "turndown": "^7.2.0",
     "tweetnacl": "^1.0.3",
     "typescript": "^5.0.0",
     "typescript-event-target": "^1.1.1",
@@ -97,12 +105,7 @@
     "vite-plugin-arraybuffer": "^0.1.0",
     "vite-plugin-top-level-await": "^1.4.4",
     "vite-plugin-wasm": "^3.4.1",
-    "vitest": "^3.0.9",
-    "@tiptap/html": "^2.14.0",
-    "turndown": "^7.2.0",
-    "jazz-svelte": "^0.14.21",
-    "jazz-tools": "^0.14.21",
-    "flexsearch": "^0.8.164"
+    "vitest": "^3.0.9"
   },
   "lint-staged": {
     "*.{svelte,svelte.ts}": [
