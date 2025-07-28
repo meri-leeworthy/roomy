@@ -26,7 +26,8 @@
     "lint-staged": "lint-staged"
   },
   "dependencies": {
-    "hls.js": "^1.6.6"
+    "hls.js": "^1.6.6",
+    "roomy-render": "workspace:*"
   },
   "devDependencies": {
     "@atproto/api": "^0.14.9",
