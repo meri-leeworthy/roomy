@@ -292,7 +292,7 @@ test.describe("Responsive Design - Cross-Browser Compatibility", () => {
 
       const successfulQueries = performanceTest.filter((q) => q.success);
       const avgDuration =
-        successfulQueries.reduce((sum, q) => sum + q?.duration, 0) /
+        successfulQueries.reduce((sum, q) => sum + (q?.duration || 0), 0) /
         successfulQueries.length;
 
       performanceResults.push({

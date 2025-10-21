@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+// @ts-expect-error process.env is injected
+const process = process;
+
 /**
  * See https://playwright.dev/docs/test-configuration.
  */
@@ -41,7 +44,7 @@ export default defineConfig({
     navigationTimeout: 45000,
 
     /* Accept that the app may continuously make requests */
-    waitForLoadState: "domcontentloaded",
+    // waitForLoadState: "domcontentloaded",
   },
 
   /* Configure projects for major browsers */
@@ -116,6 +119,6 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
     timeout: 120 * 1000, // 2 minutes timeout for server startup
     /* Don't wait for networkidle since the app makes continuous requests */
-    waitForResponse: () => true,
+    // waitForResponse: () => true,
   },
 });

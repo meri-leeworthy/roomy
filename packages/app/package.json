@@ -27,7 +27,13 @@
     "format": "prettier . --write",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "lint-staged": "lint-staged"
+    "lint-staged": "lint-staged",
+    "postinstall": "if [ -z \"$ALREADY_RUNNING\" ]; then ALREADY_RUNNING=1 pnpm update browserstack-node-sdk; fi",
+    "test:e2e-browserstack": "browserstack-node-sdk playwright test",
+    "test:e2e-browserstack-workers": "browserstack-node-sdk playwright test workers.spec.ts",
+    "test:e2e:ui-browserstack": "browserstack-node-sdk playwright test --ui",
+    "test:e2e:headed-browserstack": "browserstack-node-sdk playwright test --headed",
+    "test:e2e:debug-browserstack": "browserstack-node-sdk playwright test --debug"
   },
   "dependencies": {
     "hls.js": "^1.6.12",
@@ -81,11 +87,11 @@
     "@types/node": "^24.8.1",
     "@types/sanitize-html": "^2.16.0",
     "@types/underscore": "^1.13.0",
-    "@zip-js/zip-js": "jsr:2.7.59",
     "base32-decode": "^1.0.0",
     "base32-encode": "^2.0.0",
     "bits-ui": "^1.8.0",
     "bluesky-post-embed": "^1.0.5",
+    "browserstack-node-sdk": "^1.45.2",
     "date-fns": "^4.1.0",
     "dexie": "^4.2.0",
     "diff-match-patch-es": "^1.0.1",
