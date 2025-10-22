@@ -19,10 +19,14 @@ import {
   atprotoLoopbackClientMetadata,
   buildLoopbackClientId,
   type OAuthClientMetadataInput,
-  type OAuthSession,
 } from "@atproto/oauth-client-browser";
 import { OAuthClient } from "@atproto/oauth-client";
-import { Agent } from "@atproto/api";
+import {
+  Agent,
+  AtpAgent,
+  type AtpSessionData,
+  type AtpSessionEvent,
+} from "@atproto/api";
 import type { ProfileViewDetailed } from "@atproto/api/dist/client/types/app/bsky/actor/defs";
 import Dexie, { type EntityTable } from "dexie";
 
@@ -37,6 +41,8 @@ import { ulid } from "ulidx";
 import { LEAF_MODULE_PERSONAL } from "../moduleUrls";
 import { CONFIG } from "$lib/config";
 import { AsyncChannel } from "./asyncChannel";
+import type { SessionManager } from "@atproto/api/dist/session-manager";
+import type { FetchHandler } from "@atproto/api/dist/agent";
 
 // TODO: figure out why refreshing one tab appears to cause a re-render of the spaces list live
 // query in the other tab.
@@ -127,7 +133,7 @@ const sqliteWorkerReady = new Promise(
 class Backend {
   #oauth: OAuthClient | undefined;
   #agent: Agent | undefined;
-  #session: OAuthSession | undefined;
+  #session: SessionManager | undefined;
   #profile: ProfileViewDetailed | undefined;
   #leafClient: LeafClient | undefined;
   personalSpaceMaterializer: StreamMaterializer | undefined;
@@ -158,7 +164,20 @@ class Backend {
       (async () => {
         // if there's a stored DID and no session yet, try to restore the session
         const entry = await db.kv.get("did");
-        if (entry && this.oauth && !this.session) {
+        const appPasswordSession = await db.kv.get("session");
+        if (appPasswordSession && !this.session) {
+          console.log("Trying to restore App Password session");
+          try {
+            const restoredSession = JSON.parse(appPasswordSession.value);
+            console.log("restoredSession", restoredSession);
+            console.log("App Password session:", restoredSession);
+            this.setSession(restoredSession);
+          } catch (e) {
+            console.error(e);
+            this.logout();
+          }
+        } else if (entry && this.oauth && !this.session) {
+          console.log("Trying to restore OAuth session");
           try {
             const restoredSession = await this.oauth.restore(entry.value);
             this.setSession(restoredSession);
@@ -179,14 +198,28 @@ class Backend {
     return this.#session;
   }
 
-  setSession(session: OAuthSession | undefined) {
-    this.#session = session;
+  setSession(
+    session:
+      | SessionManager
+      | {
+          did: string;
+          fetchHandler?: FetchHandler;
+          data: { accessJwt: string };
+        }
+      | undefined,
+  ) {
+    if (session && !("fetchHandler" in session)) {
+      // Manually create SessionManager from stored App Password session data
+      session["fetchHandler"] = createFetchHandler(session.data.accessJwt);
+    }
+    this.#session = session as SessionManager;
     status.did = session?.did;
     if (session) {
       console.log("Setting up agent");
-      db.kv.add({ key: "did", value: session.did });
-      this.setAgent(new Agent(session));
+      db.kv.add({ key: "did", value: session.did || "" });
+      this.setAgent(new Agent(session as SessionManager));
     } else {
+      console.log("Not logged in, no agent");
       this.setAgent(undefined);
     }
   }
@@ -242,13 +275,52 @@ class Backend {
   }
 
   async oauthCallback(params: URLSearchParams) {
+    if (params.get("password") && params.get("handle")) {
+      const agent = new AtpAgent({
+        service: "https://bsky.social",
+        persistSession: async (evt: AtpSessionEvent, sess?: AtpSessionData) => {
+          switch (evt) {
+            case "create":
+            case "update":
+              if (sess)
+                await db.kv.put({
+                  key: "session",
+                  value: JSON.stringify(sess),
+                });
+              break;
+
+            case "expired":
+            case "create-failed":
+            case "network-error":
+              // optional: clear invalid sessions
+              await db.kv.delete("session");
+              break;
+          }
+        },
+      });
+      const login = await agent.login({
+        identifier: params.get("handle") || "",
+        password: params.get("password") || "",
+      });
+      if (!login.success) {
+        throw new Error("Login failed: " + JSON.stringify(login.data));
+      }
+
+      const sessionManager: SessionManager = {
+        did: login.data.did,
+        fetchHandler: createFetchHandler(login.data.accessJwt),
+      };
+      this.setSession(sessionManager);
+      return;
+    }
+
     await this.#oauthReady;
     const response = await state.oauth?.callback(params);
     this.setSession(response?.session);
   }
 
-  logout() {
-    db.kv.delete("did");
+  async logout() {
+    await db.kv.delete("did");
     this.setSession(undefined);
   }
 }
@@ -260,7 +332,6 @@ const state = new Backend();
 const connectedPorts = new WeakMap<MessagePortApi, string>();
 const activePorts = new Set<MessagePortApi>();
 let connectionCounter = 0;
-let consoleForwardingSetup = false;
 
 if (isSharedWorker) {
   (globalThis as any).onconnect = async ({
@@ -972,4 +1043,17 @@ class StreamMaterializer {
       }
     }
   }
+}
+
+function createFetchHandler(jwt: string): FetchHandler {
+  return (url: any, init: any) => {
+    const fullUrl = new URL(url, "https://bsky.social").toString();
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${jwt}`);
+
+    return fetch(fullUrl, {
+      ...init,
+      headers,
+    });
+  };
 }
