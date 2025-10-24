@@ -321,7 +321,7 @@
       }
 
       const bridgeConfig = {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         ...newBridge,
         enabled: false,
         createdAt: new Date(),

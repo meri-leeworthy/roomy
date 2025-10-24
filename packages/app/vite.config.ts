@@ -16,10 +16,11 @@ export default defineConfig({
       // workers, which is used by the SQLite VFS.
       name: "cross-origin-isolation-headers",
       configureServer(server) {
-        server.middlewares.use((_req, res, next) => {
-          res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
-          res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
-          res.setHeader("Permissions-Policy", "cross-origin-isolated=*");
+        server.middlewares.use((req, res, next) => {
+          console.log("INCOMING HOST:", req.headers.host, "URL:", req.url);
+          // res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+          // res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+          // res.setHeader("Permissions-Policy", "cross-origin-isolated=*");
           next();
         });
       },
@@ -34,7 +35,10 @@ export default defineConfig({
     sourcemap: true,
   },
   server: {
-    host: "127.0.0.1",
+    host: "0.0.0.0", //"127.0.0.1",
+    port: 5173,
+    strictPort: true,
+    allowedHosts: ["bs-local.com", "localhost"],
   },
   optimizeDeps: {
     exclude: ["@sqlite.org/sqlite-wasm"],

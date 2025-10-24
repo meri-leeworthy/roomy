@@ -1,7 +1,39 @@
 import { defineConfig, devices } from "@playwright/test";
+import * as cp from "child_process";
+import dotenv from "dotenv";
+import { fileURLToPath } from "url";
+import path from "path";
 
-// @ts-expect-error process.env is injected
-const process = process;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.resolve(__dirname, ".env") });
+
+// @ts-expect-error env is injected
+const env: Record<string, any> = process.env || import.meta.env || {};
+
+// Get Playwright version
+const clientPlaywrightVersion = cp
+  .execSync("npx playwright --version")
+  .toString()
+  .trim()
+  .split(" ")[1];
+
+// BrowserStack capabilities
+const caps = {
+  browser: "playwright-chromium", // or 'playwright-firefox', 'playwright-webkit'
+  os: "os x",
+  os_version: "mojave",
+  name: "My Playwright Test",
+  build: "My Build",
+  "browserstack.username": env.BROWSERSTACK_USERNAME,
+  "browserstack.accessKey": env.BROWSERSTACK_ACCESS_KEY,
+  "browserstack.local": "true", // Add this for local testing
+  "client.playwrightVersion": clientPlaywrightVersion,
+};
+
+// Generate WS endpoint
+const wsEndpoint = `wss://cdp.browserstack.com/playwright?caps=${encodeURIComponent(JSON.stringify(caps))}`;
 
 /**
  * See https://playwright.dev/docs/test-configuration.
@@ -11,11 +43,11 @@ export default defineConfig({
   /* Run tests in files in parallel */
   fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
-  forbidOnly: !!process.env.CI,
+  forbidOnly: !!env.CI,
   /* Retry on CI only */
-  retries: process.env.CI ? 2 : 0,
+  retries: env.CI ? 2 : 0,
   /* Opt out of parallel tests on CI. */
-  workers: 1, //process.env.CI ? 1 : undefined,
+  workers: 1, //env.CI ? 1 : undefined,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
   reporter: [
     ["html"],
@@ -116,7 +148,7 @@ export default defineConfig({
   webServer: {
     command: "npm run dev",
     url: "http://127.0.0.1:5173",
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: !env.CI,
     timeout: 120 * 1000, // 2 minutes timeout for server startup
     /* Don't wait for networkidle since the app makes continuous requests */
     // waitForResponse: () => true,

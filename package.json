@@ -3,6 +3,9 @@
   "repository": {
     "url": "https://github.com/muni-town/roomy"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "engines": {
     "node": ">=22.15.0",
     "pnpm": ">=10.10.0"

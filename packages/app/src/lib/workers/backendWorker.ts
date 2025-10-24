@@ -43,6 +43,7 @@ import { CONFIG } from "$lib/config";
 import { AsyncChannel } from "./asyncChannel";
 import type { SessionManager } from "@atproto/api/dist/session-manager";
 import type { FetchHandler } from "@atproto/api/dist/agent";
+import { generateUUID } from "./uuid";
 
 // TODO: figure out why refreshing one tab appears to cause a re-render of the spaces list live
 // query in the other tab.
@@ -56,7 +57,7 @@ import type { FetchHandler } from "@atproto/api/dist/agent";
 const isSharedWorker = "SharedWorkerGlobalScope" in globalThis;
 
 // Generate unique ID for this worker instance
-const backendWorkerId = crypto.randomUUID();
+const backendWorkerId = generateUUID();
 
 const status = reactiveWorkerState<BackendStatus>(
   new BroadcastChannel("backend-status"),
@@ -777,7 +778,7 @@ class OpenSpacesMaterializer {
 
   constructor(streamId: string) {
     this.#streamId = streamId;
-    this.#liveQueryId = crypto.randomUUID();
+    this.#liveQueryId = generateUUID();
     this.createLiveQuery();
   }
 

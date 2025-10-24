@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { createSubscriber } from "svelte/reactivity";
+import { generateUUID } from "./uuid";
 
 export type MessagePortApi = {
   onmessage: ((ev: MessageEvent) => void) | null;
@@ -82,7 +83,7 @@ export function messagePortInterface<
         return (
           ...args: Parameters<Remote[typeof n]>
         ): ReturnType<Remote[typeof n]> => {
-          const reqId = crypto.randomUUID();
+          const reqId = generateUUID();
           const respPromise = new Promise(
             (resolve, reject) =>
               (pendingResponseResolvers[reqId] = { resolve, reject }),

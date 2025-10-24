@@ -1,6 +1,7 @@
 import { backend } from "./workers";
 import type { LiveQueryMessage } from "./workers/setupSqlite";
-import type { SqlStatement } from "./workers/backendWorker";
+import { type SqlStatement } from "./workers/backendWorker";
+import { generateUUID } from "./workers/uuid";
 
 export class LiveQuery<Row extends { [key: string]: unknown }> {
   result: Row[] | undefined = $state.raw(undefined);
@@ -8,10 +9,10 @@ export class LiveQuery<Row extends { [key: string]: unknown }> {
   #statement: SqlStatement = { sql: "" };
 
   constructor(statement: () => SqlStatement, mapper?: (row: any) => Row) {
-    const instanceId = "live-query-instance-" + crypto.randomUUID();
+    const instanceId = "live-query-instance-" + generateUUID();
 
     $effect(() => {
-      const id = `live-query-${crypto.randomUUID()}`;
+      const id = `live-query-${generateUUID()}`;
       let dropLock: () => void = () => {};
       const lockPromise = new Promise((r) => (dropLock = r as any));
 

@@ -13,7 +13,7 @@
     "url": "https://github.com/muni-town/roomy/issues"
   },
   "scripts": {
-    "dev": "vite dev --host 127.0.0.1",
+    "dev": "vite dev",
     "build": "turbo build-web-app",
     "build-web-app": "vite build",
     "build-web-app-prod": "./scripts/build-prod.sh",
@@ -29,11 +29,11 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "lint-staged": "lint-staged",
     "postinstall": "if [ -z \"$ALREADY_RUNNING\" ]; then ALREADY_RUNNING=1 pnpm update browserstack-node-sdk; fi",
-    "test:e2e-browserstack": "browserstack-node-sdk playwright test",
-    "test:e2e-browserstack-workers": "browserstack-node-sdk playwright test workers.spec.ts",
-    "test:e2e:ui-browserstack": "browserstack-node-sdk playwright test --ui",
-    "test:e2e:headed-browserstack": "browserstack-node-sdk playwright test --headed",
-    "test:e2e:debug-browserstack": "browserstack-node-sdk playwright test --debug"
+    "test:bs": "browserstack-node-sdk playwright test",
+    "test:bs:workers": "browserstack-node-sdk playwright test workers.spec.ts",
+    "test:bs:ui": "browserstack-node-sdk playwright test --ui",
+    "test:bs:headed": "browserstack-node-sdk playwright test --headed",
+    "test:bs:debug": "browserstack-node-sdk playwright test --debug"
   },
   "dependencies": {
     "hls.js": "^1.6.12",
@@ -91,10 +91,12 @@
     "base32-encode": "^2.0.0",
     "bits-ui": "^1.8.0",
     "bluesky-post-embed": "^1.0.5",
+    "browserstack-local": "^1.5.8",
     "browserstack-node-sdk": "^1.45.2",
     "date-fns": "^4.1.0",
     "dexie": "^4.2.0",
     "diff-match-patch-es": "^1.0.1",
+    "dotenv": "^17.2.3",
     "layercake": "^10.0.2",
     "lint-staged": "^15.5.2",
     "marked": "^15.0.12",

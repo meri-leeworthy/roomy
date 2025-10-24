@@ -16,6 +16,7 @@ import {
 } from "./setupSqlite";
 import { messagePortInterface, reactiveWorkerState } from "./workerMessaging";
 import Dexie, { type EntityTable } from "dexie";
+import { generateUUID } from "./uuid";
 
 console.log("Started sqlite worker");
 
@@ -23,7 +24,7 @@ const QUERY_LOCK = "sqliteQueryLock";
 const HEARTBEAT_KEY = "sqlite-worker-heartbeat";
 const LOCK_TIMEOUT_MS = 8000; // 30 seconds
 
-const workerId = crypto.randomUUID();
+const workerId = generateUUID();
 
 interface KeyValue {
   key: string;

@@ -3,6 +3,8 @@
 # =============================
 # Add your BrowserStack userName and accessKey here or set BROWSERSTACK_USERNAME and
 # BROWSERSTACK_ACCESS_KEY as env variables
+userName: merileeworthy_g89A6e
+accessKey: 7Z2Aq7JE9kqoxGc6GppC
 
 # ======================
 # BrowserStack Reporting
@@ -30,9 +32,9 @@ platforms:
   - browserName: safari
     osVersion: 18.6
     deviceName: iPhone 16
-  - deviceName: Samsung Galaxy S22 Ultra
-    browserName: chrome # Try 'samsung' for Samsung browser
-    osVersion: 12.0
+  # - deviceName: Samsung Galaxy S22 Ultra
+  #   browserName: chrome # Try 'samsung' for Samsung browser
+  #   osVersion: 12.0
 
 # =======================
 # Parallels per Platform
@@ -44,6 +46,8 @@ platforms:
 #
 # Example 2 - If you have configured 1 platform and set `parallelsPerPlatform` as 5, a total of 5 (1 * 5) parallel threads will be used on BrowserStack
 parallelsPerPlatform: 1
+
+idleTimeout: 350
 
 # ==========================================
 # BrowserStack Local
@@ -61,8 +65,8 @@ browserstackLocal: true # <boolean> (Default false)
 # ===================
 # Debugging features
 # ===================
-debug: false # <boolean> # Set to true if you need screenshots for every selenium command ran
-networkLogs: false # <boolean> Set to true to enable HAR logs capturing
+debug: true # <boolean> # Set to true if you need screenshots for every selenium command ran
+networkLogs: true # <boolean> Set to true to enable HAR logs capturing
 consoleLogs: info # <string> Remote browser's console debug levels to be printed (Default: errors)
 # Available options are `disable`, `errors`, `warnings`, `info`, `verbose` (Default: errors)
 # CUSTOM_TAG_<INT>: # <string> (Default: parent folder name of the test file) Custom tag for your test suite
