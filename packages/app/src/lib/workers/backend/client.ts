@@ -15,7 +15,7 @@ import {
   type Batch,
 } from "../types";
 import { type Profile } from "$lib/types/profile";
-import { eventCodec, streamParamsCodec } from "../encoding";
+import { eventCodec, streamParamsCodec } from "@roomy-chat/sdk";
 import { ulid } from "ulidx";
 import { Deferred } from "$lib/utils/deferred";
 import { AsyncChannel } from "../asyncChannel";

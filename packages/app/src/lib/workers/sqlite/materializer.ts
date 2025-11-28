@@ -1,6 +1,6 @@
 import type { Bundle, Ulid } from "../types";
 import { _void, type CodecType } from "scale-ts";
-import { eventCodec, eventVariantCodec, id } from "../encoding";
+import { eventCodec, eventVariantCodec, id } from "@roomy-chat/sdk";
 import { decodeTime } from "ulidx";
 import { sql } from "$lib/utils/sqlTemplate";
 import type { SqlStatement } from "./types";

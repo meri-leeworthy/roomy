@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "dev": "tsc --watch",
-    "build": "tsc && cp src/utils/spow/spow-wasm_bg.wasm dist/utils/spow/",
+    "build": "tsc",
     "format": "prettier . --write",
     "build-lib": "pnpm build"
   },
@@ -27,11 +27,17 @@
     }
   },
   "devDependencies": {
+    "@repo/tsconfig": "workspace:*",
     "beachball": "^2.54.0",
     "pkgroll": "^2.12.2",
+    "prettier": "3.5.3",
     "turbo": "^2.5.2",
-    "typescript": "^5.8.3",
-    "@repo/tsconfig": "workspace:*",
-    "prettier": "3.5.3"
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@scure/base": "^2.0.0",
+    "scale-ts": "1.6.1",
+    "ulidx": "^2.4.1",
+    "vitest": "^3.2.4"
   }
 }

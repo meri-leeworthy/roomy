@@ -40,6 +40,7 @@
     "tippy.js": "^6.3.7"
   },
   "devDependencies": {
+    "@roomy-chat/sdk": "workspace:*",
     "@atproto/api": "^0.14.22",
     "@atproto/jwk-jose": "^0.1.10",
     "@atproto/lexicon": "^0.4.14",

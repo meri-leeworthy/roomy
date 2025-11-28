@@ -132,7 +132,7 @@ sqliteWorker.postMessage(
   },
 
   async diagnoseRoom(roomId: string) {
-    const { id } = await import("./encoding");
+    const { id } = await import("@roomy-chat/sdk");
     const { sql } = await import("../utils/sqlTemplate");
     try {
       const encodedRoomId = id(roomId);
@@ -198,7 +198,7 @@ sqliteWorker.postMessage(
   async diagnoseSpaceTree(spaceId?: string) {
     try {
       const { current } = await import("../queries.svelte");
-      const { id } = await import("./encoding");
+      const { id } = await import("@roomy-chat/sdk");
       const { sql } = await import("../utils/sqlTemplate");
 
       const actualSpaceId = spaceId || current.space?.id;

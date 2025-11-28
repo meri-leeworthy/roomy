@@ -1,5 +1,5 @@
 import type { QueryResult } from "./sqlite/setup";
-import type { eventCodec } from "./encoding";
+import type { eventCodec } from "@roomy-chat/sdk";
 import type { Did } from "@atproto/api";
 import type { SqlStatement } from "./sqlite/types";
 

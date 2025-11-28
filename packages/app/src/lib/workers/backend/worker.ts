@@ -35,7 +35,7 @@ import type {
   SqlStatement,
 } from "../sqlite/types";
 import { isDid, type Did } from "@atproto/api";
-import { id } from "../encoding";
+import { id } from "@roomy-chat/sdk";
 import { ensureEntity } from "../sqlite/materializer";
 
 // TODO: figure out why refreshing one tab appears to cause a re-render of the spaces list live
