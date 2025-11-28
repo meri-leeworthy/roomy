@@ -1,9 +1,11 @@
 packages:
   - packages/app
+  - packages/sdk
+  - packages/discord-bridge
   - packages/tsconfig
 onlyBuiltDependencies:
-  - '@swc/core'
-  - '@tailwindcss/oxide'
+  - "@swc/core"
+  - "@tailwindcss/oxide"
   - cbor-extract
   - core-js
   - esbuild
