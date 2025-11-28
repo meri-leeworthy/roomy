@@ -165,7 +165,7 @@ export async function createOauthClient(): Promise<OAuthClient> {
       )}&scope=${encodeURIComponent(CONFIG.atprotoOauthScope)}`,
     };
   } else {
-    // In prod, we fetch the `/oauth-client.json` which is expected to be deployed alongside the
+    // In prod, we fetch the `/oauth-client-metadata.json` which is expected to be deployed alongside the
     // static build.
     // native client metadata is not reuqired to be on the same domin as client_id,
     // so it can always use the deployed metadata
