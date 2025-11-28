@@ -1,6 +1,6 @@
 import { assert, expect, test, describe } from "vitest";
 
-import { Hash, id, IdCodec, Ulid, Kinds2, eventCodec } from "./encoding";
+import { Hash, id, IdCodec, UlidCodec, Kinds2, eventCodec } from "./encoding";
 import { monotonicFactory, ulid } from "ulidx";
 import { Struct, str, u32, _void } from "scale-ts";
 
@@ -12,7 +12,7 @@ test("ulid encoding round trip", () => {
   // Round trip 15 ulids
   for (let i = 0; i < 15; i++) {
     const u = ulid();
-    const u2 = Ulid.dec(Ulid.enc(u));
+    const u2 = UlidCodec.dec(UlidCodec.enc(u));
     assert(u2 == u, `${u} != ${u2}`);
   }
 });
@@ -22,7 +22,7 @@ test("ulid monotonic factory encoding round trip", () => {
   // Round trip 15 ulids
   for (let i = 0; i < 15; i++) {
     const u = ulid();
-    const u2 = Ulid.dec(Ulid.enc(u));
+    const u2 = UlidCodec.dec(UlidCodec.enc(u));
 
     assert(u == u2, `${u} != ${u2}`);
   }

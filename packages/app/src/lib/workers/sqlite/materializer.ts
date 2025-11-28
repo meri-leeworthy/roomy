@@ -1,27 +1,14 @@
-import type { Bundle, Ulid } from "../types";
-import { _void, type CodecType } from "scale-ts";
-import { eventCodec, eventVariantCodec, id } from "@roomy-chat/sdk";
+import type { Bundle } from "../types";
+import {
+  id,
+  type StreamEvent,
+  type StreamEventVariant,
+  type StreamEventVariantStr,
+  type Ulid,
+} from "@roomy-chat/sdk";
 import { decodeTime } from "ulidx";
 import { sql } from "$lib/utils/sqlTemplate";
 import type { SqlStatement } from "./types";
-
-type DecodedEventPayload = ReturnType<(typeof eventCodec)["dec"]>;
-type EventKind = DecodedEventPayload["variant"]["kind"];
-
-export type EventType<TVariant extends EventKind | undefined = undefined> =
-  TVariant extends undefined
-    ? DecodedEventPayload
-    : Omit<DecodedEventPayload, "variant"> & {
-        variant: Extract<DecodedEventPayload["variant"], { kind: TVariant }>;
-      };
-
-type StreamEvent = CodecType<typeof eventCodec>;
-type StreamEventVariants = CodecType<typeof eventVariantCodec>;
-type StreamEventVariantStr = StreamEventVariants["kind"];
-type StreamEventVariant<K extends StreamEventVariantStr> = Extract<
-  StreamEventVariants,
-  { kind: K }
->["data"];
 
 /** SQL mapping for each event variant */
 const materializers: {

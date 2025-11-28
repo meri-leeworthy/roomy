@@ -1,13 +1,14 @@
 import type { IncomingEvent } from "@muni-town/leaf-client";
 import type { AsyncChannel } from "../asyncChannel";
 import type { QueryResult } from "../sqlite/setup";
-import type { Batch, EventType, StreamHashId } from "../types";
+import type { Batch } from "../types";
 import type { Profile } from "../../types/profile";
 import type { MessagePortApi } from "../workerMessaging";
 import type { Client } from "./client";
 import type { BlobRef } from "@atproto/lexicon";
 import type { Deferred } from "$lib/utils/deferred";
 import type { SqlStatement } from "../sqlite/types";
+import type { EventType, StreamHashId } from "@roomy-chat/sdk";
 
 export interface BackendStatus {
   authState: ReactiveAuthState;

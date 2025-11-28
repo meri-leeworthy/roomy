@@ -1,17 +1,12 @@
 import type { QueryResult } from "./sqlite/setup";
-import type { eventCodec } from "@roomy-chat/sdk";
+import type {
+  StreamHashId,
+  Ulid,
+  StreamIndex,
+  EncodedStreamEvent,
+} from "@roomy-chat/sdk";
 import type { Did } from "@atproto/api";
 import type { SqlStatement } from "./sqlite/types";
-
-type RawEvent = ReturnType<(typeof eventCodec)["dec"]>;
-type EventKind = RawEvent["variant"]["kind"];
-
-export type EventType<TVariant extends EventKind | undefined = undefined> =
-  TVariant extends undefined
-    ? RawEvent
-    : Omit<RawEvent, "variant"> & {
-        variant: Extract<RawEvent["variant"], { kind: TVariant }>;
-      };
 
 export type EdgeLabel =
   | "child"
@@ -63,19 +58,7 @@ export type EdgesRecord<TRequired extends readonly EdgeLabel[]> = {
   [K in TRequired[number]]: [EdgesMap[K], EntityId];
 };
 
-export type StreamHashId = string & { __brand: "streamHashId" };
-
-export type Ulid = string & { __brand: "ulid" };
-
-export type StreamIndex = number & { __brand: "streamIndex" };
-
 export type TaskPriority = "priority" | "background";
-
-export interface EncodedStreamEvent {
-  idx: StreamIndex;
-  user: string;
-  payload: ArrayBuffer;
-}
 
 /** SqliteWorker handles a pipeline of batched computations, transforming
  * batches from Events to SQL Statements to Results

@@ -211,7 +211,11 @@ Kinds2.dec = kinds2Dec;
 
 export const Hash = enhanceCodec(Bytes(32), hex.decode, hex.encode);
 
-export const Ulid = enhanceCodec(Bytes(16), crockfordDecode, crockfordEncode);
+export const UlidCodec = enhanceCodec(
+  Bytes(16),
+  crockfordDecode,
+  crockfordEncode,
+);
 
 type InlineTagged<C extends Codec<any>> =
   CodecType<C> extends { tag: infer Tag; value: infer Value }
@@ -234,7 +238,7 @@ const inlineTagged = <C extends Codec<any>>(codec: C) =>
 
 const rawIdCodec = Enum({
   unknown: str,
-  ulid: Ulid,
+  ulid: UlidCodec,
   hash: Hash,
   did: enhanceCodec<string, string>(
     str,
@@ -296,7 +300,7 @@ export const GroupMember = Enum({
   /** A user ID. */
   user: str,
   /** The ID of another room to use as a group. That room's member list will be used. */
-  room: Ulid,
+  room: UlidCodec,
 });
 
 /** Content encoding. */
@@ -332,7 +336,7 @@ export const eventVariantCodec = Kinds({
    *
    * When the parent is undefined, then that means that the user is publicly announcing that they
    * are joining the space.
-  */
+   */
   "space.roomy.room.join.0": _void,
   /** The parent of the event indicates which room is being left. */
   "space.roomy.room.leave.0": _void,
@@ -412,7 +416,7 @@ export const eventVariantCodec = Kinds({
    * Create a new chat message. */
   "space.roomy.message.create.0": Struct({
     content: Content,
-    replyTo: Option(Ulid),
+    replyTo: Option(UlidCodec),
   }),
   /** Create a new chat message, v1.
    * This version adds support for extensible fields,
@@ -424,9 +428,9 @@ export const eventVariantCodec = Kinds({
     content: Content,
     extensions: Vector(
       Kinds2({
-        "space.roomy.replyTo.0": Ulid,
+        "space.roomy.replyTo.0": UlidCodec,
         "space.roomy.comment.0": Struct({
-          version: Ulid,
+          version: UlidCodec,
           snippet: str,
           from: u32, // document index
           to: u32, // document index
@@ -477,7 +481,7 @@ export const eventVariantCodec = Kinds({
      * */
     content: Content,
     /** The message this message is in reply to, if any. This will replace the previous value. */
-    replyTo: Option(Ulid),
+    replyTo: Option(UlidCodec),
   }),
   /**
    * Override a user handle. This is mostly used for bridged accounts, such as Discord accounts
@@ -503,7 +507,7 @@ export const eventVariantCodec = Kinds({
   /** Create a reaction to a message. */
   "space.roomy.reaction.create.0": Struct({
     /** The message that is being reacted to. */
-    reactionTo: Ulid,
+    reactionTo: UlidCodec,
     /**
      * This is usually a unicode code point, and otherwise should be a URI describing the reaction.
      * */
@@ -511,18 +515,18 @@ export const eventVariantCodec = Kinds({
   }),
   /** Delete a reaction. */
   "space.roomy.reaction.delete.0": Struct({
-    reaction_to: Ulid,
+    reaction_to: UlidCodec,
     reaction: str,
   }),
   /** Create a bridged reaction. This is similar to a normal reaction except it allows you to
    * specify an alternative user ID for who is doing the reacting. */
   "space.roomy.reaction.bridged.create.0": Struct({
-    reactionTo: Ulid,
+    reactionTo: UlidCodec,
     reaction: str,
     reactingUser: str,
   }),
   "space.roomy.reaction.bridged.delete.0": Struct({
-    reaction_to: Ulid,
+    reaction_to: UlidCodec,
     reaction: str,
     reactingUser: str,
   }),
@@ -568,7 +572,7 @@ export const eventVariantCodec = Kinds({
    */
   "space.roomy.room.lastRead.0": Struct({
     /** The ID of the room being marked as read (channel, thread, page, etc). */
-    roomId: Ulid,
+    roomId: UlidCodec,
     /** The stream ID that contains the room. */
     streamId: Hash,
   }),
@@ -576,7 +580,7 @@ export const eventVariantCodec = Kinds({
 
 export const eventCodec = Struct({
   /** The ULID here serves to uniquely represent the event and provide a timestamp. */
-  ulid: Ulid,
+  ulid: UlidCodec,
   /** The room that the event is sent in. If none, it is considered to be at the space level. */
   parent: Option(IdCodec),
   /** The event variant. */
