@@ -1,8 +1,15 @@
+import type { Faro } from "@grafana/faro-web-sdk";
+import type { Tracer } from "@opentelemetry/api";
 import "unplugin-icons/types/svelte";
 
 // See https://svelte.dev/docs/kit/types#app.d.ts
 // for information about these interfaces
 declare global {
+  interface Window {
+    faro: Faro;
+    tracer: Tracer;
+  }
+
   namespace App {
     // interface Error {}
     // interface Locals {}
