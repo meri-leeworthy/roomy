@@ -1,0 +1,19 @@
+{
+  "extends": "@repo/tsconfig",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "noEmit": false,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ES2020"
+  },
+  "include": [
+    "src/**/*",
+    "bin/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

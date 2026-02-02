@@ -1,0 +1,30 @@
+{
+  "name": "@roomy/cli",
+  "version": "0.1.0",
+  "license": "MPL-2.0",
+  "type": "module",
+  "description": "CLI tool for Roomy - enables remote-controllable agents via Claude Code integration",
+  "bin": {
+    "roomy-cli": "bin/roomy-cli.ts"
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "dev": "tsx watch -C development src/cli.ts",
+    "start": "tsx -C development src/cli.ts"
+  },
+  "dependencies": {
+    "@atproto/api": "^0.14.22",
+    "@roomy/sdk": "workspace:*",
+    "commander": "^13.1.0",
+    "ulidx": "^2.4.1"
+  },
+  "devDependencies": {
+    "@repo/tsconfig": "workspace:*",
+    "@types/node": "^22.15.17",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": "^22.15.0"
+  }
+}
