@@ -34,7 +34,8 @@
     "format": "prettier . --write",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "lint-staged": "lint-staged"
+    "lint-staged": "lint-staged",
+    "seed:test-space": "tsx ./scripts/seed-test-space.ts"
   },
   "dependencies": {
     "@ark/util": "^0.56.0",
