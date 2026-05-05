@@ -48,12 +48,14 @@ async function main() {
   const repo = BridgeRepository.open(BRIDGE_DB_PATH)
   log.info(`sqlite store opened at ${BRIDGE_DB_PATH}`)
 
-  // Initialize Roomy client
-  const roomyClient = await initRoomyClient()
-  const spaceManager = new SpaceManager(roomyClient)
+  log.info("starting api...")
 
   // Start HTTP API
   startApi(repo, () => appId)
+
+  // Initialize Roomy client
+  const roomyClient = await initRoomyClient()
+  const spaceManager = new SpaceManager(roomyClient)
 
   // Start Discord gateway
   // bot is assigned immediately after createBot; event handlers fire
