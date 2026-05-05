@@ -522,7 +522,7 @@ const spaceModuleDef: BasicModule = {
     where (select drisl_extract(payload, '.$type') from event) = 'space.roomy.space.setHandleProvider.v0';
       
     -- Mark metadata events
-    insert into metadata_events (idx)
+    insert or ignore into metadata_events (idx)
     select idx from event
     where drisl_extract(payload, '.$type') in (
       ${metadataQueryEventsString}
@@ -562,7 +562,7 @@ const spaceModuleDef: BasicModule = {
       and (select drisl_extract(payload, '.$type') from event) = 'space.roomy.message.createMessage.v0';
 
     -- Track link events
-    insert into link_events (idx)
+    insert or ignore into link_events (idx)
     select idx from event
     where drisl_extract(payload, '.$type') in (
       'space.roomy.link.createRoomLink.v0',
