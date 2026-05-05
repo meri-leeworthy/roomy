@@ -37,6 +37,7 @@ export const desiredProperties = createDesiredPropertiesObject({
     type: true,
     guildId: true,
     parentId: true,
+    permissionOverwrites: true,
   },
   user: {
     username: true,
@@ -101,6 +102,23 @@ export const THREAD_TYPES = new Set([11, 12, 10]); // PublicThread, PrivateThrea
 
 /** Any channel type that can carry messages. */
 export const MESSAGE_CHANNEL_TYPES = new Set([...CHANNEL_TYPES, ...THREAD_TYPES]);
+
+/**
+ * Check if a channel is publicly visible by examining whether the @everyone
+ * role (whose ID equals the guild ID) has VIEW_CHANNEL explicitly denied.
+ * Channels without a matching deny overwrite are public by default.
+ */
+export function isChannelPublic(
+  channel: { permissionOverwrites?: Array<{ id: bigint; deny?: string[] }> },
+  guildId: bigint | string,
+): boolean {
+  const overwrites = channel.permissionOverwrites
+  if (!overwrites || overwrites.length === 0) return true
+  const everyoneId = BigInt(guildId)
+  const everyoneOverwrite = overwrites.find((o) => o.id === everyoneId)
+  if (!everyoneOverwrite) return true
+  return !(everyoneOverwrite.deny?.includes("VIEW_CHANNEL"))
+}
 
 /** Discord message types the bridge cares about. */
 export const MsgType = {

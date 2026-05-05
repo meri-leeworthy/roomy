@@ -1,7 +1,7 @@
 import { newUlid, type Event, type Ulid } from "@roomy-space/sdk";
 import type { BridgeRepository, MappingKind } from "../db/repository.ts";
 import type { SpaceManager } from "../roomy/space-manager.ts";
-import { CHANNEL_TYPES, THREAD_TYPES } from "../discord/types.ts";
+import { CHANNEL_TYPES, THREAD_TYPES, isChannelPublic } from "../discord/types.ts";
 import type { ChannelProperties, DiscordBot } from "../discord/types.ts";
 import { createLogger } from "../logger.ts";
 
@@ -77,7 +77,22 @@ export async function handleChannelCreate(
   if (!guildId) return;
   if (!CHANNEL_TYPES.has(channel.type)) return;
 
-  const targetSpaces = repo.getTargetSpacesForChannel(guildId, channelId);
+  let targetSpaces = repo.getTargetSpacesForChannel(guildId, channelId);
+
+  // In full mode, skip private channels. Subset mode allows private channels
+  // that are explicitly in the allowlist.
+  const isPublic = isChannelPublic(channel, guildId);
+  if (!isPublic) {
+    targetSpaces = targetSpaces.filter((spaceDid) => {
+      const config = repo.getBridgeConfig(guildId, spaceDid);
+      return config?.mode === "subset";
+    });
+    if (targetSpaces.length === 0) {
+      log.debug(`Skipping private channel ${channelId}: no subset bridges target it`);
+      return;
+    }
+  }
+
   if (targetSpaces.length === 0) {
     log.debug(`Skipping channel ${channelId}: no bridges target it`);
     return;

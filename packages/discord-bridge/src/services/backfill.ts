@@ -1,6 +1,6 @@
 import type { Collection } from "@discordeno/bot";
 import { newUlid, type Event, type Ulid } from "@roomy-space/sdk";
-import { CHANNEL_TYPES, THREAD_TYPES, MESSAGE_CHANNEL_TYPES } from "../discord/types.ts";
+import { CHANNEL_TYPES, THREAD_TYPES, MESSAGE_CHANNEL_TYPES, isChannelPublic } from "../discord/types.ts";
 import type { DiscordBot, MessageProperties } from "../discord/types.ts";
 import type { BridgeRepository, BridgeConfig, BridgeMode } from "../db/repository.ts";
 import type { SpaceManager } from "../roomy/space-manager.ts";
@@ -19,6 +19,7 @@ export interface CachedChannel {
   type: number;
   name?: string;
   parentId?: bigint;
+  permissionOverwrites?: Array<{ id: bigint; deny?: string[] }>;
 }
 
 export interface CachedGuild {
@@ -97,7 +98,7 @@ async function ensureRoomyRooms(
       const guild = bot.cache.guilds.memory.get(BigInt(guildId));
       if (!guild?.channels) continue;
       channelIds = [...guild.channels.values()]
-        .filter((ch) => CHANNEL_TYPES.has(ch.type))
+        .filter((ch) => CHANNEL_TYPES.has(ch.type) && isChannelPublic(ch, guildId))
         .map((ch) => ch.id.toString());
     } else {
       channelIds = repo.listAllowlistForBridge(spaceDid).map((e) => e.channelId);
@@ -161,7 +162,7 @@ async function ensureRoomyThreads(
       mode === "full"
         ? new Set(
             [...guild.channels.values()]
-              .filter((ch) => CHANNEL_TYPES.has(ch.type))
+              .filter((ch) => CHANNEL_TYPES.has(ch.type) && isChannelPublic(ch, guildId))
               .map((ch) => ch.id.toString()),
           )
         : new Set(
@@ -278,7 +279,7 @@ function channelsForConfig(
     }
     if (!guild.channels) return channels;
     for (const [channelId, channel] of guild.channels) {
-      if (MESSAGE_CHANNEL_TYPES.has(channel.type)) {
+      if (MESSAGE_CHANNEL_TYPES.has(channel.type) && isChannelPublic(channel, config.guildId)) {
         channels.push(channelId.toString());
       }
     }

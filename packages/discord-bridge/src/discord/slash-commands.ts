@@ -395,8 +395,8 @@ async function handleBridgeModeButton(
 ): Promise<void> {
   if (!(await safeDefer(interaction, true))) return
 
-  const mode = parts[4] as "full" | "subset"
-  const spaceDid = parts[3]
+  const mode = parts[4]!
+  const spaceDid = parts[3]!
 
   if (mode === "full") {
     try {
@@ -457,7 +457,7 @@ async function handleChannelSelect(
 ): Promise<void> {
   if (!(await safeDefer(interaction, true))) return
 
-  const spaceDid = parts[3]
+  const spaceDid = parts[3]!
   const selectedChannels: string[] =
     ((interaction as any).data?.values as string[]) ?? []
 
