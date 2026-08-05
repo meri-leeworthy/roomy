@@ -238,90 +238,128 @@ export async function applyBatch(
                 break;
               }
             }
+            // ── Monolithic DB (source of truth) ────────────────────────
+            // Run first; the savepoint commits on release regardless of
+            // what happens on the derived DBs (plan §305: "If the spaceDb
+            // write fails, the monolithic DB is still consistent"). A
+            // failure HERE means the event is lost everywhere.
+            let mainFailed = false;
             try {
-              // Monolithic DB first — the source of truth.
               for (const s of eventSteps) {
                 if (s.type === "run") {
                   await db.run(s.sql, ...(s.params ?? []));
+                } else if (s.sql.startsWith("release evt_")) {
+                  // Released explicitly below — the release is part of the
+                  // eventSteps grouping marker, not a step to run here.
+                  continue;
                 } else {
                   await db.exec(s.sql);
                 }
               }
-              // Derived DBs: per-space statements to the space DB, global
-              // edge statements to the global DB. Each target runs the same
-              // savepoint framing so a failure rolls back only that event on
-              // that target.
-              if (spaceDb) {
-                const spaceSteps = eventSteps.filter(
-                  (s) => s.derived !== "none" && s.derived !== "global",
-                );
-                if (spaceSteps.length > 0) {
-                  await spaceDb.exec(`savepoint ${savepointName(eventSteps[0]!)}`);
-                  try {
-                    for (const s of spaceSteps) {
-                      if (s.type === "run") {
-                        await spaceDb.run(s.sql, ...(s.params ?? []));
-                      } else {
-                        await spaceDb.exec(s.sql);
-                      }
-                    }
-                    await spaceDb.exec(`release ${savepointName(eventSteps[0]!)}`);
-                  } catch (spaceErr) {
-                    const name = savepointName(eventSteps[0]!);
-                    try {
-                      await spaceDb.exec(`rollback to ${name}`);
-                      await spaceDb.exec(`release ${name}`);
-                    } catch {
-                      /* best-effort */
-                    }
-                    throw spaceErr;
-                  }
-                }
-              }
-              if (globalDb) {
-                const globalSteps = eventSteps.filter(
-                  (s) => s.derived === "global",
-                );
-                if (globalSteps.length > 0) {
-                  await globalDb.exec(`savepoint ${savepointName(eventSteps[0]!)}`);
-                  try {
-                    for (const s of globalSteps) {
-                      if (s.type === "run") {
-                        await globalDb.run(s.sql, ...(s.params ?? []));
-                      } else {
-                        await globalDb.exec(s.sql);
-                      }
-                    }
-                    await globalDb.exec(`release ${savepointName(eventSteps[0]!)}`);
-                  } catch (globalErr) {
-                    const name = savepointName(eventSteps[0]!);
-                    try {
-                      await globalDb.exec(`rollback to ${name}`);
-                      await globalDb.exec(`release ${name}`);
-                    } catch {
-                      /* best-effort */
-                    }
-                    throw globalErr;
-                  }
-                }
-              }
+              await db.exec(`release ${savepointName(eventSteps[0]!)}`);
             } catch (err) {
-              const message = err instanceof Error ? err.message : String(err);
-              stats.applyErrors++;
-              stats.applied--;
-              const savepointName_ = savepointName(eventSteps[0]!);
+              mainFailed = true;
+              const name = savepointName(eventSteps[0]!);
               try {
-                await db.exec(`rollback to ${savepointName_}`);
-                await db.exec(`release ${savepointName_}`);
+                await db.exec(`rollback to ${name}`);
+                await db.exec(`release ${name}`);
               } catch {
                 // Best-effort cleanup
               }
+              const message = err instanceof Error ? err.message : String(err);
+              stats.applyErrors++;
+              stats.applied--;
               recordFailure(stats, {
                 eventId: "" as unknown as Ulid,
                 type: "unknown",
                 reason: "apply",
                 message,
               });
+            }
+            if (mainFailed) continue;
+
+            // ── Derived DBs ─────────────────────────────────────────────
+            // Per-space statements to the space DB, global edge statements
+            // to the global DB. Each target runs the same savepoint framing
+            // so a failure rolls back only that event on that target. A
+            // derived failure NEVER rolls back the monolithic DB — the
+            // event stays applied there (message delivered + invalidated)
+            // and the space DB is repaired by deleting + re-backfilling it.
+            if (spaceDb) {
+              const spaceSteps = eventSteps.filter(
+                (s) => s.derived !== "none" && s.derived !== "global",
+              );
+              if (spaceSteps.length > 0) {
+                try {
+                  await spaceDb.exec(`savepoint ${savepointName(eventSteps[0]!)}`);
+                  for (const s of spaceSteps) {
+                    if (s.type === "run") {
+                      await spaceDb.run(s.sql, ...(s.params ?? []));
+                    } else {
+                      await spaceDb.exec(s.sql);
+                    }
+                  }
+                  await spaceDb.exec(`release ${savepointName(eventSteps[0]!)}`);
+                } catch (spaceErr) {
+                  const name = savepointName(eventSteps[0]!);
+                  try {
+                    await spaceDb.exec(`rollback to ${name}`);
+                    await spaceDb.exec(`release ${name}`);
+                  } catch {
+                    /* best-effort */
+                  }
+                  const message =
+                    spaceErr instanceof Error ? spaceErr.message : String(spaceErr);
+                  stats.applyErrors++;
+                  recordFailure(stats, {
+                    eventId: "" as unknown as Ulid,
+                    type: "space-db",
+                    reason: "apply",
+                    message: `[spaceDb] ${message}`,
+                  });
+                  console.error(
+                    `[materialize] spaceDb dual-write failed for ${streamId} (monolithic intact): ${message}`,
+                  );
+                }
+              }
+            }
+            if (globalDb) {
+              const globalSteps = eventSteps.filter(
+                (s) => s.derived === "global",
+              );
+              if (globalSteps.length > 0) {
+                try {
+                  await globalDb.exec(`savepoint ${savepointName(eventSteps[0]!)}`);
+                  for (const s of globalSteps) {
+                    if (s.type === "run") {
+                      await globalDb.run(s.sql, ...(s.params ?? []));
+                    } else {
+                      await globalDb.exec(s.sql);
+                    }
+                  }
+                  await globalDb.exec(`release ${savepointName(eventSteps[0]!)}`);
+                } catch (globalErr) {
+                  const name = savepointName(eventSteps[0]!);
+                  try {
+                    await globalDb.exec(`rollback to ${name}`);
+                    await globalDb.exec(`release ${name}`);
+                  } catch {
+                    /* best-effort */
+                  }
+                  const message =
+                    globalErr instanceof Error ? globalErr.message : String(globalErr);
+                  stats.applyErrors++;
+                  recordFailure(stats, {
+                    eventId: "" as unknown as Ulid,
+                    type: "global-db",
+                    reason: "apply",
+                    message: `[globalDb] ${message}`,
+                  });
+                  console.error(
+                    `[materialize] globalDb dual-write failed for ${streamId} (monolithic intact): ${message}`,
+                  );
+                }
+              }
             }
           }
         }

@@ -107,16 +107,6 @@ async function applyBundleInner(
 ): Promise<void> {
   const savepoint = `evt_${bundle.event.id.replace(/[^a-zA-Z0-9]/g, "")}`;
   await db.exec(`savepoint ${savepoint}`);
-  try {
-    if (spaceDb) await spaceDb.exec(`savepoint ${savepoint}`);
-  } catch (spaceOpenErr) {
-    // The space-DB savepoint failed to open: roll back the monolithic
-    // savepoint so the failed event's partial main-DB writes are never
-    // committed by a later RELEASE. The monolithic DB stays consistent.
-    await db.exec(`rollback to ${savepoint}`);
-    await db.exec(`release ${savepoint}`);
-    throw spaceOpenErr;
-  }
 
   // Per-batch cache: isThread result is stable per room, avoid re-querying
   // for every message in the same room within a batch.
@@ -131,22 +121,20 @@ async function applyBundleInner(
   };
 
   try {
+    // ── Monolithic DB (source of truth) ────────────────────────────────
+    // Statements + per-space side effects run on the main DB FIRST; the
+    // savepoint always releases (commits) at the end of the try, regardless
+    // of what happens on the derived DBs (plan §305: "If the spaceDb write
+    // fails, the monolithic DB is still consistent"). Only a main-DB
+    // failure rolls back and rethrows.
     for (const statement of bundle.statements) {
-      // Monolithic first — the source of truth. The space/global DB is
-      // derived and repaired by re-materialisation if this write fails.
       await runStatement(db, statement);
-      if (spaceDb) await runStatementForTargets(spaceDb, globalDb, statement);
     }
 
     await setMessageSortIdxByTimestamp(db, bundle.event);
     await setMessageSortIdxByReorder(db, opts.streamId, bundle.event);
     await setMessageSortIdxByForward(db, bundle.event);
-    if (spaceDb) {
-      // Per-space side effects: sort_idx updates + activity_item upsert.
-      await setMessageSortIdxByTimestamp(spaceDb, bundle.event);
-      await setMessageSortIdxByReorder(spaceDb, opts.streamId, bundle.event);
-      await setMessageSortIdxByForward(spaceDb, bundle.event);
-    }
+
     // Activity feed: upsert the activity item for every createMessage event
     // (including backfill, so existing rooms get populated).
     if (
@@ -158,13 +146,6 @@ async function applyBundleInner(
         spaceId: opts.streamId,
         messageId: bundle.event.id,
       });
-      if (spaceDb) {
-        await upsertActivityItem(spaceDb, {
-          roomId: bundle.event.room,
-          spaceId: opts.streamId,
-          messageId: bundle.event.id,
-        });
-      }
     }
 
     // ── Read-state side effects (monolithic DB only) ──────────────────
@@ -268,20 +249,53 @@ async function applyBundleInner(
       }
     }
 
+    // Commit the monolithic savepoint FIRST — the derived writes below must
+    // never abort the main DB's already-consistent state.
     await db.exec(`release ${savepoint}`);
-    if (spaceDb) await spaceDb.exec(`release ${savepoint}`);
   } catch (e) {
+    // Main-DB failure: roll back and rethrow — the event is lost everywhere.
     await db.exec(`rollback to ${savepoint}`);
     await db.exec(`release ${savepoint}`);
-    if (spaceDb) {
+    throw e;
+  }
+
+  // ── Derived DBs ─────────────────────────────────────────────────────
+  // Run after the main savepoint is committed. A failure rolls back only
+  // the derived target's savepoint; the monolithic DB is already consistent
+  // and the space DB is repaired by deleting + re-backfilling it.
+  if (spaceDb) {
+    try {
+      await spaceDb.exec(`savepoint ${savepoint}`);
+      for (const statement of bundle.statements) {
+        await runStatementForTargets(spaceDb, globalDb, statement);
+      }
+      await setMessageSortIdxByTimestamp(spaceDb, bundle.event);
+      await setMessageSortIdxByReorder(spaceDb, opts.streamId, bundle.event);
+      await setMessageSortIdxByForward(spaceDb, bundle.event);
+      if (
+        bundle.event.$type === "space.roomy.message.createMessage.v0" &&
+        bundle.event.room
+      ) {
+        await upsertActivityItem(spaceDb, {
+          roomId: bundle.event.room,
+          spaceId: opts.streamId,
+          messageId: bundle.event.id,
+        });
+      }
+      await spaceDb.exec(`release ${savepoint}`);
+    } catch (spaceErr) {
       try {
         await spaceDb.exec(`rollback to ${savepoint}`);
         await spaceDb.exec(`release ${savepoint}`);
       } catch {
-        // Best-effort cleanup — the monolithic DB is still consistent.
+        /* best-effort */
       }
+      const message =
+        spaceErr instanceof Error ? spaceErr.message : String(spaceErr);
+      console.error(
+        `[materialize] spaceDb dual-write failed for ${opts.streamId} (monolithic intact): ${message}`,
+      );
     }
-    throw e;
   }
 }
 
