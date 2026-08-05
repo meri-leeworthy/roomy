@@ -148,10 +148,11 @@ export async function reMaterializeFromLocalEvents(
         await ensureProfilesRoomyFirst(db, decodedEvents, happyView);
       }
 
+      const spaceDb = db.forSpace?.(streamDid as StreamDid);
+      const globalDb = db.global?.();
       const stats = await applyBatch(db, streamDid as StreamDid, decodedEvents, {
         isBackfill: true,
-      });
-
+      }, spaceDb, globalDb);
       succeeded++;
       const total = toReplay.length;
       const pct = Math.round((succeeded / total) * 100);

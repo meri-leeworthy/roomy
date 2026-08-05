@@ -173,10 +173,16 @@ export class StreamManager {
         await ensureProfilesRoomyFirst(this.#db, decodedEvents, this.#happyView);
       }
 
-      // 5. Apply batch to materialize
+      // 5. Apply batch to materialize. When the main DB handle supports the
+      // per-space split (Phase 1), dual-write the same batch to the space DB
+      // and the global DB. The monolithic DB is written first and stays the
+      // source of truth; the space DB is derived and repaired by
+      // re-materialisation if a write fails.
+      const spaceDb = this.#db.forSpace?.(streamDid);
+      const globalDb = this.#db.global?.();
       await applyBatch(this.#db, streamDid, decodedEvents, {
         isBackfill: false,
-      });
+      }, spaceDb, globalDb);
 
       // 6. Convert to applied events once — shared by invalidation (6a) and
       //    the push dispatcher poke (6b).

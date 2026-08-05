@@ -7,6 +7,14 @@
  *
  * Side-effects (activity_item, link detection) that need JS logic run
  * post-transaction since they're idempotent.
+ *
+ * Per-space split (Phase 1): when `spaceDb` (and optionally `globalDb`) are
+ * provided, the same events are dual-written to the derived DBs. The
+ * monolithic DB is written first and remains the source of truth: if a
+ * derived write fails, the monolithic DB is still consistent and the space
+ * DB is repaired by deleting it and re-materialising that stream. The
+ * materialization cursor advances on both DBs so each space DB is
+ * self-describing about its own re-materialisation progress.
  */
 
 import type { DbLike } from "../db/types.ts";
@@ -19,6 +27,8 @@ import type {
 
 import { materialize } from "./materializer.ts";
 import { applyBundle, savepointMutex } from "./applyBundle.ts";
+import { isGlobalEdgeStatement } from "./statementRouting.ts";
+import type { StatementBundleSuccess } from "./types.ts";
 import {
   isDebugEnabled,
   recordMaterialization,
@@ -49,11 +59,21 @@ export interface MaterializationStats {
   detectedLinks: string[];
 }
 
+interface ChunkStep {
+  type: "run" | "exec";
+  sql: string;
+  params?: unknown[];
+  /** Derived-DB routing: "space" (default), "global", or "none" (monolithic-only). */
+  derived: "space" | "global" | "none";
+}
+
 export async function applyBatch(
   db: DbLike,
   streamId: StreamDid,
   events: DecodedStreamEvent[],
   opts: ApplyBatchOpts,
+  spaceDb?: DbLike,
+  globalDb?: DbLike,
 ): Promise<MaterializationStats> {
   const stats: MaterializationStats = {
     applied: 0,
@@ -77,7 +97,7 @@ export async function applyBatch(
   // Process events in chunks, each chunk in one transaction
   for (let offset = 0; offset < events.length; offset += CHUNK_SIZE) {
     const chunk = events.slice(offset, offset + CHUNK_SIZE);
-    const chunkSteps: Array<{ type: "run" | "exec"; sql: string; params?: unknown[] }> = [];
+    const chunkSteps: ChunkStep[] = [];
 
     for (const e of chunk) {
       const bundle = materialize(e.event, { streamId, user: e.user }, e.idx);
@@ -106,17 +126,20 @@ export async function applyBatch(
 
       // Per-event savepoint for error isolation within the chunk
       const savepoint = `evt_${e.event.id.replace(/[^a-zA-Z0-9]/g, "")}`;
-      chunkSteps.push({ type: "exec", sql: `savepoint ${savepoint}` });
-
+      chunkSteps.push({ type: "exec", sql: `savepoint ${savepoint}`, derived: "none" });
       for (const stmt of bundle.statements) {
         const params = stmt.params;
-        if (params === undefined) {
-          chunkSteps.push({ type: "run", sql: stmt.sql });
-        } else if (Array.isArray(params)) {
-          chunkSteps.push({ type: "run", sql: stmt.sql, params: params as unknown[] });
-        } else {
-          chunkSteps.push({ type: "run", sql: stmt.sql, params: [params] });
-        }
+        chunkSteps.push({
+          type: "run",
+          sql: stmt.sql,
+          params:
+            params === undefined
+              ? undefined
+              : Array.isArray(params)
+                ? (params as unknown[])
+                : [params],
+          derived: isGlobalEdgeStatement(stmt.sql) ? "global" : "space",
+        });
       }
 
       // sort_idx: inline the UPDATE (no SELECT needed)
@@ -134,6 +157,7 @@ export async function applyBatch(
           type: "run",
           sql: "update entities set sort_idx = ? where id = ? and sort_idx is null",
           params: [sortIdx, e.event.id],
+          derived: "space",
         });
       }
 
@@ -150,11 +174,12 @@ export async function applyBatch(
             type: "run",
             sql: "update entities set sort_idx = (select sort_idx from entities where id = ?) where id = ? and sort_idx is null",
             params: [originalId, e.event.id],
+            derived: "space",
           });
         }
       }
 
-      chunkSteps.push({ type: "exec", sql: `release ${savepoint}` });
+      chunkSteps.push({ type: "exec", sql: `release ${savepoint}`, derived: "none" });
 
       stats.applied++;
 
@@ -204,7 +229,7 @@ export async function applyBatch(
           const step = chunkSteps[i]!;
           if (step.type === "exec" && step.sql.startsWith("savepoint evt_")) {
             // Collect all steps for this event (savepoint → statements → release)
-            const eventSteps: typeof chunkSteps = [];
+            const eventSteps: ChunkStep[] = [];
             for (let j = i; j < chunkSteps.length; j++) {
               const s = chunkSteps[j]!;
               eventSteps.push(s);
@@ -214,6 +239,7 @@ export async function applyBatch(
               }
             }
             try {
+              // Monolithic DB first — the source of truth.
               for (const s of eventSteps) {
                 if (s.type === "run") {
                   await db.run(s.sql, ...(s.params ?? []));
@@ -221,14 +247,72 @@ export async function applyBatch(
                   await db.exec(s.sql);
                 }
               }
+              // Derived DBs: per-space statements to the space DB, global
+              // edge statements to the global DB. Each target runs the same
+              // savepoint framing so a failure rolls back only that event on
+              // that target.
+              if (spaceDb) {
+                const spaceSteps = eventSteps.filter(
+                  (s) => s.derived !== "none" && s.derived !== "global",
+                );
+                if (spaceSteps.length > 0) {
+                  await spaceDb.exec(`savepoint ${savepointName(eventSteps[0]!)}`);
+                  try {
+                    for (const s of spaceSteps) {
+                      if (s.type === "run") {
+                        await spaceDb.run(s.sql, ...(s.params ?? []));
+                      } else {
+                        await spaceDb.exec(s.sql);
+                      }
+                    }
+                    await spaceDb.exec(`release ${savepointName(eventSteps[0]!)}`);
+                  } catch (spaceErr) {
+                    const name = savepointName(eventSteps[0]!);
+                    try {
+                      await spaceDb.exec(`rollback to ${name}`);
+                      await spaceDb.exec(`release ${name}`);
+                    } catch {
+                      /* best-effort */
+                    }
+                    throw spaceErr;
+                  }
+                }
+              }
+              if (globalDb) {
+                const globalSteps = eventSteps.filter(
+                  (s) => s.derived === "global",
+                );
+                if (globalSteps.length > 0) {
+                  await globalDb.exec(`savepoint ${savepointName(eventSteps[0]!)}`);
+                  try {
+                    for (const s of globalSteps) {
+                      if (s.type === "run") {
+                        await globalDb.run(s.sql, ...(s.params ?? []));
+                      } else {
+                        await globalDb.exec(s.sql);
+                      }
+                    }
+                    await globalDb.exec(`release ${savepointName(eventSteps[0]!)}`);
+                  } catch (globalErr) {
+                    const name = savepointName(eventSteps[0]!);
+                    try {
+                      await globalDb.exec(`rollback to ${name}`);
+                      await globalDb.exec(`release ${name}`);
+                    } catch {
+                      /* best-effort */
+                    }
+                    throw globalErr;
+                  }
+                }
+              }
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err);
               stats.applyErrors++;
               stats.applied--;
-              const savepointName = eventSteps[0]!.sql.slice("savepoint ".length);
+              const savepointName_ = savepointName(eventSteps[0]!);
               try {
-                await db.exec(`rollback to ${savepointName}`);
-                await db.exec(`release ${savepointName}`);
+                await db.exec(`rollback to ${savepointName_}`);
+                await db.exec(`release ${savepointName_}`);
               } catch {
                 // Best-effort cleanup
               }
@@ -252,6 +336,11 @@ export async function applyBatch(
     // (upserts), so if a crash happens between the chunk commit and this
     // cursor update, the chunk is replayed on restart but produces the same
     // result — harmless.
+    //
+    // The cursor is written to BOTH the monolithic DB (authoritative for
+    // boot-time re-materialization and rollback) and the per-space DB (so
+    // each space DB is self-describing about its own re-materialisation
+    // state).
     await db.run(
       `insert into materialization_cursor (stream_id, materialized_to)
        values (?, ?)
@@ -260,12 +349,22 @@ export async function applyBatch(
       streamId,
       chunkMaxIdx,
     );
+    if (spaceDb) {
+      await spaceDb.run(
+        `insert into materialization_cursor (stream_id, materialized_to)
+         values (?, ?)
+         on conflict (stream_id) do update set materialized_to = excluded.materialized_to
+         where materialization_cursor.materialized_to < excluded.materialized_to`,
+        streamId,
+        chunkMaxIdx,
+      );
+    }
 
     // Post-transaction side-effects for this chunk: activity_item upsert and
     // link detection. These need JS logic so they can't be inlined as SQL
     // steps. Running them per-chunk keeps them interleaved with progress
     // logging rather than causing a long freeze after the last progress line.
-    await applyChunkSideEffects(db, chunk, streamId, opts.isBackfill, stats.detectedLinks);
+    await applyChunkSideEffects(db, chunk, streamId, opts.isBackfill, stats.detectedLinks, spaceDb, globalDb);
   }
 
   // Advance the legacy comp_space.backfilled_to cursor. The authoritative
@@ -283,8 +382,27 @@ export async function applyBatch(
       params: [latestIdx, streamId, latestIdx],
     },
   ]);
+  if (spaceDb) {
+    await spaceDb.transaction([
+      {
+        type: "run",
+        sql: `update comp_space
+             set backfilled_to = ?,
+                 updated_at = (unixepoch() * 1000)
+             where entity = ?
+               and (backfilled_to is null or backfilled_to < ?)`,
+        params: [latestIdx, streamId, latestIdx],
+      },
+    ]);
+  }
 
   return stats;
+}
+
+function savepointName(step: ChunkStep): string {
+  return step.sql.startsWith("savepoint ")
+    ? step.sql.slice("savepoint ".length)
+    : `evt_${step.sql.length}`;
 }
 
 /**
@@ -300,17 +418,20 @@ async function applyChunkSideEffects(
   streamId: StreamDid,
   isBackfill: boolean,
   detectedLinks: string[],
+  spaceDb?: DbLike,
+  globalDb?: DbLike,
 ): Promise<void> {
   for (const e of chunk) {
     if (e.event.$type === "space.roomy.message.createMessage.v0" && (e.event as Record<string, unknown>).room) {
-      await applyBundle(db, {
+      const bundle: StatementBundleSuccess = {
         status: "success",
         event: e.event,
         eventIdx: e.idx,
         user: e.user,
         statements: [],
         dependsOn: [],
-      }, { isBackfill, streamId });
+      };
+      await applyBundle(db, bundle, { isBackfill, streamId }, spaceDb, globalDb);
 
       const body = (e.event as Record<string, unknown>).body as
         | { mimeType?: string; data?: { buf: Uint8Array } }
@@ -320,11 +441,27 @@ async function applyChunkSideEffects(
         const content = decodeContent(mime, Buffer.from(body.data.buf));
         const detected = await detectAndStoreLinks(db, e.event.id, content);
         if (detected.length > 0) detectedLinks.push(...detected);
+        if (spaceDb && detected.length > 0) {
+          // Dual-write the link detection: the URL entity + comp_embed_link
+          // row must exist in the per-space DB too so the space DB is a
+          // complete view of the space.
+          for (const url of detected) {
+            await spaceDb.run(
+              `insert or ignore into entities (id, stream_id, room, created_at)
+               values (?, '', ?, (unixepoch() * 1000))`,
+              [url, e.event.id],
+            );
+            await spaceDb.run(
+              `insert or ignore into comp_embed_link (entity, show_preview, created_at, updated_at)
+               values (?, 1, (unixepoch() * 1000), (unixepoch() * 1000))`,
+              [url],
+            );
+          }
+        }
       }
     }
   }
 }
-
 
 function recordFailure(
   stats: MaterializationStats,

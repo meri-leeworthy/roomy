@@ -10,6 +10,15 @@
  * materialisers because the original design keeps materialisers free of
  * backfill awareness.
  *
+ * Per-space split (Phase 1): when `spaceDb` is provided, the event's
+ * statements and per-space side-effects are dual-written to it. The
+ * monolithic DB is written first and remains the source of truth: if the
+ * per-space write fails, the monolithic DB is still consistent and the space
+ * DB is repaired by re-materialising that stream. Read-state side-effects
+ * (`readstate.*`) never dual-write — the per-space DB has no readstate
+ * tables. `joinedSpace`/`leftSpace` edge statements route to `globalDb`
+ * instead of the space DB.
+ *
  * Concurrency: `applyBundle` manages its SAVEPOINT via individual async
  * `db.exec` calls (each a separate worker message). Without serialization,
  * concurrent calls interleave: call A's `SAVEPOINT evt_AAA` starts an implicit
@@ -31,6 +40,7 @@ import {
 import { isThread, upsertUserThreadActivity } from "../queries/userActiveThreads.ts";
 import { upsertUserRoomParticipation } from "../queries/userRoomParticipation.ts";
 import { upsertActivityItem } from "./activityItem.ts";
+import { isGlobalEdgeStatement } from "./statementRouting.ts";
 import { decodeTime } from "ulidx";
 
 const decodeTimeFromId = (id: string): number => decodeTime(id);
@@ -77,20 +87,36 @@ export async function applyBundle(
   db: DbLike,
   bundle: StatementBundleSuccess,
   opts: ApplyBundleOpts,
+  spaceDb?: DbLike,
+  globalDb?: DbLike,
 ): Promise<void> {
   // Serialize the savepoint-managed section: manual SAVEPOINT/RELEASE via
   // individual async db.exec calls is not atomic. Without this lock,
   // concurrent calls destroy each other's savepoints (see file header).
-  return savepointMutex.run(() => applyBundleInner(db, bundle, opts));
+  return savepointMutex.run(() =>
+    applyBundleInner(db, bundle, opts, spaceDb, globalDb),
+  );
 }
 
 async function applyBundleInner(
   db: DbLike,
   bundle: StatementBundleSuccess,
   opts: ApplyBundleOpts,
+  spaceDb?: DbLike,
+  globalDb?: DbLike,
 ): Promise<void> {
   const savepoint = `evt_${bundle.event.id.replace(/[^a-zA-Z0-9]/g, "")}`;
   await db.exec(`savepoint ${savepoint}`);
+  try {
+    if (spaceDb) await spaceDb.exec(`savepoint ${savepoint}`);
+  } catch (spaceOpenErr) {
+    // The space-DB savepoint failed to open: roll back the monolithic
+    // savepoint so the failed event's partial main-DB writes are never
+    // committed by a later RELEASE. The monolithic DB stays consistent.
+    await db.exec(`rollback to ${savepoint}`);
+    await db.exec(`release ${savepoint}`);
+    throw spaceOpenErr;
+  }
 
   // Per-batch cache: isThread result is stable per room, avoid re-querying
   // for every message in the same room within a batch.
@@ -106,13 +132,21 @@ async function applyBundleInner(
 
   try {
     for (const statement of bundle.statements) {
+      // Monolithic first — the source of truth. The space/global DB is
+      // derived and repaired by re-materialisation if this write fails.
       await runStatement(db, statement);
+      if (spaceDb) await runStatementForTargets(spaceDb, globalDb, statement);
     }
 
     await setMessageSortIdxByTimestamp(db, bundle.event);
     await setMessageSortIdxByReorder(db, opts.streamId, bundle.event);
     await setMessageSortIdxByForward(db, bundle.event);
-
+    if (spaceDb) {
+      // Per-space side effects: sort_idx updates + activity_item upsert.
+      await setMessageSortIdxByTimestamp(spaceDb, bundle.event);
+      await setMessageSortIdxByReorder(spaceDb, opts.streamId, bundle.event);
+      await setMessageSortIdxByForward(spaceDb, bundle.event);
+    }
     // Activity feed: upsert the activity item for every createMessage event
     // (including backfill, so existing rooms get populated).
     if (
@@ -124,7 +158,17 @@ async function applyBundleInner(
         spaceId: opts.streamId,
         messageId: bundle.event.id,
       });
+      if (spaceDb) {
+        await upsertActivityItem(spaceDb, {
+          roomId: bundle.event.room,
+          spaceId: opts.streamId,
+          messageId: bundle.event.id,
+        });
+      }
     }
+
+    // ── Read-state side effects (monolithic DB only) ──────────────────
+    // readstate.* tables do not exist in the per-space DB.
 
     if (
       !opts.isBackfill &&
@@ -139,8 +183,10 @@ async function applyBundleInner(
         // Uses INSERT ... ON CONFLICT DO UPDATE so the read_positions row
         // is created if it doesn't exist yet (lazy creation).
         await db.run(
-          `insert into readstate.read_positions (user_did, room_id, seen_up_to, unread_count, updated_at)
+          `insert into readstate.read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
            select uta.user_did, ?, coalesce(
+             (select stream_id from entities where id = ?), ''
+           ), coalesce(
              (select max(sort_idx) from entities where room = ?), '0'
            ), 1, (unixepoch() * 1000)
              from readstate.user_thread_activity uta
@@ -148,6 +194,7 @@ async function applyBundleInner(
            on conflict(user_did, room_id) do update set
              unread_count = unread_count + 1,
              updated_at = (unixepoch() * 1000)`,
+          bundle.event.room,
           bundle.event.room,
           bundle.event.room,
           bundle.event.room,
@@ -222,11 +269,37 @@ async function applyBundleInner(
     }
 
     await db.exec(`release ${savepoint}`);
+    if (spaceDb) await spaceDb.exec(`release ${savepoint}`);
   } catch (e) {
     await db.exec(`rollback to ${savepoint}`);
     await db.exec(`release ${savepoint}`);
+    if (spaceDb) {
+      try {
+        await spaceDb.exec(`rollback to ${savepoint}`);
+        await spaceDb.exec(`release ${savepoint}`);
+      } catch {
+        // Best-effort cleanup — the monolithic DB is still consistent.
+      }
+    }
     throw e;
   }
+}
+
+/**
+ * Run a statement against the derived DBs: global-edge statements go to the
+ * global DB, everything else to the per-space DB. A missing target is a
+ * silent no-op (tests that don't exercise dual-write pass no derived DBs).
+ */
+async function runStatementForTargets(
+  spaceDb: DbLike,
+  globalDb: DbLike | undefined,
+  statement: SqlStatement,
+): Promise<void> {
+  if (isGlobalEdgeStatement(statement.sql)) {
+    if (globalDb) await runStatement(globalDb, statement);
+    return;
+  }
+  await runStatement(spaceDb, statement);
 }
 
 async function runStatement(db: DbLike, statement: SqlStatement): Promise<void> {

@@ -23,6 +23,18 @@ export interface DbLike {
     params?: unknown[];
   }>): Promise<T>;
   close(): Promise<void>;
+  /**
+   * Optional (per-space split, Phase 1): a routed handle whose requests
+   * target the per-space DB for `spaceDid`. Absent on sync adapters used in
+   * tests that don't exercise dual-write.
+   */
+  forSpace?(spaceDid: string): DbLike;
+  /**
+   * Optional (per-space split, Phase 1): a routed handle whose requests
+   * target the global DB. Absent on sync adapters used in tests that don't
+   * exercise dual-write.
+   */
+  global?(): DbLike;
 }
 
 // ─── Worker message protocol types ──────────────────────────────────────
@@ -49,6 +61,10 @@ export interface WorkerRequest {
   sql?: string;
   /** Bind parameters (for query/run/prepareRun/prepareAll/prepareGet). */
   params?: unknown[];
+  /** Which DB the request targets. Defaults to the monolithic materialised DB. */
+  targetDb?: "main" | "space" | "global";
+  /** Per-space DB selector (required when targetDb is "space"). */
+  spaceDid?: string;
   /** Query mode: "all" (default) or "get" (single row). */
   mode?: "all" | "get";
   /** Prepared statement handle ID (for prepareRun/prepareAll/prepareGet/prepareFinalize). */
@@ -64,8 +80,13 @@ export interface WorkerRequest {
     mainDbPath?: string;
     readStateDbPath?: string;
     eventsDbPath?: string;
+    spacesDir?: string;
+    globalDbPath?: string;
     schemaVersion?: string;
     readStateSchemaVersion?: string;
+    spaceSchemaVersion?: string;
+    globalSchemaVersion?: string;
+    maxSpaceDbs?: number;
   };
 }
 

@@ -1,8 +1,16 @@
 /**
  * SQLite worker — runs in a Bun.Worker thread.
  *
- * Opens both the materialisation DB and the read-state DB, processes
- * requests via message-passing, and returns results asynchronously.
+ * Owns the monolithic materialisation DB (`mainDb`), the read-state DB
+ * (`readStateDb`, ATTACHed as `readstate`), the event-log DB (`eventsDb`,
+ * ATTACHed as `events`), and — for the per-space split (Phase 1 of
+ * docs/plans/per-space-dbs.md) — the per-space DBs and the global DB.
+ *
+ * Per-space DBs (`data/spaces/<spaceDid>.sqlite`) are opened lazily on first
+ * request for that space, cached with LRU eviction, and backfilled from the
+ * monolithic DB on first open (the monolithic DB is the source of truth
+ * during Phase 1 dual-write). The global DB (`data/global.sqlite`) is opened
+ * lazily on first request and holds only `joinedSpace`/`leftSpace` edges.
  *
  * All handlers are synchronous (bun:sqlite is synchronous in the worker
  * thread). Errors are caught and returned as structured { error, errorCode }
@@ -40,10 +48,23 @@ const preparedStmts = new Map<number, ReturnType<Database["prepare"]>>();
 let nextHandle = 1;
 let closed = false;
 
+/** Per-space DBs, opened lazily and LRU-evicted. Keyed by spaceDid. */
+const spaceDbs = new Map<string, { db: Database; lastUsed: number }>();
+/** Global DB (joinedSpace/leftSpace edges), opened lazily. */
+let globalDb: Database | null = null;
+let spacesDir: string | null = null;
+let globalDbPath: string | null = null;
+let spaceSchemaVersion: string | null = null;
+let globalSchemaVersion: string | null = null;
+/** Max concurrently-open space DBs before LRU eviction. */
+let maxSpaceDbs = 100;
+
 // ─── Schema paths ─────────────────────────────────────────────────────────
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = join(THIS_DIR, "schema.sql");
+const SPACE_SCHEMA_PATH = join(THIS_DIR, "schema-space.sql");
+const GLOBAL_SCHEMA_PATH = join(THIS_DIR, "schema-global.sql");
 const READSTATE_SCHEMA_PATH = join(THIS_DIR, "readStateSchema.sql");
 const EVENTS_SCHEMA_PATH = join(THIS_DIR, "eventsSchema.sql");
 
@@ -74,6 +95,30 @@ function initializeSchema(
   if (!row) {
     db.exec(
       `insert into roomy_schema_version (id, version) values (1, '${expectedVersion}')`,
+    );
+  } else if (row.version !== expectedVersion) {
+    throw new SchemaVersionMismatchError(expectedVersion, row.version);
+  }
+}
+
+/** Schema-version tracking for a DB that keeps its own version table. */
+function initializeVersionedSchema(
+  db: Database,
+  schemaPath: string,
+  versionTable: string,
+  expectedVersion: string,
+): void {
+  const schema = readFileSync(schemaPath, "utf-8");
+  db.exec(schema);
+
+  const row = db
+    .query<{ version: string }, []>(
+      `select version from ${versionTable} where id = 1`,
+    )
+    .get();
+  if (!row) {
+    db.exec(
+      `insert into ${versionTable} (id, version) values (1, '${expectedVersion}')`,
     );
   } else if (row.version !== expectedVersion) {
     throw new SchemaVersionMismatchError(expectedVersion, row.version);
@@ -148,7 +193,7 @@ const MIGRATIONS: Migration[] = [
         create table if not exists user_room_participation (
           user_did         text not null,
           room_id          text not null,
-          last_message_at  integer not null,
+          last_message_at  integer not null,     -- epoch ms of the user's latest message in the room
           updated_at       integer not null default (unixepoch() * 1000),
           primary key (user_did, room_id)
         ) strict
@@ -161,8 +206,8 @@ const MIGRATIONS: Migration[] = [
         create table if not exists notification_state (
           user_did            text not null,
           room_id             text not null,
-          first_unseen_at     integer,
-          first_unseen_msg_id text,
+          first_unseen_at     integer,           -- epoch ms of the first unseen message in this batch
+          first_unseen_msg_id text,              -- anchor message ULID
           unseen_count        integer not null default 0,
           notified            integer not null default 0 check(notified in (0,1)),
           pushed_at           integer,
@@ -202,6 +247,30 @@ const MIGRATIONS: Migration[] = [
         create index if not exists idx_ff_assignments_flag
           on feature_flag_assignments(flag_key)
       `);
+    },
+  },
+  {
+    version: 5,
+    up(db: Database) {
+      // Per-space split (§1f): read_positions gains a denormalized
+      // `space_did` column so unread sums can be scoped per space without
+      // joining entities (which moves to per-space DBs). Purely additive —
+      // no data loss. The row backfill is NOT done here: the read-state DB
+      // is not yet ATTACHed to the main DB when migrations run (the ATTACH
+      // happens after initializeReadStateSchema in handleInit), so the
+      // entities join would fail. handleInit runs the backfill after the
+      // ATTACH instead (see backfillReadPositionsSpaceDid).
+      const cols = db
+        .query<{ name: string }, []>(
+          "select name from pragma_table_info('read_positions')",
+        )
+        .all()
+        .map((r) => r.name);
+      if (!cols.includes("space_did")) {
+        db.exec(
+          "alter table read_positions add column space_did text not null default ''",
+        );
+      }
     },
   },
 ];
@@ -245,6 +314,323 @@ function initializeReadStateSchema(
       }
     }
   }
+}
+
+// ─── Per-space DB management ──────────────────────────────────────────────
+
+/**
+ * Open (or return from the LRU cache) the per-space DB for `spaceDid`.
+ * On first open: create the file, apply the per-space schema, and backfill
+ * from the monolithic DB (the Phase 1 source of truth). The backfill is a
+ * single transaction copying every per-space table's rows whose stream_id /
+ * entity matches the space.
+ */
+function openSpaceDb(spaceDid: string): Database {
+  if (!spacesDir) throw new Error("Per-space DBs not initialized (no init)");
+  const cached = spaceDbs.get(spaceDid);
+  if (cached) {
+    cached.lastUsed = Date.now();
+    return cached.db;
+  }
+
+  const db = openSpaceDbFile(spaceDid);
+  try {
+    initializeVersionedSchema(
+      db,
+      SPACE_SCHEMA_PATH,
+      "space_schema_version",
+      spaceSchemaVersion ?? "",
+    );
+
+    if (mainDb) {
+      backfillSpaceDb(db, spaceDid);
+    }
+  } catch (err) {
+    // The space DB must never be left half-initialised: a partial file
+    // (schema applied but backfill failed, or worse) reads back as
+    // "database disk image is malformed" on every subsequent open.
+    // Close and delete it so the next open retries from scratch.
+    try {
+      db.close();
+    } catch {
+      /* best-effort */
+    }
+    if (spacesDir !== ":memory:") {
+      const path = join(spacesDir, `${spaceDid}.sqlite`);
+      try {
+        unlinkSync(path);
+      } catch {
+        /* already gone */
+      }
+      try {
+        unlinkSync(path + "-wal");
+      } catch {
+        /* already gone */
+      }
+      try {
+        unlinkSync(path + "-shm");
+      } catch {
+        /* already gone */
+      }
+    }
+    throw err;
+  }
+
+
+  // LRU eviction: close the least-recently-used handle when over capacity.
+  if (spaceDbs.size >= maxSpaceDbs) {
+    let oldest: string | null = null;
+    let oldestTs = Infinity;
+    for (const [did, entry] of spaceDbs) {
+      if (entry.lastUsed < oldestTs) {
+        oldestTs = entry.lastUsed;
+        oldest = did;
+      }
+    }
+    if (oldest !== null && oldest !== spaceDid) {
+      const entry = spaceDbs.get(oldest);
+      spaceDbs.delete(oldest);
+      try {
+        entry?.db.close();
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+
+  spaceDbs.set(spaceDid, { db, lastUsed: Date.now() });
+  return db;
+}
+
+function openSpaceDbFile(spaceDid: string): Database {
+  if (spacesDir === ":memory:") {
+    // In-memory per-space DBs (tests): each connection is its own fresh
+    // DB, cached per spaceDid in the worker LRU. Recreated on every worker
+    // restart, so tests never leak files or cross-test state.
+    const db = new Database(":memory:");
+    db.exec("pragma journal_mode = wal");
+    db.exec("pragma synchronous = normal");
+    db.exec("pragma foreign_keys = on");
+    return db;
+  }
+  const path = join(spacesDir!, `${spaceDid}.sqlite`);
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new Database(path, { create: true });
+  db.exec("pragma journal_mode = wal");
+  db.exec("pragma synchronous = normal");
+  db.exec("pragma foreign_keys = on");
+  return db;
+}
+
+/**
+ * Copy the monolithic DB's rows for `spaceDid` into a freshly-created
+ * per-space DB. One transaction; ~100k rows worst case, no round-trips.
+ * Idempotent (insert or ignore) so it is safe to re-run.
+ */
+function backfillSpaceDb(db: Database, spaceDid: string): void {
+  const main = mainDb!;
+  const copy = (table: string, where: string, params: SQLQueryBindings[]) => {
+    // Column list via pragma (the per-space and monolithic tables share
+    // identical shapes for the tables that remain).
+    const cols = main
+      .query<{ name: string }, []>(
+        `select name from pragma_table_info('${table}')`,
+      )
+      .all()
+      .map((r) => r.name);
+    if (cols.length === 0) return;
+    const colList = cols.join(", ");
+    const rows = main
+      .query(`select ${colList} from ${table} where ${where}`)
+      .all(...params) as Record<string, unknown>[];
+    if (rows.length === 0) return;
+    const placeholders = cols.map(() => "?").join(", ");
+    const insert = db.prepare(
+      `insert or ignore into ${table} (${colList}) values (${placeholders})`,
+    );
+    for (const row of rows) {
+      insert.run(...cols.map((c) => row[c] as SQLQueryBindings));
+    }
+  };
+
+  db.transaction(() => {
+    copy("entities", "stream_id = ?", [spaceDid]);
+
+    // The monolithic DB is shared across streams, and a space's own entity
+    // row can carry a DIFFERENT stream_id than the space DID (it is created
+    // by whichever materialiser ran first). Rows we are about to copy carry
+    // FK constraints onto entities (comp_space.entity, comp_room.entity,
+    // edge endpoints, reaction users, ...), so ensure every entity they
+    // reference exists BEFORE copying any FK-carrying table.
+    const referencedIds = new Set<string>([spaceDid]);
+    for (const r of main
+      .query(
+        `select head, tail from edges
+          where (head in (select id from entities where stream_id = ?)
+             or tail in (select id from entities where stream_id = ?))
+            and label not in ('joinedSpace', 'leftSpace')`,
+      )
+      .all(spaceDid, spaceDid) as Array<{ head: string; tail: string }>) {
+      referencedIds.add(r.head);
+      referencedIds.add(r.tail);
+    }
+    for (const r of main
+      .query(
+        `select user from comp_reaction
+          where entity in (select id from entities where stream_id = ?)`,
+      )
+      .all(spaceDid) as Array<{ user: string }>) {
+      if (r.user !== null) referencedIds.add(r.user);
+    }
+    if (referencedIds.size > 0) {
+      const ids = [...referencedIds];
+      const placeholders = ids.map(() => "?").join(",");
+      for (const row of main
+        .query(
+          `select id, stream_id, room, sort_idx, created_at, updated_at
+             from entities where id in (${placeholders})`,
+        )
+        .all(...ids) as Record<string, unknown>[]) {
+        db.run(
+          `insert or ignore into entities (id, stream_id, room, sort_idx, created_at, updated_at)
+           values (?, ?, ?, ?, ?, ?)`,
+          [
+            row.id as SQLQueryBindings,
+            row.stream_id as SQLQueryBindings,
+            row.room as SQLQueryBindings,
+            row.sort_idx as SQLQueryBindings,
+            row.created_at as SQLQueryBindings,
+            row.updated_at as SQLQueryBindings,
+          ],
+        );
+      }
+    }
+
+    // FK-carrying per-space tables (entity/stream-scoped).
+    copy("comp_space", "entity = ?", [spaceDid]);
+    copy("comp_room", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_discord_origin", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_user", "did in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_content", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_info", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_page_edits", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_comment", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_embed_image", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_embed_video", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_embed_file", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_embed_link", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_embed_link_data", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_last_read", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_reaction", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_calendar_link", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_calendar_event", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("roles", "stream_id = ?", [spaceDid]);
+    copy("member_roles", "stream_id = ?", [spaceDid]);
+    copy("role_rooms", "stream_id = ?", [spaceDid]);
+    copy("comp_bans", "entity = ?", [spaceDid]);
+    copy("comp_invite", "entity = ?", [spaceDid]);
+    copy("activity_item", "space_id = ?", [spaceDid]);
+    // Copy only this space's cursor rows. Rows whose stream_id differs
+    // (edge cases) are skipped — each space DB is self-describing.
+    copy("materialization_cursor", "stream_id = ?", [spaceDid]);
+    // Per-space `edges` exclude joinedSpace/leftSpace (those live in the
+    // global DB). Copy all other labels.
+    const edgeRows = main
+      .query(
+        `select head, tail, label, payload, created_at, updated_at
+           from edges
+          where (head in (select id from entities where stream_id = ?)
+             or tail in (select id from entities where stream_id = ?))
+            and label not in ('joinedSpace', 'leftSpace')`,
+      )
+      .all(spaceDid, spaceDid) as Record<string, unknown>[];
+    for (const row of edgeRows) {
+      db.run(
+        `insert or ignore into edges (head, tail, label, payload, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?)`,
+        [
+          row.head as SQLQueryBindings,
+          row.tail as SQLQueryBindings,
+          row.label as SQLQueryBindings,
+          row.payload as SQLQueryBindings,
+          row.created_at as SQLQueryBindings,
+          row.updated_at as SQLQueryBindings,
+        ],
+      );
+    }
+  })();
+}
+
+/** Open (or return) the global DB. Created lazily on first request. */
+function openGlobalDbInternal(): Database {
+  if (globalDb) return globalDb;
+  if (!globalDbPath) throw new Error("Global DB not initialized (no init)");
+  if (globalDbPath === ":memory:") {
+    // In-memory global DB (tests): fresh per worker, no files touched.
+    globalDb = new Database(":memory:");
+  } else {
+    mkdirSync(dirname(globalDbPath), { recursive: true });
+    globalDb = new Database(globalDbPath, { create: true });
+  }
+  globalDb.exec("pragma journal_mode = wal");
+  globalDb.exec("pragma synchronous = normal");
+  globalDb.exec("pragma foreign_keys = on");
+  initializeVersionedSchema(
+    globalDb,
+    GLOBAL_SCHEMA_PATH,
+    "global_schema_version",
+    globalSchemaVersion ?? "",
+  );
+
+  if (mainDb) {
+    backfillGlobalDb(globalDb);
+  }
+  return globalDb;
+}
+
+/**
+ * Copy the monolithic DB's `joinedSpace`/`leftSpace` edges into the global
+ * DB (plan §1h). Idempotent (insert or ignore). The global DB is derived
+ * data: it is deleted by the Phase 1 rollback plan and regenerated here.
+ */
+function backfillGlobalDb(db: Database): void {
+  const main = mainDb!;
+  const rows = main
+    .query(
+      `select head, tail, label, payload, created_at, updated_at
+         from edges
+        where label in ('joinedSpace', 'leftSpace')`,
+    )
+    .all() as Record<string, unknown>[];
+  db.transaction(() => {
+    for (const row of rows) {
+      db.run(
+        `insert or ignore into edges (head, tail, label, payload, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?)`,
+        [
+          row.head as SQLQueryBindings,
+          row.tail as SQLQueryBindings,
+          row.label as SQLQueryBindings,
+          row.payload as SQLQueryBindings,
+          row.created_at as SQLQueryBindings,
+          row.updated_at as SQLQueryBindings,
+        ],
+      );
+    }
+  })();
+}
+
+/** Select the DB handle a request targets. */
+function dbForRequest(req: WorkerRequest): Database {
+  if (req.targetDb === "space") {
+    if (!req.spaceDid) throw new Error("spaceDid required for space target");
+    return openSpaceDb(req.spaceDid);
+  }
+  if (req.targetDb === "global") {
+    return openGlobalDbInternal();
+  }
+  if (!mainDb) throw new Error("Main DB not initialized (no init)");
+  return mainDb;
 }
 
 // ─── Message handler ──────────────────────────────────────────────────────
@@ -322,6 +708,18 @@ function handleInit(req: WorkerRequest): {
   const readStatePath =
     opts.readStateDbPath ?? "data/roomy-readstate.sqlite";
 
+  // Per-space split (Phase 1): lazily-created space DBs + global DB.
+  // When the main DB is :memory: (tests), keep the derived DBs in-memory
+  // too so tests never touch the filesystem.
+  spacesDir =
+    opts.spacesDir ?? (mainPath === ":memory:" ? ":memory:" : "data/spaces");
+  globalDbPath =
+    opts.globalDbPath ??
+    (mainPath === ":memory:" ? ":memory:" : "data/global.sqlite");
+  spaceSchemaVersion = opts.spaceSchemaVersion ?? "";
+  globalSchemaVersion = opts.globalSchemaVersion ?? "";
+  if (opts.maxSpaceDbs !== undefined) maxSpaceDbs = opts.maxSpaceDbs;
+
   // Open main DB
   mkdirSync(dirname(mainPath), { recursive: true });
   mainDb = new Database(mainPath, { create: true });
@@ -392,6 +790,24 @@ function handleInit(req: WorkerRequest): {
     );
   }
 
+  // Backfill read_positions.space_did now that readstate is ATTACHed to the
+  // main DB (the v5 migration can't do this — it runs before the ATTACH).
+  // Idempotent: only touches rows still at ''. Best-effort: a row whose
+  // room_id is missing from entities keeps '' and is populated lazily on
+  // the next write (ensureReadPositions/updateSeen).
+  try {
+    mainDb.exec(
+      `update readstate.read_positions
+          set space_did = coalesce(
+            (select stream_id from entities where id = read_positions.room_id),
+            ''
+          )
+        where space_did = ''`,
+    );
+  } catch {
+    // Best-effort backfill; lazily populated on later writes.
+  }
+
   // Open events DB (append-only, never wiped — no schema version)
   const eventsPath = opts.eventsDbPath ?? "data/roomy-events.sqlite";
   mkdirSync(dirname(eventsPath), { recursive: true });
@@ -405,6 +821,7 @@ function handleInit(req: WorkerRequest): {
   // SQLite doesn't support ADD COLUMN IF NOT EXISTS, so we check the
   // table info first.
   const existingColumns = new Set(
+
     eventsDb
       .query<{ name: string }, []>(
         "select name from pragma_table_info('stream_events')",
@@ -444,7 +861,8 @@ function handleInit(req: WorkerRequest): {
 // ─── Query handlers ───────────────────────────────────────────────────────
 
 function handleQuery(req: WorkerRequest): unknown {
-  const stmt = mainDb!.query(req.sql!);
+  const db = dbForRequest(req);
+  const stmt = db.query(req.sql!);
   if (req.mode === "get") {
     return stmt.get(...toBindings(req.params)) ?? null;
   }
@@ -455,7 +873,8 @@ function handleRun(req: WorkerRequest): {
   changes: number;
   lastInsertRowid?: number;
 } {
-  const result = (mainDb!.run as (...args: unknown[]) => Changes)(req.sql!, ...toBindings(req.params));
+  const db = dbForRequest(req);
+  const result = (db.run as (...args: unknown[]) => Changes)(req.sql!, ...toBindings(req.params));
   return {
     changes: result.changes,
     lastInsertRowid: normaliseRowid(result.lastInsertRowid),
@@ -463,12 +882,13 @@ function handleRun(req: WorkerRequest): {
 }
 
 function handleExec(req: WorkerRequest): void {
-  mainDb!.exec(req.sql!);
+  dbForRequest(req).exec(req.sql!);
 }
 
 function handlePrepare(req: WorkerRequest): { handle: number } {
+  const db = dbForRequest(req);
   const handle = nextHandle++;
-  preparedStmts.set(handle, mainDb!.prepare(req.sql!));
+  preparedStmts.set(handle, db.prepare(req.sql!));
   return { handle };
 }
 
@@ -509,18 +929,19 @@ function handlePrepareFinalize(req: WorkerRequest): void {
 }
 
 function handleTransaction(req: WorkerRequest): unknown {
+  const db = dbForRequest(req);
   let lastResult: unknown = undefined;
-  const run = mainDb!.transaction(() => {
+  const run = db.transaction(() => {
     for (const step of req.steps ?? []) {
       switch (step.type) {
         case "query":
-          lastResult = mainDb!.prepare(step.sql).all(...toBindings(step.params));
+          lastResult = db.prepare(step.sql).all(...toBindings(step.params));
           break;
         case "run":
-          lastResult = (mainDb!.run as (...args: unknown[]) => Changes)(step.sql, ...toBindings(step.params));
+          lastResult = (db.run as (...args: unknown[]) => Changes)(step.sql, ...toBindings(step.params));
           break;
         case "exec":
-          mainDb!.exec(step.sql);
+          db.exec(step.sql);
           lastResult = undefined;
           break;
       }
@@ -537,6 +958,22 @@ function handleClose(): void {
   // via the ATTACH after mainDb drops it.
   if (mainDb) {
     mainDb.exec("detach database events");
+  }
+  for (const [, entry] of spaceDbs) {
+    try {
+      entry.db.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+  spaceDbs.clear();
+  if (globalDb) {
+    try {
+      globalDb.close();
+    } catch {
+      /* best-effort */
+    }
+    globalDb = null;
   }
   if (eventsDb) {
     eventsDb.close();

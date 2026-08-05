@@ -16,6 +16,7 @@ create table if not exists readstate_schema_version (
 create table if not exists read_positions (
   user_did    text not null,
   room_id     text not null,
+  space_did   text not null default '',  -- space stream DID (per-space split §1f)
   seen_up_to  text not null,   -- sort_idx of the last-read message entity
   unread_count integer not null default 0,
   updated_at  integer not null default (unixepoch() * 1000),

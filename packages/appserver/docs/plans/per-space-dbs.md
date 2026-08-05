@@ -89,6 +89,7 @@ These queries touch data across spaces and need special handling:
 
 ## Architecture
 
+```
 ┌──────────────────────────────────────────────────────────┐
 │                      Main Thread                          │
 │                                                           │

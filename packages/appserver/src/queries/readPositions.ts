@@ -32,16 +32,19 @@ export async function ensureReadPositions(
 
   const now = Date.now();
   const insert = await db.prepare(
-    `insert into readstate.read_positions (user_did, room_id, seen_up_to, unread_count, updated_at)
+    `insert into readstate.read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
      values (?, ?, coalesce(
+       (select stream_id from entities where id = ?), ''
+     ), coalesce(
        (select max(sort_idx) from entities where room = ?), '0'
      ), 0, ?)
      on conflict(user_did, room_id) do nothing`,
   );
 
   for (const roomId of roomIds) {
-    await insert.run([userDid, roomId, roomId, now]);
+    await insert.run([userDid, roomId, roomId, roomId, now]);
   }
+
 }
 
 /**

@@ -93,7 +93,7 @@ export class AsyncStatement {
   }
 }
 
-// ─── AsyncDatabase ────────────────────────────────────────────────────────
+// ─── WorkerLink ───────────────────────────────────────────────────────────
 
 interface PendingEntry {
   resolve: (value: unknown) => void;
@@ -103,7 +103,12 @@ interface PendingEntry {
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
-export class AsyncDatabase {
+/**
+ * Owns one Bun.Worker thread and the request/response correlation for it.
+ * Multiple `AsyncDatabase` handles can share one link; each handle stamps a
+ * route (main / per-space / global DB) onto every request it sends.
+ */
+export class WorkerLink {
   #worker: Worker;
   #pending = new Map<string, PendingEntry>();
   #nextId = 0;
@@ -136,62 +141,18 @@ export class AsyncDatabase {
     };
   }
 
-  /** Initialize: open DBs, apply schema, ATTACH read-state. */
-  async init(opts: {
-    mainDbPath?: string;
-    readStateDbPath?: string;
-    eventsDbPath?: string;
-    schemaVersion?: string;
-    readStateSchemaVersion?: string;
-  }): Promise<{ mainDbPath: string; readStateDbPath: string; version: string }> {
-    return this.#send({ type: "init", initOpts: opts }) as Promise<{
-      mainDbPath: string;
-      readStateDbPath: string;
-      version: string;
-    }>;
-  }
-
-  query(sql: string): AsyncStatement {
-    return new AsyncStatement((req) => this.#send(req), sql);
-  }
-
-  async prepare(sql: string): Promise<AsyncStatement> {
-    const { handle } = (await this.#send({
-      type: "prepare",
-      sql,
-    })) as { handle: number };
-    return new AsyncStatement((req) => this.#send(req), sql, handle);
-  }
-
-  async exec(sql: string): Promise<void> {
-    await this.#send({ type: "exec", sql });
-  }
-
-  async run(
-    sql: string,
-    ...params: unknown[]
-  ): Promise<{ changes: number; lastInsertRowid?: number }> {
-    return this.#send({ type: "run", sql, params }) as Promise<{
-      changes: number;
-      lastInsertRowid?: number;
-    }>;
-  }
-
-  async transaction<T>(
-    steps: Array<{
-      type: "query" | "run" | "exec";
-      sql: string;
-      params?: unknown[];
-    }>,
-  ): Promise<T> {
-    return this.#send({ type: "transaction", steps }) as Promise<T>;
-  }
-
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    await this.#send({ type: "close" });
-    this.#closed = true;
-    this.#worker.terminate();
+  /** Send a request, optionally stamped with a DB route. */
+  send(req: Omit<WorkerRequest, "id">, route?: DbRoute): Promise<unknown> {
+    if (this.#closed) throw new Error("Database is closed");
+    const id = String(this.#nextId++);
+    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+    const timeout = setTimeout(() => {
+      this.#pending.delete(id);
+      reject(new Error(`Request timed out: ${req.type}`));
+    }, REQUEST_TIMEOUT_MS);
+    this.#pending.set(id, { resolve, reject, timeout });
+    this.#worker.postMessage({ ...req, ...route, id });
+    return promise;
   }
 
   /** Terminate the worker immediately, rejecting all pending requests. */
@@ -206,17 +167,106 @@ export class AsyncDatabase {
     this.#pending.clear();
     this.#worker.terminate();
   }
+}
 
-  #send(req: Omit<WorkerRequest, "id">): Promise<unknown> {
-    if (this.#closed) throw new Error("Database is closed");
-    const id = String(this.#nextId++);
-    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-    const timeout = setTimeout(() => {
-      this.#pending.delete(id);
-      reject(new Error(`Request timed out: ${req.type}`));
-    }, REQUEST_TIMEOUT_MS);
-    this.#pending.set(id, { resolve, reject, timeout });
-    this.#worker.postMessage({ ...req, id });
-    return promise;
+// ─── DbRoute ──────────────────────────────────────────────────────────────
+
+/** Which DB a handle's requests target on the shared worker. */
+export interface DbRoute {
+  targetDb?: "space" | "global";
+  spaceDid?: string;
+}
+
+// ─── AsyncDatabase ────────────────────────────────────────────────────────
+
+export class AsyncDatabase {
+  #link: WorkerLink;
+  #route?: DbRoute;
+  /** True when this handle owns the worker link (isolated mode) and must
+   *  terminate it on close. Shared handles leave the link to closeDb(). */
+  #ownedLink: boolean;
+
+  constructor(link: WorkerLink, route?: DbRoute, ownedLink = false) {
+    this.#link = link;
+    this.#route = route;
+    this.#ownedLink = ownedLink;
+  }
+
+  /** A handle that routes requests to the per-space DB for `spaceDid`. */
+  forSpace(spaceDid: string): AsyncDatabase {
+    return new AsyncDatabase(this.#link, { targetDb: "space", spaceDid });
+  }
+
+  /** A handle that routes requests to the global DB. */
+  global(): AsyncDatabase {
+    return new AsyncDatabase(this.#link, { targetDb: "global" });
+  }
+
+  /** Initialize: open DBs, apply schema, ATTACH read-state. */
+  async init(opts: {
+    mainDbPath?: string;
+    readStateDbPath?: string;
+    eventsDbPath?: string;
+    spacesDir?: string;
+    globalDbPath?: string;
+    schemaVersion?: string;
+    readStateSchemaVersion?: string;
+    spaceSchemaVersion?: string;
+    globalSchemaVersion?: string;
+    maxSpaceDbs?: number;
+  }): Promise<{ mainDbPath: string; readStateDbPath: string; version: string }> {
+    return this.#link.send({ type: "init", initOpts: opts }) as Promise<{
+      mainDbPath: string;
+      readStateDbPath: string;
+      version: string;
+    }>;
+  }
+
+  query(sql: string): AsyncStatement {
+    return new AsyncStatement((req) => this.#link.send(req, this.#route), sql);
+  }
+
+  async prepare(sql: string): Promise<AsyncStatement> {
+    const { handle } = (await this.#link.send(
+      { type: "prepare", sql },
+      this.#route,
+    )) as { handle: number };
+    return new AsyncStatement((req) => this.#link.send(req, this.#route), sql, handle);
+  }
+
+  async exec(sql: string): Promise<void> {
+    await this.#link.send({ type: "exec", sql }, this.#route);
+  }
+
+  async run(
+    sql: string,
+    ...params: unknown[]
+  ): Promise<{ changes: number; lastInsertRowid?: number }> {
+    return this.#link.send({ type: "run", sql, params }, this.#route) as Promise<{
+      changes: number;
+      lastInsertRowid?: number;
+    }>;
+  }
+
+  async transaction<T>(
+    steps: Array<{
+      type: "query" | "run" | "exec";
+      sql: string;
+      params?: unknown[];
+    }>,
+  ): Promise<T> {
+    return this.#link.send({ type: "transaction", steps }, this.#route) as Promise<T>;
+  }
+
+  async close(): Promise<void> {
+    if (this.#ownedLink) {
+      this.#link.terminate();
+    }
+    // Shared handles leave the worker link to closeDb().
+  }
+
+  /** Terminate the shared worker immediately, rejecting all pending requests. */
+  terminate(): void {
+    this.#link.terminate();
   }
 }

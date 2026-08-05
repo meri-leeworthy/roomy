@@ -18,6 +18,7 @@ import type { SQLQueryBindings } from "bun:sqlite";
 import { toAsyncDb } from "../db/syncAdapter.ts";
 import { applyBatch } from "./applyBatch.ts";
 import { applyBundle } from "./applyBundle.ts";
+import { openDb } from "../db/db.ts";
 import type { StatementBundleSuccess } from "./types.ts";
 import { selectMessages } from "../queries/selectMessages.ts";
 
@@ -668,5 +669,101 @@ describe("applyBatch concurrency", () => {
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(STREAM);
     expect(cursor?.materialized_to).toBe(4);
+  });
+});
+
+describe("per-space split dual-write (Phase 1)", () => {
+  test("applyBatch dual-writes to per-space and global DBs over the shared worker", async () => {
+    // Isolated worker with an in-memory main DB; the per-space and global
+    // DBs default to :memory: too (worker init derives them from the main
+    // path), so no files are touched.
+    const testId = Math.random().toString(36).slice(2, 8);
+    process.env.EVENTS_DB_PATH = `/tmp/roomy-events-dual-${testId}.sqlite`;
+    const db = openDb({ path: ":memory:", isolated: true });
+
+    const streamDid = StreamDid.assert("did:web:dual.example");
+
+    // Seed space + user entities and a joinedSpace edge in the monolithic DB
+    // (mirrors the E2E seed helpers).
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [streamDid, streamDid]);
+    await db.run("insert into comp_space (entity) values (?)", [streamDid]);
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [USER, USER]);
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'joinedSpace')", [USER, streamDid]);
+
+    // Routed handles over the same worker. First access lazily backfills the
+    // per-space DB from the monolithic DB (§1h) and the global DB from the
+    // membership edges.
+    const spaceDb = db.forSpace(streamDid);
+    const globalDb = db.global();
+
+    // Backfilled state: space DB has no rooms yet, global DB has the edge.
+    const backfilledRooms = await spaceDb
+      .query("select count(*) as n from comp_room")
+      .get<{ n: number }>();
+    expect(backfilledRooms?.n).toBe(0);
+    const gEdge = await globalDb
+      .query("select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
+      .get<{ n: number }>(USER, streamDid);
+    expect(gEdge?.n).toBe(1);
+
+    // Dual-write a batch: a createRoom event (space-routed) and a
+    // personal.joinSpace event (global-routed edge).
+    const events: DecodedStreamEvent[] = [
+      decoded(createRoomEvent("dual-room"), 0),
+      {
+        event: {
+          $type: "space.roomy.space.personal.joinSpace.v0",
+          id: newUlid(),
+          spaceDid: streamDid,
+        } as unknown as Event,
+        idx: 1 as StreamIndex,
+        user: USER,
+      },
+    ];
+    const stats = await applyBatch(
+      db,
+      streamDid,
+      events,
+      { isBackfill: true },
+      spaceDb,
+      globalDb,
+    );
+    expect(stats.applyErrors).toBe(0);
+    expect(stats.materializerErrors).toBe(0);
+
+    // Monolithic DB has both.
+    const mainRooms = await db
+      .query("select count(*) as n from comp_room")
+      .get<{ n: number }>();
+    expect(mainRooms?.n).toBe(1);
+
+    // Space DB has the room but no joinedSpace edge (that lives in global).
+    const spaceRooms = await spaceDb
+      .query("select count(*) as n from comp_room")
+      .get<{ n: number }>();
+    expect(spaceRooms?.n).toBe(1);
+    const spaceEdge = await spaceDb
+      .query("select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
+      .get<{ n: number }>(USER, streamDid);
+    expect(spaceEdge?.n).toBeUndefined();
+
+    // Global DB has the edge, dual-written via routing.
+    const gEdgeAfter = await globalDb
+      .query("select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
+      .get<{ n: number }>(USER, streamDid);
+    expect(gEdgeAfter?.n).toBe(1);
+
+    // Cursor advanced on both DBs (each space DB is self-describing).
+    const mainCursor = await db
+      .query("select materialized_to from materialization_cursor where stream_id = ?")
+      .get<{ materialized_to: number }>(streamDid);
+    expect(mainCursor?.materialized_to).toBe(1);
+    const spaceCursor = await spaceDb
+      .query("select materialized_to from materialization_cursor where stream_id = ?")
+      .get<{ materialized_to: number }>(streamDid);
+    expect(spaceCursor?.materialized_to).toBe(1);
+
+    await db.close();
+    delete process.env.EVENTS_DB_PATH;
   });
 });

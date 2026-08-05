@@ -4,7 +4,7 @@ import { READSTATE_SCHEMA_VERSION } from "./readStateDb.ts";
 
 describe("read-state schema", () => {
   test("READSTATE_SCHEMA_VERSION is exported", () => {
-    expect(READSTATE_SCHEMA_VERSION).toBe("4");
+    expect(READSTATE_SCHEMA_VERSION).toBe("5");
   });
 
   test("schema applies cleanly on a fresh database", () => {
@@ -197,6 +197,22 @@ describe("read-state schema", () => {
               create index if not exists idx_ff_assignments_flag
                 on feature_flag_assignments(flag_key)
             `);
+          },
+        },
+        {
+          version: 5,
+          up(db: Database) {
+            const cols = db
+              .query<{ name: string }, []>(
+                "select name from pragma_table_info('read_positions')",
+              )
+              .all()
+              .map((r) => r.name);
+            if (!cols.includes("space_did")) {
+              db.exec(
+                "alter table read_positions add column space_did text not null default ''",
+              );
+            }
           },
         },
       ];
