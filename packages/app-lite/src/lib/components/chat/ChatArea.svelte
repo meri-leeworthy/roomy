@@ -24,6 +24,7 @@
   import { parseRichTextContent } from "./enrich-internal-links";
   import { RICHTEXT_MIME } from "@roomy-space/sdk";
   import type { Block } from "@roomy-space/sdk";
+  import ForwardMessageModal from "./ForwardMessageModal.svelte";
   const { queryKey } = cache;
 
   type Props = {
@@ -69,6 +70,15 @@
   function openDeleteConfirm(message: Message) {
     deleteMessageTarget = message;
     isDeleteConfirmOpen = true;
+  }
+
+  // Forward modal state — lifted here so one modal serves every message.
+  let forwardMessage = $state<Message | null>(null);
+  let isForwardModalOpen = $state(false);
+
+  function openForward(message: Message) {
+    forwardMessage = message;
+    isForwardModalOpen = true;
   }
 
   function openMobileMenu(message: Message) {
@@ -432,6 +442,7 @@
                       onCancelEdit={() => (editingMessageId = undefined)}
                       onOpenMobileMenu={openMobileMenu}
                       onRequestDelete={openDeleteConfirm}
+                      onForward={openForward}
                       mergeWithPrevious={message.mergeWithPrevious}
                     />
                   {/if}
@@ -471,6 +482,7 @@
       isMobileDrawerOpen = false;
       openDeleteConfirm(mobileMenuMessage);
     }}
+    onForward={openForward}
   />
 
   <DeleteMessageDialog
@@ -486,4 +498,13 @@
       await deleteMessage(spaceId, roomId, deleteMessageTarget.id);
     }}
   />
+
+  {#if forwardMessage}
+    <ForwardMessageModal
+      bind:open={isForwardModalOpen}
+      {spaceId}
+      fromRoomId={roomId}
+      messageId={forwardMessage.id}
+    />
+  {/if}
 </div>

@@ -6,6 +6,7 @@
   import {
     IconSmilePlus,
     IconReply,
+    IconForward,
     IconNeedleThread,
     IconEdit,
     IconTrash,
@@ -21,6 +22,7 @@
     onDelete,
     onStartThreading,
     onReply,
+    onForward,
   }: {
     /** Author-only — shows the Edit button. */
     canEdit: boolean;
@@ -35,6 +37,7 @@
     onDelete: () => void;
     onStartThreading: () => void;
     onReply: () => void;
+    onForward: () => void;
   } = $props();
 
   let isEmojiToolbarPickerOpen = $state(false);
@@ -156,6 +159,19 @@
         aria-label="Reply"
       >
         <IconReply />
+      </Toolbar.Button>
+    </Tooltip>
+
+    <Tooltip tip="Forward">
+      <Toolbar.Button
+        onclick={onForward}
+        class={[
+          buttonVariants({ variant: "ghost", size: "icon" }),
+          "backdrop-blur-none h-[34px]",
+        ]}
+        aria-label="Forward"
+      >
+        <IconForward />
       </Toolbar.Button>
     </Tooltip>
   </Toolbar.Root>

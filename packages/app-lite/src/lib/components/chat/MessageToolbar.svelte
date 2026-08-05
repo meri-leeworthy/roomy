@@ -12,6 +12,7 @@
     canEdit: boolean;
     canDelete: boolean;
     keepToolbarOpen?: boolean;
+    onForward: (message: Message) => void;
     onStartEdit: (messageId: string) => void;
     /** Requests the delete confirmation (owned by ChatArea). */
     onRequestDelete: () => void;
@@ -25,6 +26,7 @@
     canEdit,
     canDelete,
     keepToolbarOpen = $bindable(false),
+    onForward,
     onStartEdit,
     onRequestDelete,
   }: Props = $props();
@@ -60,4 +62,5 @@
   {onDelete}
   {onStartThreading}
   {onReply}
+  onForward={() => onForward(message)}
 />

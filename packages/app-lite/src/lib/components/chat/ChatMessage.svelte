@@ -38,6 +38,7 @@
     onOpenMobileMenu: (message: Message) => void;
     /** Requests the delete confirmation for this message (raised to ChatArea). */
     onRequestDelete: (message: Message) => void;
+    onForward: (message: Message) => void;
     mergeWithPrevious?: boolean;
   };
 
@@ -52,6 +53,7 @@
     onCancelEdit,
     onOpenMobileMenu,
     onRequestDelete,
+    onForward,
     mergeWithPrevious = false,
   }: Props = $props();
 
@@ -402,6 +404,7 @@
           bind:keepToolbarOpen
           {onStartEdit}
           onRequestDelete={() => onRequestDelete(message)}
+          {onForward}
         />
       {/snippet}
 
