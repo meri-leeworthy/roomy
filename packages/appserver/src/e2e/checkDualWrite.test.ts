@@ -85,6 +85,25 @@ describe("space.roomy.admin.checkDualWrite", () => {
     expect(body.spaces[0].diffs.join(" ")).toContain("joinedSpace in per-space");
   });
 
+  test("root entity with differing stream_id is not a false divergence", async () => {
+    const ctx = await startAppserver();
+    // A space whose root entity carries a stream_id different from the space
+    // DID (created by whichever materialiser ran first). comp_space is copied
+    // by entity = spaceDid in the backfill, so the check must compare it the
+    // same way or it false-positives as diverged.
+    await (ctx.db as any).run("insert into entities (id, stream_id) values (?, ?)", [SPACE, "did:web:other.example"]);
+    await (ctx.db as any).run("insert into comp_space (entity) values (?)", [SPACE]);
+    await (ctx.db as any).run("insert into comp_info (entity, name) values (?, 'Test')", [SPACE]);
+    await (ctx.db as any).run("insert into entities (id, stream_id) values (?, ?)", [USER, USER]);
+    await (ctx.db as any).run("insert into edges (head, tail, label) values (?, ?, 'joinedSpace')", [USER, SPACE]);
+
+    const body = await check(ctx, `did=${encodeURIComponent(SPACE)}&verbose=1`);
+    expect(body.spaces[0].status).toBe("ok");
+    const c = body.spaces[0].counts;
+    expect(c.mono.comp_space).toBe(1);
+    expect(c.perSpace.comp_space).toBe(1);
+  });
+
   test("anonymous (non-admin) → 403", async () => {
     const ctx = await startAppserver();
     const res = await ctx.authedFetch(USER)(
