@@ -749,3 +749,51 @@ describe("push/evaluate — notification icons (avatars)", () => {
     expect(digest!.payload.icon).toBe("https://cdn.example/space.png");
   });
 });
+
+// ── Rich-text (blocks + facets) message bodies ────────────────────────────
+
+describe("push/evaluate — rich-text message content", () => {
+  test("new-format body: push plaintext is the block text, not markdown syntax", async () => {
+    const db = freshDb();
+    await seedFixture(db);
+
+    // A block whose text contains markdown syntax: blocksToPlaintext keeps it
+    // verbatim, while stripMarkdownToPlaintext would strip the ** markers.
+    const doc = {
+      $type: "space.roomy.richtext.document",
+      blocks: [
+        {
+          $type: "space.roomy.richtext.blocks#text",
+          text: "**bold** hello",
+        },
+      ],
+    };
+    await db.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
+      MESSAGE_ID,
+      SPACE,
+      CHANNEL,
+    ]);
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit, timestamp) values (?, ?, ?, ?, ?)",
+      [
+        MESSAGE_ID,
+        "application/vnd.roomy.richtext+json",
+        Buffer.from(JSON.stringify(doc)),
+        MESSAGE_ID,
+        1_000_000,
+      ],
+    );
+
+    const deliveries = await evaluatePush(db, {
+      spaceId: SPACE,
+      roomId: CHANNEL,
+      messageId: MESSAGE_ID,
+      authorDid: AUTHOR as UserDid,
+      timestamp: 1_000_000,
+    });
+
+    const d = deliveries.find((x) => x.userDid === BUSY_READER);
+    expect(d).toBeDefined();
+    expect(d!.payload.messageContent).toBe("**bold** hello");
+  });
+});

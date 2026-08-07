@@ -1,4 +1,7 @@
 export * from "./schema";
+// Rich text (blocks + facets) types and converters.
+export * from "./schema/richtext";
+export * from "./richtext/convert";
 export type { DecodedStreamEvent, EventCallback, EventCallbackMeta, EncodedStreamEvent } from "./connection"
 export * from "./atproto";
 export * from "./client";

@@ -5,6 +5,8 @@
 
 import { newUlid, toBytes, type Ulid } from "../schema";
 import type { Event, Attachment } from "../schema";
+import type { Block } from "../schema/richtext";
+import { serializeBlocks } from "../richtext/convert";
 
 /**
  * Options for creating a message.
@@ -14,6 +16,8 @@ export interface CreateMessageOptions {
   roomId: Ulid;
   /** The message body (plain text or markdown) */
   body: string;
+  /** Rich text blocks (serialized as application/vnd.roomy.richtext+json; takes precedence over body) */
+  blocks?: Block[];
   /** The MIME type of the body (default: text/markdown) */
   mimeType?: string;
   /** Attachments to include with the message */
@@ -94,8 +98,9 @@ export async function createMessage(
     };
   }
 
-  // Add mentions extension if provided
-  if (options.mentions && options.mentions.length > 0) {
+  // Add mentions extension if provided (only for legacy string bodies; with
+  // `blocks`, mentions fold into #didMention facets in the rich text body)
+  if (!options.blocks && options.mentions && options.mentions.length > 0) {
     extensions["space.roomy.extension.mentions.v0"] = {
       $type: "space.roomy.extension.mentions.v0",
       mentions: options.mentions,
@@ -112,14 +117,20 @@ export async function createMessage(
   }
 
   // Build the event - always include extensions (required by schema)
+  const serialized = options.blocks ? serializeBlocks(options.blocks) : null;
   const event: Event = {
     id: messageId,
     room: options.roomId,
     $type: "space.roomy.message.createMessage.v0",
-    body: {
-      mimeType: options.mimeType || "text/markdown",
-      data: toBytes(new TextEncoder().encode(options.body)),
-    },
+    body: serialized
+      ? {
+          mimeType: serialized.mimeType,
+          data: toBytes(serialized.data),
+        }
+      : {
+          mimeType: options.mimeType || "text/markdown",
+          data: toBytes(new TextEncoder().encode(options.body)),
+        },
     ...(bodyAttachments.length > 0 ? { attachments: bodyAttachments } : {}),
     extensions,
   };
@@ -143,6 +154,8 @@ export interface EditMessageOptions {
   body: string;
   /** The MIME type of the body (default: text/markdown) */
   mimeType?: string;
+  /** Rich text blocks (serialized as application/vnd.roomy.richtext+json; takes precedence over body) */
+  blocks?: Block[];
   /** Unix timestamp for the edit (default: now) */
   timestamp?: number;
 }
@@ -185,23 +198,30 @@ export async function editMessage(
       timestamp: options.timestamp,
     };
   }
-
-  if (options.mentions && options.mentions.length > 0) {
+  // Mentions sidecar only for legacy string bodies; with `blocks`, mentions
+  // fold into #didMention facets in the rich text body
+  if (!options.blocks && options.mentions && options.mentions.length > 0) {
     extensions["space.roomy.extension.mentions.v0"] = {
       $type: "space.roomy.extension.mentions.v0",
       mentions: options.mentions,
     };
   }
 
+  const serialized = options.blocks ? serializeBlocks(options.blocks) : null;
   const event: Event = {
     id: editId,
     room: options.roomId,
     $type: "space.roomy.message.editMessage.v0",
     messageId: options.messageId,
-    body: {
-      mimeType: options.mimeType || "text/markdown",
-      data: toBytes(new TextEncoder().encode(options.body)),
-    },
+    body: serialized
+      ? {
+          mimeType: serialized.mimeType,
+          data: toBytes(serialized.data),
+        }
+      : {
+          mimeType: options.mimeType || "text/markdown",
+          data: toBytes(new TextEncoder().encode(options.body)),
+        },
     ...(Object.keys(extensions).length > 0 ? { extensions } : {}),
   };
 

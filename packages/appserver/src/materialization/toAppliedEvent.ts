@@ -13,6 +13,8 @@ import type {
   Ulid,
   UserDid,
 } from "@roomy-space/sdk";
+import { extractMentionDids } from "@roomy-space/sdk";
+import { decodeRichTextBody } from "../db/content.ts";
 import type { AppliedEvent } from "../invalidation/types.ts";
 
 /**
@@ -51,9 +53,23 @@ function extractDetails(
       const mentionsExt = extensions?.[
         "space.roomy.extension.mentions.v0"
       ] as { mentions?: unknown } | undefined;
-      const mentions = Array.isArray(mentionsExt?.mentions)
-        ? mentionsExt!.mentions.filter((d): d is string => typeof d === "string")
-        : undefined;
+      let mentions: string[] | undefined;
+      if (Array.isArray(mentionsExt?.mentions)) {
+        // Legacy bodies: mentions come from the sidecar extension.
+        mentions = mentionsExt!.mentions.filter(
+          (d): d is string => typeof d === "string",
+        );
+      } else {
+        // New-format bodies: mentions come from `#didMention` facets.
+        const body = event["body"] as
+          | { mimeType?: string; data?: { buf?: Uint8Array } }
+          | undefined;
+        const buf = body?.data?.buf;
+        if (body?.mimeType && buf) {
+          const blocks = decodeRichTextBody(body.mimeType, Buffer.from(buf));
+          if (blocks) mentions = extractMentionDids(blocks);
+        }
+      }
 
       const base = {
         authorDid: authorOverride?.did,

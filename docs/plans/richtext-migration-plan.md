@@ -162,6 +162,43 @@ Per the research doc: emit `app.bsky.richtext.facet#link` alongside `space.roomy
 **Convergence path:** when a community standard emerges (e.g. an agreed shared facet namespace or a `document` record shape), Roomy adds the standard's features *in addition to* its own in a new generation, keeps the unified model for its own consumers, and migrates old records via backfill. The backfill script (`Phase 6`) is the same machinery — coexistence branch, mimeType discriminator, row-level idempotent conversion.
 ---
 
+### 3.6 Feature flag: gating the new schema
+
+The appserver already has a dynamic feature flag system (`space.roomy.getFlags` XRPC query, `feature_flags` + `feature_flag_assignments` tables, admin endpoints `setFlag`/`clearFlag`/`getFlags`). Use it to gate which users send messages with the new richtext schema.
+
+**Flag key:** `richtext-schema`
+
+**How it works:**
+
+- The appserver registers `richtext-schema` in `FEATURE_FLAGS` (`packages/appserver/src/featureFlags.ts`). Default: disabled for all users.
+- The app-lite client calls `space.roomy.getFlags` on startup (already wired via `createFeatureFlagsQuery` in `packages/app-lite/src/lib/queries/feature-flags.ts`). If `richtext-schema` is enabled for the current user, the send path uses the new blocks+facets body; otherwise it continues to emit the legacy markdown body.
+- The appserver's `createMessage`/`editMessage` materializers accept both formats unconditionally (coexistence is the design), so the flag is purely a **client-side send gate** — the server never rejects a message based on the flag. This avoids a race where a user sends a new-format message but the server hasn't been told about the flag yet.
+
+**Rollout strategy:**
+
+1. **Dev / staging:** enable globally (`setFlag richtext-schema --all`) for internal testing.
+2. **Early adopters:** assign specific DIDs via `setFlag richtext-schema --user-dids did:plc:alice,did:plc:bob`.
+3. **Gradual ramp:** enable globally for a percentage of users (the flag system supports per-DID assignment, so a script can assign a random subset).
+4. **Full rollout:** enable globally once the new path is proven. The flag stays registered but is globally enabled; the client-side check becomes a no-op branch that always takes the new path. The flag can be removed (along with the legacy send path) after backfill is complete and the legacy render path is removed.
+
+**Why a client-side gate instead of server-side:**
+
+- The appserver already accepts both formats (coexistence). Rejecting at the server would add a failure mode (message send fails because the flag is off) that is invisible to the user — the editor would need to handle the error and fall back to the legacy format, adding complexity.
+- A client-side gate is simpler: the flag check is a single `if (flags.includes("richtext-schema"))` in the send path. If the flag is off, the client sends the same markdown body it always has. No error handling, no retry logic.
+- The flag is checked at send time, not at editor-init time, so the editor always works the same way — only the serialization changes.
+
+**Update to Phase 1 (Foundation) deliverables:**
+
+Add to the Foundation phase:
+- Register `richtext-schema` in `packages/appserver/src/featureFlags.ts` alongside `push-notifications`.
+- Add `space.roomy.getFlags` to the app-lite OAuth scope in `packages/app-lite/src/lib/config.ts` (already present — verify it's in `APPSERVER_RPCS`).
+
+**Update to Phase 4 (app-lite) deliverables:**
+
+Add to the app-lite phase:
+- In the send path (`ChatInputArea.svelte` / `mutations/message.ts`), check `flags.includes("richtext-schema")` from the feature flags query before constructing the new-format body. If the flag is off, fall back to the legacy markdown body.
+- The feature flags query is already cached by Tanstack Query (`createFeatureFlagsQuery`), so the check is a synchronous read of the query result — no additional network round-trip at send time.
+
 ## 4. Phased plan
 
 Each phase has a clear dependency: Foundation must land first (everyone consumes the lexicon + converters). Then SDK Schema, Appserver, App-lite, and Discord Bridge can proceed largely in parallel (they each depend on Foundation, not on each other). Data Migration and Verification come last.

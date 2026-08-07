@@ -147,7 +147,7 @@
             />
           </div>
         {:else}
-          <MessageContent content={message.content} />
+          <MessageContent content={message.content} mimeType={message.mimeType} />
         {/if}
       {/snippet}
 

@@ -18,6 +18,8 @@
   import { px, auth } from "$lib/auth.svelte";
   import { queryClient } from "$lib/client";
   import { cache } from "@roomy-space/sdk";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
+  import type { Block } from "@roomy-space/sdk";
   import type { Message } from "$lib/queries/messages";
   import type { Member, ExternalAdmin } from "$lib/queries/members";
   import type { TypeaheadUser } from "@roomy/design/components/ui/user-typeahead/UserTypeahead.svelte";
@@ -44,6 +46,20 @@
   // Computed synchronously (not in onMount) so the value is settled before
   // child ChatInput's onMount runs and triggers focus.
   const isCoarsePointer = browser && matchMedia("(pointer: coarse)").matches;
+
+  // Feature-flag gate for the new richtext send path. Mounted at component
+  // top level so the query runs; the flag is read synchronously from the
+  // cached result at send time (no await). Until the query has loaded, the
+  // legacy markdown path is used.
+  const flagsQuery = createFeatureFlagsQuery();
+  const richtextEnabled = $derived(
+    flagsQuery.data?.flags.includes("richtext-schema") ?? false,
+  );
+
+  // Blocks+facets form of the composer content, bound from ChatInput. Only
+  // used when the richtext flag is on; the markdown string binding remains
+  // the source of truth for messaging-state.
+  let blocks: Block[] | undefined = $state();
 
 
   let isSendingMessage = $state(false);
@@ -221,6 +237,14 @@
     const message = state.input;
     const filesToUpload = [...state.files];
 
+    // New-format send path: gated on the cached feature flag (synchronous
+    // read — no await at send time). When enabled and the composer produced
+    // blocks, the wire body is serializeBlocks(blocks) and the mentions
+    // sidecar is dropped (mentions fold into `#didMention` facets). Until
+    // the flag query has loaded, or when blocks are absent, the legacy
+    // markdown path is used.
+    const useRichText = richtextEnabled && !!blocks && blocks.length > 0;
+
     try {
       const attachments: Record<string, unknown>[] = [];
 
@@ -247,8 +271,9 @@
         });
       }
 
-      // Build mentions extension if any DIDs were mentioned
-      const mentionsExt = mentions.length > 0
+      // Build mentions extension if any DIDs were mentioned (legacy path
+      // only — the new format folds mentions into `#didMention` facets).
+      const mentionsExt = !useRichText && mentions.length > 0
         ? { "space.roomy.extension.mentions.v0": { $type: "space.roomy.extension.mentions.v0", mentions } }
         : undefined;
 
@@ -263,10 +288,18 @@
           id,
           room: roomId,
           $type: "space.roomy.message.createMessage.v0",
-          body: {
-            mimeType: "text/markdown",
-            data: toBytes(new TextEncoder().encode(message)),
-          },
+          body: useRichText
+            ? {
+                mimeType: "application/vnd.roomy.richtext+json",
+                data: toBytes(new TextEncoder().encode(JSON.stringify({
+                  $type: "space.roomy.richtext.document",
+                  blocks: blocks!,
+                }))),
+              }
+            : {
+                mimeType: "text/markdown",
+                data: toBytes(new TextEncoder().encode(message)),
+              },
           extensions,
         };
         await sendEvents(spaceId, [event]);
@@ -275,6 +308,7 @@
           replyTo:
             state.kind === "replying" ? state.replyTo.id : undefined,
           mentions,
+          ...(useRichText ? { blocks } : {}),
         });
       }
     } catch (e: unknown) {
@@ -354,6 +388,7 @@
             }
           }
         }
+        bind:blocks
         onEnter={handleSend}
         disabled={isSendingMessage}
         setFocus={shouldFocus}

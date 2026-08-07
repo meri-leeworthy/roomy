@@ -18,7 +18,12 @@
   import { px } from "$lib/auth.svelte";
   import { scrollPositionState } from "./scroll-position.svelte";
   import { prefetchInternalLinkSummaries } from "./prefetch-link-summaries";
-
+  import {
+    prefetchInternalLinkSummariesFromBlocks,
+  } from "./prefetch-link-summaries";
+  import { parseRichTextContent } from "./enrich-internal-links";
+  import { RICHTEXT_MIME } from "@roomy-space/sdk";
+  import type { Block } from "@roomy-space/sdk";
   const { queryKey } = cache;
 
   type Props = {
@@ -106,7 +111,18 @@
   $effect(() => {
     const msgs = timeline;
     if (msgs.length === 0) return;
-    prefetchInternalLinkSummaries(msgs.map((m) => m.content));
+    const markdowns: string[] = [];
+    const blocksList: Block[][] = [];
+    for (const m of msgs) {
+      if (m.mimeType === RICHTEXT_MIME) {
+        const blocks = parseRichTextContent(m.content);
+        if (blocks) blocksList.push(blocks);
+      } else {
+        markdowns.push(m.content);
+      }
+    }
+    if (markdowns.length > 0) prefetchInternalLinkSummaries(markdowns);
+    if (blocksList.length > 0) prefetchInternalLinkSummariesFromBlocks(blocksList);
   });
 
   let showJumpToPresent = $derived(!isAtBottom);

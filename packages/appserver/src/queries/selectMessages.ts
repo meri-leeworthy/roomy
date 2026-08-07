@@ -49,6 +49,12 @@ export interface MessageDto {
   /** Sort index for timeline ordering. ULID based on canonical timestamp. */
   sort_idx?: string;
   content: string;
+  /**
+   * MIME type of the content blob. `text/markdown` for legacy messages,
+   * `application/vnd.roomy.richtext+json` for blocks+facets messages.
+   * Clients branch rendering on this.
+   */
+  mimeType?: string;
   authorDid: string;
   authorName: string;
   authorHandle?: string;
@@ -450,6 +456,7 @@ export async function selectMessages(
       id: r.id,
       sort_idx: r.sort_idx,
       content,
+      mimeType: mime ?? undefined,
       authorDid: authorDid ?? "",
       authorName: authorName ?? "",
       authorHandle: authorHandle,

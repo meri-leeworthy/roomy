@@ -334,6 +334,65 @@ describe("applyBatch", () => {
   })
 });
 
+describe("applyBatch — rich-text link detection", () => {
+  test("new-format body with a #link facet stores the URL in comp_embed_link", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    const channelId = newUlid();
+    db.run("insert into entities (id, stream_id) values (?, ?)", [
+      channelId,
+      STREAM,
+    ]);
+    db.run(
+      "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', 'readwrite')",
+      [channelId],
+    );
+
+    const url = "https://example.com/richtext";
+    const doc = {
+      $type: "space.roomy.richtext.document",
+      blocks: [
+        {
+          $type: "space.roomy.richtext.blocks#text",
+          text: `check ${url}`,
+          facets: [
+            {
+              index: { byteStart: 6, byteEnd: 6 + url.length },
+              features: [{ $type: "space.roomy.richtext.facet#link", uri: url }],
+            },
+          ],
+        },
+      ],
+    };
+    const msgId = newUlid();
+    const event = {
+      $type: "space.roomy.message.createMessage.v0",
+      id: msgId,
+      room: channelId,
+      body: {
+        mimeType: "application/vnd.roomy.richtext+json",
+        data: { buf: new TextEncoder().encode(JSON.stringify(doc)) },
+      },
+      extensions: {},
+    } as unknown as Event;
+
+    const stats = await applyBatch(asyncDb, STREAM, [decoded(event, 1)], {
+      isBackfill: true,
+    });
+    expect(stats.applied).toBe(1);
+    expect(stats.applyErrors).toBe(0);
+
+    // The facet URL must be stored as an embed link scoped to the message.
+    const link = await asyncDb
+      .query(
+        "select e.room as room from comp_embed_link el join entities e on e.id = el.entity where el.entity = ?",
+      )
+      .get<{ room: string }>(url);
+    expect(link?.room).toBe(msgId);
+  });
+});
+
 /** Build a createMessage event with a text body in the decoded `{ buf }` form. */
 function createMessageEvent(roomId: string, id: string, text: string): Event {
   return {

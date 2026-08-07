@@ -23,6 +23,11 @@ export const ActivityAuthor = type({
 export const ActivityMessage = type({
   id: "string",
   content: "string",
+  /**
+   * MIME type of the content blob. `text/markdown` for legacy messages,
+   * `application/vnd.roomy.richtext+json` for blocks+facets messages.
+   */
+  "mimeType?": "string",
   author: ActivityAuthor,
   "timestamp?": "string",
   /** Media attachments (images/video/files). Only hydrated on the latest message of each feed item. */

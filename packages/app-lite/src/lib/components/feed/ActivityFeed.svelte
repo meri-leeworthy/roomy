@@ -10,8 +10,14 @@
   import MediaEmbed from "../chat/embeds/MediaEmbed.svelte";
   import LinkCard from "../chat/embeds/LinkCard.svelte";
   import MessageContent from "../chat/MessageContent.svelte";
-  import { prefetchInternalLinkSummaries } from "../chat/prefetch-link-summaries";
   import MessageReactions from "../chat/MessageReactions.svelte";
+  import { prefetchInternalLinkSummaries } from "../chat/prefetch-link-summaries";
+  import {
+    prefetchInternalLinkSummariesFromBlocks,
+  } from "../chat/prefetch-link-summaries";
+  import { parseRichTextContent } from "../chat/enrich-internal-links";
+  import { RICHTEXT_MIME } from "@roomy-space/sdk";
+  import type { Block } from "@roomy-space/sdk";
   import { auth } from "$lib/auth.svelte";
   import { IconChevronRight } from "@roomy/design/icons";
 
@@ -26,11 +32,19 @@
     const feed = feedQuery.data?.feed;
     if (!feed || feed.length === 0) return;
     const contents: string[] = [];
+    const blocksList: Block[][] = [];
     for (const item of feed) {
-      for (const msg of item.messages) contents.push(msg.content);
+      for (const msg of item.messages) {
+        if (msg.mimeType === RICHTEXT_MIME) {
+          const blocks = parseRichTextContent(msg.content);
+          if (blocks) blocksList.push(blocks);
+        } else {
+          contents.push(msg.content);
+        }
+      }
     }
-    if (contents.length === 0) return;
-    prefetchInternalLinkSummaries(contents);
+    if (contents.length > 0) prefetchInternalLinkSummaries(contents);
+    if (blocksList.length > 0) prefetchInternalLinkSummariesFromBlocks(blocksList);
   });
 
   const currentUserDid = $derived(auth.userDid);
@@ -151,7 +165,7 @@
                         </button>
                       {/if}
                       <span class="prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline text-base-600 dark:text-base-400 break-words [&_p]:inline [&_p]:m-0">
-                        <MessageContent content={msg.content} />
+                        <MessageContent content={msg.content} mimeType={msg.mimeType} />
                       </span>
                     </div>
                   </div>
@@ -202,7 +216,7 @@
                   {/if}
                 </div>
                 <div class="prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline text-base font-normal text-left max-w-full overflow-auto hide-scrollbar break-words [&_p]:m-0 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0">
-                  <MessageContent content={last.content} />
+                  <MessageContent content={last.content} mimeType={last.mimeType} />
                 </div>
 
                 {#if last.media && last.media.length > 0}

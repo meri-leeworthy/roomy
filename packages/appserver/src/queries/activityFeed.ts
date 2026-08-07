@@ -25,8 +25,14 @@ export interface ActivityAuthor {
 export interface ActivityMessage {
   id: string;
   content: string;
+  /**
+   * MIME type of the content blob. `text/markdown` for legacy messages,
+   * `application/vnd.roomy.richtext+json` for blocks+facets messages.
+   */
+  mimeType?: string;
   author: ActivityAuthor;
   timestamp?: string;
+
   media?: Array<{ url: string; type: string; alt?: string; width?: number; height?: number; blurhash?: string; size?: number; length?: number; name?: string }>;
   /** Reactions on the message. Only hydrated on the latest message. */
   reactions?: Array<{ emoji: string; count: number; myReactionId?: string }>;
@@ -305,6 +311,7 @@ async function batchFetchMessages(
     result.set(r.id, {
       id: r.id,
       content: decodeContent(r.mime_type, r.data),
+      ...(r.mime_type != null ? { mimeType: r.mime_type } : {}),
       author: {
         did: r.author_did ?? "",
         ...(r.author_name != null ? { name: r.author_name } : {}),

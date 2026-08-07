@@ -100,6 +100,11 @@ export const Attachments = type({
   attachments: Attachment.array().describe("The list of attachments."),
 }).describe("Attachments to the message, like files, link embeds, or images.");
 
+/**
+ * @deprecated Mentions now fold into `#didMention` facets in the rich text
+ * body (`application/vnd.roomy.richtext+json`). This sidecar is kept for the
+ * transition window and will be removed after all producers emit facets.
+ */
 export const Mentions = type({
   $type: "'space.roomy.extension.mentions.v0'",
   mentions: UserDid.array().describe(

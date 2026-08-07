@@ -22,9 +22,18 @@
   import { RichTextLink } from "$lib/tiptap/RichTextLink";
   import { cn } from "@roomy/design/utils";
   import { Markdown } from "tiptap-markdown";
+  import { proseMirrorDocToBlocks } from "@roomy-space/sdk";
+  import type { Block } from "@roomy-space/sdk";
 
   type Props = {
     content: string;
+    /**
+     * Blocks+facets form of the editor content, kept in sync with `content`
+     * on every update. The send path uses this when the `richtext-schema`
+     * feature flag is enabled; `content` (markdown) remains for the legacy
+     * path and for messaging-state's string `input` binding.
+     */
+    blocks?: Block[];
     /** Server-search fetcher for `@user` mentions (hits `getMembers?search=`). */
     mentionSearch?: (query: string) => Promise<TypeaheadUser[]>;
     /** Rooms in space that can be mentioned with #room */
@@ -38,6 +47,7 @@
 
   let {
     content = $bindable(""),
+    blocks = $bindable(),
     mentionSearch,
     context,
     onEnter,
@@ -46,6 +56,7 @@
     disabled = false,
     processImageFile,
   }: Props = $props();
+
   let element: HTMLDivElement | undefined = $state();
 
   let tiptap: Editor | undefined = $state();
@@ -91,6 +102,7 @@
       },
       onUpdate: (ctx) => {
         content = ctx.editor.storage.markdown.getMarkdown();
+        blocks = proseMirrorDocToBlocks(ctx.editor.getJSON());
       },
     });
     editor = tiptap;

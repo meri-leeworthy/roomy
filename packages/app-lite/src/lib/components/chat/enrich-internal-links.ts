@@ -1,5 +1,7 @@
 import { mount, unmount } from "svelte";
 import SpaceRoomBadge from "./embeds/SpaceRoomBadge.svelte";
+import { extractInternalLinkTargets, isRichTextDocument } from "@roomy-space/sdk";
+import type { Block } from "@roomy-space/sdk";
 
 // Known Roomy domains — bare links to these are treated as internal space/room
 // references. Must stay in sync with packages/design/src/utils/markdown.ts
@@ -9,6 +11,38 @@ const ROOMY_DOMAINS = new Set(["roomy.space", "a.roomy.space", "roomy.chat"]);
 export interface InternalLinkTarget {
   spaceId: string;
   roomId?: string;
+}
+
+/**
+ * Parse a new-format message content string into blocks, or `null` when the
+ * content isn't a valid richtext document.
+ *
+ * The appserver's `decodeContent` base64-encodes non-`text/*` mimeTypes, so
+ * `message.content` for `application/vnd.roomy.richtext+json` messages is the
+ * base64-encoded JSON document — the client must base64-decode before
+ * `JSON.parse`. Returns `null` on any parse/validation failure so callers can
+ * fall back to the legacy markdown path.
+ */
+export function parseRichTextContent(content: string): Block[] | null {
+  try {
+    const parsed: unknown = JSON.parse(atob(content));
+    if (isRichTextDocument(parsed)) return parsed.blocks;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract the unique internal-link targets from a blocks+facets body.
+ * Reads `#roomRef` facets directly (no DOM walk) via the SDK's
+ * `extractInternalLinkTargets` — the blocks equivalent of the markdown
+ * extractor in prefetch-link-summaries.ts.
+ */
+export function enrichInternalLinksFromBlocks(
+  blocks: Block[],
+): InternalLinkTarget[] {
+  return extractInternalLinkTargets(blocks);
 }
 
 /**

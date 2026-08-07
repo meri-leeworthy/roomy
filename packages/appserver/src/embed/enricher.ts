@@ -412,3 +412,38 @@ export async function detectAndStoreLinks(
   }
   return detected;
 }
+
+/**
+ * Insert pre-extracted URLs into `comp_embed_link` (same semantics as
+ * {@link detectAndStoreLinks}, but for callers that already have the URL
+ * list — e.g. rich-text bodies whose `#link` facet URIs are extracted via
+ * the SDK's `extractFacetUrls` instead of regex-scanning a content string).
+ *
+ * Returns the URLs that were newly inserted into `comp_embed_link`.
+ */
+export async function detectAndStoreLinksFromUrls(
+  db: DbLike,
+  messageId: string,
+  urls: string[],
+): Promise<string[]> {
+  if (urls.length === 0) return [];
+
+  const detected: string[] = [];
+  for (const url of urls) {
+    // Ensure the entity row exists (room = messageId so it's scoped to this message)
+    await db.run(
+      `insert or ignore into entities (id, stream_id, room, created_at)
+       values (?, '', ?, (unixepoch() * 1000))`,
+      [url, messageId],
+    );
+    // Insert into comp_embed_link if not already present. Track newly-inserted
+    // rows (changes > 0) so only genuinely-new links get prioritised.
+    const res = await db.run(
+      `insert or ignore into comp_embed_link (entity, show_preview, created_at, updated_at)
+       values (?, 1, (unixepoch() * 1000), (unixepoch() * 1000))`,
+      [url],
+    );
+    if (res.changes > 0) detected.push(url);
+  }
+  return detected;
+}

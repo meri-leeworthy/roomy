@@ -39,7 +39,8 @@
 
 import { stripMarkdownToPlaintext } from "./plaintext.ts";
 import type { DbLike } from "../db/types.ts";
-import { decodeContent } from "../db/content.ts";
+import { decodeContent, decodeRichTextBody } from "../db/content.ts";
+import { RICHTEXT_MIME, blocksToPlaintext } from "@roomy-space/sdk";
 import { roomAccess } from "../auth/access.ts";
 import { resolveLevel } from "../queries/pushPreferences.ts";
 import { selectSubscriptions } from "../queries/pushSubscriptions.ts";
@@ -88,8 +89,14 @@ export async function resolveMessageFacts(
   ).get<{ mime_type: string | null; data: Buffer | Uint8Array | null }>(messageId);
   let messageContent: string | null = null;
   if (contentRow?.data) {
-    const raw = decodeContent(contentRow.mime_type, contentRow.data);
-    messageContent = stripMarkdownToPlaintext(raw);
+    if (contentRow.mime_type === RICHTEXT_MIME) {
+      // New format: plaintext comes from the blocks, not markdown syntax.
+      const blocks = decodeRichTextBody(contentRow.mime_type, contentRow.data);
+      messageContent = blocksToPlaintext(blocks ?? []);
+    } else {
+      const raw = decodeContent(contentRow.mime_type, contentRow.data);
+      messageContent = stripMarkdownToPlaintext(raw);
+    }
     if (messageContent.length > 120) {
       messageContent = messageContent.slice(0, 120) + "\u2026";
     }

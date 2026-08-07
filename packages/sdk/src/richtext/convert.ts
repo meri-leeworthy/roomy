@@ -1,0 +1,953 @@
+/**
+ * Rich text converters: ProseMirror JSON ↔ blocks+facets, markdown → blocks,
+ * and the wire-encoding helpers.
+ *
+ * The blocks+facets model (`space.roomy.richtext.*`) is the canonical rich
+ * text representation on the wire:
+ *
+ *   - `proseMirrorDocToBlocks` — the TipTap-native authoring path (the OXA
+ *     tree→facets walk). Emits `#didMention` facets for `userMention` nodes,
+ *     `#roomRef` + `#link` facets for `channelThreadMention` nodes, and
+ *     `#bold`/`#italic`/`#code`/`#strike`/`#link` facets for text marks.
+ *   - `blocksToProseMirrorDoc` — the inverse, for re-editing structured
+ *     messages in TipTap.
+ *   - `markdownToBlocks` — self-contained markdown parser for backfill and
+ *     the Discord bridge transition (no `marked` dependency).
+ *   - `blocksToPlaintext` / `extractFacetUrls` / `extractMentionDids` /
+ *     `extractInternalLinkTargets` — server-side derivations (push bodies,
+ *     embed link detection, mention routing, internal-link prefetch).
+ *   - `serializeBlocks` / `deserializeBody` — the wire encoding:
+ *     `application/vnd.roomy.richtext+json` (UTF-8 JSON).
+ *
+ * Facet indices are UTF-8 byte offsets (`byteStart` inclusive, `byteEnd`
+ * exclusive), matching `app.bsky.richtext.facet#byteSlice`. All byte-offset
+ * computation is centralized here — JS strings are UTF-16, so callers must
+ * never compute offsets themselves.
+ */
+
+import type { Block, Facet, FacetFeature, RichTextDocument } from "../schema/richtext";
+
+/** MIME type for the blocks+facets wire encoding. */
+export const RICHTEXT_MIME = "application/vnd.roomy.richtext+json";
+
+// ─── UTF-8 byte offset helpers ───────────────────────────────────────────
+
+/** UTF-8 byte length of a JS string. */
+export function utf8ByteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+/**
+ * Convert a UTF-16 code-unit index into a string to the UTF-8 byte offset of
+ * the same character boundary. `utf16Index` must be a character boundary
+ * (not a lone surrogate).
+ */
+export function utf16ToUtf8ByteOffset(s: string, utf16Index: number): number {
+  return utf8ByteLength(s.slice(0, utf16Index));
+}
+
+// ─── ProseMirror JSON structural types (no tiptap dependency) ────────────
+
+export interface ProseMirrorMark {
+  type: string;
+  attrs?: Record<string, unknown>;
+}
+
+export interface ProseMirrorNode {
+  type: string;
+  attrs?: Record<string, unknown>;
+  content?: ProseMirrorNode[];
+  text?: string;
+  marks?: ProseMirrorMark[];
+}
+
+export type ProseMirrorDoc = ProseMirrorNode;
+
+// ─── Facet construction helpers ───────────────────────────────────────────
+
+function facet(
+  byteStart: number,
+  byteEnd: number,
+  features: FacetFeature[],
+): Facet {
+  return { index: { byteStart, byteEnd }, features };
+}
+
+function linkFeature(uri: string): FacetFeature {
+  return { $type: "space.roomy.richtext.facet#link", uri };
+}
+
+function didMentionFeature(did: string): FacetFeature {
+  return { $type: "space.roomy.richtext.facet#didMention", did };
+}
+
+function roomRefFeature(spaceId: string, roomId?: string): FacetFeature {
+  return roomId
+    ? { $type: "space.roomy.richtext.facet#roomRef", spaceId, roomId }
+    : { $type: "space.roomy.richtext.facet#roomRef", spaceId };
+}
+
+/**
+ * Parse an internal Roomy link href into `{ spaceId, roomId? }`, or `null`.
+ * Accepts root-relative paths (`/did:plc:…/roomId`) and absolute URLs on any
+ * host whose path has the same shape. `/user/…` and other non-space routes
+ * are rejected.
+ */
+export function parseInternalLinkHref(
+  href: string,
+): { spaceId: string; roomId?: string } | null {
+  let path: string;
+  try {
+    path = new URL(href, "https://roomy.space").pathname;
+  } catch {
+    return null;
+  }
+  const parts = path.split("/").filter(Boolean);
+  const spaceId = parts[0];
+  if (!spaceId || spaceId === "user") return null;
+  const roomId = parts[1];
+  return roomId ? { spaceId, roomId } : { spaceId };
+}
+
+// ─── ProseMirror → blocks ────────────────────────────────────────────────
+
+interface TextRun {
+  text: string;
+  marks: ProseMirrorMark[];
+}
+
+/** Flatten a node's inline content into text runs (marks attached). */
+function flattenInline(node: ProseMirrorNode): TextRun[] {
+  const runs: TextRun[] = [];
+  for (const child of node.content ?? []) {
+    if (child.type === "text") {
+      runs.push({ text: child.text ?? "", marks: child.marks ?? [] });
+    } else if (child.type === "userMention") {
+      const label = String(child.attrs?.label ?? child.attrs?.id ?? "");
+      runs.push({
+        text: `@${label}`,
+        marks: [{ type: "userMention", attrs: child.attrs }],
+      });
+    } else if (child.type === "channelThreadMention") {
+      const label = String(child.attrs?.label ?? "");
+      runs.push({
+        text: `#${label}`,
+        marks: [{ type: "channelThreadMention", attrs: child.attrs }],
+      });
+    } else if (child.content) {
+      runs.push(...flattenInline(child));
+    }
+  }
+  return runs;
+}
+
+/**
+ * Convert a run's marks into facet features. Returns `null` when the run has
+ * no formatting marks (plain text needs no facet).
+ */
+function marksToFeatures(
+  marks: ProseMirrorMark[],
+  text: string,
+): FacetFeature[] | null {
+  const features: FacetFeature[] = [];
+  for (const mark of marks) {
+    switch (mark.type) {
+      case "bold":
+        features.push({ $type: "space.roomy.richtext.facet#bold" });
+        break;
+      case "italic":
+        features.push({ $type: "space.roomy.richtext.facet#italic" });
+        break;
+      case "code":
+        features.push({ $type: "space.roomy.richtext.facet#code" });
+        break;
+      case "strike":
+        features.push({ $type: "space.roomy.richtext.facet#strikethrough" });
+        break;
+      case "underline":
+        features.push({ $type: "space.roomy.richtext.facet#underline" });
+        break;
+      case "link": {
+        const href = mark.attrs?.href;
+        if (typeof href === "string" && href) {
+          features.push(linkFeature(href));
+          const internal = parseInternalLinkHref(href);
+          if (internal) {
+            features.push(roomRefFeature(internal.spaceId, internal.roomId));
+          }
+        }
+        break;
+      }
+      case "userMention": {
+        const did = mark.attrs?.id;
+        if (typeof did === "string" && did.startsWith("did:")) {
+          features.push(didMentionFeature(did));
+        }
+        break;
+      }
+      case "channelThreadMention": {
+        const raw = mark.attrs?.id;
+        if (typeof raw === "string") {
+          try {
+            const parsed = JSON.parse(raw) as {
+              id?: string;
+              space?: string;
+            };
+            if (parsed.space) {
+              features.push(roomRefFeature(parsed.space, parsed.id));
+              if (parsed.id) {
+                features.push(linkFeature(`/${parsed.space}/${parsed.id}`));
+              }
+            }
+          } catch {
+            // Malformed mention id — treat as plain text.
+          }
+        }
+        break;
+      }
+      default:
+        break; // unknown marks → plain text
+    }
+  }
+  return features.length > 0 ? features : null;
+}
+
+/**
+ * Build a text-bearing block from a node's inline content, computing facet
+ * byte offsets over the concatenated text.
+ */
+function textBlockFromInline(
+  node: ProseMirrorNode,
+  blockType: "space.roomy.richtext.blocks#text" | "space.roomy.richtext.blocks#header" | "space.roomy.richtext.blocks#blockquote",
+  extra: Record<string, unknown> = {},
+): Block {
+  const runs = flattenInline(node);
+  const text = runs.map((r) => r.text).join("");
+  const facets: Facet[] = [];
+  let utf16Offset = 0;
+  for (const run of runs) {
+    const features = marksToFeatures(run.marks, run.text);
+    if (features && run.text.length > 0) {
+      const start = utf16ToUtf8ByteOffset(text, utf16Offset);
+      const end = utf16ToUtf8ByteOffset(text, utf16Offset + run.text.length);
+      facets.push(facet(start, end, features));
+    }
+    utf16Offset += run.text.length;
+  }
+  const base: Record<string, unknown> = { $type: blockType, text };
+  if (facets.length > 0) base.facets = facets;
+  return { ...base, ...extra } as Block;
+}
+
+/** Convert a list node (bulletList/orderedList) into a list block. */
+function listBlockFromNode(
+  node: ProseMirrorNode,
+  blockType: "space.roomy.richtext.blocks#orderedList" | "space.roomy.richtext.blocks#unorderedList",
+): Block {
+  const items: { text: string; facets?: Facet[] }[] = [];
+  for (const listItem of node.content ?? []) {
+    if (listItem.type !== "listItem") continue;
+    // A listItem contains one or more paragraphs; concatenate their text.
+    const runs: TextRun[] = [];
+    for (const child of listItem.content ?? []) {
+      if (child.content) runs.push(...flattenInline(child));
+    }
+    const text = runs.map((r) => r.text).join("");
+    const facets: Facet[] = [];
+    let utf16Offset = 0;
+    for (const run of runs) {
+      const features = marksToFeatures(run.marks, run.text);
+      if (features && run.text.length > 0) {
+        const start = utf16ToUtf8ByteOffset(text, utf16Offset);
+        const end = utf16ToUtf8ByteOffset(text, utf16Offset + run.text.length);
+        facets.push(facet(start, end, features));
+      }
+      utf16Offset += run.text.length;
+    }
+    items.push(facets.length > 0 ? { text, facets } : { text });
+  }
+  return { $type: blockType, items } as Block;
+}
+
+/**
+ * Convert a ProseMirror document (as produced by `editor.getJSON()`) into
+ * blocks+facets. Unknown node types are dropped (their text is lost unless
+ * the node carries inline content — see `flattenInline`).
+ */
+export function proseMirrorDocToBlocks(doc: ProseMirrorDoc): Block[] {
+  const blocks: Block[] = [];
+  for (const node of doc.content ?? []) {
+    switch (node.type) {
+      case "paragraph":
+        blocks.push(textBlockFromInline(node, "space.roomy.richtext.blocks#text"));
+        break;
+      case "heading": {
+        const level = Number(node.attrs?.level ?? 1);
+        blocks.push(
+          textBlockFromInline(node, "space.roomy.richtext.blocks#header", {
+            level: Number.isInteger(level) && level >= 1 && level <= 6 ? level : 1,
+          }),
+        );
+        break;
+      }
+      case "blockquote":
+        blocks.push(textBlockFromInline(node, "space.roomy.richtext.blocks#blockquote"));
+        break;
+      case "codeBlock": {
+        const text = (node.content ?? [])
+          .map((c) => c.text ?? "")
+          .join("");
+        const language = node.attrs?.language;
+        blocks.push(
+          typeof language === "string" && language
+            ? { $type: "space.roomy.richtext.blocks#code", text, language }
+            : { $type: "space.roomy.richtext.blocks#code", text },
+        );
+        break;
+      }
+      case "bulletList":
+        blocks.push(listBlockFromNode(node, "space.roomy.richtext.blocks#unorderedList"));
+        break;
+      case "orderedList":
+        blocks.push(listBlockFromNode(node, "space.roomy.richtext.blocks#orderedList"));
+        break;
+      case "horizontalRule":
+        blocks.push({ $type: "space.roomy.richtext.blocks#horizontalRule" });
+        break;
+      case "image": {
+        const src = node.attrs?.src;
+        if (typeof src === "string" && src) {
+          const image: Record<string, unknown> = {
+            $type: "space.roomy.richtext.blocks#image",
+            uri: src,
+          };
+          if (typeof node.attrs?.alt === "string" && node.attrs.alt) {
+            image.alt = node.attrs.alt;
+          }
+          blocks.push(image as Block);
+        }
+        break;
+      }
+      default:
+        break; // unknown block types are dropped (open union)
+    }
+  }
+  return blocks;
+}
+
+// ─── Blocks → ProseMirror ────────────────────────────────────────────────
+
+/** Sort facets by byteStart (stable for overlapping ranges). */
+function sortedFacets(facets: Facet[] | undefined): Facet[] {
+  return [...(facets ?? [])].sort((a, b) => a.index.byteStart - b.index.byteStart);
+}
+
+/** Map a facet feature to a ProseMirror mark. */
+function featureToMark(feature: FacetFeature): ProseMirrorMark | null {
+  switch (feature.$type) {
+    case "space.roomy.richtext.facet#bold":
+      return { type: "bold" };
+    case "space.roomy.richtext.facet#italic":
+      return { type: "italic" };
+    case "space.roomy.richtext.facet#code":
+      return { type: "code" };
+    case "space.roomy.richtext.facet#strikethrough":
+      return { type: "strike" };
+    case "space.roomy.richtext.facet#underline":
+      return { type: "underline" };
+    case "space.roomy.richtext.facet#link": {
+      const link = feature as { $type: "space.roomy.richtext.facet#link"; uri: string };
+      return { type: "link", attrs: { href: link.uri } };
+    }
+    case "space.roomy.richtext.facet#didMention": {
+      const mention = feature as { $type: "space.roomy.richtext.facet#didMention"; did: string };
+      return { type: "userMention", attrs: { id: mention.did } };
+    }
+    case "space.roomy.richtext.facet#roomRef": {
+      const roomRef = feature as {
+        $type: "space.roomy.richtext.facet#roomRef";
+        spaceId: string;
+        roomId?: string;
+      };
+      const attrs = roomRef.roomId
+        ? { id: JSON.stringify({ id: roomRef.roomId, space: roomRef.spaceId }) }
+        : { id: JSON.stringify({ space: roomRef.spaceId }) };
+      return { type: "channelThreadMention", attrs };
+    }
+    default:
+      return null; // unknown features → plain text
+  }
+}
+
+/**
+ * Split a block's text into ProseMirror text nodes with marks, applying all
+ * facets that cover each segment. Overlapping facets accumulate marks.
+ */
+function textNodesWithFacets(
+  text: string,
+  facets: Facet[] | undefined,
+): ProseMirrorNode[] {
+  if (!facets || facets.length === 0) {
+    return text ? [{ type: "text", text }] : [];
+  }
+  const sorted = sortedFacets(facets);
+  const nodes: ProseMirrorNode[] = [];
+  let utf16Pos = 0;
+  // Walk segment boundaries: text start, each facet start/end.
+  const boundaries = new Set<number>([0, text.length]);
+  for (const f of sorted) {
+    boundaries.add(utf8ToUtf16Index(text, f.index.byteStart));
+    boundaries.add(utf8ToUtf16Index(text, f.index.byteEnd));
+  }
+  const ordered = [...boundaries].sort((a, b) => a - b);
+  for (let i = 0; i < ordered.length - 1; i++) {
+    const start = ordered[i]!;
+    const end = ordered[i + 1]!;
+    if (end <= start) continue;
+    const segment = text.slice(start, end);
+    if (!segment) continue;
+    const marks: ProseMirrorMark[] = [];
+    for (const f of sorted) {
+      const fStart = utf8ToUtf16Index(text, f.index.byteStart);
+      const fEnd = utf8ToUtf16Index(text, f.index.byteEnd);
+      if (start >= fStart && end <= fEnd) {
+        for (const feature of f.features) {
+          const mark = featureToMark(feature);
+          if (mark) marks.push(mark);
+        }
+      }
+    }
+    nodes.push(marks.length > 0 ? { type: "text", text: segment, marks } : { type: "text", text: segment });
+  }
+  return nodes;
+}
+
+/** Convert a UTF-8 byte offset into a string to a UTF-16 code-unit index. */
+function utf8ToUtf16Index(s: string, byteOffset: number): number {
+  const bytes = new TextEncoder().encode(s);
+  if (byteOffset <= 0) return 0;
+  if (byteOffset >= bytes.length) return s.length;
+  // Walk UTF-16 code units, tracking byte position.
+  let bytePos = 0;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    bytePos += code >= 0x80 ? (code >= 0x800 ? 3 : 2) : 1;
+    if (bytePos >= byteOffset) return i + 1;
+  }
+  return s.length;
+}
+
+/** Build a paragraph node from a text-bearing block. */
+function paragraphFromTextBlock(
+  text: string,
+  facets: Facet[] | undefined,
+): ProseMirrorNode {
+  const content = textNodesWithFacets(text, facets);
+  return content.length > 0 ? { type: "paragraph", content } : { type: "paragraph" };
+}
+
+/**
+ * Convert blocks+facets back into a ProseMirror document for re-editing in
+ * TipTap. Mention facets reconstruct `userMention` / `channelThreadMention`
+ * nodes; link facets reconstruct `link` marks.
+ */
+export function blocksToProseMirrorDoc(blocks: Block[]): ProseMirrorDoc {
+  const content: ProseMirrorNode[] = [];
+  for (const block of blocks) {
+    switch (block.$type) {
+      case "space.roomy.richtext.blocks#text": {
+        const textBlock = block as { $type: "space.roomy.richtext.blocks#text"; text: string; facets?: Facet[] };
+        content.push(paragraphFromTextBlock(textBlock.text, textBlock.facets));
+        break;
+      }
+      case "space.roomy.richtext.blocks#header": {
+        const header = block as { $type: "space.roomy.richtext.blocks#header"; text: string; level: number; facets?: Facet[] };
+        content.push({
+          type: "heading",
+          attrs: { level: header.level },
+          content: textNodesWithFacets(header.text, header.facets),
+        });
+        break;
+      }
+      case "space.roomy.richtext.blocks#blockquote": {
+        const quote = block as { $type: "space.roomy.richtext.blocks#blockquote"; text: string; facets?: Facet[] };
+        content.push({
+          type: "blockquote",
+          content: [paragraphFromTextBlock(quote.text, quote.facets)],
+        });
+        break;
+      }
+      case "space.roomy.richtext.blocks#code": {
+        const code = block as { $type: "space.roomy.richtext.blocks#code"; text: string; language?: string };
+        content.push({
+          type: "codeBlock",
+          ...(code.language ? { attrs: { language: code.language } } : {}),
+          content: [{ type: "text", text: code.text }],
+        });
+        break;
+      }
+      case "space.roomy.richtext.blocks#orderedList":
+      case "space.roomy.richtext.blocks#unorderedList": {
+        const list = block as {
+          $type: "space.roomy.richtext.blocks#orderedList" | "space.roomy.richtext.blocks#unorderedList";
+          items: { text: string; facets?: Facet[] }[];
+        };
+        const listType =
+          list.$type === "space.roomy.richtext.blocks#orderedList"
+            ? "orderedList"
+            : "bulletList";
+        content.push({
+          type: listType,
+          content: list.items.map((item) => ({
+            type: "listItem",
+            content: [paragraphFromTextBlock(item.text, item.facets)],
+          })),
+        });
+        break;
+      }
+      case "space.roomy.richtext.blocks#horizontalRule":
+        content.push({ type: "horizontalRule" });
+        break;
+      case "space.roomy.richtext.blocks#image": {
+        const image = block as { $type: "space.roomy.richtext.blocks#image"; uri: string; alt?: string };
+        content.push({
+          type: "image",
+          attrs: {
+            src: image.uri,
+            ...(image.alt ? { alt: image.alt } : {}),
+          },
+        });
+        break;
+      }
+      default:
+        break; // unknown blocks are dropped
+    }
+  }
+  return { type: "doc", content };
+}
+
+// ─── Derivations ─────────────────────────────────────────────────────────
+
+/** Concatenate all block text (for push bodies, character counting). */
+export function blocksToPlaintext(blocks: Block[]): string {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    switch (block.$type) {
+      case "space.roomy.richtext.blocks#text":
+      case "space.roomy.richtext.blocks#header":
+      case "space.roomy.richtext.blocks#blockquote": {
+        const textBlock = block as { text: string };
+        parts.push(textBlock.text);
+        break;
+      }
+      case "space.roomy.richtext.blocks#code": {
+        const code = block as { text: string };
+        parts.push(code.text);
+        break;
+      }
+      case "space.roomy.richtext.blocks#orderedList":
+      case "space.roomy.richtext.blocks#unorderedList": {
+        const list = block as { items: { text: string }[] };
+        parts.push(...list.items.map((i) => i.text));
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+/** Collect every `#link` facet URI (replaces regex URL extraction). */
+export function extractFacetUrls(blocks: Block[]): string[] {
+  const urls = new Set<string>();
+  const collect = (facets: Facet[] | undefined) => {
+    for (const f of facets ?? []) {
+      for (const feature of f.features) {
+        if (feature.$type === "space.roomy.richtext.facet#link") {
+          const link = feature as { $type: "space.roomy.richtext.facet#link"; uri: string };
+          urls.add(link.uri);
+        }
+      }
+    }
+  };
+  for (const block of blocks) {
+    switch (block.$type) {
+      case "space.roomy.richtext.blocks#text":
+      case "space.roomy.richtext.blocks#header":
+      case "space.roomy.richtext.blocks#blockquote": {
+        const textBlock = block as { facets?: Facet[] };
+        collect(textBlock.facets);
+        break;
+      }
+      case "space.roomy.richtext.blocks#orderedList":
+      case "space.roomy.richtext.blocks#unorderedList": {
+        const list = block as { items: { facets?: Facet[] }[] };
+        for (const item of list.items) collect(item.facets);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return [...urls];
+}
+
+/** Collect every `#didMention` facet DID (replaces the mentions sidecar). */
+export function extractMentionDids(blocks: Block[]): string[] {
+  const dids = new Set<string>();
+  const collect = (facets: Facet[] | undefined) => {
+    for (const f of facets ?? []) {
+      for (const feature of f.features) {
+        if (feature.$type === "space.roomy.richtext.facet#didMention") {
+          const mention = feature as { $type: "space.roomy.richtext.facet#didMention"; did: string };
+          dids.add(mention.did);
+        }
+      }
+    }
+  };
+  for (const block of blocks) {
+    switch (block.$type) {
+      case "space.roomy.richtext.blocks#text":
+      case "space.roomy.richtext.blocks#header":
+      case "space.roomy.richtext.blocks#blockquote": {
+        const textBlock = block as { facets?: Facet[] };
+        collect(textBlock.facets);
+        break;
+      }
+      case "space.roomy.richtext.blocks#orderedList":
+      case "space.roomy.richtext.blocks#unorderedList": {
+        const list = block as { items: { facets?: Facet[] }[] };
+        for (const item of list.items) collect(item.facets);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return [...dids];
+}
+
+/** Collect every `#roomRef` facet target (internal-link prefetch). */
+export function extractInternalLinkTargets(
+  blocks: Block[],
+): { spaceId: string; roomId?: string }[] {
+  const targets: { spaceId: string; roomId?: string }[] = [];
+  const seen = new Set<string>();
+  const collect = (facets: Facet[] | undefined) => {
+    for (const f of facets ?? []) {
+      for (const feature of f.features) {
+        if (feature.$type === "space.roomy.richtext.facet#roomRef") {
+          const roomRef = feature as {
+            $type: "space.roomy.richtext.facet#roomRef";
+            spaceId: string;
+            roomId?: string;
+          };
+          const key = `${roomRef.spaceId}/${roomRef.roomId ?? ""}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          targets.push(
+            roomRef.roomId
+              ? { spaceId: roomRef.spaceId, roomId: roomRef.roomId }
+              : { spaceId: roomRef.spaceId },
+          );
+        }
+      }
+    }
+  };
+  for (const block of blocks) {
+    switch (block.$type) {
+      case "space.roomy.richtext.blocks#text":
+      case "space.roomy.richtext.blocks#header":
+      case "space.roomy.richtext.blocks#blockquote": {
+        const textBlock = block as { facets?: Facet[] };
+        collect(textBlock.facets);
+        break;
+      }
+      case "space.roomy.richtext.blocks#orderedList":
+      case "space.roomy.richtext.blocks#unorderedList": {
+        const list = block as { items: { facets?: Facet[] }[] };
+        for (const item of list.items) collect(item.facets);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return targets;
+}
+
+// ─── Markdown → blocks (self-contained) ──────────────────────────────────
+
+interface MdLine {
+  text: string;
+  indent: number;
+}
+
+/**
+ * Parse a markdown string into blocks+facets. Handles the Roomy message
+ * corpus: paragraphs, headings, blockquotes, code fences, bullet/ordered
+ * lists, horizontal rules, images, links, bold/italic/code/strike inline
+ * formatting. Mentions (`@handle`) are left as plain text — resolving them
+ * to DIDs requires context the converter doesn't have.
+ */
+export function markdownToBlocks(md: string): Block[] {
+  const lines = md.replace(/\r\n/g, "\n").split("\n");
+  const blocks: Block[] = [];
+  let i = 0;
+
+  const inlineToBlock = (
+    text: string,
+    blockType: "space.roomy.richtext.blocks#text" | "space.roomy.richtext.blocks#header" | "space.roomy.richtext.blocks#blockquote",
+    extra: Record<string, unknown> = {},
+  ): Block => {
+    const { text: plain, facets } = parseInline(text);
+    const base: Record<string, unknown> = { $type: blockType, text: plain };
+    if (facets.length > 0) base.facets = facets;
+    return { ...base, ...extra } as Block;
+  };
+
+  while (i < lines.length) {
+    const line = lines[i]!;
+    const trimmed = line.trim();
+
+    // Blank line → paragraph separator.
+    if (trimmed === "") {
+      i++;
+      continue;
+    }
+
+    // Code fence.
+    const fence = /^```(\w*)/.exec(trimmed);
+    if (fence) {
+      const language = fence[1] || undefined;
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i]!.trim())) {
+        codeLines.push(lines[i]!);
+        i++;
+      }
+      i++; // closing fence
+      const text = codeLines.join("\n");
+      blocks.push(
+        language
+          ? { $type: "space.roomy.richtext.blocks#code", text, language }
+          : { $type: "space.roomy.richtext.blocks#code", text },
+      );
+      continue;
+    }
+
+    // Horizontal rule.
+    if (/^[-*_]{3,}\s*$/.test(trimmed)) {
+      blocks.push({ $type: "space.roomy.richtext.blocks#horizontalRule" });
+      i++;
+      continue;
+    }
+
+    // Heading.
+    const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed);
+    if (heading) {
+      blocks.push(
+        inlineToBlock(heading[2]!, "space.roomy.richtext.blocks#header", {
+          level: heading[1]!.length,
+        }),
+      );
+      i++;
+      continue;
+    }
+
+    // Blockquote (single level; nested quotes are flattened).
+    if (trimmed.startsWith(">")) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && lines[i]!.trim().startsWith(">")) {
+        quoteLines.push(lines[i]!.trim().replace(/^>\s?/, ""));
+        i++;
+      }
+      blocks.push(
+        inlineToBlock(quoteLines.join(" "), "space.roomy.richtext.blocks#blockquote"),
+      );
+      continue;
+    }
+
+    // Lists.
+    const bullet = /^([-*+])\s+(.*)$/.exec(trimmed);
+    if (bullet) {
+      const items: { text: string; facets?: Facet[] }[] = [];
+      while (i < lines.length) {
+        const m = /^([-*+])\s+(.*)$/.exec(lines[i]!.trim());
+        if (!m) break;
+        const { text, facets } = parseInline(m[2]!);
+        items.push(facets.length > 0 ? { text, facets } : { text });
+        i++;
+      }
+      blocks.push({ $type: "space.roomy.richtext.blocks#unorderedList", items });
+      continue;
+    }
+    const ordered = /^(\d+)[.)]\s+(.*)$/.exec(trimmed);
+    if (ordered) {
+      const items: { text: string; facets?: Facet[] }[] = [];
+      while (i < lines.length) {
+        const m = /^(\d+)[.)]\s+(.*)$/.exec(lines[i]!.trim());
+        if (!m) break;
+        const { text, facets } = parseInline(m[2]!);
+        items.push(facets.length > 0 ? { text, facets } : { text });
+        i++;
+      }
+      blocks.push({ $type: "space.roomy.richtext.blocks#orderedList", items });
+      continue;
+    }
+
+    // Image on its own line.
+    const image = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/.exec(trimmed);
+    if (image) {
+      const img: Record<string, unknown> = {
+        $type: "space.roomy.richtext.blocks#image",
+        uri: image[2]!,
+      };
+      if (image[1]) img.alt = image[1];
+      blocks.push(img as Block);
+      i++;
+      continue;
+    }
+
+    // Paragraph: consume until a blank line or a block-level construct.
+    const paraLines: string[] = [trimmed];
+    i++;
+    while (
+      i < lines.length &&
+      lines[i]!.trim() !== "" &&
+      !/^(#{1,6})\s+/.test(lines[i]!.trim()) &&
+      !/^```/.test(lines[i]!.trim()) &&
+      !/^>/.test(lines[i]!.trim()) &&
+      !/^([-*+])\s+/.test(lines[i]!.trim()) &&
+      !/^(\d+)[.)]\s+/.test(lines[i]!.trim()) &&
+      !/^[-*_]{3,}\s*$/.test(lines[i]!.trim())
+    ) {
+      paraLines.push(lines[i]!.trim());
+      i++;
+    }
+    blocks.push(inlineToBlock(paraLines.join(" "), "space.roomy.richtext.blocks#text"));
+  }
+
+  return blocks;
+}
+
+/**
+ * Parse inline markdown into plain text + facets. Handles bold, italic,
+ * inline code, strikethrough, and links. Facet byte offsets are computed
+ * over the final plain text.
+ */
+function parseInline(input: string): { text: string; facets: Facet[] } {
+  // Tokenize: links, code spans, bold, italic, strike.
+  const tokens: { kind: "text" | "link" | "code" | "bold" | "italic" | "strike"; text: string; href?: string }[] = [];
+  let rest = input;
+  const pattern =
+    /!\[(?<imgAlt>[^\]]*)\]\((?<imgUrl>[^)\s]+)(?:\s+"[^"]*")?\)|\[(?<linkText>[^\]]*)\]\((?<linkUrl>[^)\s]+)(?:\s+"[^"]*")?\)|(?<codeDelim>`+)(?<code>[^`]+?)\k<codeDelim>|(?<boldDelim>\*\*|__)(?<bold>.+?)\k<boldDelim>|(?<italicDelim>\*|_)(?<italic>[^*_]+?)\k<italicDelim>|(?<strikeDelim>~~)(?<strike>.+?)\k<strikeDelim>/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(rest)) !== null) {
+    if (m.index > last) {
+      tokens.push({ kind: "text", text: rest.slice(last, m.index) });
+    }
+    const g = m.groups ?? {};
+    if (g.imgUrl !== undefined) {
+      // image → keep alt text as plain text
+      tokens.push({ kind: "text", text: g.imgAlt ?? "" });
+    } else if (g.linkUrl !== undefined) {
+      tokens.push({ kind: "link", text: g.linkText ?? "", href: g.linkUrl });
+    } else if (g.code !== undefined) {
+      tokens.push({ kind: "code", text: g.code });
+    } else if (g.bold !== undefined) {
+      tokens.push({ kind: "bold", text: g.bold });
+    } else if (g.italic !== undefined) {
+      tokens.push({ kind: "italic", text: g.italic });
+    } else if (g.strike !== undefined) {
+      tokens.push({ kind: "strike", text: g.strike });
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < rest.length) {
+    tokens.push({ kind: "text", text: rest.slice(last) });
+  }
+
+  const text = tokens.map((t) => t.text).join("");
+  const facets: Facet[] = [];
+  let utf16Offset = 0;
+  for (const token of tokens) {
+    const features: FacetFeature[] = [];
+    switch (token.kind) {
+      case "bold":
+        features.push({ $type: "space.roomy.richtext.facet#bold" });
+        break;
+      case "italic":
+        features.push({ $type: "space.roomy.richtext.facet#italic" });
+        break;
+      case "code":
+        features.push({ $type: "space.roomy.richtext.facet#code" });
+        break;
+      case "strike":
+        features.push({ $type: "space.roomy.richtext.facet#strikethrough" });
+        break;
+      case "link":
+        if (token.href) {
+          features.push(linkFeature(token.href));
+          const internal = parseInternalLinkHref(token.href);
+          if (internal) {
+            features.push(roomRefFeature(internal.spaceId, internal.roomId));
+          }
+        }
+        break;
+      default:
+        break;
+    }
+    if (features.length > 0 && token.text.length > 0) {
+      const start = utf16ToUtf8ByteOffset(text, utf16Offset);
+      const end = utf16ToUtf8ByteOffset(text, utf16Offset + token.text.length);
+      facets.push(facet(start, end, features));
+    }
+    utf16Offset += token.text.length;
+  }
+  return { text, facets };
+}
+
+// ─── Wire encoding ───────────────────────────────────────────────────────
+
+/**
+ * Serialize blocks into the wire body: `{ mimeType, data }` with
+ * `application/vnd.roomy.richtext+json` and UTF-8 JSON bytes.
+ */
+export function serializeBlocks(
+  blocks: Block[],
+): { mimeType: string; data: Uint8Array } {
+  const doc: RichTextDocument = {
+    $type: "space.roomy.richtext.document",
+    blocks,
+  };
+  return {
+    mimeType: RICHTEXT_MIME,
+    data: new TextEncoder().encode(JSON.stringify(doc)),
+  };
+}
+
+/**
+ * Decode a wire body into blocks (new mimeType) or a string (legacy
+ * mimeTypes). Returns `null` when the body is empty or the JSON is invalid.
+ */
+export function deserializeBody(
+  mime: string | null,
+  data: Uint8Array | null,
+): Block[] | string | null {
+  if (data === null) return null;
+  if (mime === RICHTEXT_MIME) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(data)) as RichTextDocument;
+      if (parsed && Array.isArray(parsed.blocks)) return parsed.blocks;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  if (!mime || mime.startsWith("text/") || mime === "application/json") {
+    return new TextDecoder().decode(data);
+  }
+  return null;
+}

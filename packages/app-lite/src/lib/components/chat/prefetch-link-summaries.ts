@@ -24,6 +24,8 @@ import { renderMarkdownSanitized } from "@roomy/design/utils";
 import { queryClient } from "$lib/client";
 import { px } from "$lib/auth.svelte";
 import { parseInternalLinkHref } from "./enrich-internal-links";
+import { enrichInternalLinksFromBlocks } from "./enrich-internal-links";
+import type { Block } from "@roomy-space/sdk";
 
 const { queryKey } = cache;
 
@@ -103,6 +105,44 @@ export function prefetchInternalLinkSummaries(
   for (const { spaceId, roomId } of targets) {
     // Space summary is always needed (the badge shows the space avatar+name
     // unless this is the current space, which the badge itself decides).
+    void queryClient.ensureQueryData({
+      queryKey: queryKey(SPACE_SUMMARY, { spaceId }),
+      queryFn: () => pxClient.query(SPACE_SUMMARY, { spaceId }),
+    });
+    if (roomId) {
+      void queryClient.ensureQueryData({
+        queryKey: queryKey(ROOM_SUMMARY, { roomId }),
+        queryFn: () => pxClient.query(ROOM_SUMMARY, { roomId }),
+      });
+    }
+  }
+}
+
+/**
+ * Prefetch the `getSpaceSummary` / `getRoomSummary` queries for every
+ * internal link target referenced by the given blocks+facets bodies.
+ *
+ * Reads `#roomRef` facets directly (no markdown render, no DOM walk) via
+ * {@link enrichInternalLinksFromBlocks}. Same cache-warming contract as
+ * {@link prefetchInternalLinkSummaries}: best-effort, not awaited.
+ */
+export function prefetchInternalLinkSummariesFromBlocks(
+  blocksList: Iterable<Block[]>,
+): void {
+  const targets: { spaceId: string; roomId?: string }[] = [];
+  const seen = new Set<string>();
+  for (const blocks of blocksList) {
+    for (const target of enrichInternalLinksFromBlocks(blocks)) {
+      const dedupeKey = `${target.spaceId}/${target.roomId ?? ""}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      targets.push(target);
+    }
+  }
+  if (targets.length === 0) return;
+
+  const pxClient = px();
+  for (const { spaceId, roomId } of targets) {
     void queryClient.ensureQueryData({
       queryKey: queryKey(SPACE_SUMMARY, { spaceId }),
       queryFn: () => pxClient.query(SPACE_SUMMARY, { spaceId }),

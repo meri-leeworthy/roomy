@@ -33,8 +33,12 @@ import {
   isDebugEnabled,
   recordMaterialization,
 } from "../debug/eventStore.ts";
-import { detectAndStoreLinks } from "../embed/enricher.ts";
-import { decodeContent } from "../db/content.ts";
+import {
+  detectAndStoreLinks,
+  detectAndStoreLinksFromUrls,
+} from "../embed/enricher.ts";
+import { decodeContent, decodeRichTextBody } from "../db/content.ts";
+import { RICHTEXT_MIME, extractFacetUrls } from "@roomy-space/sdk";
 import { decodeTime, ulid } from "ulidx";
 
 import { log } from "../log.ts";
@@ -476,8 +480,21 @@ async function applyChunkSideEffects(
         | undefined;
       if (body?.data?.buf) {
         const mime = body.mimeType ?? "text/markdown";
-        const content = decodeContent(mime, Buffer.from(body.data.buf));
-        const detected = await detectAndStoreLinks(db, e.event.id, content);
+        const buf = Buffer.from(body.data.buf);
+        let detected: string[];
+        if (mime === RICHTEXT_MIME) {
+          // New format: URLs come from `#link` facet URIs, not regex scanning.
+          const blocks = decodeRichTextBody(mime, buf);
+          detected = await detectAndStoreLinksFromUrls(
+            db,
+            e.event.id,
+            blocks ? extractFacetUrls(blocks) : [],
+          );
+        } else {
+          // Legacy text/markdown bodies keep the regex extraction path.
+          const content = decodeContent(mime, buf);
+          detected = await detectAndStoreLinks(db, e.event.id, content);
+        }
         if (detected.length > 0) detectedLinks.push(...detected);
         if (spaceDb && detected.length > 0) {
           // Dual-write the link detection: the URL entity + comp_embed_link

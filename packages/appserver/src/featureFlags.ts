@@ -20,6 +20,7 @@ export interface FeatureFlagDef {
  */
 export const FEATURE_FLAGS: readonly FeatureFlagDef[] = [
   { key: "push-notifications", description: "Enable push notification delivery and subscription" },
+  { key: "richtext-schema", description: "Enable sending messages with the new blocks+facets rich text schema (application/vnd.roomy.richtext+json)" },
 ];
 export const FEATURE_FLAG_KEYS: ReadonlySet<string> = new Set(
   FEATURE_FLAGS.map((f) => f.key),

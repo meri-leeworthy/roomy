@@ -163,6 +163,79 @@ describe("createMessage", () => {
       "custom.extension.v1": { custom: "data" },
     });
   });
+
+  it("creates a message with rich text blocks", async () => {
+    const blocks = [
+      {
+        $type: "space.roomy.richtext.blocks#text",
+        text: "Hello, world!",
+      },
+    ];
+
+    await createMessage({
+      roomId: "01HXXXXXXXXXXXXXXXXXXXXXXXXXXXX" as any,
+      body: "ignored",
+      blocks,
+    }, mockSendEvent);
+
+    const event = mockSendEvent.mock.calls[0][0];
+    expect(event.body.mimeType).toBe("application/vnd.roomy.richtext+json");
+    const decoded = JSON.parse(
+      new TextDecoder().decode(Buffer.from(event.body.data.$bytes, "base64")),
+    );
+    expect(decoded).toEqual({
+      $type: "space.roomy.richtext.document",
+      blocks,
+    });
+  });
+
+  it("does not emit the mentions sidecar when blocks are provided", async () => {
+    const blocks = [
+      {
+        $type: "space.roomy.richtext.blocks#text",
+        text: "Hello @alice",
+        facets: [
+          {
+            index: { byteStart: 6, byteEnd: 12 },
+            features: [
+              {
+                $type: "space.roomy.richtext.facet#didMention",
+                did: "did:plc:alice",
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    await createMessage({
+      roomId: "01HXXXXXXXXXXXXXXXXXXXXXXXXXXXX" as any,
+      body: "ignored",
+      blocks,
+      mentions: ["did:plc:alice"],
+    }, mockSendEvent);
+
+    const event = mockSendEvent.mock.calls[0][0];
+    expect(event.extensions).not.toHaveProperty(
+      "space.roomy.extension.mentions.v0",
+    );
+  });
+
+  it("keeps the mentions sidecar for string bodies (backward compat)", async () => {
+    await createMessage({
+      roomId: "01HXXXXXXXXXXXXXXXXXXXXXXXXXXXX" as any,
+      body: "Hello @alice",
+      mentions: ["did:plc:alice"],
+    }, mockSendEvent);
+
+    const event = mockSendEvent.mock.calls[0][0];
+    expect(event.extensions).toMatchObject({
+      "space.roomy.extension.mentions.v0": {
+        $type: "space.roomy.extension.mentions.v0",
+        mentions: ["did:plc:alice"],
+      },
+    });
+  });
 });
 
 describe("editMessage", () => {
@@ -215,6 +288,33 @@ describe("editMessage", () => {
         $type: "space.roomy.extension.timestampOverride.v0",
         timestamp,
       },
+    });
+  });
+
+  it("creates an edit with rich text blocks", async () => {
+    const blocks = [
+      {
+        $type: "space.roomy.richtext.blocks#header",
+        text: "Edited",
+        level: 2,
+      },
+    ];
+
+    await editMessage({
+      roomId: "01HXXXXXXXXXXXXXXXXXXXXXXXXXXXX" as any,
+      messageId: "01JXXXXXXXXXXXXXXXXXXXXXXXXXXXX" as any,
+      body: "ignored",
+      blocks,
+    }, mockSendEvent);
+
+    const event = mockSendEvent.mock.calls[0][0];
+    expect(event.body.mimeType).toBe("application/vnd.roomy.richtext+json");
+    const decoded = JSON.parse(
+      new TextDecoder().decode(Buffer.from(event.body.data.$bytes, "base64")),
+    );
+    expect(decoded).toEqual({
+      $type: "space.roomy.richtext.document",
+      blocks,
     });
   });
 });

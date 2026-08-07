@@ -90,6 +90,12 @@ export const Message = type({
   /** Sort index for timeline ordering. ULID based on canonical timestamp. */
   "sort_idx?": "string",
   content: "string",
+  /**
+   * MIME type of the content blob. `text/markdown` for legacy messages,
+   * `application/vnd.roomy.richtext+json` for blocks+facets messages.
+   * Clients branch rendering on this.
+   */
+  "mimeType?": "string",
   authorDid: "string",
   authorName: "string",
   "authorHandle?": "string",

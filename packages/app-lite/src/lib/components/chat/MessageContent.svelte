@@ -1,19 +1,37 @@
 <script lang="ts">
   import { renderMarkdownSanitized } from "@roomy/design/utils";
   import { enrichInternalLinks } from "./enrich-internal-links";
+  import { parseRichTextContent } from "./enrich-internal-links";
+  import BlocksRenderer from "./BlocksRenderer.svelte";
+  import { RICHTEXT_MIME } from "@roomy-space/sdk";
 
   let {
     content,
+    mimeType,
   }: {
-    /** Markdown message content to render with internal link badges. */
-      content: string;
+    /** Message content to render. Markdown for legacy messages, base64-encoded
+     *  richtext JSON for `application/vnd.roomy.richtext+json` messages. */
+    content: string;
+    /** MIME type of the content blob. Absent → legacy markdown path. */
+    mimeType?: string;
   } = $props();
+
+  // New format: content is base64-encoded JSON of the blocks document
+  // (the appserver's decodeContent base64-encodes non-text mimeTypes).
+  // Parse once; on any failure fall back to the legacy markdown path.
+  const blocks = $derived(
+    mimeType === RICHTEXT_MIME ? parseRichTextContent(content) : null,
+  );
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div use:enrichInternalLinks class="roomy-message-content">
-  {@html renderMarkdownSanitized(content)}
-</div>
+{#if blocks}
+  <BlocksRenderer {blocks} />
+{:else}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div use:enrichInternalLinks class="roomy-message-content">
+    {@html renderMarkdownSanitized(content)}
+  </div>
+{/if}
 
 <style>
   /*
