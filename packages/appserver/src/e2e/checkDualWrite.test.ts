@@ -61,7 +61,7 @@ describe("space.roomy.admin.checkDualWrite", () => {
 
     // Touch the per-space DB (lazy backfill from mono), then add an extra
     // row only there — simulating a spurious per-space write that mono lacks.
-    const spaceDb = ctx.db.forSpace(SPACE);
+    const spaceDb = (ctx.db as any).forSpace(SPACE);
     await spaceDb.run("insert or ignore into entities (id, stream_id) values (?, ?)", ["did:web:r1", SPACE]);
     await spaceDb.run("insert or ignore into comp_room (entity, label) values ('did:web:r1', 'space.roomy.channel')");
 
@@ -76,7 +76,7 @@ describe("space.roomy.admin.checkDualWrite", () => {
     seedJoinedSpace(ctx.db as any, USER, SPACE);
 
     // Simulate broken routing: a joinedSpace edge landed in the per-space DB.
-    const spaceDb = ctx.db.forSpace(SPACE);
+    const spaceDb = (ctx.db as any).forSpace(SPACE);
     await spaceDb.run("insert or ignore into entities (id, stream_id) values (?, ?)", [USER, SPACE]);
     await spaceDb.run("insert or ignore into edges (head, tail, label) values (?, ?, 'joinedSpace')", [USER, SPACE]);
 

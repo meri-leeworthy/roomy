@@ -806,4 +806,48 @@ describe("per-space split dual-write (Phase 1)", () => {
     await db.close();
     delete process.env.EVENTS_DB_PATH;
   });
+
+  test("per-space backfill handles a space with many referenced entities (chunked IN)", async () => {
+    // A large space references > SQLite's bind-parameter limit via edges /
+    // reactions. The backfill must chunk the `id IN (...)` so it doesn't blow
+    // up with "query expected N values, received M". Regression for a 500
+    // observed on a ~135k-entity production space.
+    const testId = Math.random().toString(36).slice(2, 8);
+    process.env.EVENTS_DB_PATH = `/tmp/roomy-events-chunk-${testId}.sqlite`;
+    const db = openDb({ path: ":memory:", isolated: true });
+
+    const streamDid = StreamDid.assert("did:web:chunk.example");
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [streamDid, streamDid]);
+    await db.run("insert into comp_space (entity) values (?)", [streamDid]);
+    // USER is the edge tail — must exist for the FK in the mono DB.
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [USER, USER]);
+
+    // Many entities that belong to the space.
+    const N = 2000;
+    const ids: string[] = [];
+    for (let i = 0; i < N; i++) {
+      const id = `msg-${i}`;
+      ids.push(id);
+      await db.run("insert into entities (id, stream_id) values (?, ?)", [id, streamDid]);
+    }
+    // Edge endpoints force the referencedIds set to grow past the chunk size.
+    for (const id of ids) {
+      await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [id, USER]);
+    }
+
+    // Accessing forSpace triggers the lazy backfill. Must not throw.
+    const spaceDb = db.forSpace(streamDid);
+    const copied = await spaceDb
+      .query("select count(*) as n from entities")
+      .get<{ n: number }>();
+    // Space root + USER (edge tail, pulled in via referencedIds) + all msgs.
+    expect(copied?.n).toBe(N + 2);
+    const edges = await spaceDb
+      .query("select count(*) as n from edges where label = 'author'")
+      .get<{ n: number }>();
+    expect(edges?.n).toBe(N);
+
+    await db.close();
+    delete process.env.EVENTS_DB_PATH;
+  });
 });

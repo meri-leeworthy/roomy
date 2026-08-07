@@ -483,26 +483,33 @@ function backfillSpaceDb(db: Database, spaceDid: string): void {
       if (r.user !== null) referencedIds.add(r.user);
     }
     if (referencedIds.size > 0) {
+      // A large space can reference > 100k edge endpoints / reaction users.
+      // SQLite caps bind parameters per statement, so chunk the IN (...) so
+      // each prepared query stays well under the limit.
+      const CHUNK = 500;
       const ids = [...referencedIds];
-      const placeholders = ids.map(() => "?").join(",");
-      for (const row of main
-        .query(
-          `select id, stream_id, room, sort_idx, created_at, updated_at
-             from entities where id in (${placeholders})`,
-        )
-        .all(...ids) as Record<string, unknown>[]) {
-        db.run(
-          `insert or ignore into entities (id, stream_id, room, sort_idx, created_at, updated_at)
-           values (?, ?, ?, ?, ?, ?)`,
-          [
-            row.id as SQLQueryBindings,
-            row.stream_id as SQLQueryBindings,
-            row.room as SQLQueryBindings,
-            row.sort_idx as SQLQueryBindings,
-            row.created_at as SQLQueryBindings,
-            row.updated_at as SQLQueryBindings,
-          ],
-        );
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const chunk = ids.slice(i, i + CHUNK);
+        const placeholders = chunk.map(() => "?").join(",");
+        for (const row of main
+          .query(
+            `select id, stream_id, room, sort_idx, created_at, updated_at
+               from entities where id in (${placeholders})`,
+          )
+          .all(...chunk) as Record<string, unknown>[]) {
+          db.run(
+            `insert or ignore into entities (id, stream_id, room, sort_idx, created_at, updated_at)
+             values (?, ?, ?, ?, ?, ?)`,
+            [
+              row.id as SQLQueryBindings,
+              row.stream_id as SQLQueryBindings,
+              row.room as SQLQueryBindings,
+              row.sort_idx as SQLQueryBindings,
+              row.created_at as SQLQueryBindings,
+              row.updated_at as SQLQueryBindings,
+            ],
+          );
+        }
       }
     }
 
