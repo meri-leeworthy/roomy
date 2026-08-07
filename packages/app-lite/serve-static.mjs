@@ -37,16 +37,18 @@ const server = createServer(async (req, res) => {
     }
 
     let body;
+    let servedPath = filePath;
     try {
       body = await readFile(filePath);
     } catch {
-      body = await readFile(join(ROOT, 'index.html'));
+      servedPath = join(ROOT, 'index.html');
+      body = await readFile(servedPath);
     }
 
-    const type = MIME[extname(filePath)] || 'application/octet-stream';
+    const type = MIME[extname(servedPath)] || 'application/octet-stream';
     res.writeHead(200, {
       'Content-Type': type,
-      'Cache-Control': filePath.endsWith('.html') ? 'no-cache' : 'public, max-age=31536000, immutable',
+      'Cache-Control': servedPath.endsWith('.html') ? 'no-cache' : 'public, max-age=31536000, immutable',
     });
     res.end(body);
   } catch (err) {
