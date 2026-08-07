@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Portal } from "bits-ui";
   import { resolveBlobUrl, normalizeMimeType } from "$lib/utils";
 
   type MediaItem = { url: string; type: string; alt?: string };
@@ -62,18 +63,19 @@
 
 {#if zoomedSrc}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div
-    role="dialog"
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 cursor-zoom-out"
-    onclick={closeZoom}
-    onkeydown={onKeydown}
-  >
-    <img
-      src={zoomedSrc}
-      alt=""
-      class="max-h-[90vh] max-w-[90vw] object-contain rounded-lg shadow-2xl cursor-default"
-      onclick={(e) => e.stopPropagation()}
-    />
-  </div>
+  <Portal>
+    <div
+      role="dialog"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 cursor-zoom-out"
+      onclick={closeZoom}
+      onkeydown={onKeydown}
+    >
+      <img
+        src={zoomedSrc}
+        alt=""
+        class="max-h-[90vh] max-w-[90vw] object-contain rounded-lg shadow-2xl cursor-zoom-out"
+      />
+    </div>
+  </Portal>
 {/if}
 
