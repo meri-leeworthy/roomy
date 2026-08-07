@@ -113,8 +113,12 @@ export const SPACE_SCHEMA_VERSION = "1";
 /**
  * Global DB schema version (`data/global.sqlite`). Bump whenever
  * schema-global.sql changes.
+ *
+ * `.2`: added the global `profiles` table (authoritative per-user Roomy
+ * profile). A bump wipes and re-derives the global DB (edges backfill from
+ * the monolithic DB; profiles are re-populated on the next profile fetch).
  */
-export const GLOBAL_SCHEMA_VERSION = "1";
+export const GLOBAL_SCHEMA_VERSION = "2";
 
 const DEFAULT_DB_PATH = process.env.APPSERVER_DB_PATH ?? "data/roomy.sqlite";
 
@@ -222,6 +226,21 @@ export function openGlobalDb(): AsyncDatabase {
   ensureLink();
   if (!globalDb) {
     globalDb = mainDb!.global();
+  }
+  return globalDb;
+}
+
+/**
+ * Return the global DB handle if the worker-backed DBs are initialised, or
+ * `null` otherwise. Unlike `openGlobalDb()`, this does NOT lazily initialise
+ * the worker — used by code paths that may run against a raw in-memory
+ * `Database` in tests (where the global DB isn't set up) and should skip the
+ * global write rather than spin up a worker.
+ */
+export function tryOpenGlobalDb(): AsyncDatabase | null {
+  if (!mainDb) return null;
+  if (!globalDb) {
+    globalDb = mainDb.global();
   }
   return globalDb;
 }

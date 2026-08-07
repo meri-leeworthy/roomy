@@ -628,7 +628,7 @@ The monolithic DB is always kept in sync during Phase 1, so there's no data loss
    - Space-scoped handlers (`getMetadata`, `getMembers`, `getRoles`, `getInvites`, `getSpaceSummary`, `getThreads`, `setHandle`, `sendEvents`, `joinSpace`, `leaveSpace`) open `openSpaceDb(spaceId)`.
    - Room/message-scoped handlers (`getMessages`, `getThreads`, `getRoomSummary`, `getMetadata`, `getMessage`, `getReactions`, `updateSeen`) resolve the owning space via `openSpaceDbForEntity(entityId)` (a cheap monolithic `entities.stream_id` lookup — the monolithic DB is still dual-written and correct) and then read from the per-space DB.
    - Read-state queries (`read_positions`, `user_thread_activity`) are NOT split and stay on the monolithic handle (`openDb()`), since the per-space DBs have no readstate tables.
-   - `getProfile` is a genuinely cross-space query (no space context) and is left on the monolithic DB for now — the plan's cross-space list does not cover it.
+   - `getProfile` is a genuinely cross-space query (no space context). Profiles are global (the atproto collection lexicon defines one Roomy profile per user), so they live in a new global `profiles` table in the global DB. `getProfile` reads from there; the profile fetch path (`insertProfiles`/`insertProfilesWithExtras`) and the `SetUserProfile` materialiser write to it. Per-space DBs keep a denormalised copy (`comp_user`/`comp_info`) for fast per-space reads (getMembers, getMessages, ...).
 
 2. **Cross-space queries use global DB + fan-out**: `getSpaces`, `getActivityFeed` (no filter) use the fan-out pattern described above.
 

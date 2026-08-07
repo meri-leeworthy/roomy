@@ -19,7 +19,7 @@
  * not an error. Only `did` is always present.
  */
 
-import { openDb } from "../db/db.ts";
+import { openGlobalDb } from "../db/db.ts";
 import { idResolver } from "../identity.ts";
 import { insertProfilesWithExtras, defaultGetProfiles } from "../materialization/profiles.ts";
 import { getHappyView } from "../happyview.ts";
@@ -53,7 +53,7 @@ export const getProfileHandler: QueryHandler<
   // Resolve handle → DID if the actor param isn't a DID.
   const did = await resolveActorToDid(actor);
 
-  const db = openDb();
+  const db = openGlobalDb();
 
   // ── Roomy profile record from HappyView (authoritative) ──────────────
   // The appserver processes events from its local event store, not ATProto repo commits,
@@ -136,10 +136,10 @@ export const getProfileHandler: QueryHandler<
 };
 
 /**
- * Read the materialised profile row (comp_user + comp_info) for a DID.
- * Returns null when no comp_user row exists (user never seen by the
- * appserver). comp_info fields may be null when the user has comp_user but
- * no materialised profile data.
+ * Read the global profile row (`profiles` table in the global DB) for a DID.
+ * Returns null when no profile row exists (user never seen by the
+ * appserver). Fields may be null when the user has a row but no materialised
+ * profile data.
  */
 async function readProfileRow(
   db: DbLike,
@@ -157,17 +157,16 @@ async function readProfileRow(
   return db
     .query(
       `select
-        u.did      as did,
-        u.handle   as handle,
-        i.name     as displayName,
-        i.avatar   as avatar,
-        i.description as description,
-        i.banner   as banner,
-        i.pronouns as pronouns,
-        i.website  as website
-      from comp_user u
-      left join comp_info i on i.entity = u.did
-      where u.did = ?`,
+        did,
+        handle,
+        name as displayName,
+        avatar,
+        description,
+        banner,
+        pronouns,
+        website
+      from profiles
+      where did = ?`,
     )
     .get<{
       did: string;

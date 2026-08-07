@@ -19,6 +19,7 @@
  */
 
 import type { DbLike } from "../db/types.ts";
+import { tryOpenGlobalDb } from "../db/db.ts";
 import {
   type DecodedStreamEvent,
   type EventType,
@@ -269,6 +270,98 @@ async function filterMissing(db: DbLike, candidates: Set<UserDid>): Promise<User
   return resolvable.filter((d) => !present.has(d) || staleHandleDids.has(d));
 }
 
+/**
+ * Write a profile to the global `profiles` table (the authoritative per-user
+ * Roomy profile store). The atproto collection lexicon defines one global
+ * profile per user, so this is the cross-space home for profile data; the
+ * per-space DBs keep a denormalised copy (comp_user/comp_info) for fast
+ * per-space reads.
+ *
+ * Conflict strategy mirrors comp_info: a Roomy record is authoritative and
+ * overwrites all fields; a Bluesky fallback is first-writer-wins for display
+ * fields but always refreshes the handle.
+ */
+async function writeGlobalProfile(
+  p: ProfileViewDetailed,
+  ex: RoomyProfileExtras | undefined,
+): Promise<void> {
+  const globalDb = tryOpenGlobalDb();
+  // No worker-backed global DB (e.g. a raw in-memory Database in tests) —
+  // skip the global write; the per-space/monolithic write still happens.
+  if (!globalDb) return;
+  const isRoomy = ex !== undefined;
+  const did = p.did;
+  const handle = p.handle ?? null;
+  const name = p.displayName ?? null;
+  const avatar = p.avatar ?? null;
+  const description = p.description ?? null;
+  const banner = ex?.banner ?? null;
+  const pronouns = ex?.pronouns ?? null;
+  const website = ex?.website ?? null;
+
+  if (isRoomy) {
+    await globalDb.run(
+      `insert into profiles (did, handle, name, avatar, description, banner, pronouns, website, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, unixepoch() * 1000)
+       on conflict(did) do update set
+         handle = excluded.handle,
+         name = excluded.name,
+         avatar = excluded.avatar,
+         description = excluded.description,
+         banner = excluded.banner,
+         pronouns = excluded.pronouns,
+         website = excluded.website,
+         updated_at = unixepoch() * 1000`,
+      [did, handle, name, avatar, description, banner, pronouns, website],
+    );
+  } else {
+    await globalDb.run(
+      `insert into profiles (did, handle, name, avatar, description, updated_at)
+       values (?, ?, ?, ?, ?, unixepoch() * 1000)
+       on conflict(did) do update set
+         handle = coalesce(excluded.handle, profiles.handle),
+         updated_at = unixepoch() * 1000`,
+      [did, handle, name, avatar, description],
+    );
+  }
+}
+
+/**
+ * Write a `space.roomy.user.updateProfile.v0` (SetUserProfile) event to the
+ * global `profiles` table. Called from the materialiser so bridged-user
+ * profile updates (which don't go through HappyView) stay fresh in the
+ * global store. Only the fields the event carries are updated (coalesce).
+ */
+export async function writeSetUserProfileToGlobal(event: {
+  did: string;
+  name?: unknown;
+  avatar?: unknown;
+  description?: unknown;
+  extensions?: Record<string, unknown>;
+}): Promise<void> {
+  const globalDb = tryOpenGlobalDb();
+  if (!globalDb) return;
+  const discordOrigin = event.extensions?.[
+    "space.roomy.extension.discordUserOrigin.v0"
+  ] as { handle?: string } | undefined;
+  const handle = discordOrigin?.handle ?? null;
+  const name = typeof event.name === "string" ? event.name : null;
+  const avatar = typeof event.avatar === "string" ? event.avatar : null;
+  const description =
+    typeof event.description === "string" ? event.description : null;
+  await globalDb.run(
+    `insert into profiles (did, handle, name, avatar, description, updated_at)
+     values (?, ?, ?, ?, ?, unixepoch() * 1000)
+     on conflict(did) do update set
+       handle = coalesce(excluded.handle, profiles.handle),
+       name = coalesce(excluded.name, profiles.name),
+       avatar = coalesce(excluded.avatar, profiles.avatar),
+       description = coalesce(excluded.description, profiles.description),
+       updated_at = unixepoch() * 1000`,
+    [event.did, handle, name, avatar, description],
+  );
+}
+
 /** Insert one transaction's worth of profile rows (Bluesky-only path). */
 async function insertProfiles(db: DbLike, profiles: ProfileViewDetailed[]): Promise<void> {
   const steps: Array<{ type: "query" | "run" | "exec"; sql: string; params?: unknown[] }> = [];
@@ -276,6 +369,7 @@ async function insertProfiles(db: DbLike, profiles: ProfileViewDetailed[]): Prom
     steps.push({ type: "run", sql: "insert into entities (id, stream_id) values (?, ?) on conflict(id) do nothing", params: [p.did, p.did] });
     steps.push({ type: "run", sql: "insert into comp_user (did, handle) values (?, ?) on conflict(did) do update set handle = excluded.handle, updated_at = unixepoch() * 1000", params: [p.did, p.handle] });
     steps.push({ type: "run", sql: "insert into comp_info (entity, name, avatar) values (?, ?, ?) on conflict(entity) do nothing", params: [p.did, p.displayName ?? p.handle, p.avatar ?? null] });
+    await writeGlobalProfile(p, undefined);
   }
   await db.transaction(steps);
 }
@@ -351,6 +445,7 @@ export async function insertProfilesWithExtras(
         ],
       });
     }
+    await writeGlobalProfile(p, ex);
   }
   await db.transaction(steps);
 }

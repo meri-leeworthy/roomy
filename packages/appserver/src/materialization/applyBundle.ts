@@ -40,6 +40,7 @@ import {
 import { isThread, upsertUserThreadActivity } from "../queries/userActiveThreads.ts";
 import { upsertUserRoomParticipation } from "../queries/userRoomParticipation.ts";
 import { upsertActivityItem } from "./activityItem.ts";
+import { writeSetUserProfileToGlobal } from "./profiles.ts";
 import { isGlobalEdgeStatement } from "./statementRouting.ts";
 import { decodeTime } from "ulidx";
 
@@ -281,6 +282,19 @@ async function applyBundleInner(
           spaceId: opts.streamId,
           messageId: bundle.event.id,
         });
+      }
+      // SetUserProfile events update the global profile store (bridged users
+      // don't go through HappyView, so the materialiser is the only writer).
+      if (bundle.event.$type === "space.roomy.user.updateProfile.v0") {
+        await writeSetUserProfileToGlobal(
+          bundle.event as unknown as {
+            did: string;
+            name?: unknown;
+            avatar?: unknown;
+            description?: unknown;
+            extensions?: Record<string, unknown>;
+          },
+        );
       }
       await spaceDb.exec(`release ${savepoint}`);
     } catch (spaceErr) {

@@ -399,3 +399,53 @@ describe("defaultGetProfiles", () => {
     expect(profiles[0]?.did).toBe("did:plc:survivor-1");
   });
 });
+
+describe("global profile store (Phase 2)", () => {
+  test("insertProfilesWithExtras writes the global profiles table", async () => {
+    const { closeDb, openDb, openGlobalDb } = await import("../db/db.ts");
+    const { insertProfilesWithExtras } = await import("./profiles.ts");
+    closeDb();
+    openDb({ path: ":memory:" });
+    const globalDb = openGlobalDb();
+
+    const p = profileFor(ALICE, "alice.test");
+    await insertProfilesWithExtras(openDb(), [p], new Map());
+
+    const row = await globalDb
+      .query("select did, handle, name, avatar from profiles where did = ?")
+      .get(ALICE);
+    expect(row).not.toBeNull();
+    expect(row?.handle).toBe("alice.test");
+    expect(row?.name).toBe("alice.test display");
+    expect(row?.avatar).toBe("https://cdn.example/alice.test.png");
+
+    closeDb();
+  });
+
+  test("writeSetUserProfileToGlobal updates the global profile", async () => {
+    const { closeDb, openDb, openGlobalDb } = await import("../db/db.ts");
+    const { writeSetUserProfileToGlobal } = await import("./profiles.ts");
+    closeDb();
+    openDb({ path: ":memory:" });
+    const globalDb = openGlobalDb();
+
+    await writeSetUserProfileToGlobal({
+      did: BOB,
+      name: "Bob",
+      avatar: "https://cdn.example/bob.png",
+      extensions: {
+        "space.roomy.extension.discordUserOrigin.v0": { handle: "bob#1234" },
+      },
+    });
+
+    const row = await globalDb
+      .query("select did, handle, name, avatar from profiles where did = ?")
+      .get(BOB);
+    expect(row).not.toBeNull();
+    expect(row?.handle).toBe("bob#1234");
+    expect(row?.name).toBe("Bob");
+    expect(row?.avatar).toBe("https://cdn.example/bob.png");
+
+    closeDb();
+  });
+});

@@ -624,6 +624,42 @@ function backfillGlobalDb(db: Database): void {
         ],
       );
     }
+
+    // Backfill the global profiles table from the monolithic DB's
+    // comp_user + comp_info (the pre-split profile store). Idempotent
+    // (insert or ignore) so re-running is safe. The global DB is derived
+    // data; profiles are re-populated on the next profile fetch anyway.
+    const profileRows = main
+      .query(
+        `select
+           u.did as did,
+           u.handle as handle,
+           i.name as name,
+           i.avatar as avatar,
+           i.description as description,
+           i.banner as banner,
+           i.pronouns as pronouns,
+           i.website as website
+         from comp_user u
+         left join comp_info i on i.entity = u.did`,
+      )
+      .all() as Record<string, unknown>[];
+    for (const row of profileRows) {
+      db.run(
+        `insert or ignore into profiles (did, handle, name, avatar, description, banner, pronouns, website, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, unixepoch() * 1000)`,
+        [
+          row.did as SQLQueryBindings,
+          row.handle as SQLQueryBindings,
+          row.name as SQLQueryBindings,
+          row.avatar as SQLQueryBindings,
+          row.description as SQLQueryBindings,
+          row.banner as SQLQueryBindings,
+          row.pronouns as SQLQueryBindings,
+          row.website as SQLQueryBindings,
+        ],
+      );
+    }
   })();
 }
 
