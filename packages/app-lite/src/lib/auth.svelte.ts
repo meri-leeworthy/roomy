@@ -127,8 +127,23 @@ async function loginWithAppPassword(identifier: string, password: string) {
   authenticated = true;
 }
 
+/**
+ * Hard cap on how long `init()` may take. The atproto OAuth client has no
+ * timeout on the callback token exchange / DID resolution / session restore,
+ * so a hung authorization server (or a network request that never settles) can
+ * otherwise leave `initializing` stuck at `true` forever. The layout renders a
+ * full-screen loading overlay while that's true — which on iOS Safari can
+ * appear as a blank white page that is unrecoverable in the installed PWA (no
+ * address bar to reload). The watchdog below converts that hang into a normal
+ * `initError`, so the user gets a recovery UI instead of a blank screen.
+ */
+const INIT_TIMEOUT_MS = 15_000;
+
 export async function init() {
-  try {
+  // The real init work, raced against a watchdog below. Kept separate so the
+  // watchdog can fire without aborting the (possibly still-in-flight) exchange,
+  // and so a successful-but-slow result can recover afterwards.
+  const doInit = async () => {
     saveAppserverDid(CONFIG.appserverDid);
 
     // Test mode: if app-password credentials are baked into the build env,
@@ -168,15 +183,64 @@ export async function init() {
       // push is unsupported/unconfigured or permission was never granted.
       void subscribeIfAlreadyPermitted();
     }
+  };
+
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+
+  const work = doInit();
+
+  try {
+    // Race init against the watchdog. Uses a plain `setTimeout` (not
+    // `AbortSignal.timeout`) so it works even on older iOS Safari builds that
+    // lack that API.
+    await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => {
+          timedOut = true;
+          reject(
+            new Error(
+              "Sign-in timed out — the authorization server didn't respond in time. " +
+                "This can happen on iOS Safari after the OAuth callback. Tap Reload " +
+                "below (or open Roomy in Safari) to try again.",
+            ),
+          );
+        }, INIT_TIMEOUT_MS);
+      }),
+    ]);
+    // `work` won: all session state was set inside `doInit`.
   } catch (err) {
     initError = String(err);
+
+    // If the watchdog fired but the (slow) exchange actually completed in the
+    // background afterwards, the session is now persisted and authenticated —
+    // clear the error so the app reveals itself instead of a stuck overlay. A
+    // manual reload would reach the same state via session restore, but this
+    // avoids forcing the user to reload.
+    if (timedOut) {
+      work.then(
+        () => {
+          if (initError) {
+            initError = null;
+            initializing = false;
+          }
+        },
+        () => {
+          // Exchange failed after the timeout — error already surfaced above.
+        },
+      );
+    }
+
     // If session restoration failed due to a recoverable ATProto auth error
     // (expired/revoked token, failed refresh), auto-reload to retry init —
     // this is the primary recovery path in the PWA where manual reload is
-    // impossible. scheduleAutoReload no-ops for non-recoverable errors, so
-    // genuine config/DNS failures simply surface as initError instead.
+    // impossible. scheduleAutoReload no-ops for non-recoverable errors
+    // (including this timeout), so genuine config/DNS/hang failures simply
+    // surface as initError instead of causing reload loops.
     scheduleAutoReload(err);
   } finally {
+    if (watchdog) clearTimeout(watchdog);
     initializing = false;
   }
 }

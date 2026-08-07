@@ -150,11 +150,24 @@
       </div>
     </div>
   {:else if auth.initializing && !auth.authenticated && requireAuth.value}
-    <!-- OAuth callback / session restoration in progress — skeleton -->
+    <!-- OAuth callback / session restoration in progress — skeleton.
+         The atproto OAuth callback has no timeout, so on a slow/hung
+         authorization server init() can take a while. Show real text (not
+         just a spinner that can render as a blank screen on some devices) and
+         a hint so users aren't stuck on a white page with no context. -->
     <div
-      class="fixed inset-0 z-50 flex items-center justify-center bg-base-50 dark:bg-base-950"
+      class="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-base-50 dark:bg-base-950"
     >
       <LoadingSpinner size={48} />
+      <div class="text-sm text-base-500 dark:text-base-400">
+        Signing you in…
+      </div>
+      <div
+        class="text-xs text-base-400 dark:text-base-500 max-w-xs text-center px-4"
+      >
+        If this takes more than a few seconds, tap Reload or reopen Roomy from
+        your home screen.
+      </div>
     </div>
   {:else if !auth.authenticated && requireAuth.value}
     <!-- Not logged in — show login modal -->
