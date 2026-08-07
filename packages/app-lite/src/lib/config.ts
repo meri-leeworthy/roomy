@@ -36,7 +36,7 @@ const APPSERVER_RPCS = [
 
 export const CONFIG = {
   appserverDid:
-    import.meta.env.VITE_APPSERVER_DID || "did:web:appserver.roomy.chat",
+    import.meta.env.VITE_APPSERVER_DID || "did:web:api.roomy.space",
   /**
    * Override the WebSocket origin for the sync connection.
    * When set, bypasses DID document resolution and uses this URL directly.

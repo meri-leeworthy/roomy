@@ -31,7 +31,7 @@ SCOPE+=" repo:${VITE_STREAM_HANDLE_NSID:-space.roomy.space.handle.dev}"
 SCOPE+=" repo:space.roomy.user.profile"
 
 # ── Service auth (for direct/non-proxied XRPC calls) ───────────────────
-SCOPE+=" rpc:com.atproto.server.getServiceAuth?aud=${VITE_APPSERVER_DID:-did:web:appserver.roomy.chat}"
+SCOPE+=" rpc:com.atproto.server.getServiceAuth?aud=${VITE_APPSERVER_DID:-did:web:api.roomy.space}"
 
 # ── Appserver RPCs (must match APPSERVER_RPCS in config.ts) ──────────────
 SCOPE+=" rpc:space.roomy.space.getSpaces?aud=*"
