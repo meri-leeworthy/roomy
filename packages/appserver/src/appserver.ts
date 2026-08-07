@@ -28,6 +28,7 @@ import { createSyncSubscribeHandler } from "./handlers/space.roomy.sync.subscrib
 import { connectSpaceHandler } from "./handlers/space.roomy.admin.connectSpace.ts";
 import { getEventsHandler } from "./handlers/space.roomy.sync.getEvents.ts";
 import { materializeSpaceHandler } from "./handlers/space.roomy.admin.materializeSpace.ts";
+import { checkDualWriteHandler } from "./handlers/space.roomy.admin.checkDualWrite.ts";
 import { getFlagsHandler } from "./handlers/space.roomy.getFlags.ts";
 import { adminGetFlagsHandler } from "./handlers/space.roomy.admin.getFlags.ts";
 import { adminSetFlagHandler } from "./handlers/space.roomy.admin.setFlag.ts";
@@ -180,6 +181,9 @@ export function buildRouter(
     })
     .query("space.roomy.admin.materializeSpace", {
       handler: materializeSpaceHandler,
+    })
+    .query("space.roomy.admin.checkDualWrite", {
+      handler: checkDualWriteHandler,
     })
     // ── Feature flags ─────────────────────────────────────────────────────
     .query("space.roomy.getFlags", {
