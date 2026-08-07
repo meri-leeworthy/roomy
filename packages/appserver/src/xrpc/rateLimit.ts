@@ -48,15 +48,29 @@ const BLOCK_DURATION = envInt("RATE_LIMIT_BLOCK_DURATION", 120);
 
 // TODO: The module-level limiter is shared across all test files and uses
 // real time windows. Tests that run concurrently and hit the same IP can
-// exhaust each other's points and flake. Consider making the limiter
-// resettable, accepting an injected limiter in checkRateLimit, or setting
-// RATE_LIMIT_DISABLED=true in the test setup.
-const limiter = new RateLimiterMemory({
+// exhaust each other's points and flake. `_resetRateLimit()` recreates the
+// limiter between tests; consider RATE_LIMIT_DISABLED=true in a global setup.
+let limiter = new RateLimiterMemory({
   keyPrefix: "rl",
   points: POINTS,
   duration: DURATION,
   blockDuration: BLOCK_DURATION,
 });
+
+/**
+ * Reset the in-memory limiter between tests. Tests-only hook: because the
+ * limiter is a module-level singleton shared across all test files (which run
+ * in one process), accumulated points and blocks can leak between files and
+ * 429 later tests. Recreating it gives each test a clean slate.
+ */
+export function _resetRateLimit(): void {
+  limiter = new RateLimiterMemory({
+    keyPrefix: "rl",
+    points: POINTS,
+    duration: DURATION,
+    blockDuration: BLOCK_DURATION,
+  });
+}
 
 // ─── Key extraction ─────────────────────────────────────────────────────
 

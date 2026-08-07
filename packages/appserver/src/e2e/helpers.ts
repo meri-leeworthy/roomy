@@ -22,6 +22,7 @@ import { afterEach } from "bun:test";
 import { createAppserver, type AppserverHandle } from "../appserver.ts";
 import { testAuthVerifier } from "../xrpc/auth.ts";
 import { closeDb, openDb } from "../db/db.ts";
+import { _resetRateLimit } from "../xrpc/rateLimit.ts";
 import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper, stopEmbedSweeper } from "../embed/sweeper.ts";
 import { newUlid } from "@roomy-space/sdk";
@@ -56,6 +57,7 @@ export async function startAppserver(): Promise<E2eContext> {
   // Stop any running background sweeper loop before resetting state.
   await stopEmbedSweeper();
   closeDb();
+  _resetRateLimit();
   _resetHydrationInflight();
   _resetEmbedSweeper();
 
