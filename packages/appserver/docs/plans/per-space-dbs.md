@@ -148,17 +148,20 @@ These queries touch data across spaces and need special handling:
 
 **Why:** Every recovery path in this plan — §1h's alternative rebuild from the event log, §1i's "global DB can be regenerated", and the corruption-recovery row in the risks table — assumes the global DB is fully reconstructible by replaying `data/roomy-events.sqlite`. Today that is false for `leftSpace` edges: they are written only by the `leaveSpace` handler (`recordLeftSpaceEdge`), no event materialises them, so a rebuild drops left-space history (`getSpaces?includeLeft=true` loses previously-left spaces until rejoin). This must be fixed before Phase 1's dual-write starts, or the global DB becomes the one piece of state that cannot be regenerated.
 
-**Change (SDK materialisers, mirrors what the `joinedSpace` edge already does):**
+**Change — membership lives in the global DB, on the space-side join/leave events (no personal events):**
 
-1. **`PersonalLeaveSpace`** (in `space.roomy.space.personal.leaveSpace.v0` events) additionally writes a `leftSpace` edge (`head = user`, `tail = spaceDid`) alongside its existing deletion of the `joinedSpace` edge. `leftSpace` edges thus become event-backed and replayable, exactly like `joinedSpace`.
-2. **`PersonalJoinSpace`** additionally deletes any existing `leftSpace` edge (head = user, tail = spaceDid) — today only the handler's `removeLeftSpaceEdge` does this; the materialiser needs it so re-joining correctly clears left history during replay.
-3. **Handler fast-path stays:** `leaveSpace`/`joinSpace` keep writing/removing edges directly for read-after-write consistency; the materialiser is the durability backstop (idempotent, same as the existing `joinedSpace` dual path).
+The historical divide between *personal join intent* (`personal.joinSpace`) and *in-space join registration* (`space.joinSpace`) came from an architectural limitation (a separate personal stream) that has since been removed. Membership is now tracked in one place — the global DB — and the space-side events are the single source:
 
-**Migration:** This is a materialiser-logic change, not a schema change. Bump `SCHEMA_VERSION` (appserver `db.ts`) so the wipe+replay rebuilds edges from the now-complete materialiser output. Because the change is *additive* (new edges on replay), no data is lost by the wipe; existing handler-written `leftSpace` edges are dropped and re-derived from `personal.leaveSpace` events in the log.
+1. **`JoinSpace`** (`space.roomy.space.joinSpace.v0`) writes the `joinedSpace` edge (`head = user`, `tail = space`) and deletes any `leftSpace` edge. Routed to the global DB by §statementRouting, so joining writes membership.
+2. **`LeaveSpace`** (`space.roomy.space.leaveSpace.v0`) deletes the `joinedSpace` edge and writes a `leftSpace` edge. Routed to the global DB, so leaving removes membership and records history for `getSpaces?includeLeft=true`.
+3. **`personal.joinSpace` / `personal.leaveSpace` events and their materialisers are removed.** The SDK no longer defines them; `writeAuth` no longer rejects them (they don't exist); replay skips any historical `personal.*` events in the log (the same event stream also contains the `space.joinSpace` events, so membership is reconstructed from those).
+4. **Handler fast-path stays, dual-writing to the global DB:** `createSpace`/`joinSpace` write the `joinedSpace` edge (and `leaveSpace` the `leftSpace` edge) directly to both the monolithic DB (Phase-1 read source) and the global DB (`openGlobalDb()`) for read-after-write consistency; the materialiser is the idempotent durability backstop.
 
-**Caveat — history before this change:** `leftSpace` edges that exist *before* this prerequisite ships were created by handlers only; their corresponding `personal.leaveSpace` events ARE in the event log, so replay reconstructs them. The only lossless gap is a leave that happens between the last schema wipe and this prerequisite — i.e. current production left markers do not survive the first wipe. That is the accepted, pre-existing rebuild behavior this prerequisite fixes going forward.
+**Migration:** This is a materialiser-logic change, not a schema change. Bump `SCHEMA_VERSION` (appserver `db.ts`) so the wipe+replay rebuilds edges from the now-complete materialiser output. Because the change is *additive* (new edges on replay), no data is lost by the wipe; existing handler-written `leftSpace` edges are dropped and re-derived from `space.leaveSpace` events in the log.
 
-**Verification:** seed events → run `reMaterializeFromLocalEvents` on a wiped DB → assert `leftSpace` edges exist for users whose `personal.leaveSpace` events replayed; `getSpaces?includeLeft=true` returns them with `isMember = false`.
+**Caveat — history before this change:** `leftSpace` edges that exist *before* this prerequisite ships were created by handlers only; their corresponding `space.leaveSpace` events ARE in the event log, so replay reconstructs them. The only lossless gap is a leave that happens between the last schema wipe and this prerequisite — i.e. current production left markers do not survive the first wipe. That is the accepted, pre-existing rebuild behavior this prerequisite fixes going forward.
+
+**Verification:** seed events → run `reMaterializeFromLocalEvents` on a wiped DB → assert `joinedSpace`/`leftSpace` edges exist for users whose `space.joinSpace`/`space.leaveSpace` events replayed; `getSpaces` (incl. `?includeLeft=true`) reflects them; the global DB matches the monolithic DB's membership edges.
 
 ## Phase 1: Schema Split + Dual-Write
 
@@ -666,4 +669,4 @@ Run the full test suite with the monolithic DB in read-only mode. All tests shou
 | **Embed sweeper needs to scan all spaces** | Global `pending_links` index table, dual-written during materialization. |
 | **Migration: existing monolithic DB** | Phase 1 dual-write populates per-space DBs gradually. On first access to each space, backfill from the monolithic DB. |
 | **Test infrastructure churn** | Every test that seeds a DB needs to seed the per-space DB too. The `e2e/helpers.ts` seed functions are the bulk of the test churn. |
-| **Global DB rebuild drops left-space history** | `leftSpace` edges are handler-only today; rebuilding the global DB from the event log loses them. Mitigated by the §Prerequisite (event-back `leftSpace` via `PersonalLeaveSpace`/`PersonalJoinSpace` materialisers) before Phase 1's dual-write starts. |
+| **Global DB rebuild drops left-space history** | `leftSpace` edges are handler-only today; rebuilding the global DB from the event log loses them. Mitigated by the §Prerequisite (event-back `leftSpace` via the `space.leaveSpace`/`space.joinSpace` materialisers) before Phase 1's dual-write starts. |

@@ -42,7 +42,7 @@ _setAdminDids([ADMIN]);
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 /**
- * Set up a minimal seeded space with a personal stream, room, and messages.
+ * Set up a minimal seeded space with a room and messages.
  * Returns the E2eContext for use in test bodies.
  */
 async function setupBasicSpace(): Promise<E2eContext> {

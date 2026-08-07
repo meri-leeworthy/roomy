@@ -72,7 +72,7 @@ import { READSTATE_SCHEMA_VERSION } from "./readStateDb.ts";
  * the event carries only name/description (no space-level fields). Without
  * this, spaces created via `createDefaultSpaceEvents` (the default path)
  * never got a `comp_space` row from their own stream — they only got one
- * incidentally when a member's `PersonalJoinSpace` materialised. After a
+ * incidentally when a member's `JoinSpace` event materialised. After a
  * schema-version wipe, re-materialization from the event log failed to
  * recreate `comp_space` (FK constraint), so `getMetadata` returned 404 and
  * the frontend couldn't navigate to any space. Wipe re-derives the rows.
@@ -80,7 +80,7 @@ import { READSTATE_SCHEMA_VERSION } from "./readStateDb.ts";
  * `.10-appserver.8`: personal stream removal — `joinedSpace`/`leftSpace` edges
  * now use the user DID as `head` (not a personal-stream DID). The
  * `comp_user_personal_stream` table is dropped. Wipe re-materialises edges
- * from the updated `PersonalJoinSpace`/`PersonalLeaveSpace` materialisers
+ * from the updated `JoinSpace`/`LeaveSpace` materialisers
  * (which use `user` from the event context as the edge head).
  *
  * `.10-appserver.9`: re-run of `.8`'s re-materialisation with a corrected

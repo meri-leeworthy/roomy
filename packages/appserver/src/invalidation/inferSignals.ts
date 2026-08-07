@@ -407,41 +407,6 @@ function handleUnbanAccount(event: AppliedEvent): InvalidationEvent[] {
   return handleBanAccount(event);
 }
 
-// ─── Personal stream events ─────────────────────────────────────────────
-
-function handlePersonalJoinSpace(event: AppliedEvent): InvalidationEvent[] {
-  const details = event.details ?? {};
-  const spaceId = details.spaceDid as StreamDid | undefined;
-  const signals: InvalidationEvent[] = [
-    invalidate("space.roomy.space.getSpaces", {}, event.user),
-  ];
-  if (spaceId) {
-    signals.push(
-      invalidate("space.roomy.space.getMembers", { spaceId }),
-      invalidate("space.roomy.space.getMetadata", { spaceId }),
-    );
-  }
-  return signals;
-}
-
-function handlePersonalLeaveSpace(event: AppliedEvent): InvalidationEvent[] {
-  const details = event.details ?? {};
-  const spaceId = details.spaceDid as StreamDid | undefined;
-  const signals: InvalidationEvent[] = [
-    invalidate("space.roomy.space.getSpaces", {}, event.user),
-  ];
-  if (spaceId) {
-    signals.push(
-      invalidate("space.roomy.space.getMembers", { spaceId }),
-      // getMetadata returns isMember, which flips to false on leave.
-      // Mirror handlePersonalJoinSpace (which emits getMetadata) so the
-      // leaver's cached space metadata is invalidated, not just getSpaces.
-      invalidate("space.roomy.space.getMetadata", { spaceId }, event.user),
-    );
-  }
-  return signals;
-}
-
 // ─── Link events ────────────────────────────────────────────────────────
 
 function handleCreateRoomLink(event: AppliedEvent): InvalidationEvent[] {
@@ -587,10 +552,6 @@ const HANDLERS: Record<string, (event: AppliedEvent, db?: DbLike, messageSnapsho
   "space.roomy.space.banAccount.v0": handleBanAccount,
   "space.roomy.space.unbanAccount.v0": handleUnbanAccount,
   "space.roomy.space.setHandleProvider.v0": handleUpdateSpaceInfo,
-
-  // Personal stream
-  "space.roomy.space.personal.joinSpace.v0": handlePersonalJoinSpace,
-  "space.roomy.space.personal.leaveSpace.v0": handlePersonalLeaveSpace,
 
   // Links
   "space.roomy.link.createRoomLink.v0": handleCreateRoomLink,

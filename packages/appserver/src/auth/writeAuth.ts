@@ -36,8 +36,6 @@ export type WriteAuthResult = undefined | WriteAuthDenial;
  * They target the personal stream or have been replaced by dedicated XRPCs.
  */
 const REJECTED_TYPES = new Set([
-  "space.roomy.space.personal.joinSpace.v0",
-  "space.roomy.space.personal.leaveSpace.v0",
   "space.roomy.state.markRead.v0",
 ]);
 

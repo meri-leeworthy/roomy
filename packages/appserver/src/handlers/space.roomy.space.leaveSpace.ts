@@ -8,10 +8,16 @@
  */
 
 import { newUlid, StreamDid, parseEvent } from "@roomy-space/sdk";
-import { openDb } from "../db/db.ts";
+import { openDb, openGlobalDb } from "../db/db.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import { isMember, isAdmin } from "../auth/access.ts";
-import { JOINED_SPACE_LABEL, recordLeftSpaceEdge } from "../queries/joinedSpaces.ts";
+import {
+  JOINED_SPACE_LABEL,
+  LEFT_SPACE_LABEL,
+  recordLeftSpaceEdge,
+  recordGlobalMembership,
+  deleteGlobalMembership,
+} from "../queries/joinedSpaces.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { Router as InvalidationRouter } from "../invalidation/index.ts";
@@ -77,19 +83,31 @@ export const leaveSpaceHandler: ProcedureHandler<LeaveSpaceBody, void> = async (
     callerDid,
   );
 
-  // ── 2. Delete the joinedSpace edge (join intent) ─────────────────────
-  // The PersonalLeaveSpace materialiser used to delete this edge, but the
-  // personal.leaveSpace event is no longer written — remove it here or the
-  // space lingers as joined in getSpaces and the activity feed after
-  // leaving.
+  // ── 2. Delete the joinedSpace edge (membership) ──────────────────────
+  // The space-side LeaveSpace materialiser now deletes this edge (routed to
+  // the global DB), but remove it here directly too for read-after-write
+  // consistency, in both the monolithic DB (Phase-1 read source) and the
+  // global DB (membership store).
   await db.run(
     `delete from edges
       where head = ? and tail = ? and label = ?`,
     [callerDid, spaceId, JOINED_SPACE_LABEL],
   );
+  await deleteGlobalMembership(
+    openGlobalDb(),
+    spaceStreamDid,
+    callerDid,
+    JOINED_SPACE_LABEL,
+  );
 
   // ── 3. Write leftSpace edge so the space appears with includeLeft ────
   await recordLeftSpaceEdge(db, spaceStreamDid, callerDid);
+  await recordGlobalMembership(
+    openGlobalDb(),
+    spaceStreamDid,
+    callerDid,
+    LEFT_SPACE_LABEL,
+  );
 
   // ── 4. Emit direct getSpaces + getMetadata invalidation signals ──────
 

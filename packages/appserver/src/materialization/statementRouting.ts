@@ -7,8 +7,8 @@
  * The rule is deliberately narrow:
  *
  * - `edges` statements mentioning `'joinedSpace'` or `'leftSpace'` are the
- *   per-user membership edges from `PersonalJoinSpace`/`PersonalLeaveSpace`
- *   (and, going forward, the event-backed `leftSpace` prerequisite). They
+ *   per-user membership edges written by the `JoinSpace`/`LeaveSpace`
+ *   materialisers (space.roomy.space.joinSpace/leaveSpace). They
  *   live in the global DB only.
  * - Everything else — `entities`, `comp_*`, `roles`, `activity_item`,
  *   `materialization_cursor`, and all other `edges` labels (member, admin,

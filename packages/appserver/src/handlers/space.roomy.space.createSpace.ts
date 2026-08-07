@@ -4,9 +4,13 @@ import {
   StreamDid,
   parseEvent,
 } from "@roomy-space/sdk";
-import { openDb } from "../db/db.ts";
+import { openDb, openGlobalDb } from "../db/db.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
-import { recordPersonalSpaceMembership } from "../queries/joinedSpaces.ts";
+import {
+  JOINED_SPACE_LABEL,
+  recordPersonalSpaceMembership,
+  recordGlobalMembership,
+} from "../queries/joinedSpaces.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { Router as InvalidationRouter } from "../invalidation/index.ts";
@@ -113,10 +117,18 @@ export const createSpaceHandler: ProcedureHandler<
 
   // ── 4. Record the membership in the local DB ────────────────────────
   // getSpaces identifies joined spaces by a `joinedSpace` edge (head =
-  // caller DID). No personal.joinSpace event is sent on this path, so the
-  // edge is written directly here. Idempotent.
+  // caller DID). Membership now lives in the global DB, so the edge is
+  // written directly to both the monolithic DB (Phase-1 read source) and
+  // the global DB (the membership store) for read-after-write consistency
+  // before the materialiser lands. Idempotent.
   const db = openDb();
   await recordPersonalSpaceMembership(db, spaceId, callerDid);
+  await recordGlobalMembership(
+    openGlobalDb(),
+    spaceId,
+    callerDid,
+    JOINED_SPACE_LABEL,
+  );
 
   // ── 5. Emit direct getSpaces + getMetadata invalidation signals ──────
   // The live materializer also emits these when it processes the

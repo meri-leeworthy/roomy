@@ -115,11 +115,6 @@ function extractDetails(
     case "space.roomy.role.setRoleRoomPermission.v0":
       return { roomId: event["roomId"] };
 
-    // Personal stream events: which space was joined/left.
-    case "space.roomy.space.personal.joinSpace.v0":
-    case "space.roomy.space.personal.leaveSpace.v0":
-      return { spaceDid: event["spaceDid"] };
-
     default:
       return undefined;
   }

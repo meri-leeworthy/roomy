@@ -20,8 +20,8 @@ import { getSpaceUnreadCount } from "./readPositions.ts";
  * many-to-many table) rather than on the single global `comp_space` /
  * `entities` row a space has.
  *
- * Must match the label written by the SDK's `PersonalJoinSpace` /
- * `PersonalLeaveSpace` materialisers.
+ * Must match the label written by the SDK's `JoinSpace` / `LeaveSpace`
+ * materialisers.
  */
 export const JOINED_SPACE_LABEL = "joinedSpace";
 
@@ -225,15 +225,14 @@ async function selectJoinedAndLeftSpaces(
  * Record that `userDid` has joined `spaceId` by writing the `joinedSpace`
  * edge `selectJoinedSpaces` reads.
  *
- * Why this exists: `createSpace` materialises the new space and writes the
- * `personal.joinSpace` event, but the live materialisation of that event
- * may not have landed by the time the HTTP response returns. Writing the
- * edge directly makes the new space visible to the immediately following
- * `getSpaces` call regardless of materialisation timing.
+ * Why this exists: `createSpace` materialises the new space and sends the
+ * space-side `space.joinSpace` event, but the live materialisation of that
+ * event may not have landed by the time the HTTP response returns. Writing
+ * the edge directly makes the new space visible to the immediately
+ * following `getSpaces` call regardless of materialisation timing.
  *
- * The writes mirror the SDK's `PersonalJoinSpace` materialiser and are
- * idempotent, so the later live materialisation of the same event is a
- * harmless no-op.
+ * The writes mirror the SDK's `JoinSpace` materialiser and are idempotent,
+ * so the later live materialisation of the same event is a harmless no-op.
  */
 export async function recordPersonalSpaceMembership(
   db: DbLike,
@@ -308,5 +307,42 @@ export async function removeLeftSpaceEdge(
     `delete from edges
       where head = ? and tail = ? and label = ?`,
     [userDid, spaceId, LEFT_SPACE_LABEL],
+  );
+}
+
+/**
+ * Record a membership edge directly in the global DB, used by the handler
+ * fast-paths (`createSpace`/`joinSpace`/`leaveSpace`) for read-after-write
+ * consistency before the materialiser lands. The global DB has only the
+ * `edges` table (no `entities`), so this writes just the edge — no entity
+ * seeding — unlike the monolithic-DB helpers above.
+ *
+ * `label` is `JOINED_SPACE_LABEL` or `LEFT_SPACE_LABEL`.
+ */
+export async function recordGlobalMembership(
+  db: DbLike,
+  spaceId: StreamDid,
+  userDid: UserDid,
+  label: string,
+): Promise<void> {
+  await db.run(
+    `insert or ignore into edges (head, tail, label) values (?, ?, ?)`,
+    [userDid, spaceId, label],
+  );
+}
+
+/**
+ * Delete a membership edge from the global DB. Used by the handler
+ * fast-paths to remove `joinedSpace` on leave and `leftSpace` on rejoin.
+ */
+export async function deleteGlobalMembership(
+  db: DbLike,
+  spaceId: StreamDid,
+  userDid: UserDid,
+  label: string,
+): Promise<void> {
+  await db.run(
+    `delete from edges where head = ? and tail = ? and label = ?`,
+    [userDid, spaceId, label],
   );
 }

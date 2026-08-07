@@ -9,10 +9,17 @@
  */
 
 import { newUlid, StreamDid, parseEvent } from "@roomy-space/sdk";
-import { openDb } from "../db/db.ts";
+import { openDb, openGlobalDb } from "../db/db.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import { isBanned } from "../auth/access.ts";
-import { recordPersonalSpaceMembership, removeLeftSpaceEdge } from "../queries/joinedSpaces.ts";
+import {
+  JOINED_SPACE_LABEL,
+  LEFT_SPACE_LABEL,
+  recordPersonalSpaceMembership,
+  removeLeftSpaceEdge,
+  recordGlobalMembership,
+  deleteGlobalMembership,
+} from "../queries/joinedSpaces.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { Router as InvalidationRouter } from "../invalidation/index.ts";
@@ -123,14 +130,27 @@ export const joinSpaceHandler: ProcedureHandler<
   );
 
   // ── 2. Write joinedSpace edge directly ────────────────────────────────
-  // The SDK materialiser also writes this edge from the personal.joinSpace
-  // event, but the live materialisation may not have landed by the time
-  // the HTTP response returns. Writing directly makes the space immediately
-  // visible to getSpaces.
+  // The SDK materialiser (space.joinSpace) also writes this edge — routed
+  // to the global DB — but the live materialisation may not have landed by
+  // the time the HTTP response returns. Writing directly to both the
+  // monolithic DB (Phase-1 read source) and the global DB (membership store)
+  // makes the space immediately visible and keeps the global DB consistent.
   await recordPersonalSpaceMembership(db, spaceStreamDid, callerDid);
+  await recordGlobalMembership(
+    openGlobalDb(),
+    spaceStreamDid,
+    callerDid,
+    JOINED_SPACE_LABEL,
+  );
 
   // ── 3. Remove any leftSpace edge since the user is now rejoined ────
   await removeLeftSpaceEdge(db, spaceStreamDid, callerDid);
+  await deleteGlobalMembership(
+    openGlobalDb(),
+    spaceStreamDid,
+    callerDid,
+    LEFT_SPACE_LABEL,
+  );
 
   // ── 4. Emit direct getSpaces + getMetadata invalidation signals ──────
   // The live materializer also emits these when it processes the

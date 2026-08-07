@@ -46,8 +46,6 @@ export {
 export {
   JoinSpace,
   LeaveSpace,
-  PersonalJoinSpace,
-  PersonalLeaveSpace,
   UpdateSpaceInfo,
   UpdateSidebarV0,
   UpdateSidebar,

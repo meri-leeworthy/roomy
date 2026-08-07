@@ -20,8 +20,6 @@ import { CreateRoom, UpdateRoom, DeleteRoom, RestoreRoom } from "./room";
 import {
   JoinSpace,
   LeaveSpace,
-  PersonalJoinSpace,
-  PersonalLeaveSpace,
   UpdateSpaceInfo,
   UpdateSidebarV0,
   UpdateSidebar,
@@ -63,8 +61,6 @@ export const eventRegistry = {
   "space.roomy.reaction.removeBridgedReaction.v0": RemoveBridgedReaction,
   "space.roomy.space.joinSpace.v0": JoinSpace,
   "space.roomy.space.leaveSpace.v0": LeaveSpace,
-  "space.roomy.space.personal.joinSpace.v0": PersonalJoinSpace,
-  "space.roomy.space.personal.leaveSpace.v0": PersonalLeaveSpace,
   "space.roomy.space.updateSpaceInfo.v0": UpdateSpaceInfo,
   "space.roomy.space.updateSidebar.v0": UpdateSidebarV0,
   "space.roomy.space.updateSidebar.v1": UpdateSidebar,

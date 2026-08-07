@@ -3,7 +3,7 @@
  *
  * Before a caller-scoped read can be answered, we need to know which spaces
  * the caller has joined. Membership is tracked as `joinedSpace` edges with
- * `head = userDid`, written by `PersonalJoinSpace` materialisation and by the
+ * `head = userDid`, written by the `JoinSpace` materialisation and by the
  * join/create handlers directly.
  *
  * Materialization is handled inline by StreamManager when events are written,
@@ -69,10 +69,10 @@ async function run(
 }
 
 /**
- * Read the user's intended (joined-and-not-left) spaces. `PersonalJoinSpace`
- * writes a `joinedSpace` edge (head = user DID, tail = space);
- * `PersonalLeaveSpace` deletes it. Membership is per-user, so it lives in
- * `edges` rather than on the single global `comp_space` row a space has.
+ * Read the user's intended (joined-and-not-left) spaces. The `JoinSpace`
+ * materialiser writes a `joinedSpace` edge (head = user DID, tail = space);
+ * `LeaveSpace` deletes it. Membership is per-user, so it lives in `edges`
+ * rather than on the single global `comp_space` row a space has.
  */
 async function readIntendedSpaceDids(
   db: DbLike,

@@ -29,6 +29,20 @@ export const JoinSpace = defineEvent(
   ({ streamId, user, event }) => [
     // Ensure the joining user entity exists before referencing it in edges
     ensureEntity(streamId, user),
+    // Ensure the space entity exists (it is the stream root; idempotent).
+    ensureEntity(streamId, streamId),
+    // Membership (head = user DID, tail = space DID). Routed to the global
+    // DB by the appserver, so joining here is what tracks membership.
+    // Idempotent — a re-join must not duplicate the edge.
+    sql`
+      insert or ignore into edges (head, tail, label)
+      values (${user}, ${streamId}, 'joinedSpace')
+    `,
+    // A re-join clears any previous leave marker.
+    sql`
+      delete from edges
+       where head = ${user} and tail = ${streamId} and label = 'leftSpace'
+    `,
     // Insert member edge, using admin permission if an 'admin' edge exists for this user.
     // This ensures that admins who leave and rejoin retain their admin status.
     sql`
@@ -104,61 +118,18 @@ export const LeaveSpace = defineEvent(
           and
         label = 'member'
     `,
-  ],
-);
-
-const PersonalJoinSpaceSchema = type({
-  $type: "'space.roomy.space.personal.joinSpace.v0'",
-  spaceDid: StreamDid.describe("The space being joined."),
-}).describe(
-  "Join a Roomy space. \
-Records the user's join intent as a `joinedSpace` edge (head = user DID, tail = space DID). \
-Signaling that you have joined a space inside the space you are joining should be done with a room.joinRoom event.",
-);
-
-export const PersonalJoinSpace = defineEvent(
-  PersonalJoinSpaceSchema,
-  ({ streamId, user, event }) => {
-    return [
-      ensureEntity(streamId, event.spaceDid),
-      ensureEntity(streamId, user),
-      sql`
-        insert into comp_space (entity)
-        values (${event.spaceDid})
-        on conflict do update set hidden = 0
-      `,
-      // Per-user join intent as an edge (head = user DID, tail = space).
-      // `comp_space.hidden` above is a single global row per space and so
-      // can't represent which users have joined; this edge can. The appserver
-      // reads joined-space membership from these edges.
-      sql`
-        insert or ignore into edges (head, tail, label)
-        values (${user}, ${event.spaceDid}, 'joinedSpace')
-      `,
-    ];
-  },
-);
-
-const PersonalLeaveSpaceSchema = type({
-  $type: "'space.roomy.space.personal.leaveSpace.v0'",
-  spaceDid: StreamDid.describe("The space being left."),
-}).describe(
-  "Leave a Roomy space. \
-Removes the `joinedSpace` edge (head = user DID, tail = space DID) written by personal.joinSpace.",
-);
-
-export const PersonalLeaveSpace = defineEvent(
-  PersonalLeaveSpaceSchema,
-  ({ user, event }) => [
-    sql`
-      update comp_space set hidden = 1 where entity = ${event.spaceDid}
-    `,
-    // Remove the join-intent edge written by PersonalJoinSpace.
+    // Remove membership (head = user DID, tail = space DID). Routed to the
+    // global DB, so leaving clears membership tracking there.
     sql`
       delete from edges
-      where head = ${user}
-        and tail = ${event.spaceDid}
-        and label = 'joinedSpace'
+       where head = ${user} and tail = ${streamId} and label = 'joinedSpace'
+    `,
+    // Record the leave so `getSpaces?includeLeft=true` still lists the
+    // space (with isMember = false). Routed to the global DB alongside the
+    // joinedSpace edge. Idempotent.
+    sql`
+      insert or ignore into edges (head, tail, label)
+      values (${user}, ${streamId}, 'leftSpace')
     `,
   ],
 );
@@ -202,9 +173,8 @@ export const UpdateSpaceInfo = defineEvent(
       // Always ensure a comp_space row exists for this space. Without this,
       // a space created with only a name (no allowPublicJoin /
       // allowMemberInvites) never gets a comp_space row from its own stream
-      // — it only gets one incidentally when a member's PersonalJoinSpace
-      // event materializes. If that personal-join doesn't land (or on
-      // re-materialization of just the space stream), getMetadata 404s.
+      // (the join-space materializer now writes joinedSpace to the global DB,
+      // not comp_space). getMetadata would 404.
       sql`
         insert into comp_space (entity)
         values (${streamId})
@@ -446,8 +416,6 @@ export const SetHandleProvider = defineEvent(
 export const SpaceEventVariant = type.or(
   JoinSpaceSchema,
   LeaveSpaceSchema,
-  PersonalJoinSpaceSchema,
-  PersonalLeaveSpaceSchema,
   AddAdminSchema,
   RemoveAdminSchema,
   SetHandleProviderSchema,

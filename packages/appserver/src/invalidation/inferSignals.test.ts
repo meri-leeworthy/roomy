@@ -630,37 +630,6 @@ describe("inferSignals: invite events", () => {
   });
 });
 
-// ─── Personal stream events ─────────────────────────────────────────────
-
-describe("inferSignals: personal stream events", () => {
-  it("personalJoinSpace invalidates user's space list + target space members", async () => {
-    const targetSpace =
-      "did:web:target.space" as import("@roomy-space/sdk").StreamDid;
-    const signals = await inferSignals(
-      makeEvent({
-        type: "space.roomy.space.personal.joinSpace.v0",
-        details: { spaceDid: targetSpace },
-      }),
-    );
-
-    const nsids = invalidatedNsids(signals);
-    expect(nsids).toContain("space.roomy.space.getSpaces");
-
-    // Space-scoped invalidations use the personal stream's DID, not the
-    // target space DID. The personal stream's streamDid is the user's own.
-    // But we pass targetSpace in details, so the getMembers invalidation
-    // should target the joined space.
-    const memberInvalidations = signals.filter(
-      (s): s is { kind: "queryInvalidation"; signal: QueryInvalidation } =>
-        s.kind === "queryInvalidation" &&
-        s.signal.nsid === "space.roomy.space.getMembers",
-    );
-    expect(
-      memberInvalidations.some((s) => s.signal.params.spaceId === targetSpace),
-    ).toBe(true);
-  });
-});
-
 // ─── State events ───────────────────────────────────────────────────────
 
 describe("inferSignals: state events", () => {

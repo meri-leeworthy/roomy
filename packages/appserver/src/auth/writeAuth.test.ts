@@ -120,27 +120,6 @@ function deleteMessageEvent(roomId: string, messageId: string) {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 describe("auth/writeAuth — rejected types", () => {
-  test("personal.joinSpace is rejected with 400", async () => {
-    const { asyncDb: db } = freshDb();
-    const result = await checkWriteAuth(db, SPACE, USER, {
-      $type: "space.roomy.space.personal.joinSpace.v0",
-      id: newUlid(),
-    });
-    expect(result).toBeDefined();
-    expect(result!.status).toBe(400);
-    expect(result!.error).toBe("InvalidRequest");
-  });
-
-  test("personal.leaveSpace is rejected with 400", async () => {
-    const { asyncDb: db } = freshDb();
-    const result = await checkWriteAuth(db, SPACE, USER, {
-      $type: "space.roomy.space.personal.leaveSpace.v0",
-      id: newUlid(),
-    });
-    expect(result).toBeDefined();
-    expect(result!.status).toBe(400);
-  });
-
   test("markRead is rejected with 400", async () => {
     const { asyncDb: db } = freshDb();
     const result = await checkWriteAuth(db, SPACE, USER, {

@@ -34,10 +34,9 @@ function freshDb(): { db: Database; asyncDb: DbLike } {
 
 /**
  * Intent seeding: the production materializer writes `joinedSpace` edges
- * (head = userDid, tail = spaceId) from PersonalJoinSpace events. We bypass
+ * (head = userDid, tail = spaceId) from space.joinSpace events. We bypass
  * the materializer here and write the rows directly so hydration can be
- * tested in isolation. A left space has no such edge (PersonalLeaveSpace
- * deletes it).
+ * tested in isolation. A left space has no such edge (LeaveSpace deletes it).
  */
 function seedPersonalIntent(
   db: Database,
