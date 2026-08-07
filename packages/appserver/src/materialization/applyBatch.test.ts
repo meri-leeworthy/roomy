@@ -753,4 +753,57 @@ describe("per-space split dual-write (Phase 1)", () => {
     await db.close();
     delete process.env.EVENTS_DB_PATH;
   });
+
+  test("replaying join+leave in order does not re-add a departed user", async () => {
+    // This is the migration guarantee: rebuilding the global DB from the
+    // event log must respect a user's decision to leave. The log holds both
+    // space.joinSpace and space.leaveSpace in order, and replay applies them
+    // in idx order, so a join that was later undone must NOT leave a
+    // joinedSpace edge behind (which would re-add the user to getSpaces).
+    const testId = Math.random().toString(36).slice(2, 8);
+    process.env.EVENTS_DB_PATH = `/tmp/roomy-events-replay-${testId}.sqlite`;
+    const db = openDb({ path: ":memory:", isolated: true });
+
+    const streamDid = StreamDid.assert("did:web:replay.example");
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [streamDid, streamDid]);
+    await db.run("insert into comp_space (entity) values (?)", [streamDid]);
+
+    const spaceDb = db.forSpace(streamDid);
+    const globalDb = db.global();
+
+    const joined = async (): Promise<number> =>
+      (await globalDb
+        .query("select count(*) as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
+        .get<{ n: number }>(USER, streamDid))?.n ?? 0;
+    const left = async (): Promise<number> =>
+      (await globalDb
+        .query("select count(*) as n from edges where head = ? and tail = ? and label = 'leftSpace'")
+        .get<{ n: number }>(USER, streamDid))?.n ?? 0;
+
+    const evJoin = {
+      event: { $type: "space.roomy.space.joinSpace.v0", id: newUlid() } as unknown as Event,
+      idx: 0 as StreamIndex,
+      user: USER,
+    };
+    const evLeave = {
+      event: { $type: "space.roomy.space.leaveSpace.v0", id: newUlid() } as unknown as Event,
+      idx: 1 as StreamIndex,
+      user: USER,
+    };
+
+    // Replay the log in order, exactly as reMaterializeFromLocalEvents does.
+    await applyBatch(db, streamDid, [evJoin], { isBackfill: true }, spaceDb, globalDb);
+    expect(await joined()).toBe(1);
+    expect(await left()).toBe(0);
+
+    await applyBatch(db, streamDid, [evLeave], { isBackfill: true }, spaceDb, globalDb);
+    expect(await joined()).toBe(0); // leave undid the join
+    expect(await left()).toBe(1);   // leave history preserved
+
+    // The departed user must NOT appear as a member after replay.
+    expect(await joined()).toBe(0);
+
+    await db.close();
+    delete process.env.EVENTS_DB_PATH;
+  });
 });
