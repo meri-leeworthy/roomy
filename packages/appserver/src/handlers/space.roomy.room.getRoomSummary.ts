@@ -10,10 +10,11 @@
  * `requireRoomRead` access check.
  */
 
-import { openDb } from "../db/db.ts";
+import { openSpaceDbForEntity } from "../db/db.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { requireString } from "../xrpc/params.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
+import { XrpcError } from "../xrpc/errors.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
 
 interface GetRoomSummaryResult {
@@ -35,7 +36,10 @@ export const getRoomSummaryHandler: QueryHandler<
   const userDid = parseUserDid(auth);
   const roomId = requireString(params, "roomId");
 
-  const db = openDb();
+  const db = await openSpaceDbForEntity(roomId);
+  if (!db) {
+    throw new XrpcError(404, "NotFound", `Room not found: ${roomId}`);
+  }
   // Single access check — no memo needed (no loop). requireRoomRead throws
   // 404/403 as appropriate.
   const access = await requireRoomRead(db, roomId, userDid);

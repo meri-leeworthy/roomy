@@ -7,7 +7,7 @@
  */
 
 import { createAccessMemo, roomAccess, spaceAccess } from "../auth/access.ts";
-import { openDb } from "../db/db.ts";
+import { openDb, openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { getReadPositions } from "../queries/readPositions.ts";
 import { queryActiveThreads, resolveThreadsByIds } from "../queries/userActiveThreads.ts";
@@ -84,7 +84,8 @@ export const getMetadataHandler: QueryHandler<
     await hydrateUserMembership(userDid);
   }
 
-  const db = openDb();
+  const db = openSpaceDb(spaceId);
+  const mainDb = openDb();
   // Metadata (name, avatar, joinPolicy, isMember) is required to render the
   // join / accept-invite UI for spaces the caller is not yet a member of —
   // including invite-only spaces. We therefore don't require read membership
@@ -171,7 +172,7 @@ export const getMetadataHandler: QueryHandler<
 
     // Batch-fetch read positions for all channels in this space.
     const readPositions = await getReadPositions(
-      db,
+      mainDb,
       userDid,
       allChannelRows.map((r) => r.id as string),
     );
@@ -218,14 +219,14 @@ export const getMetadataHandler: QueryHandler<
     // ── Active threads ────────────────────────────────────────────────
     // Fetch up to 8 threads the user has recently interacted with and
     // distribute them into their parent channels for the sidebar.
-    const activeThreadEntries = await queryActiveThreads(db, userDid, spaceId);
+    const activeThreadEntries = await queryActiveThreads(mainDb, userDid, spaceId);
 
     if (activeThreadEntries.length > 0) {
       const threadIds = activeThreadEntries.map((t) => t.id);
       const threadMetaMap = await resolveThreadsByIds(db, threadIds);
 
       // Build active thread objects with access checks and read positions.
-      const threadReadPositions = await getReadPositions(db, userDid, threadIds);
+      const threadReadPositions = await getReadPositions(mainDb, userDid, threadIds);
       const activeThreadsByParent = new Map<string, ActiveSidebarThread[]>();
 
       for (const entry of activeThreadEntries) {

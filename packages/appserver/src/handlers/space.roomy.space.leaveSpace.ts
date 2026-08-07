@@ -8,7 +8,7 @@
  */
 
 import { newUlid, StreamDid, parseEvent } from "@roomy-space/sdk";
-import { openDb, openGlobalDb } from "../db/db.ts";
+import { openDb, openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import { isMember, isAdmin } from "../auth/access.ts";
 import {
@@ -48,6 +48,7 @@ export const leaveSpaceHandler: ProcedureHandler<LeaveSpaceBody, void> = async (
   }
 
   const db = openDb();
+  const spaceDb = openSpaceDb(spaceId);
 
   // ── Authorisation: caller must be a member or admin ──────────────────
   // The auth check doubles as the existence check: member/admin edges have
@@ -56,8 +57,8 @@ export const leaveSpaceHandler: ProcedureHandler<LeaveSpaceBody, void> = async (
   // `entities WHERE id = ? AND stream_id = ?` existence check was unreliable
   // because stream_id depends on which materialiser wrote the entity row
   // first — see queries/joinedSpaces.ts.)
-  const member = await isMember(db, spaceId, callerDid);
-  const admin = await isAdmin(db, spaceId, callerDid);
+  const member = await isMember(spaceDb, spaceId, callerDid);
+  const admin = await isAdmin(spaceDb, spaceId, callerDid);
   if (!member && !admin) {
     throw new XrpcError(
       403,

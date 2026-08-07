@@ -267,7 +267,14 @@ describe("per-space dual-write: rooms and messages", () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     await joinSpace(ctx, USER, SPACE);
+    // Phase 2: the per-space DB is the read source, so the admin edge must
+    // be present there too (the per-space DB is backfilled from mono on first
+    // open, which already happened during joinSpace).
     (ctx.db as AnyDb).run(
+      "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
+      [SPACE, USER],
+    );
+    await (ctx.db as AnyDb).forSpace(SPACE).run(
       "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
       [SPACE, USER],
     );
@@ -295,13 +302,23 @@ describe("per-space dual-write: rooms and messages", () => {
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     await joinSpace(ctx, USER, SPACE);
 
-    // Need a room to target.
+    // Need a room to target. Phase 2: the per-space DB is the read source,
+    // so the room must exist there too (the per-space DB was backfilled from
+    // mono on first open during joinSpace).
     const room = newUlid();
     await (ctx.db as AnyDb).run(
       "insert or ignore into entities (id, stream_id) values (?, ?)",
       [room, SPACE],
     );
     await (ctx.db as AnyDb).run(
+      "insert or ignore into comp_room (entity, label) values (?, 'space.roomy.channel')",
+      [room],
+    );
+    await (ctx.db as AnyDb).forSpace(SPACE).run(
+      "insert or ignore into entities (id, stream_id) values (?, ?)",
+      [room, SPACE],
+    );
+    await (ctx.db as AnyDb).forSpace(SPACE).run(
       "insert or ignore into comp_room (entity, label) values (?, 'space.roomy.channel')",
       [room],
     );

@@ -5,7 +5,7 @@
  * access on that room is enforced before assembling the message.
  */
 
-import { openDb } from "../db/db.ts";
+import { openSpaceDbForEntity } from "../db/db.ts";
 import { prioritiseLinksForRead } from "../embed/sweeper.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
@@ -25,7 +25,10 @@ export const getMessageHandler: QueryHandler<QueryParams, MessageDto> = async (
     await hydrateUserMembership(userDid);
   }
 
-  const db = openDb();
+  const db = await openSpaceDbForEntity(messageId);
+  if (!db) {
+    throw new XrpcError(404, "NotFound", `Message not found: ${messageId}`);
+  }
   const row = await db
     .query("select room from entities where id = ?")
     .get<{ room: string | null }>(messageId);

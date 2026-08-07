@@ -5,7 +5,7 @@
  * assigned member DIDs. Soft-deleted roles are omitted.
  */
 
-import { openDb } from "../db/db.ts";
+import { openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -42,7 +42,7 @@ export const getRolesHandler: QueryHandler<
 		await hydrateUserMembership(userDid);
 	}
 
-	const db = openDb();
+	const db = openSpaceDb(spaceId);
 	const access = await requireSpaceAccess(db, spaceId, userDid);
 
 	const roleRows = await db

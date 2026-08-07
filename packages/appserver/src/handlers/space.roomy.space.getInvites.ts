@@ -7,7 +7,7 @@
  * explicit denial makes intent clear per spec).
  */
 
-import { openDb } from "../db/db.ts";
+import { openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -36,7 +36,7 @@ export const getInvitesHandler: QueryHandler<
 
   await hydrateUserMembership(userDid);
 
-  const db = openDb();
+  const db = openSpaceDb(spaceId);
   const access = await requireSpaceAccess(db, spaceId, userDid);
 
   if (!access.isAdmin) {

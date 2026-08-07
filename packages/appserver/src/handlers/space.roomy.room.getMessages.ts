@@ -5,11 +5,12 @@
  * older than the cursor are returned.
  */
 
-import { openDb } from "../db/db.ts";
+import { openSpaceDbForEntity } from "../db/db.ts";
 import { prioritiseLinksForRead } from "../embed/sweeper.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
+import { XrpcError } from "../xrpc/errors.ts";
 import { optionalInt, optionalString, requireString } from "../xrpc/params.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
@@ -36,7 +37,10 @@ export const getMessagesHandler: QueryHandler<
     await hydrateUserMembership(userDid);
   }
 
-  const db = openDb();
+  const db = await openSpaceDbForEntity(roomId);
+  if (!db) {
+    throw new XrpcError(404, "NotFound", `Room not found: ${roomId}`);
+  }
   await requireRoomRead(db, roomId, userDid);
 
   const { messages, nextCursor } = await selectMessages(db, {

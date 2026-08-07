@@ -12,6 +12,7 @@
 
 import type { DbLike } from "../db/types.ts";
 import type { StreamDid, UserDid } from "@roomy-space/sdk";
+import { openSpaceDb } from "../db/db.ts";
 import { getSpaceUnreadCount } from "./readPositions.ts";
 
 /**
@@ -50,175 +51,114 @@ export interface SelectSpacesOptions {
 }
 
 /**
- * Map a raw SQL row to a SpaceRow.
- */
-async function rowToSpace(
-  db: DbLike,
-  r: {
-    id: string;
-    name: string | null;
-    avatar: string | null;
-    description: string | null;
-    handle: string | null;
-    is_member: number;
-    is_admin: number;
-  },
-  userDid: UserDid,
-): Promise<SpaceRow> {
-  const space: SpaceRow = {
-    id: r.id,
-    unreadCount: await getSpaceUnreadCount(db, userDid, r.id),
-    isMember: !!r.is_member,
-    isAdmin: !!r.is_admin,
-    roleIds: [],
-  };
-  if (r.name !== null) space.name = r.name;
-  if (r.avatar !== null) space.avatar = r.avatar;
-  if (r.description !== null) space.description = r.description;
-  if (r.handle !== null) space.handle = r.handle;
-  return space;
-}
-
-/**
  * Return the caller's joined spaces, optionally including left spaces.
  *
- * A joined space is identified by a `joinedSpace` edge from the caller's
- * user DID to the space. The edge carries the join intent; the space
- * stream's own `member`/`admin` edges carry the actual membership truth.
- *
- * When `includeLeft` is true, left spaces (identified by a `leftSpace` edge)
- * are also returned with `isMember = false`, `isAdmin = false`.
+ * Phase 2 (read cutover): membership edges (`joinedSpace`/`leftSpace`) live in
+ * the global DB, while the space's display fields and membership truth
+ * (`member`/`admin` edges, `comp_bans`) live in the per-space DB. This
+ * function reads the space DIDs from `globalDb`, then fans out to each space's
+ * per-space DB for the details. `mainDb` is the monolithic handle, used only
+ * for the read-state unread-count aggregate (read_positions / user_thread_activity
+ * are not split and live on the main DB).
  */
 export async function selectJoinedSpaces(
-  db: DbLike,
+  globalDb: DbLike,
+  mainDb: DbLike,
   userDid: UserDid,
   options: SelectSpacesOptions = {},
 ): Promise<SpaceRow[]> {
-  if (options.includeLeft) {
-    return await selectJoinedAndLeftSpaces(db, userDid);
-  }
-  return await selectJoinedSpacesOnly(db, userDid);
+  const labels = options.includeLeft
+    ? [JOINED_SPACE_LABEL, LEFT_SPACE_LABEL]
+    : [JOINED_SPACE_LABEL];
+  const ph = labels.map(() => "?").join(",");
+  const rows = await globalDb
+    .query(
+      `select tail as id, label from edges
+        where head = ? and label in (${ph})`,
+    )
+    .all<{ id: string; label: string }>([userDid, ...labels]);
+
+  const spaceRows = await Promise.all(
+    rows.map(async (r) => {
+      const isLeft = r.label === LEFT_SPACE_LABEL;
+      const spaceDb = openSpaceDb(r.id);
+      const row = await querySpaceRow(spaceDb, r.id, userDid);
+      if (!row) return null;
+      // Left spaces are always included (isMember/isAdmin false). Joined
+      // spaces require a member/admin edge (real membership truth).
+      if (!isLeft && !row.is_member && !row.is_admin) return null;
+      const unreadCount = await getSpaceUnreadCount(mainDb, userDid, r.id);
+      const space: SpaceRow = {
+        id: r.id,
+        unreadCount,
+        isMember: !!row.is_member,
+        isAdmin: !!row.is_admin,
+        roleIds: [],
+      };
+      if (row.name !== null) space.name = row.name;
+      if (row.avatar !== null) space.avatar = row.avatar;
+      if (row.description !== null) space.description = row.description;
+      if (row.handle !== null) space.handle = row.handle;
+      return space;
+    }),
+  );
+
+  return spaceRows.filter((s): s is SpaceRow => s !== null);
 }
 
 /**
- * Joined spaces only — the original behaviour. Requires the user to have
- * a `member` or `admin` edge on the space (in addition to the `joinedSpace`
- * edge from the user DID).
+ * Query a single space's display fields + membership truth from its per-space
+ * DB. Returns null when the space isn't materialised there, or when the caller
+ * is banned from it.
  */
-async function selectJoinedSpacesOnly(
-  db: DbLike,
+async function querySpaceRow(
+  spaceDb: DbLike,
+  spaceId: string,
   userDid: UserDid,
-): Promise<SpaceRow[]> {
-  const rows = await db
+): Promise<{
+  id: string;
+  name: string | null;
+  avatar: string | null;
+  description: string | null;
+  handle: string | null;
+  is_member: number;
+  is_admin: number;
+} | null> {
+  const banned = await spaceDb
     .query(
-      `select
-           je.tail as id,
-           ci.name as name,
-           ci.avatar as avatar,
-           ci.description as description,
-           cs.handle as handle,
-           exists (
-             select 1 from edges
-              where head = je.tail and tail = ?1 and label = 'member'
-           ) as is_member,
-           exists (
-             select 1 from edges
-              where head = je.tail and tail = ?1 and label = 'admin'
-           ) as is_admin
-         from edges je
-         left join comp_info ci on ci.entity = je.tail
-         left join comp_space cs on cs.entity = je.tail
-        where je.head = ?1
-          and je.label = ?2
-          and not exists (
-            select 1 from comp_bans
-             where entity = je.tail and user_did = ?1
-          )
-          and (
-            exists (
-              select 1 from edges
-               where head = je.tail and tail = ?1 and label = 'member'
-            )
-            or exists (
-              select 1 from edges
-               where head = je.tail and tail = ?1 and label = 'admin'
-            )
-          )`,
+      "select 1 as n from comp_bans where entity = ? and user_did = ? limit 1",
     )
-    .all<{
-      id: string;
-      name: string | null;
-      avatar: string | null;
-      description: string | null;
-      handle: string | null;
-      is_member: number;
-      is_admin: number;
-    }>([userDid, JOINED_SPACE_LABEL]);
+    .get<{ n: number }>([spaceId, userDid]);
+  if (banned) return null;
 
-  return await Promise.all(rows.map((r) => rowToSpace(db, r, userDid)));
-}
-
-/**
- * Joined + left spaces. Returns spaces with either a `joinedSpace` edge
- * (currently joined) OR a `leftSpace` edge (previously left). The
- * `isMember`/`isAdmin` fields correctly reflect the current membership
- * state — left spaces have both as false.
- */
-async function selectJoinedAndLeftSpaces(
-  db: DbLike,
-  userDid: UserDid,
-): Promise<SpaceRow[]> {
-  const rows = await db
+  // comp_info / comp_space may be absent (a space can be joined before its
+  // own stream materialises a comp_space row), so read them independently.
+  const info = await spaceDb
+    .query("select name, avatar, description from comp_info where entity = ?")
+    .get<{ name: string | null; avatar: string | null; description: string | null }>([spaceId]);
+  const cs = await spaceDb
+    .query("select handle from comp_space where entity = ?")
+    .get<{ handle: string | null }>([spaceId]);
+  const member = await spaceDb
     .query(
-      `select
-           je.tail as id,
-           ci.name as name,
-           ci.avatar as avatar,
-           ci.description as description,
-           cs.handle as handle,
-           exists (
-             select 1 from edges
-              where head = je.tail and tail = ?1 and label = 'member'
-           ) as is_member,
-           exists (
-             select 1 from edges
-              where head = je.tail and tail = ?1 and label = 'admin'
-           ) as is_admin
-         from edges je
-         left join comp_info ci on ci.entity = je.tail
-         left join comp_space cs on cs.entity = je.tail
-        where je.head = ?1
-          and (
-            je.label = ?2   -- joinedSpace
-            or je.label = ?3  -- leftSpace
-          )
-          and not exists (
-            select 1 from comp_bans
-             where entity = je.tail and user_did = ?1
-          )
-          and (
-            je.label = ?3  -- leftSpace → always include
-            or exists (
-              select 1 from edges
-               where head = je.tail and tail = ?1 and label = 'member'
-            )
-            or exists (
-              select 1 from edges
-               where head = je.tail and tail = ?1 and label = 'admin'
-            )
-          )`,
+      "select 1 as n from edges where head = ? and tail = ? and label = 'member' limit 1",
     )
-    .all<{
-      id: string;
-      name: string | null;
-      avatar: string | null;
-      description: string | null;
-      handle: string | null;
-      is_member: number;
-      is_admin: number;
-    }>([userDid, JOINED_SPACE_LABEL, LEFT_SPACE_LABEL]);
+    .get<{ n: number }>([spaceId, userDid]);
+  const admin = await spaceDb
+    .query(
+      "select 1 as n from edges where head = ? and tail = ? and label = 'admin' limit 1",
+    )
+    .get<{ n: number }>([spaceId, userDid]);
 
-  return await Promise.all(rows.map((r) => rowToSpace(db, r, userDid)));
+  return {
+    id: spaceId,
+    name: info?.name ?? null,
+    avatar: info?.avatar ?? null,
+    description: info?.description ?? null,
+    handle: cs?.handle ?? null,
+    is_member: member ? 1 : 0,
+    is_admin: admin ? 1 : 0,
+  };
 }
 
 /**

@@ -9,7 +9,7 @@
  */
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
-import { openDb } from "../db/db.ts";
+import { openDb, openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
 import { getReadPositions } from "../queries/readPositions.ts";
@@ -61,7 +61,8 @@ export const getSpaceThreadsHandler: QueryHandler<
     await hydrateUserMembership(userDid);
   }
 
-  const db = openDb();
+  const db = openSpaceDb(spaceId);
+  const mainDb = openDb();
   // Per-request memo: every thread in this space shares the same
   // space-level membership/admin/ban flags — without the memo, each
   // thread's roomAccess call re-queries them (~5 queries × N threads).
@@ -72,7 +73,7 @@ export const getSpaceThreadsHandler: QueryHandler<
 
   // Collect all thread IDs for batch unread lookup
   const threadIds = all.map((t) => t.id);
-  const readPositions = auth.did ? await getReadPositions(db, auth.did, threadIds) : new Map();
+  const readPositions = auth.did ? await getReadPositions(mainDb, auth.did, threadIds) : new Map();
 
   // Batch-fetch channel names for all canonical parents
   const parentIds = [...new Set(all.map((t) => t.canonicalParent).filter(Boolean))] as string[];

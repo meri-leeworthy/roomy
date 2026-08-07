@@ -6,7 +6,7 @@
  * message payloads small.
  */
 
-import { openDb } from "../db/db.ts";
+import { openSpaceDbForEntity } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -40,7 +40,10 @@ export const getReactionsHandler: QueryHandler<
     await hydrateUserMembership(userDid);
   }
 
-  const db = openDb();
+  const db = await openSpaceDbForEntity(messageId);
+  if (!db) {
+    throw new XrpcError(404, "NotFound", `Message not found: ${messageId}`);
+  }
 
   // Resolve the message's room for access control.
   const row = await db

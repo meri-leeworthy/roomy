@@ -6,7 +6,7 @@
  * event `space.roomy.state.markRead.v0`.
  */
 
-import { openDb } from "../db/db.ts";
+import { openDb, openSpaceDbForEntity } from "../db/db.ts";
 import { resetNotificationState } from "../queries/notificationState.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
@@ -58,7 +58,11 @@ export const updateSeenHandler: ProcedureHandler<UpdateSeenBody, void> = async (
   // arrive.
   void hydrateUserMembership(userDid).catch(() => {});
 
-  const db = openDb();
+  const db = await openSpaceDbForEntity(roomId);
+  if (!db) {
+    throw new XrpcError(404, "NotFound", `Room not found: ${roomId}`);
+  }
+  const mainDb = openDb();
   let access: Awaited<ReturnType<typeof requireRoomRead>>;
   try {
     access = await requireRoomRead(db, roomId, userDid);
@@ -110,7 +114,7 @@ export const updateSeenHandler: ProcedureHandler<UpdateSeenBody, void> = async (
     unreadCount = (countRow?.n as number) ?? 0;
   }
 
-  const stmt = await db.prepare(
+  const stmt = await mainDb.prepare(
     `insert into readstate.read_positions (user_did, room_id, seen_up_to, unread_count, updated_at)
      values (?, ?, ?, ?, (unixepoch() * 1000))
      on conflict(user_did, room_id) do update set
@@ -123,7 +127,7 @@ export const updateSeenHandler: ProcedureHandler<UpdateSeenBody, void> = async (
   // Reset the Engaged push-digest batch for this (user, room): the user has
   // opened the room, so cancel any pending digest and re-arm the batch for the
   // next burst ("until you open the room again"). Idempotent: no row = no-op.
-  await resetNotificationState(db, userDid, roomId);
+  await resetNotificationState(mainDb, userDid, roomId);
 
   // Push invalidation signals to the sync manager so the caller's WS
   // connection re-fetches stale data.

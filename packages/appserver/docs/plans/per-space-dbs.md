@@ -1,7 +1,7 @@
 # Per-Space Database Architecture
 
 **Date:** 2026-07-03
-**Status:** Design / Proposed
+**Status:** Phase 1 (dual-write) + Phase 2 (read cutover, dual-write kept) shipped. Phase 3 (remove monolithic) pending.
 
 ## Problem
 
@@ -614,21 +614,36 @@ The monolithic DB is always kept in sync during Phase 1, so there's no data loss
 
 **Goal**: All per-space queries read from per-space DBs. Monolithic DB is read-only.
 
+> **Status (2026-08):** Read cutover shipped while KEEPING dual-write. Per the
+> operator's directive, we cut over reads to the per-space DBs but did NOT make
+> the monolithic DB read-only or remove dual-write — the monolithic DB stays
+> dual-written and correct so we can validate the migration in production and
+> roll back by flipping reads back. Items 3–5 below (removing write paths) are
+> deferred to Phase 3.
+
 ### Changes
 
 1. **Handler reads switch to per-space DBs**: Every handler that currently reads from `openDb()` (monolithic) reads from `openDb(spaceDid)` (per-space) instead.
 
+   - Space-scoped handlers (`getMetadata`, `getMembers`, `getRoles`, `getInvites`, `getSpaceSummary`, `getThreads`, `setHandle`, `sendEvents`, `joinSpace`, `leaveSpace`) open `openSpaceDb(spaceId)`.
+   - Room/message-scoped handlers (`getMessages`, `getThreads`, `getRoomSummary`, `getMetadata`, `getMessage`, `getReactions`, `updateSeen`) resolve the owning space via `openSpaceDbForEntity(entityId)` (a cheap monolithic `entities.stream_id` lookup — the monolithic DB is still dual-written and correct) and then read from the per-space DB.
+   - Read-state queries (`read_positions`, `user_thread_activity`) are NOT split and stay on the monolithic handle (`openDb()`), since the per-space DBs have no readstate tables.
+   - `getProfile` is a genuinely cross-space query (no space context) and is left on the monolithic DB for now — the plan's cross-space list does not cover it.
+
 2. **Cross-space queries use global DB + fan-out**: `getSpaces`, `getActivityFeed` (no filter) use the fan-out pattern described above.
 
-3. **Monolithic DB becomes read-only**: Remove all write paths to the monolithic DB. Keep it mounted for rollback safety.
+   - `getSpaces` reads `joinedSpace`/`leftSpace` edges from the global DB, then fans out to each space's per-space DB for display fields + membership truth; the read-state unread-count aggregate still reads from the monolithic handle.
+   - `getActivityFeed` (no filter) reads joined-space DIDs from the global DB, fans out to each space's per-space DB for `activity_item` + message/embed/reaction data, merges/sorts in JS, and reads unread counts from the monolithic handle.
 
-4. **Remove dual-write from materializers**: `applyBatch` and `applyBundle` only write to the per-space DB.
+3. **Monolithic DB becomes read-only**: Remove all write paths to the monolithic DB. Keep it mounted for rollback safety. — **DEFERRED** (dual-write kept for production validation).
 
-5. **Remove global pending-links dual-write**: The embed sweeper reads from the global `pending_links` table (which is still dual-written during materialization). This is the one dual-write that stays — it's the sweeper's index, not a backup.
+4. **Remove dual-write from materializers**: `applyBatch` and `applyBundle` only write to the per-space DB. — **DEFERRED** (dual-write kept).
+
+5. **Remove global pending-links dual-write**: The embed sweeper reads from the global `pending_links` table (which is still dual-written during materialization). This is the one dual-write that stays — it's the sweeper's index, not a backup. — **DEFERRED** (dual-write kept).
 
 ### Verification
 
-Run the full test suite with the monolithic DB in read-only mode. All tests should pass without writing to the monolithic DB.
+Run the full test suite with the monolithic DB in read-only mode. All tests should pass without writing to the monolithic DB. — **NOT YET**: with dual-write kept, the monolithic DB is still written; this verification applies once items 3–5 land in Phase 3.
 
 ---
 

@@ -10,7 +10,7 @@
  */
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
-import { openDb } from "../db/db.ts";
+import { openDb, openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import {
   selectActivityFeed,
@@ -44,27 +44,28 @@ export const getActivityFeedHandler: QueryHandler<
   const cursor = optionalString(params, "cursor") ?? null;
 
   await hydrateUserMembership(userDid);
-  const db = openDb();
+  const mainDb = openDb();
 
   // Per-request memo: the feed spans multiple spaces/rooms but each
   // (space, did) membership decision is reused across all items in that
   // space. Without the memo, each item's roomAccess re-queries the same
   // space-level flags.
   const memo = createAccessMemo();
-  // If a specific space is requested, verify access.
+  // If a specific space is requested, verify access against its per-space DB.
   if (spaceId) {
-    await requireSpaceAccess(db, spaceId, userDid, memo);
+    await requireSpaceAccess(openSpaceDb(spaceId), spaceId, userDid, memo);
   }
 
   const { feed, cursor: nextCursor } = await selectActivityFeed(
-    db,
+    mainDb,
     userDid,
     { spaceId, limit, cursor },
   );
 
   // Filter by room-level read access: silently skip rooms the user can't read.
+  // Each feed item carries its spaceId, so open that item's per-space DB.
   const accessResults = await Promise.all(
-    feed.map((item) => roomAccess(db, item.threadId, userDid, memo)),
+    feed.map((item) => roomAccess(openSpaceDb(item.spaceId), item.threadId, userDid, memo)),
   );
   const accessible = feed.filter((_, i) => accessResults[i]?.canRead ?? false);
 

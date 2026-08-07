@@ -6,11 +6,12 @@
  */
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
-import { openDb } from "../db/db.ts";
+import { openDb, openSpaceDbForEntity } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { getReadPosition, getReadPositions, type ReadPosition } from "../queries/readPositions.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
+import { XrpcError } from "../xrpc/errors.ts";
 import { requireString } from "../xrpc/params.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
@@ -47,7 +48,11 @@ export const getRoomMetadataHandler: QueryHandler<
     await hydrateUserMembership(userDid);
   }
 
-  const db = openDb();
+  const db = await openSpaceDbForEntity(roomId);
+  if (!db) {
+    throw new XrpcError(404, "NotFound", `Room not found: ${roomId}`);
+  }
+  const mainDb = openDb();
   // Per-request access memo: this handler calls roomAccess for the room
   // itself plus up to 20 recent threads, and each roomAccess call
   // internally checks isMember/isAdmin/isBanned/allowsPublicJoin on the
@@ -95,7 +100,7 @@ export const getRoomMetadataHandler: QueryHandler<
       .map((t, i) => ({ thread: t, access: accessByIndex[i]! }))
       .filter(({ access }) => access.canRead);
     const threadPositions = await getReadPositions(
-      db,
+      mainDb,
       userDid,
       accessible.map(({ thread }) => thread.id),
     );
@@ -114,7 +119,7 @@ export const getRoomMetadataHandler: QueryHandler<
 
   let pos: ReadPosition;
   if (userDid !== null) {
-    pos = await getReadPosition(db, userDid, roomId);
+    pos = await getReadPosition(mainDb, userDid, roomId);
   } else {
     pos = { unreadCount: 0, lastRead: null };
   }

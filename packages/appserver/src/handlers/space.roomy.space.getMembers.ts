@@ -13,7 +13,7 @@
  * hasn't been hydrated yet; that's expected and not an error.
  */
 
-import { openDb } from "../db/db.ts";
+import { openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -39,7 +39,7 @@ export const getMembersHandler: QueryHandler<
 
   await hydrateUserMembership(userDid);
 
-  const db = openDb();
+  const db = openSpaceDb(spaceId);
   await requireSpaceAccess(db, spaceId, userDid);
 
   return await selectMembers(db, spaceId, search);

@@ -9,7 +9,7 @@
  */
 
 import { newUlid, StreamDid, parseEvent } from "@roomy-space/sdk";
-import { openDb, openGlobalDb } from "../db/db.ts";
+import { openDb, openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import { isBanned } from "../auth/access.ts";
 import {
@@ -64,9 +64,10 @@ export const joinSpaceHandler: ProcedureHandler<
   }
 
   const db = openDb();
+  const spaceDb = openSpaceDb(spaceId);
 
   // ── Verify space exists ──────────────────────────────────────────────
-  const spaceRow = await db
+  const spaceRow = await spaceDb
     .query(
       "SELECT 1 AS n FROM entities WHERE id = ? LIMIT 1",
     )
@@ -76,7 +77,7 @@ export const joinSpaceHandler: ProcedureHandler<
   }
 
   // ── Ban check ────────────────────────────────────────────────────────
-  if (await isBanned(db, spaceId, callerDid)) {
+  if (await isBanned(spaceDb, spaceId, callerDid)) {
     throw new XrpcError(
       403,
       "Forbidden",
@@ -85,7 +86,7 @@ export const joinSpaceHandler: ProcedureHandler<
   }
 
   // ── Invite token validation for private spaces ───────────────────────
-  const publicJoinRow = await db
+  const publicJoinRow = await spaceDb
     .query(
       "SELECT coalesce(allow_public_join, 1) AS v FROM comp_space WHERE entity = ?",
     )
@@ -101,7 +102,7 @@ export const joinSpaceHandler: ProcedureHandler<
         "This space requires an invite token to join",
       );
     }
-    const tokenRow = await db
+    const tokenRow = await spaceDb
     .query(
       "SELECT 1 AS n FROM comp_invite WHERE entity = ? AND token = ?",
     )

@@ -10,6 +10,7 @@
 
 import type { DbLike } from "../db/types.ts";
 import { decodeContent } from "../db/content.ts";
+import { openGlobalDb, openSpaceDb } from "../db/db.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -56,83 +57,131 @@ export interface ActivityFeedScope {
 
 // ─── Query ────────────────────────────────────────────────────────────────
 
+/** Raw `activity_item` row shape, shared across the per-space fan-out. */
+interface ActivityItemRow {
+  room_id: string;
+  space_id: string;
+  is_thread: number;
+  parent_channel_id: string | null;
+  parent_channel_name: string | null;
+  last_activity_at: number;
+  recent_message_ids: string;
+  room_name: string | null;
+  space_name: string | null;
+  space_avatar: string | null;
+}
+
+const ACTIVITY_ITEM_COLUMNS = `
+     ai.room_id, ai.space_id, ai.is_thread,
+     ai.parent_channel_id, ai.parent_channel_name,
+     ai.last_activity_at, ai.recent_message_ids,
+     ai.room_name, ai.space_name, ai.space_avatar
+`;
+
+/** Filter out deleted rooms. */
+const NOT_DELETED = "(cr.deleted is null or cr.deleted = 0)";
+
+/**
+ * Select the activity feed by fanning out to per-space DBs (Phase 2).
+ *
+ * `mainDb` is the MONOLITHIC handle, used ONLY for the readstate unread-count
+ * query (readstate tables are not split and live on the monolithic DB). All
+ * other reads go against the per-space DBs, one per joined space.
+ */
 export async function selectActivityFeed(
-  db: DbLike,
+  mainDb: DbLike,
   userDid: string,
   scope: ActivityFeedScope,
 ): Promise<{ feed: ActivityFeedItem[]; cursor: string | null }> {
-  // Step 1: fetch the raw activity_item rows, filtered and paginated.
-  const spaceFilter = scope.spaceId;
-
-  // Build the WHERE clause dynamically.
-  const conditions: string[] = [];
-  const params: (string | number)[] = [];
-
-  // Always filter by joined spaces (or a specific space).
-  if (spaceFilter) {
-    conditions.push("ai.space_id = ?");
-    params.push(spaceFilter);
+  // Step 0: determine the set of space DIDs.
+  let spaceDids: string[];
+  if (scope.spaceId) {
+    spaceDids = [scope.spaceId];
   } else {
-    conditions.push("ai.space_id in (select tail from edges where head = ? and label = 'joinedSpace')");
-    params.push(userDid);
+    const globalDb = openGlobalDb();
+    const joinedRows = await globalDb
+      .query("select tail as id from edges where head = ? and label = 'joinedSpace'")
+      .all<{ id: string }>([userDid]);
+    spaceDids = joinedRows.map((r) => r.id);
   }
 
-  // Filter out deleted rooms.
-  conditions.push("(cr.deleted is null or cr.deleted = 0)");
+  if (spaceDids.length === 0) return { feed: [], cursor: null };
 
-  // Cursor pagination: newest-first.
-  // Cursor format: "timestamp::roomId"
+  // Step 1: fan out to per-space DBs, fetching a page of rows per space
+  // (newest first) so we can merge and paginate globally.
+  const allRows: ActivityItemRow[] = [];
+  for (const spaceDid of spaceDids) {
+    const spaceDb = openSpaceDb(spaceDid);
+    const rows = await spaceDb
+      .query(
+        `select ${ACTIVITY_ITEM_COLUMNS}
+         from activity_item ai
+         left join comp_room cr on cr.entity = ai.room_id
+         where ai.space_id = ? and ${NOT_DELETED}
+         order by ai.last_activity_at desc, ai.room_id desc
+         limit ?`,
+      )
+      .all<ActivityItemRow>([spaceDid, scope.limit + 1]);
+    allRows.push(...rows);
+  }
+
+  if (allRows.length === 0) return { feed: [], cursor: null };
+
+  // Step 2: merge + sort (newest-first, tie-break by room id descending).
+  allRows.sort((a, b) => {
+    if (a.last_activity_at !== b.last_activity_at) {
+      return b.last_activity_at - a.last_activity_at;
+    }
+    return b.room_id < a.room_id ? -1 : b.room_id > a.room_id ? 1 : 0;
+  });
+
+  // Step 3: apply the cursor ("timestamp::roomId") — keep rows strictly after it.
+  let filtered = allRows;
   if (scope.cursor) {
     const sepIdx = scope.cursor.lastIndexOf("::");
     if (sepIdx !== -1) {
       const cursorTs = Number(scope.cursor.slice(0, sepIdx));
       const cursorId = scope.cursor.slice(sepIdx + 2);
-      conditions.push(
-        "(ai.last_activity_at < ? or (ai.last_activity_at = ? and ai.room_id < ?))",
-      );
-      params.push(cursorTs, cursorTs, cursorId);
+      if (!Number.isNaN(cursorTs)) {
+        filtered = allRows.filter((r) =>
+          r.last_activity_at < cursorTs ||
+          (r.last_activity_at === cursorTs && r.room_id < cursorId),
+        );
+      }
     }
   }
 
-  const whereClause = conditions.join(" and ");
+  // Step 4: paginate.
+  const hasMore = filtered.length > scope.limit;
+  const pageRows = hasMore ? filtered.slice(0, scope.limit) : filtered;
+  if (pageRows.length === 0) return { feed: [], cursor: null };
 
-  const rows = await db
-    .query(
-      `select
-         ai.room_id, ai.space_id, ai.is_thread,
-         ai.parent_channel_id, ai.parent_channel_name,
-         ai.last_activity_at, ai.recent_message_ids,
-         ai.room_name, ai.space_name, ai.space_avatar
-       from activity_item ai
-       left join comp_room cr on cr.entity = ai.room_id
-       where ${whereClause}
-       order by ai.last_activity_at desc, ai.room_id desc
-       limit ?`,
-    )
-    .all<{room_id: string; space_id: string; is_thread: number; parent_channel_id: string | null; parent_channel_name: string | null; last_activity_at: number; recent_message_ids: string; room_name: string | null; space_name: string | null; space_avatar: string | null;}>([...params, scope.limit + 1]);
-
-  if (rows.length === 0) return { feed: [], cursor: null };
-
-  // Fetch one extra row to determine if there are more pages.
-  const hasMore = rows.length > scope.limit;
-  const pageRows = hasMore ? rows.slice(0, scope.limit) : rows;
-
-  // Step 2: collect all message IDs from the page and batch-query their data.
-  const allMessageIds: string[] = [];
+  // Step 5: batch-fetch full message data per space, merging into a shared map.
+  const messagesData = new Map<string, ActivityMessage>();
+  const bySpace = new Map<string, ActivityItemRow[]>();
   for (const r of pageRows) {
-    const ids: string[] = JSON.parse(r.recent_message_ids);
-    allMessageIds.push(...ids);
+    let arr = bySpace.get(r.space_id);
+    if (!arr) {
+      arr = [];
+      bySpace.set(r.space_id, arr);
+    }
+    arr.push(r);
+  }
+  for (const [spaceDid, rows] of bySpace) {
+    const msgIds: string[] = [];
+    for (const r of rows) msgIds.push(...JSON.parse(r.recent_message_ids));
+    if (msgIds.length === 0) continue;
+    const spaceDb = openSpaceDb(spaceDid);
+    const fetched = await batchFetchMessages(spaceDb, msgIds);
+    for (const [k, v] of fetched) messagesData.set(k, v);
   }
 
-  const messagesData = allMessageIds.length > 0
-    ? await batchFetchMessages(db, allMessageIds)
-    : new Map<string, ActivityMessage>();
-
-  // Step 3: fetch unread counts for all rooms on the page.
+  // Step 6: fetch unread counts from the MONOLITHIC handle (readstate tables
+  // are not split — they live on the monolithic DB).
   const roomIds = pageRows.map((r) => r.room_id);
-  const unreadCounts = await batchFetchUnreadCounts(db, userDid, roomIds);
+  const unreadCounts = await batchFetchUnreadCounts(mainDb, userDid, roomIds);
 
-  // Step 4: assemble feed items.
+  // Step 7: assemble feed items.
   const feed: ActivityFeedItem[] = pageRows.map((r) => {
     const messageIds: string[] = JSON.parse(r.recent_message_ids);
     const messages: ActivityMessage[] = [];
@@ -161,29 +210,43 @@ export async function selectActivityFeed(
     return item;
   });
 
-  // Step 4.5: hydrate media + link embeds + reactions for the LATEST message of
-  // each feed item only. `recent_message_ids` is stored newest-first, so the
-  // latest message is at index 0. Preceding context messages stay text-only to
-  // keep the payload light.
-  const lastMsgIds = feed
-    .map((it) => it.messages[0]?.id)
-    .filter((id): id is string => id != null);
-  if (lastMsgIds.length > 0) {
-    const { mediaByMsg, linkEmbedsByMsg } = await batchFetchEmbeds(db, lastMsgIds);
-    const reactionsByMsg = await batchFetchReactions(db, lastMsgIds, userDid);
-    for (const it of feed) {
-      const last = it.messages[0];
-      if (!last) continue;
-      const media = mediaByMsg.get(last.id);
-      if (media && media.length > 0) last.media = media;
-      const linkEmbeds = linkEmbedsByMsg.get(last.id);
-      if (linkEmbeds && linkEmbeds.length > 0) last.linkEmbeds = linkEmbeds as Array<{ url: string; embed?: Record<string, unknown> }>;
-      const reactions = reactionsByMsg.get(last.id);
-      if (reactions && reactions.length > 0) last.reactions = reactions;
+  // Step 8: hydrate media + link embeds + reactions for the LATEST message of
+  // each feed item only (index 0 of `recent_message_ids`, newest-first).
+  // These reads hit per-space tables, so fan out by space.
+  const lastMsgIdsBySpace = new Map<string, string[]>();
+  for (const it of feed) {
+    const last = it.messages[0]?.id;
+    if (last == null) continue;
+    let arr = lastMsgIdsBySpace.get(it.spaceId);
+    if (!arr) {
+      arr = [];
+      lastMsgIdsBySpace.set(it.spaceId, arr);
     }
+    arr.push(last);
+  }
+  const mediaByMsg = new Map<string, Array<{ url: string; type: string; alt?: string; width?: number; height?: number; blurhash?: string; size?: number; length?: number; name?: string }>>();
+  const linkEmbedsByMsg = new Map<string, Array<{ url: string; embed?: Record<string, unknown> | null }>>();
+  const reactionsByMsg = new Map<string, Array<{ emoji: string; count: number; myReactionId?: string }>>();
+  for (const [spaceDid, lastMsgIds] of lastMsgIdsBySpace) {
+    const spaceDb = openSpaceDb(spaceDid);
+    const { mediaByMsg: m, linkEmbedsByMsg: l } = await batchFetchEmbeds(spaceDb, lastMsgIds);
+    for (const [k, v] of m) mediaByMsg.set(k, v);
+    for (const [k, v] of l) linkEmbedsByMsg.set(k, v);
+    const rxn = await batchFetchReactions(spaceDb, lastMsgIds, userDid);
+    for (const [k, v] of rxn) reactionsByMsg.set(k, v);
+  }
+  for (const it of feed) {
+    const last = it.messages[0];
+    if (!last) continue;
+    const media = mediaByMsg.get(last.id);
+    if (media && media.length > 0) last.media = media;
+    const linkEmbeds = linkEmbedsByMsg.get(last.id);
+    if (linkEmbeds && linkEmbeds.length > 0) last.linkEmbeds = linkEmbeds as Array<{ url: string; embed?: Record<string, unknown> }>;
+    const reactions = reactionsByMsg.get(last.id);
+    if (reactions && reactions.length > 0) last.reactions = reactions;
   }
 
-  // Step 5: compute the next cursor.
+  // Step 9: compute the next cursor.
   let cursor: string | null = null;
   if (hasMore) {
     const last = pageRows[pageRows.length - 1]!;

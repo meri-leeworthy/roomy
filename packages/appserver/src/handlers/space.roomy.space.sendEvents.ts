@@ -10,7 +10,7 @@
 
 import { parseEvent, type Event, StreamDid } from "@roomy-space/sdk";
 import { log } from "../log.ts";
-import { openDb } from "../db/db.ts";
+import { openSpaceDb } from "../db/db.ts";
 import { checkWriteAuth } from "../auth/writeAuth.ts";
 import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -58,7 +58,7 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
     throw new XrpcError(401, "AuthRequired", "Authentication required");
   }
   log.info("sendEvents", { spaceId, callerDid, count: body.events.length });
-  const db = openDb();
+  const db = openSpaceDb(spaceId);
   const access = await requireSpaceAccess(db, spaceId, callerDid);
 
   // 3. Validate + authorize each event

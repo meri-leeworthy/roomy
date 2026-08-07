@@ -13,7 +13,7 @@
  */
 
 import { spaceAccess } from "../auth/access.ts";
-import { openDb } from "../db/db.ts";
+import { openSpaceDb } from "../db/db.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { requireString } from "../xrpc/params.ts";
@@ -32,7 +32,7 @@ export const getSpaceSummaryHandler: QueryHandler<
   const userDid = parseUserDid(auth);
   const spaceId = requireString(params, "spaceId");
 
-  const db = openDb();
+  const db = openSpaceDb(spaceId);
 
   // Ban check only — badges don't need membership/admin status, and public
   // spaces are readable anonymously. No hydrateUserMembership: the ban table

@@ -192,6 +192,28 @@ export function openSpaceDb(spaceDid: string): AsyncDatabase {
 }
 
 /**
+ * Resolve the space DID that owns `entityId` (a room or message entity) by
+ * reading `entities.stream_id` from the monolithic DB, then return a handle
+ * that routes requests to that space's per-space DB.
+ *
+ * Phase 2 (read cutover): room/message-scoped handlers need to know which
+ * per-space DB to read from, but their XRPC params only carry the room/message
+ * id. The monolithic DB is still dual-written and correct during Phase 2, so
+ * it is the cheap, authoritative place to resolve entity → space. Returns
+ * `null` when the entity doesn't exist (the caller decides 404 vs 400).
+ */
+export async function openSpaceDbForEntity(
+  entityId: string,
+): Promise<AsyncDatabase | null> {
+  const main = openDb();
+  const row = await main
+    .query("select stream_id from entities where id = ?")
+    .get<{ stream_id: string }>(entityId);
+  if (!row) return null;
+  return openSpaceDb(row.stream_id);
+}
+
+/**
  * Return a handle that routes every request to the global DB
  * (`data/global.sqlite`), over the shared worker. The global DB is created
  * lazily on first use and holds only `joinedSpace`/`leftSpace` edges.
