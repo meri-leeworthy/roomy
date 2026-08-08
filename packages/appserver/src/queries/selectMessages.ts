@@ -17,6 +17,7 @@
 import type { DbLike } from "../db/types.ts";
 import { decodeContent } from "../db/content.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
+import { hydrateProfiles } from "./profileStore.ts";
 
 export interface ReactionDto {
   emoji: string;
@@ -467,6 +468,21 @@ export async function selectMessages(
       linkEmbeds: linkEmbedsForMsg,
     }) as MessageDto;
   });
+
+  // Resolve author profiles from the global store (with an in-memory cache).
+  // A message author's profile entity lives in their own stream, not this
+  // space's stream, so the per-space comp_user/comp_info join above is null
+  // for cross-stream authors. The global `profiles` table is authoritative;
+  // the per-space value (if any) acts as a fallback.
+  await hydrateProfiles(
+    messages,
+    (m) => m.authorDid,
+    (m, p) => {
+      if (p.name != null) m.authorName = p.name;
+      if (p.handle != null) m.authorHandle = p.handle;
+      if (p.avatar != null) m.authorAvatar = p.avatar;
+    },
+  );
 
   // Sort ascending so callers get oldest → newest (matches spec example).
   // sort_idx is set by the materializer for messages (using the canonical

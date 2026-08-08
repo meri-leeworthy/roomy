@@ -11,6 +11,7 @@
 import type { DbLike } from "../db/types.ts";
 import { decodeContent } from "../db/content.ts";
 import { openGlobalDb, openSpaceDb } from "../db/db.ts";
+import { hydrateProfiles } from "./profileStore.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -313,6 +314,22 @@ async function batchFetchMessages(
       ...(r.timestamp != null ? { timestamp: new Date(r.timestamp).toISOString() } : {}),
     });
   }
+
+  // Resolve author profiles from the global store (with an in-memory cache).
+  // A message author's profile entity lives in their own stream, not this
+  // space's stream, so the per-space comp_user/comp_info join above is null
+  // for cross-stream authors. The global `profiles` table is authoritative;
+  // the per-space value (if any) acts as a fallback.
+  const authors = [...result.values()].map((m) => m.author);
+  await hydrateProfiles(
+    authors,
+    (a) => a.did,
+    (a, p) => {
+      if (p.name != null) a.name = p.name;
+      if (p.handle != null) a.handle = p.handle;
+      if (p.avatar != null) a.avatar = p.avatar;
+    },
+  );
 
   return result;
 }

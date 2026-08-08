@@ -4,6 +4,7 @@ import { testAuthVerifier } from "./xrpc/auth.ts";
 import { closeDb } from "./db/db.ts";
 import { _resetHydrationInflight } from "./hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "./embed/sweeper.ts";
+import { _resetProfileStoreCache } from "./queries/profileStore.ts";
 
 // Pick a free port by letting the OS assign one (port 0).
 function ephemeralPort(): number {
@@ -18,6 +19,7 @@ beforeEach(() => {
   closeDb();
   _resetHydrationInflight();
   _resetEmbedSweeper();
+  _resetProfileStoreCache();
 });
 
 afterEach(async () => {

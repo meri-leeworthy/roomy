@@ -23,6 +23,8 @@ import {
   seedJoinedSpace,
   seedInvite,
   seedUser,
+  seedRoom,
+  seedMessage,
   type E2eContext,
 } from "./helpers.ts";
 
@@ -387,6 +389,52 @@ describe("per-space dual-write: global DB backfill", () => {
     const g = await membershipIn(ctx.db as AnyDb, USER, SPACE, "joinedSpace");
     expect(g.mono).toBe(true);
     expect(g.global).toBe(true);
+  });
+});
+
+// ─── Cross-stream profiles resolve from the global store ───────────────
+
+describe("cross-stream profiles resolve from the global store", () => {
+  test("getMessages resolves a cross-stream author from the global profiles table", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    const room = newUlid();
+    const msg = newUlid();
+
+    seedSpace(db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
+    seedJoinedSpace(db as AnyDb, USER, SPACE);
+    seedRoom(db as AnyDb, room, SPACE);
+    seedMessage(db as AnyDb, msg, room, SPACE, "a");
+
+    // Author edge: msg → USER2. USER2's profile entity lives in USER2's OWN
+    // stream (not SPACE's), so the per-space DB backfill does NOT carry
+    // USER2's comp_user/comp_info — the author resolves to blank from the
+    // per-space join. The authoritative profile lives in the global store.
+    (db as AnyDb).run(
+      "insert or ignore into entities (id, stream_id) values (?, ?)",
+      [USER2, USER2],
+    );
+    (db as AnyDb).run(
+      "insert or ignore into edges (head, tail, label) values (?, ?, 'author')",
+      [msg, USER2],
+    );
+    // Seed the global profiles table (the authoritative store).
+    await (db as AnyDb).global().run(
+      "insert into profiles (did, handle, name, avatar) values (?, ?, ?, ?)",
+      [USER2, "user2.test", "User Two", "https://cdn.example/user2.png"],
+    );
+
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.room.getMessages?roomId=${room}`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const authorMsg = body.messages.find((m: { id: string }) => m.id === msg);
+    expect(authorMsg).toBeDefined();
+    expect(authorMsg.authorDid).toBe(USER2);
+    expect(authorMsg.authorName).toBe("User Two");
+    expect(authorMsg.authorHandle).toBe("user2.test");
+    expect(authorMsg.authorAvatar).toBe("https://cdn.example/user2.png");
   });
 });
 

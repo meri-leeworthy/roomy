@@ -25,6 +25,7 @@ import { closeDb, openDb } from "../db/db.ts";
 import { _resetRateLimit } from "../xrpc/rateLimit.ts";
 import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper, stopEmbedSweeper } from "../embed/sweeper.ts";
+import { _resetProfileStoreCache } from "../queries/profileStore.ts";
 import { newUlid } from "@roomy-space/sdk";
 import type { Database } from "bun:sqlite";
 
@@ -60,6 +61,7 @@ export async function startAppserver(): Promise<E2eContext> {
   _resetRateLimit();
   _resetHydrationInflight();
   _resetEmbedSweeper();
+  _resetProfileStoreCache();
 
   // Open the singleton DB in-memory so handlers' internal openDb() resolves.
   const db = openDb({ path: ":memory:" }) as unknown as Database;
@@ -100,6 +102,7 @@ export async function startAppserver(): Promise<E2eContext> {
     await handle.close();
     _resetHydrationInflight();
     _resetEmbedSweeper();
+    _resetProfileStoreCache();
   });
 
   return { handle, baseUrl, authedFetch, anonFetch, db };

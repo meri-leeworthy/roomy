@@ -17,6 +17,7 @@
 
 import type { DbLike } from "../db/types.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
+import { hydrateProfiles } from "./profileStore.ts";
 
 export interface MemberRow {
   did: string;
@@ -132,15 +133,41 @@ export async function selectMembers(
     )
     .all<{ did: string; handle: string | null; name: string | null; avatar: string | null }>([spaceId, ...extFilter.binds]);
 
+  const externalAdmins: ExternalAdminRow[] = externalAdminRows.map((r) =>
+    stripNulls({
+      did: r.did,
+      handle: r.handle,
+      name: r.name,
+      avatar: r.avatar,
+    }) as ExternalAdminRow,
+  );
+
+  // Resolve member/admin profiles from the global store (with an in-memory
+  // cache). A member's profile entity lives in their own stream, not this
+  // space's stream, so the per-space comp_user/comp_info join above is null
+  // for cross-stream members. The global `profiles` table is authoritative;
+  // the per-space value (if any) acts as a fallback.
+  await hydrateProfiles(
+    members,
+    (m) => m.did,
+    (m, p) => {
+      if (p.name != null) m.name = p.name;
+      if (p.handle != null) m.handle = p.handle;
+      if (p.avatar != null) m.avatar = p.avatar;
+    },
+  );
+  await hydrateProfiles(
+    externalAdmins,
+    (m) => m.did,
+    (m, p) => {
+      if (p.name != null) m.name = p.name;
+      if (p.handle != null) m.handle = p.handle;
+      if (p.avatar != null) m.avatar = p.avatar;
+    },
+  );
+
   return {
     members,
-    externalAdmins: externalAdminRows.map((r) =>
-      stripNulls({
-        did: r.did,
-        handle: r.handle,
-        name: r.name,
-        avatar: r.avatar,
-      }) as ExternalAdminRow,
-    ),
+    externalAdmins,
   };
 }

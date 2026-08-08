@@ -333,7 +333,7 @@ function openSpaceDb(spaceDid: string): Database {
     return cached.db;
   }
 
-  const db = openSpaceDbFile(spaceDid);
+  let db = openSpaceDbFile(spaceDid);
   try {
     initializeVersionedSchema(
       db,
@@ -350,30 +350,25 @@ function openSpaceDb(spaceDid: string): Database {
     // (schema applied but backfill failed, or worse) reads back as
     // "database disk image is malformed" on every subsequent open.
     // Close and delete it so the next open retries from scratch.
-    try {
-      db.close();
-    } catch {
-      /* best-effort */
+    deleteSpaceDbFile(spaceDid, db);
+    // A schema-version mismatch means the on-disk schema is stale. Wipe and
+    // re-derive transparently so the caller never sees a failed request for
+    // a space that merely needs re-backfilling (e.g. after a backfill-logic
+    // change bumps SPACE_SCHEMA_VERSION).
+    if (err instanceof SchemaVersionMismatchError) {
+      db = openSpaceDbFile(spaceDid);
+      initializeVersionedSchema(
+        db,
+        SPACE_SCHEMA_PATH,
+        "space_schema_version",
+        spaceSchemaVersion ?? "",
+      );
+      if (mainDb) {
+        backfillSpaceDb(db, spaceDid);
+      }
+    } else {
+      throw err;
     }
-    if (spacesDir !== ":memory:") {
-      const path = join(spacesDir, `${spaceDid}.sqlite`);
-      try {
-        unlinkSync(path);
-      } catch {
-        /* already gone */
-      }
-      try {
-        unlinkSync(path + "-wal");
-      } catch {
-        /* already gone */
-      }
-      try {
-        unlinkSync(path + "-shm");
-      } catch {
-        /* already gone */
-      }
-    }
-    throw err;
   }
 
 
@@ -400,6 +395,25 @@ function openSpaceDb(spaceDid: string): Database {
 
   spaceDbs.set(spaceDid, { db, lastUsed: Date.now() });
   return db;
+}
+
+/** Close and delete a per-space DB file (best-effort). */
+function deleteSpaceDbFile(spaceDid: string, db: Database): void {
+  try {
+    db.close();
+  } catch {
+    /* best-effort */
+  }
+  if (spacesDir !== ":memory:" && spacesDir !== null) {
+    const path = join(spacesDir, `${spaceDid}.sqlite`);
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        unlinkSync(path + suffix);
+      } catch {
+        /* already gone */
+      }
+    }
+  }
 }
 
 function openSpaceDbFile(spaceDid: string): Database {
@@ -533,8 +547,9 @@ function backfillSpaceDb(db: Database, spaceDid: string): void {
     copy("comp_room", STREAM_OR_SPACE, [spaceDid, spaceDid]);
     copy("comp_discord_origin", STREAM_OR_SPACE, [spaceDid, spaceDid]);
     // comp_user is keyed by `did` (not `entity`); keep the stream filter.
-    // Member profiles whose entity lives in another stream are hydrated on
-    // demand by getMembers' per-space read path.
+    // Cross-stream member/author profiles are resolved from the global
+    // `profiles` table at read time (see queries/profileStore.ts), so the
+    // per-space DB only carries profiles whose entity lives in this stream.
     copy("comp_user", "did in (select id from entities where stream_id = ?)", [spaceDid]);
     copy("comp_content", STREAM_OR_SPACE, [spaceDid, spaceDid]);
     copy("comp_info", STREAM_OR_SPACE, [spaceDid, spaceDid]);

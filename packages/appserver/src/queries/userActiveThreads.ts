@@ -11,6 +11,7 @@
 
 import type { DbLike } from "../db/types.ts";
 import type { StreamDid, Ulid, UserDid } from "@roomy-space/sdk";
+import { hydrateProfiles } from "./profileStore.ts";
 
 /** How far back (in ms) to consider threads active. Default: 72 hours. */
 const ACTIVE_WINDOW_MS = 72 * 60 * 60 * 1000;
@@ -141,6 +142,22 @@ export async function resolveThreadsByIds(
       canonicalParent: parent?.head ?? null,
     });
   }
+
+  // Resolve participant profiles from the global store (with an in-memory
+  // cache). A user's profile entity lives in their own stream, not this
+  // space's stream, so the per-space comp_info join above is null for
+  // cross-stream users. The global `profiles` table is authoritative; the
+  // per-space value (if any) acts as a fallback.
+  const membersToHydrate: Array<{ did: string; name: string | null; avatar: string | null }> = [];
+  for (const entry of result.values()) membersToHydrate.push(...entry.latestMembers);
+  await hydrateProfiles(
+    membersToHydrate,
+    (m) => m.did,
+    (m, p) => {
+      if (p.name != null) m.name = p.name;
+      if (p.avatar != null) m.avatar = p.avatar;
+    },
+  );
 
   return result;
 }

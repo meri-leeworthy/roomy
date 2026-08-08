@@ -21,6 +21,7 @@
 
 import type { DbLike } from "../db/types.ts";
 import { decodeContent } from "../db/content.ts";
+import { hydrateProfiles } from "./profileStore.ts";
 
 export interface ThreadMember {
   did: string;
@@ -312,6 +313,25 @@ export async function listThreadActivity(
       latestMessage,
     };
   });
+
+  // Resolve participant + latest-message author profiles from the global
+  // store (with an in-memory cache). A user's profile entity lives in their
+  // own stream, not this space's stream, so the per-space comp_info join
+  // above is null for cross-stream users. The global `profiles` table is
+  // authoritative; the per-space value (if any) acts as a fallback.
+  const membersToHydrate: ThreadMember[] = [];
+  for (const t of results) {
+    membersToHydrate.push(...t.latestMembers);
+    if (t.latestMessage?.author) membersToHydrate.push(t.latestMessage.author);
+  }
+  await hydrateProfiles(
+    membersToHydrate,
+    (m) => m.did,
+    (m, p) => {
+      if (p.name != null) m.name = p.name;
+      if (p.avatar != null) m.avatar = p.avatar;
+    },
+  );
 
   // Compute next cursor from the last visible thread.
   let nextCursor: string | null = null;

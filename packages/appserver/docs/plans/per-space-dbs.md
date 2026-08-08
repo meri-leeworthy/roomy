@@ -591,6 +591,16 @@ select ... from main.comp_space where entity = ?;
 
 This is a one-time copy per space. For a space with 100k events, this is ~100k rows. It's fast (single SQLite transaction, no round-trips).
 
+> **Cross-stream profiles resolve from the global store (2026-08):**
+> `comp_user`/`comp_info` are global (one Roomy profile per user) and a
+> user's profile entity lives in THEIR OWN stream, not the space's stream.
+> The per-space backfill therefore only copies stream-scoped profile rows;
+> cross-stream authors/members (the common case) resolve at read time from
+> the global `profiles` table via `queries/profileStore.ts`, which keeps a
+> short-TTL in-memory cache so the per-space read hot path
+> (`getMessages`/`getMembers`/...) doesn't hit the global DB on every
+> message. This avoids duplicating all user profiles into every per-space DB.
+
 > **Alternative recovery path**: instead of copying from the monolithic DB, a space DB can always be rebuilt from scratch by replaying the local event log (`reMaterializeFromLocalEvents` for that stream). The event-log DB (`data/roomy-events.sqlite`) is append-only and never wiped, so deleting a corrupted space DB file and re-running re-materialization for that stream is always safe. The copy-from-monolithic path is just faster because it avoids re-running the materializer.
 
 > **Global DB backfill**: the `joinedSpace`/`leftSpace` edges for the global DB come from the same lazy-creation pass — copy `edges` rows with those labels from the monolithic DB, or (after the §Prerequisite ships) simply replay the event log for the affected streams. The §Prerequisite's event-backing is what makes "regenerate the global DB from the log" a safe recovery claim here and in §1i.
