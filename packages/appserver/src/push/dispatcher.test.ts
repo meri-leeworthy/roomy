@@ -135,7 +135,7 @@ describe("push/evaluate — per-recipient feature-flag gate", () => {
 
   test("recipient with the flag globally enabled gets a push", async () => {
     await setFlagGlobal(db, "push-notifications", true);
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -150,7 +150,7 @@ describe("push/evaluate — per-recipient feature-flag gate", () => {
   test("recipient without the flag (flag globally off) is skipped", async () => {
     // Flag is off globally; assign only to FLAGGED_READER.
     await assignFlagToUser(db, "push-notifications", FLAGGED_READER);
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -164,7 +164,7 @@ describe("push/evaluate — per-recipient feature-flag gate", () => {
 
   test("no pushes when the flag is off for everyone", async () => {
     // Flag globally off, no per-user assignments.
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,

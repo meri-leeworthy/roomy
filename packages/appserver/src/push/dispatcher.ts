@@ -22,6 +22,7 @@
  */
 
 import type { DbLike } from "../db/types.ts";
+import { openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { createHash } from "node:crypto";
 import { log } from "../log.ts";
 import { evaluatePush } from "./evaluate.ts";
@@ -73,7 +74,7 @@ const queue: PushJob[] = [];
 /** Resolved by {@link pokePushDispatcher} to wake an idle loop. */
 let wake: (() => void) | null = null;
 export interface PushDispatcherOpts {
-  /** Process-wide materialisation DB (readstate is attached as `readstate.*`). */
+  /** Read-state DB handle (read_positions, notification_state, push_subscriptions, …). */
   db: DbLike;
 }
 
@@ -155,7 +156,10 @@ async function processBatch(db: DbLike, batch: PushJob[]): Promise<void> {
   for (const job of batch) {
     statsDispatched++;
     try {
-      deliveries.push(...(await evaluatePush(db, job)));
+      // Route per-space reads to the job's owning per-space DB; read-state
+      // reads stay on the read-state handle (`db`).
+      const spaceDb = openSpaceDb(job.spaceId);
+      deliveries.push(...(await evaluatePush(db, spaceDb, job)));
     } catch (err) {
       log.error(`[push-dispatcher] evaluatePush failed for ${job.messageId}:`, err);
     }
@@ -176,32 +180,44 @@ async function processBatch(db: DbLike, batch: PushJob[]): Promise<void> {
  * backlog drains gradually. Runs on every idle wake.
  *
  * The sweep row carries `(userDid, roomId, unseenCount)` but not the spaceId
- * or any author; we resolve the owning space from the room entity
- * (`entities.stream_id`) and the most-recent sender via {@link resolveLatestRoomAuthor}
- * so the payload can carry `spaceId` + an avatar icon.
+ * or any author; we resolve the owning space from the global `entity_space`
+ * index and the most-recent sender via {@link resolveLatestRoomAuthor}
+ * (both against the room's per-space DB) so the payload can carry `spaceId`
+ * + an avatar icon.
  */
 async function runDigestSweep(db: DbLike): Promise<void> {
   const due = await selectDueDigests(db, Date.now(), SWEEP_BATCH_LIMIT);
   if (due.length === 0) return;
 
-  // Resolve room name + owning space (entities.stream_id) once for the batch
-  // (cheap lookups), so each payload carries roomName + spaceId.
+  // The sweep row carries `(userDid, roomId, unseenCount)` but not the
+  // spaceId. Resolve each room's owning space via the global `entity_space`
+  // index, then open the per-space DB for room metadata + latest-author
+  // lookups. Read-state reads (due digests, markNotified, deliverPayload)
+  // stay on the read-state handle (`db`).
+  const global = openGlobalDb();
   const roomMeta = new Map<
     string,
     { name: string | null; spaceId: string | null }
   >();
+  const spaceDbByRoom = new Map<string, DbLike>();
   for (const row of due) {
     if (roomMeta.has(row.roomId)) continue;
-    const r = await db.query(
-      `select ci.name as name, e.stream_id as space_id
-         from entities e
-         left join comp_info ci on ci.entity = e.id
-        where e.id = ?`,
-    ).get<{ name: string | null; space_id: string | null }>(row.roomId);
-    roomMeta.set(row.roomId, {
-      name: r?.name ?? null,
-      spaceId: r?.space_id ?? null,
-    });
+    const spaceRow = await global
+      .query("select space_did from entity_space where entity_id = ?")
+      .get<{ space_did: string }>(row.roomId);
+    const spaceId = spaceRow?.space_did ?? null;
+    roomMeta.set(row.roomId, { name: null, spaceId });
+    if (spaceId) {
+      const spaceDb = openSpaceDb(spaceId);
+      spaceDbByRoom.set(row.roomId, spaceDb);
+      const r = await spaceDb.query(
+        `select ci.name as name
+           from entities e
+           left join comp_info ci on ci.entity = e.id
+          where e.id = ?`,
+      ).get<{ name: string | null }>(row.roomId);
+      roomMeta.set(row.roomId, { name: r?.name ?? null, spaceId });
+    }
   }
 
   await mapWithConcurrency(due, CONCURRENCY, async (row) => {
@@ -217,11 +233,14 @@ async function runDigestSweep(db: DbLike): Promise<void> {
     // Icon: most-recent sender avatar → space avatar (same "user avatars, or
     // failing that, space avatars" rule as message pushes). Sender avatars are
     // the reliable source; space `atblob://` avatars often 404.
-    const latestAuthor = await resolveLatestRoomAuthor(db, row.roomId);
-    const icon =
-      (latestAuthor ? await resolveEntityAvatar(db, latestAuthor) : undefined) ??
-      (await resolveEntityAvatar(db, spaceId));
-    if (icon) payload.icon = icon;
+    const spaceDb = spaceDbByRoom.get(row.roomId);
+    if (spaceDb) {
+      const latestAuthor = await resolveLatestRoomAuthor(spaceDb, row.roomId);
+      const icon =
+        (latestAuthor ? await resolveEntityAvatar(spaceDb, latestAuthor) : undefined) ??
+        (await resolveEntityAvatar(spaceDb, spaceId));
+      if (icon) payload.icon = icon;
+    }
     // Mark notified regardless of delivery success so a transient push-service
     // outage doesn't re-fire the same batch every 60s (Phase 4 adds retry).
     await deliverPayload(db, row.userDid, payload);

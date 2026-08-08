@@ -148,26 +148,31 @@ function buildMessagePayload(
  * Phase 3 (mentions): Quiet and Engaged recipients who are mentioned in the
  * message get an immediate `message` push instead of being skipped (quiet) or
  * routed to the digest path (engaged).
+ *
+ * Per-space reads (message facts, recipient enumeration, room access, avatars)
+ * go through `spaceDb`; read-state reads (preferences, subscriptions, feature
+ * flags, participation, digest state) go through `readStateDb`.
  */
 export async function evaluatePush(
-  db: DbLike,
+  readStateDb: DbLike,
+  spaceDb: DbLike,
   job: PushJob,
 ): Promise<PushDelivery[]> {
   const { spaceId, roomId, authorDid, messageId, timestamp, mentions } = job;
-  const facts = await resolveMessageFacts(db, roomId, authorDid, messageId);
+  const facts = await resolveMessageFacts(spaceDb, roomId, authorDid, messageId);
   log.info(`[push-evaluate] messageContent for ${messageId}: ${facts.messageContent ? facts.messageContent.slice(0, 60) + "…" : "null"}`);
 
   // Icon is recipient-independent → resolve once per message. Both message and
   // on-event digest pushes use the sender avatar → space avatar (per the plan:
   // "user avatars, or failing that, space avatars").
-  const icon = await resolveMessageIcon(db, authorDid, spaceId);
+  const icon = await resolveMessageIcon(spaceDb, authorDid, spaceId);
   if (icon) {
     log.info(`[push-evaluate] icon resolved for ${messageId}: ${icon}`);
   } else {
     log.debug(`[push-evaluate] no icon for ${messageId} (author=${authorDid.slice(0, 30)}… space=${spaceId.slice(0, 30)}…)`);
   }
 
-  const candidateDids = await enumerateRecipients(db, spaceId);
+  const candidateDids = await enumerateRecipients(spaceDb, spaceId);
   log.debug(`[push-evaluate] ${messageId} in ${roomId}: ${candidateDids.length} candidate recipients`);
 
   const deliveries: PushDelivery[] = [];
@@ -179,13 +184,13 @@ export async function evaluatePush(
     // push. This is the flag's intended role — it gates recipients, not the
     // dispatcher process — so a user without the flag is skipped even if
     // they somehow have a stale subscription row.
-    const enabledFlags = await getEnabledFlagsForUser(db, did);
+    const enabledFlags = await getEnabledFlagsForUser(readStateDb, did);
     if (!enabledFlags.includes("push-notifications")) {
       log.debug(`[push-evaluate] skip ${did.slice(0, 20)}…: push-notifications flag not enabled`);
       continue;
     }
 
-    const level = await resolveLevel(db, did, spaceId);
+    const level = await resolveLevel(readStateDb, did, spaceId);
     if (level === "silent") {
       log.debug(`[push-evaluate] skip ${did.slice(0, 20)}…: level=silent`);
       continue;
@@ -193,14 +198,14 @@ export async function evaluatePush(
 
     // Read-access filter (reuse the auth unit). Skip users who can't read
     // the room — never leak a notification for a room they can't open.
-    const access = await roomAccess(db, roomId, did);
+    const access = await roomAccess(spaceDb, roomId, did);
     if (!access.canRead) {
       log.debug(`[push-evaluate] skip ${did.slice(0, 20)}…: no read access to room`);
       continue;
     }
 
     // Only enqueue if the user has at least one subscription.
-    const subs = await selectSubscriptions(db, did);
+    const subs = await selectSubscriptions(readStateDb, did);
     if (subs.length === 0) {
       log.debug(`[push-evaluate] skip ${did.slice(0, 20)}…: no push subscriptions registered`);
       continue;
@@ -226,12 +231,12 @@ export async function evaluatePush(
     // Participation gate: only rooms the recipient has sent a message in.
     // (Lazy-backfilled once per user+space so the gate works for existing
     // users without them sending a new message first.)
-    if (!(await hasUserParticipatedInSpace(db, did, spaceId, roomId))) {
+    if (!(await hasUserParticipatedInSpace(readStateDb, did, spaceId, roomId))) {
       log.debug(`[push-evaluate] skip ${did.slice(0, 20)}…: engaged, not participated in space`);
       continue;
     }
 
-    const outcome = await upsertNotificationState(db, did, roomId, timestamp, messageId);
+    const outcome = await upsertNotificationState(readStateDb, did, roomId, timestamp, messageId);
     if (!outcome.fireNow) {
       log.debug(`[push-evaluate] skip ${did.slice(0, 20)}…: engaged digest pending (${outcome.unseenCount} unseen, threshold not reached)`);
       continue; // below threshold; sweep catches the 1h timer

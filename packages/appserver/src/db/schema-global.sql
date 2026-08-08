@@ -51,3 +51,32 @@ create table if not exists profiles (
   updated_at integer not null default (unixepoch() * 1000)
 ) strict;
 create index if not exists idx_profiles_handle on profiles(handle);
+
+-- Global entity → space index. Maps every materialised entity id (room,
+-- message, ...) to the space DID that owns it. Populated during
+-- materialization (Phase 3): when an `insert into entities` statement is
+-- applied to a per-space DB, the same (entity_id, space_did) pair is
+-- recorded here. Used by `openSpaceDbForEntity` to resolve which per-space
+-- DB a room/message id lives in, replacing the monolithic DB's
+-- `entities.stream_id` lookup.
+create table if not exists entity_space (
+  entity_id text primary key,
+  space_did text not null
+) strict;
+create index if not exists idx_entity_space_space on entity_space(space_did);
+
+-- Global pending-embed-links index (Phase 3). Dual-written during
+-- materialization alongside the per-space `comp_embed_link` rows so the
+-- centralized embed sweeper can find pending work with a single query across
+-- ALL per-space DBs, instead of iterating every space DB. Each row records
+-- the space DID and message id that contained the URL so the sweeper can
+-- route enrichment + invalidation to the correct per-space DB and delete the
+-- row once processed.
+create table if not exists pending_links (
+  space_did text not null,
+  message_id text not null,
+  url text not null,
+  created_at integer not null default (unixepoch() * 1000),
+  primary key (space_did, message_id, url)
+) strict;
+create index if not exists idx_pending_links_created on pending_links(created_at);

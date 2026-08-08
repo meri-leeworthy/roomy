@@ -1,5 +1,5 @@
 /**
- * Apply a batch of decoded events to the database.
+ * Apply a batch of decoded events to the per-space database.
  *
  * Events are processed in chunks, each chunk in a single `db.transaction()`
  * call. Per-event savepoints provide error isolation within each chunk.
@@ -8,13 +8,12 @@
  * Side-effects (activity_item, link detection) that need JS logic run
  * post-transaction since they're idempotent.
  *
- * Per-space split (Phase 1): when `spaceDb` (and optionally `globalDb`) are
- * provided, the same events are dual-written to the derived DBs. The
- * monolithic DB is written first and remains the source of truth: if a
- * derived write fails, the monolithic DB is still consistent and the space
- * DB is repaired by deleting it and re-materialising that stream. The
- * materialization cursor advances on both DBs so each space DB is
- * self-describing about its own re-materialisation progress.
+ * Per-space split (Phase 3): `db` is the per-space DB — the source of truth
+ * for space data. There is no monolithic DB. `globalDb` (optional) receives
+ * the `joinedSpace`/`leftSpace` membership edges and the `entity_space`
+ * entity→space index. The materialization cursor advances on the per-space
+ * DB so each space DB is self-describing about its own re-materialisation
+ * progress.
  */
 
 import type { DbLike } from "../db/types.ts";
@@ -34,6 +33,7 @@ import {
   recordMaterialization,
 } from "../debug/eventStore.ts";
 import { detectAndStoreLinks } from "../embed/enricher.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { decodeContent } from "../db/content.ts";
 import { decodeTime, ulid } from "ulidx";
 
@@ -63,7 +63,7 @@ interface ChunkStep {
   type: "run" | "exec";
   sql: string;
   params?: unknown[];
-  /** Derived-DB routing: "space" (default), "global", or "none" (monolithic-only). */
+  /** Derived-DB routing: "space" (default), "global", or "none" (no derived write). */
   derived: "space" | "global" | "none";
 }
 
@@ -72,7 +72,6 @@ export async function applyBatch(
   streamId: StreamDid,
   events: DecodedStreamEvent[],
   opts: ApplyBatchOpts,
-  spaceDb?: DbLike,
   globalDb?: DbLike,
 ): Promise<MaterializationStats> {
   const stats: MaterializationStats = {
@@ -140,6 +139,25 @@ export async function applyBatch(
                 : [params],
           derived: isGlobalEdgeStatement(stmt.sql) ? "global" : "space",
         });
+        // Phase 3: maintain the global entity→space index. Every `insert
+        // into entities` statement carries (id, stream_id) as its first two
+        // params; record the mapping so `openSpaceDbForEntity` can resolve
+        // which per-space DB a room/message id lives in. Skip entities with
+        // an empty stream_id (e.g. link entities) — they are never resolved
+        // via openSpaceDbForEntity.
+        if (stmt.sql.startsWith("insert into entities")) {
+          const p = Array.isArray(params) ? params : [params];
+          const id = p[0];
+          const sid = p[1];
+          if (typeof id === "string" && typeof sid === "string" && sid !== "") {
+            chunkSteps.push({
+              type: "run",
+              sql: "insert or ignore into entity_space (entity_id, space_did) values (?, ?)",
+              params: [id, sid],
+              derived: "global",
+            });
+          }
+        }
       }
 
       // sort_idx: inline the UPDATE (no SELECT needed)
@@ -238,19 +256,17 @@ export async function applyBatch(
                 break;
               }
             }
-            // ── Monolithic DB (source of truth) ────────────────────────
-            // Run first; the savepoint commits on release regardless of
-            // what happens on the derived DBs (plan §305: "If the spaceDb
-            // write fails, the monolithic DB is still consistent"). A
-            // failure HERE means the event is lost everywhere.
-            let mainFailed = false;
+            // ── Per-space DB (source of truth) ──────────────────────────
+            // Run the space statements first; the savepoint commits on
+            // release. A failure here rolls back the event on the space DB.
+            let spaceFailed = false;
             try {
               for (const s of eventSteps) {
                 if (s.type === "run") {
-                  await db.run(s.sql, ...(s.params ?? []));
+                  if (s.derived === "space") {
+                    await db.run(s.sql, ...(s.params ?? []));
+                  }
                 } else if (s.sql.startsWith("release evt_")) {
-                  // Released explicitly below — the release is part of the
-                  // eventSteps grouping marker, not a step to run here.
                   continue;
                 } else {
                   await db.exec(s.sql);
@@ -258,7 +274,7 @@ export async function applyBatch(
               }
               await db.exec(`release ${savepointName(eventSteps[0]!)}`);
             } catch (err) {
-              mainFailed = true;
+              spaceFailed = true;
               const name = savepointName(eventSteps[0]!);
               try {
                 await db.exec(`rollback to ${name}`);
@@ -276,53 +292,12 @@ export async function applyBatch(
                 message,
               });
             }
-            if (mainFailed) continue;
+            if (spaceFailed) continue;
 
-            // ── Derived DBs ─────────────────────────────────────────────
-            // Per-space statements to the space DB, global edge statements
-            // to the global DB. Each target runs the same savepoint framing
-            // so a failure rolls back only that event on that target. A
-            // derived failure NEVER rolls back the monolithic DB — the
-            // event stays applied there (message delivered + invalidated)
-            // and the space DB is repaired by deleting + re-backfilling it.
-            if (spaceDb) {
-              const spaceSteps = eventSteps.filter(
-                (s) => s.derived !== "none" && s.derived !== "global",
-              );
-              if (spaceSteps.length > 0) {
-                try {
-                  await spaceDb.exec(`savepoint ${savepointName(eventSteps[0]!)}`);
-                  for (const s of spaceSteps) {
-                    if (s.type === "run") {
-                      await spaceDb.run(s.sql, ...(s.params ?? []));
-                    } else {
-                      await spaceDb.exec(s.sql);
-                    }
-                  }
-                  await spaceDb.exec(`release ${savepointName(eventSteps[0]!)}`);
-                } catch (spaceErr) {
-                  const name = savepointName(eventSteps[0]!);
-                  try {
-                    await spaceDb.exec(`rollback to ${name}`);
-                    await spaceDb.exec(`release ${name}`);
-                  } catch {
-                    /* best-effort */
-                  }
-                  const message =
-                    spaceErr instanceof Error ? spaceErr.message : String(spaceErr);
-                  stats.applyErrors++;
-                  recordFailure(stats, {
-                    eventId: "" as unknown as Ulid,
-                    type: "space-db",
-                    reason: "apply",
-                    message: `[spaceDb] ${message}`,
-                  });
-                  console.error(
-                    `[materialize] spaceDb dual-write failed for ${streamId} (monolithic intact): ${message}`,
-                  );
-                }
-              }
-            }
+            // ── Global DB ──────────────────────────────────────────────
+            // Membership edges + entity_space index. A failure here never
+            // rolls back the per-space DB — the event stays applied there
+            // and the global DB is repaired by re-materialisation.
             if (globalDb) {
               const globalSteps = eventSteps.filter(
                 (s) => s.derived === "global",
@@ -356,7 +331,7 @@ export async function applyBatch(
                     message: `[globalDb] ${message}`,
                   });
                   console.error(
-                    `[materialize] globalDb dual-write failed for ${streamId} (monolithic intact): ${message}`,
+                    `[materialize] globalDb write failed for ${streamId} (per-space intact): ${message}`,
                   );
                 }
               }
@@ -374,11 +349,6 @@ export async function applyBatch(
     // (upserts), so if a crash happens between the chunk commit and this
     // cursor update, the chunk is replayed on restart but produces the same
     // result — harmless.
-    //
-    // The cursor is written to BOTH the monolithic DB (authoritative for
-    // boot-time re-materialization and rollback) and the per-space DB (so
-    // each space DB is self-describing about its own re-materialisation
-    // state).
     await db.run(
       `insert into materialization_cursor (stream_id, materialized_to)
        values (?, ?)
@@ -387,22 +357,12 @@ export async function applyBatch(
       streamId,
       chunkMaxIdx,
     );
-    if (spaceDb) {
-      await spaceDb.run(
-        `insert into materialization_cursor (stream_id, materialized_to)
-         values (?, ?)
-         on conflict (stream_id) do update set materialized_to = excluded.materialized_to
-         where materialization_cursor.materialized_to < excluded.materialized_to`,
-        streamId,
-        chunkMaxIdx,
-      );
-    }
 
     // Post-transaction side-effects for this chunk: activity_item upsert and
     // link detection. These need JS logic so they can't be inlined as SQL
     // steps. Running them per-chunk keeps them interleaved with progress
     // logging rather than causing a long freeze after the last progress line.
-    await applyChunkSideEffects(db, chunk, streamId, opts.isBackfill, stats.detectedLinks, spaceDb, globalDb);
+    await applyChunkSideEffects(db, chunk, streamId, opts.isBackfill, stats.detectedLinks, globalDb);
   }
 
   // Advance the legacy comp_space.backfilled_to cursor. The authoritative
@@ -420,19 +380,6 @@ export async function applyBatch(
       params: [latestIdx, streamId, latestIdx],
     },
   ]);
-  if (spaceDb) {
-    await spaceDb.transaction([
-      {
-        type: "run",
-        sql: `update comp_space
-             set backfilled_to = ?,
-                 updated_at = (unixepoch() * 1000)
-             where entity = ?
-               and (backfilled_to is null or backfilled_to < ?)`,
-        params: [latestIdx, streamId, latestIdx],
-      },
-    ]);
-  }
 
   return stats;
 }
@@ -456,7 +403,6 @@ async function applyChunkSideEffects(
   streamId: StreamDid,
   isBackfill: boolean,
   detectedLinks: string[],
-  spaceDb?: DbLike,
   globalDb?: DbLike,
 ): Promise<void> {
   for (const e of chunk) {
@@ -469,7 +415,7 @@ async function applyChunkSideEffects(
         statements: [],
         dependsOn: [],
       };
-      await applyBundle(db, bundle, { isBackfill, streamId }, spaceDb, globalDb);
+      await applyBundle(db, bundle, { isBackfill, streamId }, globalDb, openReadStateDb());
 
       const body = (e.event as Record<string, unknown>).body as
         | { mimeType?: string; data?: { buf: Uint8Array } }
@@ -479,20 +425,25 @@ async function applyChunkSideEffects(
         const content = decodeContent(mime, Buffer.from(body.data.buf));
         const detected = await detectAndStoreLinks(db, e.event.id, content);
         if (detected.length > 0) detectedLinks.push(...detected);
-        if (spaceDb && detected.length > 0) {
-          // Dual-write the link detection: the URL entity + comp_embed_link
-          // row must exist in the per-space DB too so the space DB is a
-          // complete view of the space.
+        if (globalDb && detected.length > 0) {
+          // Record the link entities in the global entity→space index so
+          // they resolve to this space (they carry an empty stream_id in
+          // the per-space DB).
           for (const url of detected) {
-            await spaceDb.run(
-              `insert or ignore into entities (id, stream_id, room, created_at)
-               values (?, '', ?, (unixepoch() * 1000))`,
-              [url, e.event.id],
+            await globalDb.run(
+              `insert or ignore into entity_space (entity_id, space_did) values (?, ?)`,
+              [url, streamId],
             );
-            await spaceDb.run(
-              `insert or ignore into comp_embed_link (entity, show_preview, created_at, updated_at)
-               values (?, 1, (unixepoch() * 1000), (unixepoch() * 1000))`,
-              [url],
+          }
+          // Dual-write the global pending-links index so the centralized
+          // embed sweeper can find this work without iterating every
+          // per-space DB. `insert or ignore` keeps the row idempotent across
+          // re-materialisation.
+          for (const url of detected) {
+            await globalDb.run(
+              `insert or ignore into pending_links (space_did, message_id, url, created_at)
+               values (?, ?, ?, ?)`,
+              [streamId, e.event.id, url, Date.now()],
             );
           }
         }

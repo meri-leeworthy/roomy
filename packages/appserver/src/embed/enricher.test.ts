@@ -11,12 +11,14 @@ import {
   filterPendingUrls,
   fetchEmbedData,
   countPendingLinks,
+  type PendingLink,
 } from "./enricher.ts";
 import type { DbLike } from "../db/types.ts";
 import type { Embed } from "./types.ts";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SCHEMA_PATH = join(__dirname, "..", "db", "schema.sql");
+const GLOBAL_SCHEMA_PATH = join(__dirname, "..", "db", "schema-global.sql");
 const SCHEMA_VERSION = "10-appserver.4";
 
 function freshDb(): { db: Database; asyncDb: DbLike } {
@@ -30,6 +32,17 @@ function freshDb(): { db: Database; asyncDb: DbLike } {
   return { db, asyncDb: toAsyncDb(db) };
 }
 
+/** In-memory global DB (schema-global.sql) for the pending_links index tests. */
+function freshGlobalDb(): { db: Database; asyncDb: DbLike } {
+  const db = new Database(":memory:");
+  db.exec("pragma journal_mode = wal");
+  db.exec("pragma synchronous = normal");
+  db.exec("pragma foreign_keys = on");
+  const schemaSql = readFileSync(GLOBAL_SCHEMA_PATH, "utf8");
+  db.exec(schemaSql);
+  return { db, asyncDb: toAsyncDb(db) };
+}
+
 /** Insert the entity + comp_embed_link rows needed for a URL to be enrichable. */
 function seedLink(db: Database, url: string): void {
   db.run("insert into entities (id, stream_id) values (?, ?)", [
@@ -39,6 +52,20 @@ function seedLink(db: Database, url: string): void {
   db.run("insert into comp_embed_link (entity, show_preview) values (?, 1)", [
     url,
   ]);
+}
+
+/** Insert a row into the global pending_links index. */
+function seedPendingLink(
+  db: Database,
+  url: string,
+  spaceDid = "did:web:test.example",
+  messageId = "msg1",
+  createdAt = Date.now(),
+): void {
+  db.run(
+    "insert into pending_links (space_did, message_id, url, created_at) values (?, ?, ?, ?)",
+    [spaceDid, messageId, url, createdAt],
+  );
 }
 
 type DataRow = {
@@ -57,7 +84,7 @@ function dataRow(db: Database, url: string): DataRow | null {
 
 const EMBED: Embed = { v: "1", ts: "x", ty: "link", t: "T" };
 
-describe("embed retry-with-backoff", () => {
+describe("embed retry-with-backoff (per-space storeEmbedData)", () => {
   test("transient failure schedules a retry with escalating backoff", async () => {
     const { db, asyncDb } = freshDb();
     seedLink(db, "https://a.example");
@@ -75,9 +102,6 @@ describe("embed retry-with-backoff", () => {
     row = dataRow(db, "https://a.example")!;
     expect(row.attempts).toBe(2);
     expect((row.retry_after ?? 0) > firstRetry).toBe(true);
-
-    // Backoff not yet elapsed → the URL is NOT in the pending set.
-    expect(await findPendingLinks(asyncDb)).not.toContain("https://a.example");
   });
   test("definitive failure (404 / no-data) settles with no retry", async () => {
     const { db, asyncDb } = freshDb();
@@ -87,8 +111,6 @@ describe("embed retry-with-backoff", () => {
     expect(row.embed_json).toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.retry_after).toBeNull();
-    // Settled — not pending, will never be retried.
-    expect(await findPendingLinks(asyncDb)).not.toContain("https://c.example");
   });
 
   test("success stores embed data and clears any prior retry state", async () => {
@@ -101,30 +123,6 @@ describe("embed retry-with-backoff", () => {
     expect(row.embed_json).not.toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.retry_after).toBeNull();
-    expect(await findPendingLinks(asyncDb)).not.toContain("https://d.example");
-  });
-
-  test("findPendingLinks returns never-attempted and retry-eligible rows only", async () => {
-    const { db, asyncDb } = freshDb();
-    seedLink(db, "https://never.example"); // no data row → pending
-    seedLink(db, "https://retry.example");
-    seedLink(db, "https://settled.example");
-    await storeEmbedData(asyncDb, "https://retry.example", { status: "transient" }); // future retry_after
-    await storeEmbedData(asyncDb, "https://settled.example", { status: "definitive" });
-
-    // Only the never-attempted link is pending (retry's backoff hasn't elapsed).
-    let pending = await findPendingLinks(asyncDb);
-    expect(pending).toContain("https://never.example");
-    expect(pending).not.toContain("https://retry.example");
-    expect(pending).not.toContain("https://settled.example");
-
-    // Fast-forward: force the retry row's retry_after into the past.
-    await asyncDb.run(
-      "update comp_embed_link_data set retry_after = ? where entity = ?",
-      [Date.now() - 1000, "https://retry.example"],
-    );
-    pending = await findPendingLinks(asyncDb);
-    expect(pending).toContain("https://retry.example"); // now eligible for retry
   });
 
   test("filterPendingUrls (priority) only returns never-attempted links", async () => {
@@ -142,26 +140,49 @@ describe("embed retry-with-backoff", () => {
     expect(got).toContain("https://new.example");
     expect(got).not.toContain("https://failed.example");
   });
+});
 
-  test("countPendingLinks matches findPendingLinks across retry/backoff states", async () => {
-    // Backed by the same predicate as findPendingLinks but unbounded — used by
-    // /health/embed to report backlog depth. Keep the two in lockstep.
-    const { db, asyncDb } = freshDb();
-    seedLink(db, "https://never.example"); // no data row → pending
-    seedLink(db, "https://retry.example");
-    seedLink(db, "https://settled.example");
-    await storeEmbedData(asyncDb, "https://retry.example", { status: "transient" });
-    await storeEmbedData(asyncDb, "https://settled.example", { status: "definitive" });
+describe("global pending_links index (findPendingLinks / countPendingLinks)", () => {
+  test("findPendingLinks returns pending rows oldest-first with space + message", async () => {
+    const { db, asyncDb } = freshGlobalDb();
+    seedPendingLink(db, "https://old.example", "did:web:a", "m1", 1000);
+    seedPendingLink(db, "https://new.example", "did:web:b", "m2", 2000);
 
-    // Only the never-attempted link is pending (retry's backoff hasn't elapsed).
-    expect(await countPendingLinks(asyncDb)).toBe(1);
-    expect(await countPendingLinks(asyncDb)).toBe((await findPendingLinks(asyncDb)).length);
+    const pending = await findPendingLinks(asyncDb);
+    expect(pending.map((p) => p.url)).toEqual([
+      "https://old.example",
+      "https://new.example",
+    ]);
+    expect(pending[0]).toMatchObject({
+      url: "https://old.example",
+      spaceDid: "did:web:a",
+      messageId: "m1",
+    });
+    expect(pending[1]).toMatchObject({
+      url: "https://new.example",
+      spaceDid: "did:web:b",
+      messageId: "m2",
+    });
+  });
 
-    // Fast-forward the retry row: now two are pending.
-    await asyncDb.run(
-      "update comp_embed_link_data set retry_after = ? where entity = ?",
-      [Date.now() - 1000, "https://retry.example"],
-    );
+  test("findPendingLinks respects the limit", async () => {
+    const { db, asyncDb } = freshGlobalDb();
+    seedPendingLink(db, "https://one.example", "did:web:a", "m1", 1000);
+    seedPendingLink(db, "https://two.example", "did:web:a", "m2", 2000);
+    seedPendingLink(db, "https://three.example", "did:web:a", "m3", 3000);
+
+    const pending = await findPendingLinks(asyncDb, 2);
+    expect(pending.map((p) => p.url)).toEqual([
+      "https://one.example",
+      "https://two.example",
+    ]);
+  });
+
+  test("countPendingLinks counts all pending rows", async () => {
+    const { db, asyncDb } = freshGlobalDb();
+    expect(await countPendingLinks(asyncDb)).toBe(0);
+    seedPendingLink(db, "https://one.example", "did:web:a", "m1");
+    seedPendingLink(db, "https://two.example", "did:web:b", "m2");
     expect(await countPendingLinks(asyncDb)).toBe(2);
     expect(await countPendingLinks(asyncDb)).toBe((await findPendingLinks(asyncDb)).length);
   });

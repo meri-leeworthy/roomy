@@ -173,7 +173,7 @@ describe("push/evaluate — Busy immediate pushes", () => {
     const db = freshDb();
     await seedFixture(db);
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -203,7 +203,7 @@ describe("push/evaluate — Busy immediate pushes", () => {
     await setUserDefault(db, AUTHOR, "busy");
     await addSubscription(db, AUTHOR);
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -222,7 +222,7 @@ describe("push/evaluate — Busy immediate pushes", () => {
     // delivery of any kind for a single message.
     _resetParticipationBackfillCache();
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -239,7 +239,7 @@ describe("push/evaluate — Busy immediate pushes", () => {
     // BANNED_BUSY is busy + has a subscription, but is banned in the space.
     // roomAccess.canRead must be false → no push (never leak to a banned user).
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -259,7 +259,7 @@ describe("push/evaluate — Busy immediate pushes", () => {
       [BUSY_READER],
     );
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -279,7 +279,7 @@ describe("push/evaluate — Busy immediate pushes", () => {
       [BUSY_READER, SPACE],
     );
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -340,7 +340,7 @@ describe("push/evaluate — Engaged digest path", () => {
 
     // Messages 1–4: no digest yet (below threshold), but state accumulates.
     for (let i = 1; i <= 4; i++) {
-      const deliveries = await evaluatePush(db, msgJob(i));
+      const deliveries = await evaluatePush(db, db, msgJob(i));
       expect(deliveries.find((d) => d.userDid === ENGAGED_READER)).toBeUndefined();
     }
     expect(await notifState(db, ENGAGED_READER, CHANNEL)).toEqual({
@@ -349,7 +349,7 @@ describe("push/evaluate — Engaged digest path", () => {
     });
 
     // 5th message: on-event threshold reached → digest delivery, notified=1.
-    const deliveries5 = await evaluatePush(db, msgJob(5));
+    const deliveries5 = await evaluatePush(db, db, msgJob(5));
     const digest = deliveries5.find((d) => d.userDid === ENGAGED_READER);
     expect(digest).toBeDefined();
     expect(digest!.payload.type).toBe("digest");
@@ -370,7 +370,7 @@ describe("push/evaluate — Engaged digest path", () => {
     await addSubscription(db, ENGAGED_READER);
 
     for (let i = 1; i <= 6; i++) {
-      const deliveries = await evaluatePush(db, msgJob(i));
+      const deliveries = await evaluatePush(db, db, msgJob(i));
       expect(deliveries.find((d) => d.userDid === ENGAGED_READER)).toBeUndefined();
     }
     // Participation gate skips before any notification_state write.
@@ -385,12 +385,12 @@ describe("push/evaluate — Engaged digest path", () => {
     await addSubscription(db, ENGAGED_READER);
 
     // Fire the 5-message threshold.
-    for (let i = 1; i <= 5; i++) await evaluatePush(db, msgJob(i));
+    for (let i = 1; i <= 5; i++) await evaluatePush(db, db, msgJob(i));
     expect((await notifState(db, ENGAGED_READER, CHANNEL))!.notified).toBe(1);
 
     // More messages arrive while the user still hasn't reopened the room.
-    const deliveries6 = await evaluatePush(db, msgJob(6));
-    const deliveries7 = await evaluatePush(db, msgJob(7));
+    const deliveries6 = await evaluatePush(db, db, msgJob(6));
+    const deliveries7 = await evaluatePush(db, db, msgJob(7));
     expect(deliveries6.find((d) => d.userDid === ENGAGED_READER)).toBeUndefined();
     expect(deliveries7.find((d) => d.userDid === ENGAGED_READER)).toBeUndefined();
     // Per the plan, once notified the row "does nothing" for further messages
@@ -410,7 +410,7 @@ describe("push/evaluate — Engaged digest path", () => {
     await addSubscription(db, ENGAGED_READER);
 
     // Fire + notify the first batch.
-    for (let i = 1; i <= 5; i++) await evaluatePush(db, msgJob(i));
+    for (let i = 1; i <= 5; i++) await evaluatePush(db, db, msgJob(i));
     expect((await notifState(db, ENGAGED_READER, CHANNEL))!.notified).toBe(1);
 
     // User reopens the room → updateSeen resets the digest state.
@@ -418,7 +418,7 @@ describe("push/evaluate — Engaged digest path", () => {
     expect(await notifState(db, ENGAGED_READER, CHANNEL)).toBeUndefined();
 
     // A new burst can fire another digest.
-    for (let i = 10; i <= 14; i++) await evaluatePush(db, msgJob(i));
+    for (let i = 10; i <= 14; i++) await evaluatePush(db, db, msgJob(i));
     const state = await notifState(db, ENGAGED_READER, CHANNEL);
     expect(state?.notified).toBe(1);
     expect(state?.unseen_count).toBe(5);
@@ -433,7 +433,7 @@ describe("push/evaluate — Engaged digest path", () => {
     await addSubscription(db, ENGAGED_READER);
 
     for (let i = 1; i <= 6; i++) {
-      const deliveries = await evaluatePush(db, msgJob(i));
+      const deliveries = await evaluatePush(db, db, msgJob(i));
       expect(deliveries.find((d) => d.userDid === ENGAGED_READER)).toBeUndefined();
     }
     expect(await notifState(db, ENGAGED_READER, CHANNEL)).toBeUndefined();
@@ -449,7 +449,7 @@ describe("push/evaluate — Engaged digest path", () => {
     await addBan(db, SPACE, ENGAGED_READER);
 
     for (let i = 1; i <= 6; i++) {
-      const deliveries = await evaluatePush(db, msgJob(i));
+      const deliveries = await evaluatePush(db, db, msgJob(i));
       expect(deliveries.find((d) => d.userDid === ENGAGED_READER)).toBeUndefined();
     }
     expect(await notifState(db, ENGAGED_READER, CHANNEL)).toBeUndefined();
@@ -478,7 +478,7 @@ describe("push/evaluate — Phase 3 mention routing", () => {
     _resetParticipationBackfillCache();
     // QUIET_READER is quiet by default (set in seedFixture) + has a subscription.
     // The message mentions them → should get an immediate push.
-    const deliveries = await evaluatePush(db, msgJobWithMentions(1, [QUIET_READER]));
+    const deliveries = await evaluatePush(db, db, msgJobWithMentions(1, [QUIET_READER]));
     const push = deliveries.find((d) => d.userDid === QUIET_READER);
     expect(push).toBeDefined();
     expect(push!.payload.type).toBe("message");
@@ -491,7 +491,7 @@ describe("push/evaluate — Phase 3 mention routing", () => {
     await seedFixture(db);
     _resetParticipationBackfillCache();
     // QUIET_READER is quiet, message does NOT mention them → no push.
-    const deliveries = await evaluatePush(db, msgJobWithMentions(1, [ENGAGED_READER]));
+    const deliveries = await evaluatePush(db, db, msgJobWithMentions(1, [ENGAGED_READER]));
     expect(deliveries.find((d) => d.userDid === QUIET_READER)).toBeUndefined();
   });
 
@@ -505,7 +505,7 @@ describe("push/evaluate — Phase 3 mention routing", () => {
     await addParticipation(db, ENGAGED_READER, CHANNEL, 500_000);
 
     // Message mentions them → should get immediate message push, not digest.
-    const deliveries = await evaluatePush(db, msgJobWithMentions(1, [ENGAGED_READER]));
+    const deliveries = await evaluatePush(db, db, msgJobWithMentions(1, [ENGAGED_READER]));
     const push = deliveries.find((d) => d.userDid === ENGAGED_READER);
     expect(push).toBeDefined();
     expect(push!.payload.type).toBe("message");
@@ -522,7 +522,7 @@ describe("push/evaluate — Phase 3 mention routing", () => {
     await addParticipation(db, ENGAGED_READER, CHANNEL, 500_000);
 
     // Even with 0 prior unseen messages, a mention fires immediately.
-    const deliveries = await evaluatePush(db, msgJobWithMentions(1, [ENGAGED_READER]));
+    const deliveries = await evaluatePush(db, db, msgJobWithMentions(1, [ENGAGED_READER]));
     expect(deliveries.find((d) => d.userDid === ENGAGED_READER)).toBeDefined();
   });
 
@@ -535,10 +535,10 @@ describe("push/evaluate — Phase 3 mention routing", () => {
 
     // No mentions → digest path. 5 messages should fire a digest.
     for (let i = 1; i <= 4; i++) {
-      const deliveries = await evaluatePush(db, msgJobWithMentions(i));
+      const deliveries = await evaluatePush(db, db, msgJobWithMentions(i));
       expect(deliveries.find((d) => d.userDid === ENGAGED_READER)).toBeUndefined();
     }
-    const deliveries5 = await evaluatePush(db, msgJobWithMentions(5));
+    const deliveries5 = await evaluatePush(db, db, msgJobWithMentions(5));
     const digest = deliveries5.find((d) => d.userDid === ENGAGED_READER);
     expect(digest).toBeDefined();
     expect(digest!.payload.type).toBe("digest");
@@ -549,7 +549,7 @@ describe("push/evaluate — Phase 3 mention routing", () => {
     await seedFixture(db);
     // BUSY_READER is busy. Mention doesn't change busy behaviour — they get
     // the same immediate push regardless.
-    const deliveries = await evaluatePush(db, msgJobWithMentions(1, [BUSY_READER]));
+    const deliveries = await evaluatePush(db, db, msgJobWithMentions(1, [BUSY_READER]));
     expect(deliveries.find((d) => d.userDid === BUSY_READER)).toBeDefined();
   });
 
@@ -563,7 +563,7 @@ describe("push/evaluate — Phase 3 mention routing", () => {
       [BUSY_READER, SPACE],
     );
 
-    const deliveries = await evaluatePush(db, msgJobWithMentions(1, [BUSY_READER]));
+    const deliveries = await evaluatePush(db, db, msgJobWithMentions(1, [BUSY_READER]));
     expect(deliveries.find((d) => d.userDid === BUSY_READER)).toBeUndefined();
   });
 
@@ -571,7 +571,7 @@ describe("push/evaluate — Phase 3 mention routing", () => {
     const db = freshDb();
     await seedFixture(db);
     // Author mentions themselves — still excluded by the `did === authorDid` check.
-    const deliveries = await evaluatePush(db, msgJobWithMentions(1, [AUTHOR]));
+    const deliveries = await evaluatePush(db, db, msgJobWithMentions(1, [AUTHOR]));
     expect(deliveries.find((d) => d.userDid === AUTHOR)).toBeUndefined();
   });
 
@@ -584,9 +584,9 @@ describe("push/evaluate — Phase 3 mention routing", () => {
 
     // Empty mentions array — no one is mentioned. Engaged reader gets digest path.
     for (let i = 1; i <= 4; i++) {
-      await evaluatePush(db, msgJobWithMentions(i, []));
+      await evaluatePush(db, db, msgJobWithMentions(i, []));
     }
-    const deliveries5 = await evaluatePush(db, msgJobWithMentions(5, []));
+    const deliveries5 = await evaluatePush(db, db, msgJobWithMentions(5, []));
     const digest = deliveries5.find((d) => d.userDid === ENGAGED_READER);
     expect(digest).toBeDefined();
     expect(digest!.payload.type).toBe("digest");
@@ -644,7 +644,7 @@ describe("push/evaluate — notification icons (avatars)", () => {
       AUTHOR,
     ]);
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -669,7 +669,7 @@ describe("push/evaluate — notification icons (avatars)", () => {
       "https://cdn.example/space.png",
     ]);
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -687,7 +687,7 @@ describe("push/evaluate — notification icons (avatars)", () => {
     await seedFixture(db);
     // seedFixture sets no avatars.
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
@@ -715,7 +715,7 @@ describe("push/evaluate — notification icons (avatars)", () => {
 
     let digest: { payload: { icon?: string } } | undefined;
     for (let i = 1; i <= 5; i++) {
-      const deliveries = await evaluatePush(db, msgJob(i));
+      const deliveries = await evaluatePush(db, db, msgJob(i));
       digest = deliveries.find((d) => d.userDid === ENGAGED_READER) as
         | { payload: { icon?: string } }
         | undefined;
@@ -740,7 +740,7 @@ describe("push/evaluate — notification icons (avatars)", () => {
 
     let digest: { payload: { icon?: string } } | undefined;
     for (let i = 1; i <= 5; i++) {
-      const deliveries = await evaluatePush(db, msgJob(i));
+      const deliveries = await evaluatePush(db, db, msgJob(i));
       digest = deliveries.find((d) => d.userDid === ENGAGED_READER) as
         | { payload: { icon?: string } }
         | undefined;

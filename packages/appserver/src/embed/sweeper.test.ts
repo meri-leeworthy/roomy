@@ -1,8 +1,4 @@
 import { beforeAll, afterAll, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { toAsyncDb } from "../db/syncAdapter.ts";
 import type { DbLike } from "../db/types.ts";
@@ -14,16 +10,12 @@ import {
   stopEmbedSweeper,
   type EmbedSweeperOpts,
 } from "./sweeper.ts";
+import { openDb, openGlobalDb, openSpaceDb, closeDb } from "../db/db.ts";
 import type { Embed } from "./types.ts";
 import type {
   InvalidationEvent,
   InvalidationRouter,
 } from "../invalidation/types.ts";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const SCHEMA_PATH = join(__dirname, "..", "db", "schema.sql");
-const SCHEMA_VERSION = "10-appserver.4";
 
 // Deterministic fake embed so the sweeper test doesn't depend on the
 // network or a live embed service. The sweeper only emits a #messageDiff
@@ -40,6 +32,12 @@ const FAKE_RESPONSE = JSON.stringify(["2026-06-23T00:00:00Z", FAKE_EMBED]);
 const realFetch = globalThis.fetch;
 
 beforeAll(() => {
+  // Point every DB at in-memory storage so the shared worker (used by
+  // openGlobalDb / openSpaceDb) never touches the filesystem across tests.
+  process.env.EVENTS_DB_PATH = ":memory:";
+  process.env.READSTATE_DB_PATH = ":memory:";
+  process.env.SPACES_DIR = ":memory:";
+  process.env.GLOBAL_DB_PATH = ":memory:";
   globalThis.fetch = ((
     _input: RequestInfo | URL,
     _init?: RequestInit,
@@ -53,6 +51,8 @@ beforeAll(() => {
 });
 afterAll(() => {
   globalThis.fetch = realFetch;
+  stopEmbedSweeper();
+  closeDb();
 });
 
 /**
@@ -72,44 +72,54 @@ function captureRouter(): {
   return { router, signals };
 }
 
-function freshDb(): { db: Database; asyncDb: DbLike } {
-  const db = new Database(":memory:");
-  db.exec("pragma journal_mode = wal");
-  db.exec("pragma synchronous = normal");
-  db.exec("pragma foreign_keys = on");
-  const schemaSql = readFileSync(SCHEMA_PATH, "utf8");
-  db.exec(schemaSql);
-  db.run("insert into roomy_schema_version (id, version) values (1, ?)", [SCHEMA_VERSION]);
-  return { db, asyncDb: toAsyncDb(db) };
+const SPACE_DID = "did:web:test.example";
+
+/**
+ * Stop any running sweeper, tear down the previous worker, and open a fresh
+ * in-memory worker with routed global + per-space handles. Each test gets an
+ * isolated set of in-memory DBs.
+ */
+function freshWorker(): { globalDb: DbLike; spaceDb: DbLike } {
+  stopEmbedSweeper();
+  closeDb();
+  openDb();
+  return { globalDb: openGlobalDb(), spaceDb: openSpaceDb(SPACE_DID) };
 }
 
-/** Seed the minimum entity rows for a link-in-a-message-in-a-room scenario. */
-function seedLinkMessageRoom(
-  db: Database,
+/**
+ * Seed the minimum entity rows for a link-in-a-message-in-a-room scenario in
+ * the per-space DB, plus the matching global `pending_links` row.
+ */
+async function seedLinkMessageRoom(
+  spaceDb: DbLike,
+  globalDb: DbLike,
   ids: { room: string; message: string; url: string },
-): void {
+): Promise<void> {
   // Room entity (its own room column is null — rooms don't belong to rooms).
-  db.run("insert into entities (id, stream_id) values (?, ?)", [
+  await spaceDb.run("insert into entities (id, stream_id) values (?, ?)", [
     ids.room,
-    "did:web:test.example",
+    SPACE_DID,
   ]);
   // Message entity — room column holds the REAL room id.
-  db.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
+  await spaceDb.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
     ids.message,
-    "did:web:test.example",
+    SPACE_DID,
     ids.room,
   ]);
   // Link entity — room column holds the MESSAGE id (not the room id!).
-  // This mirrors both ensureEntity(streamId, url, event.id) for explicit
-  // link attachments and detectAndStoreLinks(db, messageId, content).
-  db.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
+  await spaceDb.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
     ids.url,
-    "did:web:test.example",
+    SPACE_DID,
     ids.message,
   ]);
-  db.run(
+  await spaceDb.run(
     "insert into comp_embed_link (entity, show_preview) values (?, 1)",
     [ids.url],
+  );
+  // Global pending-links index row (the sweeper's work queue).
+  await globalDb.run(
+    "insert into pending_links (space_did, message_id, url, created_at) values (?, ?, ?, ?)",
+    [SPACE_DID, ids.message, ids.url, Date.now()],
   );
 }
 
@@ -123,22 +133,22 @@ async function flushSweeper(opts: EmbedSweeperOpts): Promise<void> {
   await stopEmbedSweeper();
   startEmbedSweeper(opts);
   // Run one cycle synchronously, then stop the background loop.
-  await sweepCycle(opts.db);
+  await sweepCycle(opts.globalDb);
   await stopEmbedSweeper();
 }
 
 describe("embed sweeper invalidation room resolution", () => {
   test("emits a #messageDiff update with the real room id, not the message id", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb, spaceDb } = freshWorker();
     const { router, signals } = captureRouter();
     const ids = {
       room: "01KVQQQQQQQQQQQQQQQQQQQQQQ",
       message: "01KVMMMMMMMMMMMMMMMMMMMMMM",
       url: "https://example.com/article",
     };
-    seedLinkMessageRoom(db, ids);
+    await seedLinkMessageRoom(spaceDb, globalDb, ids);
 
-    await flushSweeper({ db: asyncDb, invalidationRouter: router });
+    await flushSweeper({ globalDb, invalidationRouter: router });
 
     // The sweeper loop is async and waits on fetchEmbedData (network). Give
     // it a moment to process the pending link, then assert. We use a generous
@@ -184,10 +194,10 @@ describe("embed sweeper invalidation room resolution", () => {
   });
 
   test("does not emit when no pending links exist", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb } = freshWorker();
     const { router, signals } = captureRouter();
 
-    await flushSweeper({ db: asyncDb, invalidationRouter: router });
+    await flushSweeper({ globalDb, invalidationRouter: router });
 
     // Let the loop idle once.
     await new Promise((r) => setTimeout(r, 100));
@@ -200,20 +210,20 @@ describe("embed sweeper invalidation room resolution", () => {
     // Regression: links in messages a user is READING (detected during
     // backfill, never write-poked) used to sit behind the entire backlog.
     // The read handler now calls prioritiseLinksForRead so they jump the queue.
-    const { db, asyncDb } = freshDb();
+    const { globalDb, spaceDb } = freshWorker();
     const { router, signals } = captureRouter();
     const ids = {
       room: "01KVRRRRRRRRRRRRRRRRRRRRRR",
       message: "01KVMMMMMMMMMMMMMMMMMMMMMM",
       url: "https://example.com/read-viewed",
     };
-    seedLinkMessageRoom(db, ids);
+    await seedLinkMessageRoom(spaceDb, globalDb, ids);
 
     // Simulate the getMessages handler: prioritise the viewed message's links.
     // Called BEFORE the sweeper is started (as it would be on a cold read).
-    await prioritiseLinksForRead(asyncDb, [{ linkEmbeds: [{ url: ids.url }] }]);
+    await prioritiseLinksForRead(spaceDb, [{ linkEmbeds: [{ url: ids.url }] }]);
 
-    await flushSweeper({ db: asyncDb, invalidationRouter: router });
+    await flushSweeper({ globalDb, invalidationRouter: router });
 
     const deadline = Date.now() + 15_000;
     while (signals.length === 0 && Date.now() < deadline) {
@@ -240,9 +250,9 @@ describe("embed sweeper invalidation room resolution", () => {
     // pressure) inside filterPendingUrls must be swallowed so getMessages /
     // getMessage never 500 due to embed prioritisation. Embeds are best-effort;
     // messages are the product. A closed DB makes the query throw reliably.
-    const { asyncDb } = freshDb();
-    await asyncDb.close();
-    await prioritiseLinksForRead(asyncDb, [
+    const { spaceDb } = freshWorker();
+    closeDb(); // terminate the worker so every subsequent DB call throws
+    await prioritiseLinksForRead(spaceDb, [
       { linkEmbeds: [{ url: "https://example.com/x" }] },
     ]);
   });
@@ -251,16 +261,16 @@ describe("embed sweeper invalidation room resolution", () => {
     // Simulates a failing DB (IOERR_VNODE): seed a pending link, then close
     // the DB so every read/write throws. The loop must back off rather than
     // tight-loop fetch-and-fail, and must emit nothing (no enrichments landed).
-    const { db, asyncDb } = freshDb();
+    const { globalDb, spaceDb } = freshWorker();
     const { router, signals } = captureRouter();
-    seedLinkMessageRoom(db, {
+    await seedLinkMessageRoom(spaceDb, globalDb, {
       room: "01KVRRRRRRRRRRRRRRRRRRRRRR",
       message: "01KVMMMMMMMMMMMMMMMMMMMMMM",
       url: "https://example.com/broken-db",
     });
-    await asyncDb.close();
+    closeDb(); // terminate the worker so every subsequent DB call throws
 
-    await flushSweeper({ db: asyncDb, invalidationRouter: router });
+    await flushSweeper({ globalDb, invalidationRouter: router });
     // Let the loop attempt a cycle and back off.
     await new Promise((r) => setTimeout(r, 300));
     _resetEmbedSweeper();
