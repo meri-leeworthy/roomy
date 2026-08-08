@@ -7,7 +7,7 @@
  */
 
 import { createAccessMemo, roomAccess, spaceAccess } from "../auth/access.ts";
-import { openDb, openSpaceDb } from "../db/db.ts";
+import { openReadStateDb, openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { getReadPositions } from "../queries/readPositions.ts";
 import { queryActiveThreads, resolveThreadsByIds } from "../queries/userActiveThreads.ts";
@@ -85,7 +85,7 @@ export const getMetadataHandler: QueryHandler<
   }
 
   const db = openSpaceDb(spaceId);
-  const mainDb = openDb();
+  const mainDb = openReadStateDb();
   // Metadata (name, avatar, joinPolicy, isMember) is required to render the
   // join / accept-invite UI for spaces the caller is not yet a member of —
   // including invite-only spaces. We therefore don't require read membership
@@ -219,7 +219,7 @@ export const getMetadataHandler: QueryHandler<
     // ── Active threads ────────────────────────────────────────────────
     // Fetch up to 8 threads the user has recently interacted with and
     // distribute them into their parent channels for the sidebar.
-    const activeThreadEntries = await queryActiveThreads(mainDb, userDid, spaceId);
+    const activeThreadEntries = await queryActiveThreads(mainDb, db, userDid, spaceId);
 
     if (activeThreadEntries.length > 0) {
       const threadIds = activeThreadEntries.map((t) => t.id);

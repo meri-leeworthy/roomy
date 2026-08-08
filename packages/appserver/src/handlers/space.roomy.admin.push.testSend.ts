@@ -15,7 +15,7 @@
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { sendPush } from "../push/webpush.ts";
 import { selectSubscriptions } from "../queries/pushSubscriptions.ts";
@@ -58,7 +58,7 @@ export const adminTestSendHandler: ProcedureHandler<
     throw new XrpcError(400, "InvalidRequest", "Missing or empty required field: did");
   }
 
-  const db = openDb();
+  const db = openReadStateDb();
   const subs = await selectSubscriptions(db, userDid);
 
   // Optional filter by endpoint hostname or full URL.

@@ -2,8 +2,10 @@
  * Unit tests for reMaterializeFromLocalEvents — idempotent re-materialization
  * of every stream from the local events DB on boot.
  *
- * Uses an in-memory main DB with a temp-file events DB (ATTACHed by openDb).
- * Events are seeded directly into events.stream_events, bypassing StreamManager.
+ * Phase 3: `openDb()` returns the EVENT-LOG DB (stream_events / stream_state).
+ * Materialised rows (entities, comp_*, materialization_cursor) live in the
+ * per-space DBs, reached via `db.forSpace(streamDid)`. Events are seeded
+ * directly into the event-log `stream_events`, bypassing StreamManager.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
@@ -36,7 +38,8 @@ beforeEach(async () => {
   const testId = Math.random().toString(36).slice(2, 8);
   process.env.EVENTS_DB_PATH = `/tmp/roomy-events-${testId}.sqlite`;
 
-  // In-memory main DB; the worker ATTACHes the events DB as `events`.
+  // In-memory event-log DB; derived DBs (per-space/global/readstate) are
+  // also in-memory. `db` is the event-log handle.
   db = openDb({ path: ":memory:" });
 });
 
@@ -46,11 +49,10 @@ afterEach(() => {
 });
 
 /**
- * Seed events into events.stream_events for a given stream.
+ * Seed events into the event-log `stream_events` for a given stream.
  * Each event is CBOR-encoded and inserted with a sequential idx starting
- * from `startIdx` (default 0). Also pre-seeds the entities row for the
- * stream DID so FK constraints resolve (mirrors what createStream does in
- * production).
+ * from `startIdx` (default 0). The event-log DB has no FK to `entities`, so
+ * no pre-seeding is needed (unlike the old monolithic schema).
  */
 async function seedEvents(
   db: DbLike,
@@ -59,17 +61,10 @@ async function seedEvents(
   user: UserDid = ADMIN,
   startIdx: number = 0,
 ): Promise<void> {
-  // Pre-seed the entity row for the stream DID (createStream does this)
-  await db.run(
-    "insert into entities (id, stream_id) values (?, ?) on conflict(id) do nothing",
-    streamDid,
-    streamDid,
-  );
-
   for (let i = 0; i < events.length; i++) {
     const payload = encode(events[i] as Parameters<typeof encode>[0]);
     await db.run(
-      "insert into events.stream_events (stream_id, idx, user, payload, signature) values (?, ?, ?, ?, x'')",
+      "insert into stream_events (stream_id, idx, user, payload, signature) values (?, ?, ?, ?, x'')",
       streamDid,
       startIdx + i,
       user,
@@ -96,7 +91,7 @@ function makeRoomEvents(count: number): Record<string, unknown>[] {
 }
 
 /**
- * Read and decode events from the events DB for a given stream, starting
+ * Read and decode events from the event-log DB for a given stream, starting
  * from `fromIdx`. Returns DecodedStreamEvent[] ready for applyBatch.
  */
 async function readDecodedEvents(
@@ -106,7 +101,7 @@ async function readDecodedEvents(
 ): Promise<DecodedStreamEvent[]> {
   const rows = await db
     .query(
-      "SELECT idx, user, payload FROM events.stream_events WHERE stream_id = ? AND idx >= ? ORDER BY idx",
+      "SELECT idx, user, payload FROM stream_events WHERE stream_id = ? AND idx >= ? ORDER BY idx",
     )
     .all<{ idx: number; user: string; payload: Uint8Array }>(streamDid, fromIdx);
   return rows.map((r): DecodedStreamEvent => ({
@@ -121,6 +116,7 @@ async function readDecodedEvents(
 describe("reMaterializeFromLocalEvents", () => {
   test("idempotent re-apply", async () => {
     const streamDid = StreamDid.assert("did:web:idempotent-test.example");
+    const space = db.forSpace!(streamDid);
 
     // Seed default space events (updateSpaceInfo, createRoom, updateSidebar)
     const events = createDefaultSpaceEvents({ name: "Idempotent Space" });
@@ -129,23 +125,23 @@ describe("reMaterializeFromLocalEvents", () => {
     // ── First pass ──────────────────────────────────────────────────────
     await reMaterializeFromLocalEvents(db);
 
-    // Snapshot materialized row counts
-    const entities1 = await db
+    // Snapshot materialized row counts (per-space DB)
+    const entities1 = await space
       .query("select count(*) as cnt from entities")
       .get<{ cnt: number }>();
     expect(entities1!.cnt).toBeGreaterThan(0);
 
-    const compInfo1 = await db
+    const compInfo1 = await space
       .query("select count(*) as cnt from comp_info")
       .get<{ cnt: number }>();
     expect(compInfo1!.cnt).toBeGreaterThan(0);
 
-    const compRoom1 = await db
+    const compRoom1 = await space
       .query("select count(*) as cnt from comp_room")
       .get<{ cnt: number }>();
     expect(compRoom1!.cnt).toBeGreaterThan(0);
 
-    const compSpace1 = await db
+    const compSpace1 = await space
       .query("select count(*) as cnt from comp_space")
       .get<{ cnt: number }>();
     // updateSpaceInfo always ensures a comp_space row exists (even with
@@ -154,12 +150,12 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(compSpace1!.cnt).toBe(1);
 
     // Verify key columns are populated
-    const spaceRow1 = await db
+    const spaceRow1 = await space
       .query("select entity, handle, sidebar_config from comp_space where entity = ?")
       .get<{ entity: string; handle: string | null; sidebar_config: string }>(streamDid);
     expect(spaceRow1).not.toBeNull();
     expect(spaceRow1!.entity).toBe(streamDid);
-    const infoRow1 = await db
+    const infoRow1 = await space
       .query("select entity, name from comp_info where entity = ?")
       .get<{ entity: string; name: string | null }>(streamDid);
     expect(infoRow1).not.toBeNull();
@@ -168,35 +164,34 @@ describe("reMaterializeFromLocalEvents", () => {
     // ── Second pass — should not change anything ──────────────────────
     await reMaterializeFromLocalEvents(db);
 
-    const entities2 = await db
+    const entities2 = await space
       .query("select count(*) as cnt from entities")
       .get<{ cnt: number }>();
     expect(entities2!.cnt).toBe(entities1!.cnt);
 
-    const compInfo2 = await db
+    const compInfo2 = await space
       .query("select count(*) as cnt from comp_info")
       .get<{ cnt: number }>();
     expect(compInfo2!.cnt).toBe(compInfo1!.cnt);
 
-    const compRoom2 = await db
+    const compRoom2 = await space
       .query("select count(*) as cnt from comp_room")
       .get<{ cnt: number }>();
     expect(compRoom2!.cnt).toBe(compRoom1!.cnt);
 
-    const compSpace2 = await db
+    const compSpace2 = await space
       .query("select count(*) as cnt from comp_space")
       .get<{ cnt: number }>();
     expect(compSpace2!.cnt).toBe(compSpace1!.cnt);
 
     // Key column values unchanged
-    const spaceRow2 = await db
+    const spaceRow2 = await space
       .query("select entity, handle, sidebar_config from comp_space where entity = ?")
       .get<{ entity: string; handle: string | null; sidebar_config: string }>(streamDid);
     expect(spaceRow2).not.toBeNull();
     expect(spaceRow2!.entity).toBe(streamDid);
 
-
-    const infoRow2 = await db
+    const infoRow2 = await space
       .query("select entity, name from comp_info where entity = ?")
       .get<{ entity: string; name: string | null }>(streamDid);
     expect(infoRow2!.name).toBe(infoRow1!.name);
@@ -206,20 +201,18 @@ describe("reMaterializeFromLocalEvents", () => {
     // No events seeded — should be a no-op
     await reMaterializeFromLocalEvents(db);
 
-    const entities = await db
-      .query("select count(*) as cnt from entities")
+    // No streams in the event-log DB → nothing materialized anywhere.
+    const streams = await db
+      .query("select count(*) as cnt from stream_events")
       .get<{ cnt: number }>();
-    expect(entities!.cnt).toBe(0);
-
-    const compSpace = await db
-      .query("select count(*) as cnt from comp_space")
-      .get<{ cnt: number }>();
-    expect(compSpace!.cnt).toBe(0);
+    expect(streams!.cnt).toBe(0);
   });
 
   test("multiple streams", async () => {
     const stream1 = StreamDid.assert("did:web:multi-one.example");
     const stream2 = StreamDid.assert("did:web:multi-two.example");
+    const space1 = db.forSpace!(stream1);
+    const space2 = db.forSpace!(stream2);
 
     const events1 = createDefaultSpaceEvents({ name: "Space Alpha" });
     const events2 = createDefaultSpaceEvents({ name: "Space Beta" });
@@ -229,42 +222,43 @@ describe("reMaterializeFromLocalEvents", () => {
 
     await reMaterializeFromLocalEvents(db);
 
-    // Both streams should have entities
-    const stream1Entities = await db
+    // Both streams should have entities (in their own per-space DBs)
+    const stream1Entities = await space1
       .query("select count(*) as cnt from entities where stream_id = ?")
       .get<{ cnt: number }>(stream1);
     expect(stream1Entities!.cnt).toBeGreaterThan(0);
 
-    const stream2Entities = await db
+    const stream2Entities = await space2
       .query("select count(*) as cnt from entities where stream_id = ?")
       .get<{ cnt: number }>(stream2);
     expect(stream2Entities!.cnt).toBeGreaterThan(0);
 
     // updateSpaceInfo always ensures a comp_space row exists for each
     // space (see idempotent re-apply test), so both streams get one.
-    const stream1Space = await db
+    const stream1Space = await space1
       .query("select count(*) as cnt from comp_space where entity = ?")
       .get<{ cnt: number }>(stream1);
     expect(stream1Space!.cnt).toBe(1);
 
-    const stream2Space = await db
+    const stream2Space = await space2
       .query("select count(*) as cnt from comp_space where entity = ?")
       .get<{ cnt: number }>(stream2);
     expect(stream2Space!.cnt).toBe(1);
 
     // Each stream's comp_info should have the correct name
-    const info1 = await db
+    const info1 = await space1
       .query("select name from comp_info where entity = ?")
       .get<{ name: string | null }>(stream1);
     expect(info1!.name).toBe("Space Alpha");
 
-    const info2 = await db
+    const info2 = await space2
       .query("select name from comp_info where entity = ?")
       .get<{ name: string | null }>(stream2);
     expect(info2!.name).toBe("Space Beta");
   });
   test("skips already-materialized streams on second call", async () => {
     const streamDid = StreamDid.assert("did:web:cursor-skip.example");
+    const space = db.forSpace!(streamDid);
 
     const events = createDefaultSpaceEvents({ name: "Cursor Skip Space" });
     await seedEvents(db, streamDid, events);
@@ -272,13 +266,13 @@ describe("reMaterializeFromLocalEvents", () => {
     // First call: full replay (no cursor row → materialized_to defaults to -1)
     await reMaterializeFromLocalEvents(db);
 
-    const entitiesAfterFirst = await db
+    const entitiesAfterFirst = await space
       .query("select count(*) as cnt from entities where stream_id = ?")
       .get<{ cnt: number }>(streamDid);
     expect(entitiesAfterFirst!.cnt).toBeGreaterThan(0);
 
     // Cursor should now be at the latest event idx
-    const cursor = await db
+    const cursor = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor).not.toBeNull();
@@ -289,13 +283,13 @@ describe("reMaterializeFromLocalEvents", () => {
     await reMaterializeFromLocalEvents(db);
 
     // Row counts unchanged
-    const entitiesAfterSecond = await db
+    const entitiesAfterSecond = await space
       .query("select count(*) as cnt from entities where stream_id = ?")
       .get<{ cnt: number }>(streamDid);
     expect(entitiesAfterSecond!.cnt).toBe(entitiesAfterFirst!.cnt);
 
     // Cursor unchanged
-    const cursor2 = await db
+    const cursor2 = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor2!.materialized_to).toBe(cursor!.materialized_to);
@@ -303,6 +297,7 @@ describe("reMaterializeFromLocalEvents", () => {
 
   test("replays only new events after cursor on partial catch-up", async () => {
     const streamDid = StreamDid.assert("did:web:partial-catchup.example");
+    const space = db.forSpace!(streamDid);
 
     const initialEvents = createDefaultSpaceEvents({ name: "Partial Space" });
     await seedEvents(db, streamDid, initialEvents);
@@ -310,7 +305,7 @@ describe("reMaterializeFromLocalEvents", () => {
     // First call: materialize all initial events
     await reMaterializeFromLocalEvents(db);
 
-    const cursorAfterFirst = await db
+    const cursorAfterFirst = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursorAfterFirst!.materialized_to).toBe(initialEvents.length - 1);
@@ -323,7 +318,7 @@ describe("reMaterializeFromLocalEvents", () => {
     await reMaterializeFromLocalEvents(db);
 
     // Cursor should advance to the new latest idx
-    const cursorAfterSecond = await db
+    const cursorAfterSecond = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursorAfterSecond!.materialized_to).toBe(initialEvents.length + extraEvents.length - 1);
@@ -332,6 +327,8 @@ describe("reMaterializeFromLocalEvents", () => {
   test("mix of caught-up and behind streams", async () => {
     const caughtUp = StreamDid.assert("did:web:caught-up.example");
     const behind = StreamDid.assert("did:web:behind.example");
+    const caughtUpSpace = db.forSpace!(caughtUp);
+    const behindSpace = db.forSpace!(behind);
 
     // Both streams get initial events
     const events1 = createDefaultSpaceEvents({ name: "Caught Up" });
@@ -349,18 +346,19 @@ describe("reMaterializeFromLocalEvents", () => {
     // Second call: "caughtUp" should be skipped, "behind" should replay extras
     await reMaterializeFromLocalEvents(db);
 
-    const caughtUpCursor = await db
+    const caughtUpCursor = await caughtUpSpace
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(caughtUp);
     expect(caughtUpCursor!.materialized_to).toBe(events1.length - 1);
 
-    const behindCursor = await db
+    const behindCursor = await behindSpace
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(behind);
     expect(behindCursor!.materialized_to).toBe(events2.length + extraEvents.length - 1);
   });
   test("cursor advances per-chunk across multi-chunk batch", async () => {
     const streamDid = StreamDid.assert("did:web:multi-chunk.example");
+    const space = db.forSpace!(streamDid);
 
     // 600 events → spans 2 chunks (CHUNK_SIZE = 500)
     const events = makeRoomEvents(600);
@@ -369,20 +367,20 @@ describe("reMaterializeFromLocalEvents", () => {
     await reMaterializeFromLocalEvents(db);
 
     // Cursor should be at the last event idx (599)
-    const cursor = await db
+    const cursor = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor!.materialized_to).toBe(599);
 
     // All 600 rooms should be materialized
-    const roomCount = await db
+    const roomCount = await space
       .query("select count(*) as cnt from comp_room")
       .get<{ cnt: number }>();
     expect(roomCount!.cnt).toBe(600);
 
     // Second call: cursor is current → skipped
     await reMaterializeFromLocalEvents(db);
-    const cursor2 = await db
+    const cursor2 = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor2!.materialized_to).toBe(599);
@@ -390,6 +388,7 @@ describe("reMaterializeFromLocalEvents", () => {
 
   test("resumes from last committed chunk after interruption", async () => {
     const streamDid = StreamDid.assert("did:web:interrupted.example");
+    const space = db.forSpace!(streamDid);
 
     // 1000 events → spans 2 chunks of 500 each
     const events = makeRoomEvents(1000);
@@ -399,15 +398,15 @@ describe("reMaterializeFromLocalEvents", () => {
     // only the first 500 events. The cursor should advance to idx 499.
     const firstBatch = await readDecodedEvents(db, streamDid, 0);
     const firstChunkEvents = firstBatch.slice(0, 500);
-    await applyBatch(db, streamDid, firstChunkEvents, { isBackfill: true });
+    await applyBatch(space, streamDid, firstChunkEvents, { isBackfill: true }, db.global?.());
 
-    const cursorAfterFirstChunk = await db
+    const cursorAfterFirstChunk = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursorAfterFirstChunk!.materialized_to).toBe(499);
 
     // 500 rooms materialized so far
-    const roomsAfterFirstChunk = await db
+    const roomsAfterFirstChunk = await space
       .query("select count(*) as cnt from comp_room")
       .get<{ cnt: number }>();
     expect(roomsAfterFirstChunk!.cnt).toBe(500);
@@ -417,19 +416,20 @@ describe("reMaterializeFromLocalEvents", () => {
     await reMaterializeFromLocalEvents(db);
 
     // Cursor should now be at 999
-    const cursorAfterResume = await db
+    const cursorAfterResume = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursorAfterResume!.materialized_to).toBe(999);
 
     // All 1000 rooms should now be materialized
-    const roomsAfterResume = await db
+    const roomsAfterResume = await space
       .query("select count(*) as cnt from comp_room")
       .get<{ cnt: number }>();
     expect(roomsAfterResume!.cnt).toBe(1000);
   });
   test("cursor advances even when all events in batch have apply errors", async () => {
     const streamDid = StreamDid.assert("did:web:all-errors.example");
+    const space = db.forSpace!(streamDid);
 
     // Create events with an invalid defaultAccess that will fail the CHECK
     // constraint on comp_room (default_access must be in ('readwrite',
@@ -450,10 +450,10 @@ describe("reMaterializeFromLocalEvents", () => {
     // applyBatch should process the events (with errors) and still advance
     // the cursor — this is the key fix for the infinite-retry loop.
     const decoded = await readDecodedEvents(db, streamDid, 0);
-    await applyBatch(db, streamDid, decoded, { isBackfill: true });
+    await applyBatch(space, streamDid, decoded, { isBackfill: true }, db.global?.());
 
     // Cursor must have advanced past the failed events
-    const cursor = await db
+    const cursor = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor).not.toBeNull();
@@ -461,7 +461,7 @@ describe("reMaterializeFromLocalEvents", () => {
 
     // reMaterializeFromLocalEvents should skip this stream (cursor is current)
     await reMaterializeFromLocalEvents(db);
-    const cursor2 = await db
+    const cursor2 = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor2!.materialized_to).toBe(2);
@@ -473,6 +473,7 @@ describe("reMaterializeFromLocalEvents", () => {
     // hydrate comp_info/comp_user for did:plc authors referenced by
     // profile-relevant events (joinSpace here).
     const streamDid = StreamDid.assert("did:web:profile-backfill.example");
+    const space = db.forSpace!(streamDid);
     const author = UserDid.assert("did:plc:backfill-author");
 
     const joinEvent = {
@@ -494,13 +495,17 @@ describe("reMaterializeFromLocalEvents", () => {
 
     expect(getProfiles).toHaveBeenCalledTimes(1);
     expect(getProfiles).toHaveBeenCalledWith([author]);
+    // Phase 3: profiles are written to the global `profiles` table (the
+    // authoritative per-user Roomy profile store), not per-space comp_info.
     const info = await db
-      .query("select name, avatar from comp_info where entity = ?")
+      .global!()
+      .query("select name, avatar from profiles where did = ?")
       .get<{ name: string; avatar: string }>(author);
     expect(info?.name).toBe("Backfill Author");
     expect(info?.avatar).toBe("https://cdn.example/backfill.png");
     const user = await db
-      .query("select handle from comp_user where did = ?")
+      .global!()
+      .query("select handle from profiles where did = ?")
       .get<{ handle: string }>(author);
     expect(user?.handle).toBe("backfill.test");
   });

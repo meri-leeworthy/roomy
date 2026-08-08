@@ -1,7 +1,7 @@
 /**
  * XRPC: space.roomy.sync.getEvents (query).
  *
- * ADMIN-ONLY. Returns raw events from events.stream_events for a given stream,
+ * ADMIN-ONLY. Returns raw events from stream_events (the event-log DB) for a given stream,
  * after a cursor. Used by the discord-bridge to poll for new events after
  * receiving invalidation signals.
  *

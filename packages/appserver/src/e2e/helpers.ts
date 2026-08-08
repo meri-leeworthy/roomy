@@ -123,77 +123,79 @@ export function seedSpace(
   userDid: string,
   opts?: { handle?: string; allowPublicJoin?: number },
 ): string {
+  const sp = spaceDb(db, spaceId);
   // Space entity
-  db.run(
+  sp.run(
     "insert or ignore into entities (id, stream_id) values (?, ?)",
     [spaceId, spaceId],
   );
   // comp_space row
-  db.run(
+  sp.run(
     `insert or ignore into comp_space (entity, handle, allow_public_join, allow_member_invites)
      values (?, ?, ?, ?)`,
     [spaceId, opts?.handle ?? null, opts?.allowPublicJoin ?? null, 1],
   );
   // comp_info row (for name/avatar/description)
-  db.run(
+  sp.run(
     `insert or ignore into comp_info (entity, name)
      values (?, ?)`,
     [spaceId, "Test Space"],
   );
-  // User entity
-  db.run(
+  // The user's entity + comp_user row live in the user's OWN per-space DB,
+  // but for e2e seeding convenience we also write them to this space's
+  // per-space DB so member-edge FK constraints hold.
+  sp.run(
     "insert or ignore into entities (id, stream_id) values (?, ?)",
     [userDid, userDid],
   );
-  // comp_user row
-  db.run(
+  sp.run(
     "insert or ignore into comp_user (did, handle) values (?, ?)",
     [userDid, null],
   );
   // Membership edge: user is a member of the space.
   // The isMember/isAdmin checks in auth/access.ts use head=spaceId, tail=did.
-  db.run(
+  sp.run(
     `insert or ignore into edges (head, tail, label)
      values (?, ?, 'member')`,
     [spaceId, userDid],
   );
   // Also seed the reverse direction for queries that use head=did, tail=spaceId.
-  db.run(
+  sp.run(
     `insert or ignore into edges (head, tail, label)
      values (?, ?, 'member')`,
     [userDid, spaceId],
   );
+  // Global entity→space index entry (Phase 3) so openSpaceDbForEntity and
+  // related lookups resolve the space id.
+  globalDb(db).run(
+    "insert or ignore into entity_space (entity_id, space_did) values (?, ?)",
+    [spaceId, spaceId],
+  );
   return spaceId;
 }
 
-
-
 /**
  * Seed a joinedSpace edge from the user to the space.
- * This is what getSpaces reads to determine membership.
- * Also inserts the user entity if it doesn't exist (edges
- * have FK constraints on entities(id)).
+ * This is what getSpaces reads to determine membership. In Phase 3 the
+ * `joinedSpace` edge lives in the global DB (membership store), not the
+ * per-space DB.
  */
 export function seedJoinedSpace(
   db: Database,
   userDid: string,
   spaceId: string,
 ): void {
-  // Ensure the user has an entity row (edges FK on entities(id)).
-  db.run(
-    "insert or ignore into entities (id, stream_id) values (?, ?)",
-    [userDid, userDid],
-  );
-  db.run(
+  globalDb(db).run(
     `insert or ignore into edges (head, tail, label)
      values (?, ?, 'joinedSpace')`,
     [userDid, spaceId],
   );
 }
 
-
 /**
- * Seed a room entity + comp_room row.
+ * Seed a room entity + comp_room row in the room's per-space DB, plus the
+ * global `entity_space` index entry (Phase 3) so `openSpaceDbForEntity`
+ * can resolve the room to its owning space.
  */
 export function seedRoom(
   db: Database,
@@ -201,19 +203,26 @@ export function seedRoom(
   spaceId: string,
   label?: string,
 ): void {
-  db.run(
+  const sp = spaceDb(db, spaceId);
+  sp.run(
     "insert or ignore into entities (id, stream_id) values (?, ?)",
     [roomId, spaceId],
   );
-  db.run(
+  sp.run(
     `insert or ignore into comp_room (entity, label)
      values (?, ?)`,
     [roomId, label ?? "space.roomy.channel"],
   );
+  globalDb(db).run(
+    "insert or ignore into entity_space (entity_id, space_did) values (?, ?)",
+    [roomId, spaceId],
+  );
 }
 
 /**
- * Seed a message entity + comp_content row.
+ * Seed a message entity + comp_content row in the room's per-space DB, plus
+ * the global `entity_space` index entry so `openSpaceDbForEntity` can
+ * resolve the message to its owning space.
  */
 export function seedMessage(
   db: Database,
@@ -222,37 +231,40 @@ export function seedMessage(
   spaceId: string,
   sortIdx?: string,
 ): void {
-  db.run(
+  const sp = spaceDb(db, spaceId);
+  sp.run(
     "insert or ignore into entities (id, stream_id, room, sort_idx) values (?, ?, ?, ?)",
     [msgId, spaceId, roomId, sortIdx ?? msgId],
   );
-  db.run(
+  sp.run(
     `insert or ignore into comp_content (entity, mime_type, data, last_edit)
      values (?, 'text/html', ?, ?)`,
     [msgId, new TextEncoder().encode("<p>hello</p>"), msgId],
   );
+  globalDb(db).run(
+    "insert or ignore into entity_space (entity_id, space_did) values (?, ?)",
+    [msgId, spaceId],
+  );
 }
 
 /**
- * Seed a user entity + comp_user row.
+ * Seed a user profile in the global `profiles` table (Phase 3). Roomy
+ * profiles are global (one per user), so `seedUser` writes there rather than
+ * to any per-space DB.
  */
 export function seedUser(
   db: Database,
   userDid: string,
   handle?: string,
 ): void {
-  db.run(
-    "insert or ignore into entities (id, stream_id) values (?, ?)",
-    [userDid, userDid],
-  );
-  db.run(
-    "insert or ignore into comp_user (did, handle) values (?, ?)",
+  globalDb(db).run(
+    "insert or ignore into profiles (did, handle) values (?, ?)",
     [userDid, handle ?? null],
   );
 }
 
 /**
- * Seed a membership edge (member or admin).
+ * Seed a membership edge (member or admin) in the space's per-space DB.
  */
 export function seedMembership(
   db: Database,
@@ -260,7 +272,8 @@ export function seedMembership(
   userDid: string,
   label?: "member" | "admin",
 ): void {
-  db.run(
+  const sp = spaceDb(db, spaceId);
+  sp.run(
     `insert or ignore into edges (head, tail, label)
      values (?, ?, ?)`,
     [userDid, spaceId, label ?? "member"],
@@ -268,7 +281,7 @@ export function seedMembership(
 }
 
 /**
- * Seed a role.
+ * Seed a role in the space's per-space DB.
  */
 export function seedRole(
   db: Database,
@@ -276,7 +289,8 @@ export function seedRole(
   spaceId: string,
   name?: string,
 ): void {
-  db.run(
+  const sp = spaceDb(db, spaceId);
+  sp.run(
     `insert into roles (id, stream_id, name)
      values (?, ?, ?)`,
     [roleId, spaceId, name ?? "Test Role"],
@@ -284,7 +298,7 @@ export function seedRole(
 }
 
 /**
- * Assign a user to a role.
+ * Assign a user to a role in the space's per-space DB.
  */
 export function seedMemberRole(
   db: Database,
@@ -292,7 +306,8 @@ export function seedMemberRole(
   roleId: string,
   spaceId: string,
 ): void {
-  db.run(
+  const sp = spaceDb(db, spaceId);
+  sp.run(
     `insert into member_roles (user_id, role_id, stream_id)
      values (?, ?, ?)`,
     [userId, roleId, spaceId],
@@ -300,7 +315,7 @@ export function seedMemberRole(
 }
 
 /**
- * Seed an invite token.
+ * Seed an invite token in the space's per-space DB.
  */
 export function seedInvite(
   db: Database,
@@ -308,7 +323,8 @@ export function seedInvite(
   token: string,
   creatorDid: string,
 ): void {
-  db.run(
+  const sp = spaceDb(db, spaceId);
+  sp.run(
     `insert into comp_invite (entity, token, created_by_did, event_ulid)
      values (?, ?, ?, ?)`,
     [spaceId, token, creatorDid, newUlid()],
@@ -316,15 +332,23 @@ export function seedInvite(
 }
 
 /**
- * Seed a reaction on a message.
+ * Seed a reaction on a message in the owning space's per-space DB. The
+ * owning space is resolved from the global `entity_space` index (seeded by
+ * `seedMessage`).
  */
-export function seedReaction(
+export async function seedReaction(
   db: Database,
   msgId: string,
   userDid: string,
   reaction: string,
-): void {
-  db.run(
+): Promise<void> {
+  const row = await globalDb(db)
+    .query("select space_did from entity_space where entity_id = ?")
+    .get<{ space_did: string }>(msgId);
+  const spaceId = row?.space_did;
+  if (!spaceId) return;
+  const sp = spaceDb(db, spaceId);
+  await sp.run(
     `insert into comp_reaction (entity, user, reaction_id, reaction)
      values (?, ?, ?, ?)`,
     [msgId, userDid, newUlid(), reaction],
@@ -332,7 +356,7 @@ export function seedReaction(
 }
 
 /**
- * Seed an activity feed item.
+ * Seed an activity feed item in the space's per-space DB.
  */
 export function seedActivityItem(
   db: Database,
@@ -340,7 +364,8 @@ export function seedActivityItem(
   spaceId: string,
   lastActivityAt?: number,
 ): void {
-  db.run(
+  const sp = spaceDb(db, spaceId);
+  sp.run(
     `insert into activity_item (room_id, space_id, last_activity_at, recent_message_ids)
      values (?, ?, ?, ?)`,
     [roomId, spaceId, lastActivityAt ?? Date.now(), "[]"],
@@ -348,7 +373,8 @@ export function seedActivityItem(
 }
 
 /**
- * Seed a read position in the readstate DB.
+ * Seed a read position in the read-state DB (Phase 3: read-state is its own
+ * routed DB, `data/roomy-readstate.sqlite`).
  */
 export function seedReadPosition(
   db: Database,
@@ -357,11 +383,42 @@ export function seedReadPosition(
   seenUpTo: string,
   unreadCount?: number,
 ): void {
-  // The readstate DB is ATTACHed as `readstate`, so we write through the
-  // main DB connection.
-  db.run(
-    `insert or ignore into readstate.read_positions (user_did, room_id, seen_up_to, unread_count)
+  readStateDb(db).run(
+    `insert or ignore into read_positions (user_did, room_id, seen_up_to, unread_count)
      values (?, ?, ?, ?)`,
     [userDid, roomId, seenUpTo, unreadCount ?? 0],
   );
+}
+
+// ─── Phase 3 DB routing ──────────────────────────────────────────────────
+
+/**
+ * The e2e seed helpers are handed the base AsyncDatabase handle returned by
+ * `openDb()` (the event-log DB). In Phase 3 the materialised data lives in
+ * the per-space DBs (`forSpace`) and the global DB (`global`), so the seed
+ * helpers route each write to the correct database. These small helpers keep
+ * that routing typed and local to this file.
+ */
+type RoutedDb = {
+  forSpace(spaceDid: string): AsyncLike;
+  global(): AsyncLike;
+  readState(): AsyncLike;
+};
+type AsyncLike = {
+  query(sql: string): {
+    get<T>(...params: unknown[]): Promise<T | null>;
+  };
+  run(sql: string, ...params: unknown[]): Promise<unknown>;
+};
+
+function spaceDb(db: Database, spaceDid: string): AsyncLike {
+  return (db as unknown as RoutedDb).forSpace(spaceDid);
+}
+
+function globalDb(db: Database): AsyncLike {
+  return (db as unknown as RoutedDb).global();
+}
+
+function readStateDb(db: Database): AsyncLike {
+  return (db as unknown as RoutedDb).readState();
 }

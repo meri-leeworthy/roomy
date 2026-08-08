@@ -58,13 +58,13 @@ export async function upsertNotificationState(
   msgId: string,
 ): Promise<UpsertDigestOutcome> {
   const existing = await db.query(
-    "select unseen_count, notified from readstate.notification_state where user_did = ? and room_id = ?",
+    "select unseen_count, notified from notification_state where user_did = ? and room_id = ?",
   ).get<{ unseen_count: number; notified: 0 | 1 }>(userDid, roomId);
 
   // No row → start a fresh batch.
   if (!existing) {
     await db.run(
-      `insert into readstate.notification_state
+      `insert into notification_state
          (user_did, room_id, first_unseen_at, first_unseen_msg_id, unseen_count, notified, updated_at)
        values (?, ?, ?, ?, 1, 0, (unixepoch() * 1000))`,
       userDid,
@@ -86,7 +86,7 @@ export async function upsertNotificationState(
     // Threshold reached — fire now, and mark notified so the batch won't
     // fire again (on-event or sweep). The caller delivers the push.
     await db.run(
-      `update readstate.notification_state
+      `update notification_state
           set unseen_count = ?, notified = 1, pushed_at = (unixepoch() * 1000), updated_at = (unixepoch() * 1000)
         where user_did = ? and room_id = ?`,
       newCount,
@@ -97,7 +97,7 @@ export async function upsertNotificationState(
   }
 
   await db.run(
-    `update readstate.notification_state
+    `update notification_state
         set unseen_count = ?, updated_at = (unixepoch() * 1000)
       where user_did = ? and room_id = ?`,
     newCount,
@@ -121,7 +121,7 @@ export async function selectDueDigests(
   const rows = await db.query(
     `select user_did, room_id, first_unseen_at, first_unseen_msg_id,
             unseen_count, notified, pushed_at
-       from readstate.notification_state
+       from notification_state
       where notified = 0
         and first_unseen_at is not null
         and first_unseen_at <= ?
@@ -158,7 +158,7 @@ export async function markNotified(
   roomId: string,
 ): Promise<void> {
   await db.run(
-    `update readstate.notification_state
+    `update notification_state
         set notified = 1, pushed_at = (unixepoch() * 1000), updated_at = (unixepoch() * 1000)
       where user_did = ? and room_id = ?`,
     userDid,
@@ -178,7 +178,7 @@ export async function resetNotificationState(
   roomId: string,
 ): Promise<void> {
   await db.run(
-    "delete from readstate.notification_state where user_did = ? and room_id = ?",
+    "delete from notification_state where user_did = ? and room_id = ?",
     userDid,
     roomId,
   );

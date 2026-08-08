@@ -10,7 +10,7 @@
 import { beforeEach, afterEach, describe, expect, test } from "bun:test";
 import { StreamDid, UserDid, newUlid } from "@roomy-space/sdk";
 
-import { closeDb, openDb } from "../db/db.ts";
+import { closeDb, openDb, openReadStateDb } from "../db/db.ts";
 import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { updateSeenHandler } from "./space.roomy.room.updateSeen.ts";
 
@@ -24,8 +24,8 @@ interface ReadPositionRow {
 }
 
 async function readPosition(roomId: string): Promise<ReadPositionRow | null> {
-  return openDb()
-    .query("select seen_up_to, unread_count from readstate.read_positions where user_did = ? and room_id = ?")
+  return openReadStateDb()
+    .query("select seen_up_to, unread_count from read_positions where user_did = ? and room_id = ?")
     .get<ReadPositionRow>(USER, roomId);
 }
 
@@ -40,21 +40,30 @@ beforeEach(async () => {
 
   // In-memory singleton so the handler's internal openDb() sees this DB.
   const db = openDb({ path: ":memory:" });
+  const space = db.forSpace!(SPACE);
 
   roomId = newUlid();
   msgA = newUlid();
   msgB = newUlid();
 
-  // Room lives in SPACE; two messages with sort_idx "a" < "b".
-  await db.run("insert into entities (id, stream_id) values (?, ?)", [SPACE, SPACE]);
-  await db.run("insert into entities (id, stream_id) values (?, ?)", [roomId, SPACE]);
-  await db.run(
+  // Room lives in SPACE; two messages with sort_idx "a" < "b". Materialised
+  // rows live in the per-space DB.
+  await space.run("insert into entities (id, stream_id) values (?, ?)", [SPACE, SPACE]);
+  await space.run("insert into entities (id, stream_id) values (?, ?)", [roomId, SPACE]);
+  await space.run(
     "insert into entities (id, stream_id, room, sort_idx) values (?, ?, ?, ?)",
     [msgA, SPACE, roomId, "a"],
   );
-  await db.run(
+  await space.run(
     "insert into entities (id, stream_id, room, sort_idx) values (?, ?, ?, ?)",
     [msgB, SPACE, roomId, "b"],
+  );
+
+  // openSpaceDbForEntity(roomId) resolves the room's space via the global
+  // entity_space index — seed it so the handler finds the per-space DB.
+  await db.global!().run(
+    "insert into entity_space (entity_id, space_did) values (?, ?)",
+    [roomId, SPACE],
   );
 
   // Make the background hydration hermetic: the room's space (SPACE)

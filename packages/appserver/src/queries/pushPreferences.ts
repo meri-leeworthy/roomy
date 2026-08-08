@@ -1,5 +1,5 @@
 /**
- * Push preference store, backed by the read-state DB (`readstate.*`).
+ * Push preference store, backed by the read-state DB (`*`).
  *
  * The preference model is a user-wide default (`push_user_default`) plus
  * optional per-space overrides (`push_preferences`). `resolveLevel` is the
@@ -33,12 +33,12 @@ export async function resolveLevel(
   spaceId: string,
 ): Promise<Level> {
   const spaceRow = await db.query(
-    "select level from readstate.push_preferences where user_did = ? and space_id = ?",
+    "select level from push_preferences where user_did = ? and space_id = ?",
   ).get<{ level: string }>(userDid, spaceId);
   if (spaceRow) return spaceRow.level as Level;
 
   const defaultRow = await db.query(
-    "select level from readstate.push_user_default where user_did = ?",
+    "select level from push_user_default where user_did = ?",
   ).get<{ level: string }>(userDid);
   if (defaultRow) return defaultRow.level as Level;
 
@@ -51,11 +51,11 @@ export async function getPreferences(
   userDid: string,
 ): Promise<PushPreferences> {
   const defaultRow = await db.query(
-    "select level from readstate.push_user_default where user_did = ?",
+    "select level from push_user_default where user_did = ?",
   ).get<{ level: string }>(userDid);
 
   const perSpaceRows = await db.query(
-    "select space_id, level from readstate.push_preferences where user_did = ? order by updated_at desc",
+    "select space_id, level from push_preferences where user_did = ? order by updated_at desc",
   ).all<{ space_id: string; level: string }>(userDid);
 
   return {
@@ -74,7 +74,7 @@ export async function setUserDefault(
   level: Level,
 ): Promise<void> {
   await db.run(
-    `insert into readstate.push_user_default (user_did, level, updated_at)
+    `insert into push_user_default (user_did, level, updated_at)
      values (?, ?, (unixepoch() * 1000))
      on conflict(user_did) do update set
        level = excluded.level,
@@ -92,7 +92,7 @@ export async function setSpaceLevel(
   level: Level,
 ): Promise<void> {
   await db.run(
-    `insert into readstate.push_preferences (user_did, space_id, level, updated_at)
+    `insert into push_preferences (user_did, space_id, level, updated_at)
      values (?, ?, ?, (unixepoch() * 1000))
      on conflict(user_did, space_id) do update set
        level = excluded.level,

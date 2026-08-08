@@ -6,8 +6,8 @@
  * `head = userDid`, written by the `JoinSpace` materialisation and by the
  * join/create handlers directly.
  *
- * Materialization is handled inline by StreamManager when events are written,
- * so hydration only needs to read the intended spaces from the materialized DB.
+ * Membership edges live in the GLOBAL DB (they're cross-space data), so
+ * hydration reads the intended spaces from the global DB.
  *
  * Per-user dedup: concurrent calls for the same userDid share an in-flight
  * promise to avoid N parallel membership reads.
@@ -15,7 +15,7 @@
 
 import type { DbLike } from "../db/types.ts";
 import { type StreamDid, type UserDid } from "@roomy-space/sdk";
-import { openDb } from "../db/db.ts";
+import { openGlobalDb } from "../db/db.ts";
 import { JOINED_SPACE_LABEL } from "../queries/joinedSpaces.ts";
 
 export interface HydrationFailure {
@@ -54,7 +54,7 @@ async function run(
   userDid: UserDid,
   opts: HydrateOpts,
 ): Promise<UserHydrationResult> {
-  const db = opts.db ?? openDb();
+  const db = opts.db ?? openGlobalDb();
 
   // Materialization is handled by the subscription system. We read whatever
   // state is currently materialised and return it. If backfill is still in
@@ -70,9 +70,10 @@ async function run(
 
 /**
  * Read the user's intended (joined-and-not-left) spaces. The `JoinSpace`
- * materialiser writes a `joinedSpace` edge (head = user DID, tail = space);
- * `LeaveSpace` deletes it. Membership is per-user, so it lives in `edges`
- * rather than on the single global `comp_space` row a space has.
+ * materialiser writes a `joinedSpace` edge (head = user DID, tail = space)
+ * to the GLOBAL DB; `LeaveSpace` deletes it. Membership is per-user, so it
+ * lives in `edges` rather than on the single global `comp_space` row a space
+ * has.
  */
 async function readIntendedSpaceDids(
   db: DbLike,

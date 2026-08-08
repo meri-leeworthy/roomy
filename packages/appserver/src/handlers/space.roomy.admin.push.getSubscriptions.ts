@@ -12,7 +12,7 @@
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
@@ -44,9 +44,9 @@ export const adminGetSubscriptionsHandler: QueryHandler<
     throw new XrpcError(400, "InvalidRequest", "Missing or empty query param: did");
   }
 
-  const db = openDb();
+  const db = openReadStateDb();
   const rows = await db.query(
-    "select endpoint, p256dh, auth, expiration_time, created_at, updated_at from readstate.push_subscriptions where user_did = ? order by updated_at desc",
+    "select endpoint, p256dh, auth, expiration_time, created_at, updated_at from push_subscriptions where user_did = ? order by updated_at desc",
   ).all<{
     endpoint: string;
     p256dh: string;

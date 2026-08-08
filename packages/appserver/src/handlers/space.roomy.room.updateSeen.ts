@@ -6,7 +6,7 @@
  * event `space.roomy.state.markRead.v0`.
  */
 
-import { openDb, openSpaceDbForEntity } from "../db/db.ts";
+import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
 import { resetNotificationState } from "../queries/notificationState.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
@@ -62,7 +62,7 @@ export const updateSeenHandler: ProcedureHandler<UpdateSeenBody, void> = async (
   if (!db) {
     throw new XrpcError(404, "NotFound", `Room not found: ${roomId}`);
   }
-  const mainDb = openDb();
+  const mainDb = openReadStateDb();
   let access: Awaited<ReturnType<typeof requireRoomRead>>;
   try {
     access = await requireRoomRead(db, roomId, userDid);
@@ -115,7 +115,7 @@ export const updateSeenHandler: ProcedureHandler<UpdateSeenBody, void> = async (
   }
 
   const stmt = await mainDb.prepare(
-    `insert into readstate.read_positions (user_did, room_id, seen_up_to, unread_count, updated_at)
+    `insert into read_positions (user_did, room_id, seen_up_to, unread_count, updated_at)
      values (?, ?, ?, ?, (unixepoch() * 1000))
      on conflict(user_did, room_id) do update set
        seen_up_to = excluded.seen_up_to,

@@ -4,11 +4,10 @@ import {
   StreamDid,
   parseEvent,
 } from "@roomy-space/sdk";
-import { openDb, openGlobalDb } from "../db/db.ts";
+import { openGlobalDb } from "../db/db.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import {
   JOINED_SPACE_LABEL,
-  recordPersonalSpaceMembership,
   recordGlobalMembership,
 } from "../queries/joinedSpaces.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
@@ -121,8 +120,6 @@ export const createSpaceHandler: ProcedureHandler<
   // written directly to both the monolithic DB (Phase-1 read source) and
   // the global DB (the membership store) for read-after-write consistency
   // before the materialiser lands. Idempotent.
-  const db = openDb();
-  await recordPersonalSpaceMembership(db, spaceId, callerDid);
   await recordGlobalMembership(
     openGlobalDb(),
     spaceId,

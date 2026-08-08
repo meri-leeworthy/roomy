@@ -22,7 +22,7 @@
 import type { StreamDid, Ulid, UserDid } from "@roomy-space/sdk";
 import type { AppliedEvent, InvalidationEvent, QueryNsid } from "./types.ts";
 import type { DbLike } from "../db/types.ts";
-import { openDb } from "../db/db.ts";
+import { openReadStateDb, openSpaceDb } from "../db/db.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
 import { getRoomReadPositionUsers } from "../queries/readPositions.ts";
 
@@ -34,7 +34,9 @@ import { getRoomReadPositionUsers } from "../queries/readPositions.ts";
  * e.g. synthetic backfill events).
  *
  * @param event - The applied event to infer signals for.
- * @param db - Optional database instance. Defaults to `openDb()`.
+ * @param db - Optional database instance. For per-space reads (`selectMessages`)
+ *   this defaults to `openSpaceDb(event.streamDid)`; for read-state reads
+ *   (`getRoomReadPositionUsers`) it defaults to `openReadStateDb()`.
  * @param messageSnapshots - Optional pre-fetched message rows keyed by
  *   message id. When the caller has already batch-fetched the messages a
  *   batch of events will reference (e.g. `Router.onEventsApplied`), passing
@@ -112,7 +114,7 @@ async function handleCreateMessage(
   // `selectMessages` call — 5 queries per batch instead of 5N). Fall back
   // to a per-event read for direct callers (tests, standalone use).
   const message = messageSnapshots?.get(event.id) ?? (
-    await selectMessages(db ?? openDb(), { kind: "ids", ids: [event.id] })
+    await selectMessages(db ?? openSpaceDb(event.streamDid), { kind: "ids", ids: [event.id] })
   ).messages[0];
 
   const signals: InvalidationEvent[] = [];
@@ -136,7 +138,7 @@ async function handleCreateMessage(
   // the matching `SpaceRow.unreadCount` in `getSpaces`, and the channel
   // entry in the `space.getMetadata` sidebar tree — all with `delta +1`,
   // no refetch.
-  const users = await getRoomReadPositionUsers(db ?? openDb(), roomId);
+  const users = await getRoomReadPositionUsers(db ?? openReadStateDb(), roomId);
   if (users.length > 0) {
     signals.push({
       kind: "roomMetadataDiff",
@@ -187,7 +189,7 @@ async function handleEditMessage(
   // pre-fetched batch snapshot when available (see `handleCreateMessage`
   // for the rationale).
   const message = messageSnapshots?.get(messageId) ?? (
-    await selectMessages(db ?? openDb(), { kind: "ids", ids: [messageId] })
+    await selectMessages(db ?? openSpaceDb(event.streamDid), { kind: "ids", ids: [messageId] })
   ).messages[0];
 
   const signals: InvalidationEvent[] = [];

@@ -9,7 +9,7 @@
  */
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
-import { openDb, openSpaceDb } from "../db/db.ts";
+import { openReadStateDb, openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
 import { getReadPositions } from "../queries/readPositions.ts";
@@ -62,7 +62,7 @@ export const getSpaceThreadsHandler: QueryHandler<
   }
 
   const db = openSpaceDb(spaceId);
-  const mainDb = openDb();
+  const mainDb = openReadStateDb();
   // Per-request memo: every thread in this space shares the same
   // space-level membership/admin/ban flags — without the memo, each
   // thread's roomAccess call re-queries them (~5 queries × N threads).

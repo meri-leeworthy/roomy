@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { ulid } from "ulidx";
 import {
@@ -16,20 +16,34 @@ import type { DbLike } from "../db/types.ts";
 import type { SQLQueryBindings } from "bun:sqlite";
 
 import { toAsyncDb } from "../db/syncAdapter.ts";
+import { closeDb, openDb } from "../db/db.ts";
 import { applyBatch } from "./applyBatch.ts";
 import { applyBundle } from "./applyBundle.ts";
-import { openDb } from "../db/db.ts";
 import type { StatementBundleSuccess } from "./types.ts";
 import { selectMessages } from "../queries/selectMessages.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const SCHEMA_PATH = join(__dirname, "..", "db", "schema.sql");
-const SCHEMA_VERSION = "10-appserver.4";
+const SCHEMA_PATH = join(__dirname, "..", "db", "schema-space.sql");
+const GLOBAL_SCHEMA_PATH = join(__dirname, "..", "db", "schema-global.sql");
 
 const STREAM = StreamDid.assert("did:web:test-stream.example");
 const USER = UserDid.assert("did:plc:test-user");
 
+// applyBatch's side-effect path calls openReadStateDb() (and selectMessages
+// calls tryOpenGlobalDb()), which route to the worker-backed DBs. Initialise
+// the worker with :memory: DBs so those side effects never touch real files
+// (a leftover data/global.sqlite with an old schema version would otherwise
+// throw "Schema version mismatch").
+beforeEach(() => {
+  closeDb();
+  openDb({ path: ":memory:" });
+});
+afterEach(() => {
+  closeDb();
+});
+
+/** Raw in-memory per-space DB seeded with schema-space.sql. */
 function freshDb(): { db: Database; asyncDb: DbLike } {
   const db = new Database(":memory:");
   db.exec("pragma journal_mode = wal");
@@ -37,7 +51,17 @@ function freshDb(): { db: Database; asyncDb: DbLike } {
   db.exec("pragma foreign_keys = on");
   const schemaSql = readFileSync(SCHEMA_PATH, "utf8");
   db.exec(schemaSql);
-  db.run("insert into roomy_schema_version (id, version) values (1, ?)", [SCHEMA_VERSION]);
+  return { db, asyncDb: toAsyncDb(db) };
+}
+
+/** Raw in-memory global DB seeded with schema-global.sql (membership edges). */
+function freshGlobalDb(): { db: Database; asyncDb: DbLike } {
+  const db = new Database(":memory:");
+  db.exec("pragma journal_mode = wal");
+  db.exec("pragma synchronous = normal");
+  db.exec("pragma foreign_keys = on");
+  const schemaSql = readFileSync(GLOBAL_SCHEMA_PATH, "utf8");
+  db.exec(schemaSql);
   return { db, asyncDb: toAsyncDb(db) };
 }
 
@@ -302,10 +326,11 @@ describe("applyBatch", () => {
 
   // The space.joinSpace materialiser must write the `joinedSpace` edge with
   // the *user DID* as head and the space stream as tail — this is what
-  // tracks membership (routed to the global DB by the appserver). Pins the
-  // edge shape so a stale dist / wrong materialiser fails loudly.
+  // tracks membership. In Phase 3 the appserver routes these membership
+  // edges to the global DB, so we pass a globalDb and assert there.
   test("space.joinSpace writes joinedSpace edge with user DID as head", async () => {
     const { db, asyncDb } = freshDb();
+    const { asyncDb: globalDb } = freshGlobalDb();
     seedSpace(db, STREAM);
 
     const joinEvent = {
@@ -318,19 +343,28 @@ describe("applyBatch", () => {
       STREAM,
       [{ event: joinEvent, idx: 0 as StreamIndex, user: USER }],
       { isBackfill: true },
+      globalDb,
     );
 
     expect(stats.applied).toBe(1);
     expect(stats.materializerErrors).toBe(0);
     expect(stats.applyErrors).toBe(0);
 
-    // Edge head must be the user DID, tail the space stream.
-    const userEdge = await asyncDb
+    // Edge head must be the user DID, tail the space stream — in the global DB.
+    const userEdge = await globalDb
       .query(
         "select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'",
       )
       .get<{ n: number }>(USER, STREAM);
     expect(userEdge?.n).toBe(1);
+
+    // The membership edge must NOT land in the per-space DB.
+    const spaceEdge = await asyncDb
+      .query(
+        "select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'",
+      )
+      .get<{ n: number }>(USER, STREAM);
+    expect(spaceEdge?.n).toBeUndefined();
   })
 });
 
@@ -657,197 +691,5 @@ describe("applyBatch concurrency", () => {
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(STREAM);
     expect(cursor?.materialized_to).toBe(4);
-  });
-});
-
-describe("per-space split dual-write (Phase 1)", () => {
-  test("applyBatch dual-writes to per-space and global DBs over the shared worker", async () => {
-    // Isolated worker with an in-memory main DB; the per-space and global
-    // DBs default to :memory: too (worker init derives them from the main
-    // path), so no files are touched.
-    const testId = Math.random().toString(36).slice(2, 8);
-    process.env.EVENTS_DB_PATH = `/tmp/roomy-events-dual-${testId}.sqlite`;
-    const db = openDb({ path: ":memory:", isolated: true });
-
-    const streamDid = StreamDid.assert("did:web:dual.example");
-
-    // Seed space + user entities and a joinedSpace edge in the monolithic DB
-    // (mirrors the E2E seed helpers).
-    await db.run("insert into entities (id, stream_id) values (?, ?)", [streamDid, streamDid]);
-    await db.run("insert into comp_space (entity) values (?)", [streamDid]);
-    await db.run("insert into entities (id, stream_id) values (?, ?)", [USER, USER]);
-    await db.run("insert into edges (head, tail, label) values (?, ?, 'joinedSpace')", [USER, streamDid]);
-
-    // Routed handles over the same worker. First access lazily backfills the
-    // per-space DB from the monolithic DB (§1h) and the global DB from the
-    // membership edges.
-    const spaceDb = db.forSpace(streamDid);
-    const globalDb = db.global();
-
-    // Backfilled state: space DB has no rooms yet, global DB has the edge.
-    const backfilledRooms = await spaceDb
-      .query("select count(*) as n from comp_room")
-      .get<{ n: number }>();
-    expect(backfilledRooms?.n).toBe(0);
-    const gEdge = await globalDb
-      .query("select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
-      .get<{ n: number }>(USER, streamDid);
-    expect(gEdge?.n).toBe(1);
-
-    // Dual-write a batch: a createRoom event (space-routed) and a
-    // space.joinSpace event (its joinedSpace edge is global-routed).
-    const events: DecodedStreamEvent[] = [
-      decoded(createRoomEvent("dual-room"), 0),
-      {
-        event: {
-          $type: "space.roomy.space.joinSpace.v0",
-          id: newUlid(),
-        } as unknown as Event,
-        idx: 1 as StreamIndex,
-        user: USER,
-      },
-    ];
-    const stats = await applyBatch(
-      db,
-      streamDid,
-      events,
-      { isBackfill: true },
-      spaceDb,
-      globalDb,
-    );
-    expect(stats.applyErrors).toBe(0);
-    expect(stats.materializerErrors).toBe(0);
-
-    // Monolithic DB has both.
-    const mainRooms = await db
-      .query("select count(*) as n from comp_room")
-      .get<{ n: number }>();
-    expect(mainRooms?.n).toBe(1);
-
-    // Space DB has the room but no joinedSpace edge (that lives in global).
-    const spaceRooms = await spaceDb
-      .query("select count(*) as n from comp_room")
-      .get<{ n: number }>();
-    expect(spaceRooms?.n).toBe(1);
-    const spaceEdge = await spaceDb
-      .query("select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
-      .get<{ n: number }>(USER, streamDid);
-    expect(spaceEdge?.n).toBeUndefined();
-
-    // Global DB has the edge, dual-written via routing.
-    const gEdgeAfter = await globalDb
-      .query("select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
-      .get<{ n: number }>(USER, streamDid);
-    expect(gEdgeAfter?.n).toBe(1);
-
-    // Cursor advanced on both DBs (each space DB is self-describing).
-    const mainCursor = await db
-      .query("select materialized_to from materialization_cursor where stream_id = ?")
-      .get<{ materialized_to: number }>(streamDid);
-    expect(mainCursor?.materialized_to).toBe(1);
-    const spaceCursor = await spaceDb
-      .query("select materialized_to from materialization_cursor where stream_id = ?")
-      .get<{ materialized_to: number }>(streamDid);
-    expect(spaceCursor?.materialized_to).toBe(1);
-
-    await db.close();
-    delete process.env.EVENTS_DB_PATH;
-  });
-
-  test("replaying join+leave in order does not re-add a departed user", async () => {
-    // This is the migration guarantee: rebuilding the global DB from the
-    // event log must respect a user's decision to leave. The log holds both
-    // space.joinSpace and space.leaveSpace in order, and replay applies them
-    // in idx order, so a join that was later undone must NOT leave a
-    // joinedSpace edge behind (which would re-add the user to getSpaces).
-    const testId = Math.random().toString(36).slice(2, 8);
-    process.env.EVENTS_DB_PATH = `/tmp/roomy-events-replay-${testId}.sqlite`;
-    const db = openDb({ path: ":memory:", isolated: true });
-
-    const streamDid = StreamDid.assert("did:web:replay.example");
-    await db.run("insert into entities (id, stream_id) values (?, ?)", [streamDid, streamDid]);
-    await db.run("insert into comp_space (entity) values (?)", [streamDid]);
-
-    const spaceDb = db.forSpace(streamDid);
-    const globalDb = db.global();
-
-    const joined = async (): Promise<number> =>
-      (await globalDb
-        .query("select count(*) as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
-        .get<{ n: number }>(USER, streamDid))?.n ?? 0;
-    const left = async (): Promise<number> =>
-      (await globalDb
-        .query("select count(*) as n from edges where head = ? and tail = ? and label = 'leftSpace'")
-        .get<{ n: number }>(USER, streamDid))?.n ?? 0;
-
-    const evJoin = {
-      event: { $type: "space.roomy.space.joinSpace.v0", id: newUlid() } as unknown as Event,
-      idx: 0 as StreamIndex,
-      user: USER,
-    };
-    const evLeave = {
-      event: { $type: "space.roomy.space.leaveSpace.v0", id: newUlid() } as unknown as Event,
-      idx: 1 as StreamIndex,
-      user: USER,
-    };
-
-    // Replay the log in order, exactly as reMaterializeFromLocalEvents does.
-    await applyBatch(db, streamDid, [evJoin], { isBackfill: true }, spaceDb, globalDb);
-    expect(await joined()).toBe(1);
-    expect(await left()).toBe(0);
-
-    await applyBatch(db, streamDid, [evLeave], { isBackfill: true }, spaceDb, globalDb);
-    expect(await joined()).toBe(0); // leave undid the join
-    expect(await left()).toBe(1);   // leave history preserved
-
-    // The departed user must NOT appear as a member after replay.
-    expect(await joined()).toBe(0);
-
-    await db.close();
-    delete process.env.EVENTS_DB_PATH;
-  });
-
-  test("per-space backfill handles a space with many referenced entities (chunked IN)", async () => {
-    // A large space references > SQLite's bind-parameter limit via edges /
-    // reactions. The backfill must chunk the `id IN (...)` so it doesn't blow
-    // up with "query expected N values, received M". Regression for a 500
-    // observed on a ~135k-entity production space.
-    const testId = Math.random().toString(36).slice(2, 8);
-    process.env.EVENTS_DB_PATH = `/tmp/roomy-events-chunk-${testId}.sqlite`;
-    const db = openDb({ path: ":memory:", isolated: true });
-
-    const streamDid = StreamDid.assert("did:web:chunk.example");
-    await db.run("insert into entities (id, stream_id) values (?, ?)", [streamDid, streamDid]);
-    await db.run("insert into comp_space (entity) values (?)", [streamDid]);
-    // USER is the edge tail — must exist for the FK in the mono DB.
-    await db.run("insert into entities (id, stream_id) values (?, ?)", [USER, USER]);
-
-    // Many entities that belong to the space.
-    const N = 2000;
-    const ids: string[] = [];
-    for (let i = 0; i < N; i++) {
-      const id = `msg-${i}`;
-      ids.push(id);
-      await db.run("insert into entities (id, stream_id) values (?, ?)", [id, streamDid]);
-    }
-    // Edge endpoints force the referencedIds set to grow past the chunk size.
-    for (const id of ids) {
-      await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [id, USER]);
-    }
-
-    // Accessing forSpace triggers the lazy backfill. Must not throw.
-    const spaceDb = db.forSpace(streamDid);
-    const copied = await spaceDb
-      .query("select count(*) as n from entities")
-      .get<{ n: number }>();
-    // Space root + USER (edge tail, pulled in via referencedIds) + all msgs.
-    expect(copied?.n).toBe(N + 2);
-    const edges = await spaceDb
-      .query("select count(*) as n from edges where label = 'author'")
-      .get<{ n: number }>();
-    expect(edges?.n).toBe(N);
-
-    await db.close();
-    delete process.env.EVENTS_DB_PATH;
   });
 });

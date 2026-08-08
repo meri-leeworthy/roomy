@@ -1,5 +1,5 @@
 /**
- * Apply a single materialised event's SQL statements to the database.
+ * Apply a single materialised event's SQL statements to the per-space DB.
  *
  * Each event runs inside its own SAVEPOINT so a single failing event rolls
  * back cleanly without poisoning the rest of the batch. This is stricter than
@@ -10,14 +10,12 @@
  * materialisers because the original design keeps materialisers free of
  * backfill awareness.
  *
- * Per-space split (Phase 1): when `spaceDb` is provided, the event's
- * statements and per-space side-effects are dual-written to it. The
- * monolithic DB is written first and remains the source of truth: if the
- * per-space write fails, the monolithic DB is still consistent and the space
- * DB is repaired by re-materialising that stream. Read-state side-effects
- * (`readstate.*`) never dual-write — the per-space DB has no readstate
- * tables. `joinedSpace`/`leftSpace` edge statements route to `globalDb`
- * instead of the space DB.
+ * Per-space split (Phase 3): `db` is the per-space DB — the source of truth.
+ * There is no monolithic DB. `globalDb` (optional) receives the
+ * `joinedSpace`/`leftSpace` membership edges and the `SetUserProfile` global
+ * profile write. `readStateDb` (optional) receives the read-state side-effects
+ * (read_positions, user_thread_activity, user_room_participation) — the
+ * per-space DB has no readstate tables.
  *
  * Concurrency: `applyBundle` manages its SAVEPOINT via individual async
  * `db.exec` calls (each a separate worker message). Without serialization,
@@ -69,12 +67,12 @@ class AsyncMutex {
 }
 
 /**
- * Process-wide mutex for savepoint-managed SQL sections on the materialised
- * DB. Shared by `applyBundle` (side-effects) and `applyBatch`'s inline
- * per-event loop — both manage SAVEPOINT/RELEASE via individual async
- * `db.exec` calls on the same DB handle, so any two concurrent sections can
- * interleave and destroy each other's savepoints. Exporting the instance
- * lets `applyBatch` acquire the same lock as `applyBundle`.
+ * Process-wide mutex for savepoint-managed SQL sections on the per-space DB.
+ * Shared by `applyBundle` (side-effects) and `applyBatch`'s inline per-event
+ * loop — both manage SAVEPOINT/RELEASE via individual async `db.exec` calls
+ * on the same DB handle, so any two concurrent sections can interleave and
+ * destroy each other's savepoints. Exporting the instance lets `applyBatch`
+ * acquire the same lock as `applyBundle`.
  */
 export const savepointMutex = new AsyncMutex();
 
@@ -88,14 +86,14 @@ export async function applyBundle(
   db: DbLike,
   bundle: StatementBundleSuccess,
   opts: ApplyBundleOpts,
-  spaceDb?: DbLike,
   globalDb?: DbLike,
+  readStateDb?: DbLike,
 ): Promise<void> {
   // Serialize the savepoint-managed section: manual SAVEPOINT/RELEASE via
   // individual async db.exec calls is not atomic. Without this lock,
   // concurrent calls destroy each other's savepoints (see file header).
   return savepointMutex.run(() =>
-    applyBundleInner(db, bundle, opts, spaceDb, globalDb),
+    applyBundleInner(db, bundle, opts, globalDb, readStateDb),
   );
 }
 
@@ -103,8 +101,8 @@ async function applyBundleInner(
   db: DbLike,
   bundle: StatementBundleSuccess,
   opts: ApplyBundleOpts,
-  spaceDb?: DbLike,
   globalDb?: DbLike,
+  readStateDb?: DbLike,
 ): Promise<void> {
   const savepoint = `evt_${bundle.event.id.replace(/[^a-zA-Z0-9]/g, "")}`;
   await db.exec(`savepoint ${savepoint}`);
@@ -122,14 +120,11 @@ async function applyBundleInner(
   };
 
   try {
-    // ── Monolithic DB (source of truth) ────────────────────────────────
-    // Statements + per-space side effects run on the main DB FIRST; the
-    // savepoint always releases (commits) at the end of the try, regardless
-    // of what happens on the derived DBs (plan §305: "If the spaceDb write
-    // fails, the monolithic DB is still consistent"). Only a main-DB
-    // failure rolls back and rethrows.
+    // ── Per-space DB (source of truth) ─────────────────────────────────
+    // Statements + per-space side effects run on the per-space DB. Global
+    // edge statements route to `globalDb`.
     for (const statement of bundle.statements) {
-      await runStatement(db, statement);
+      await runStatementForTargets(db, globalDb, statement);
     }
 
     await setMessageSortIdxByTimestamp(db, bundle.event);
@@ -149,13 +144,14 @@ async function applyBundleInner(
       });
     }
 
-    // ── Read-state side effects (monolithic DB only) ──────────────────
+    // ── Read-state side effects (readStateDb only) ────────────────────
     // readstate.* tables do not exist in the per-space DB.
 
     if (
       !opts.isBackfill &&
       bundle.event.$type === "space.roomy.message.createMessage.v0" &&
-      bundle.event.room
+      bundle.event.room &&
+      readStateDb
     ) {
       const isThreadRoom = await cachedIsThread(bundle.event.room);
 
@@ -163,28 +159,30 @@ async function applyBundleInner(
       if (isThreadRoom) {
         // Threads: only bump users who have engaged with this thread.
         // Uses INSERT ... ON CONFLICT DO UPDATE so the read_positions row
-        // is created if it doesn't exist yet (lazy creation).
-        await db.run(
-          `insert into readstate.read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
-           select uta.user_did, ?, coalesce(
-             (select stream_id from entities where id = ?), ''
-           ), coalesce(
-             (select max(sort_idx) from entities where room = ?), '0'
-           ), 1, (unixepoch() * 1000)
-             from readstate.user_thread_activity uta
+        // is created if it doesn't exist yet (lazy creation). The space_did
+        // and seen_up_to come from the per-space DB (opts.streamId is the
+        // space DID; max sort_idx is read from the per-space entities).
+        const maxSortRow = await db
+          .query("select max(sort_idx) as m from entities where room = ?")
+          .get<{ m: string | null }>(bundle.event.room);
+        const seenUpTo = maxSortRow?.m ?? "0";
+        await readStateDb.run(
+          `insert into read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
+           select uta.user_did, ?, ?, ?, 1, (unixepoch() * 1000)
+             from user_thread_activity uta
             where uta.thread_id = ?
            on conflict(user_did, room_id) do update set
              unread_count = unread_count + 1,
              updated_at = (unixepoch() * 1000)`,
           bundle.event.room,
-          bundle.event.room,
-          bundle.event.room,
+          opts.streamId,
+          seenUpTo,
           bundle.event.room,
         );
       } else {
         // Channels: bump all users with a read_positions row.
-        await db.run(
-          `update readstate.read_positions
+        await readStateDb.run(
+          `update read_positions
               set unread_count = unread_count + 1,
                   updated_at = (unixepoch() * 1000)
             where room_id = ?`,
@@ -196,7 +194,7 @@ async function applyBundleInner(
       // author's interaction so the thread appears in their sidebar.
       if (isThreadRoom) {
         const timestamp = decodeTimeFromId(bundle.event.id);
-        await upsertUserThreadActivity(db, bundle.user, bundle.event.room, timestamp);
+        await upsertUserThreadActivity(readStateDb, bundle.user, bundle.event.room, timestamp);
       }
 
       // Track the author's participation in this room (all room types —
@@ -209,7 +207,7 @@ async function applyBundleInner(
       const overrideDid =
         typeof ext?.did === "string" ? ext.did : undefined;
       await upsertUserRoomParticipation(
-        db,
+        readStateDb,
         overrideDid ?? bundle.user,
         bundle.event.room,
         decodeTimeFromId(bundle.event.id),
@@ -223,10 +221,11 @@ async function applyBundleInner(
       !opts.isBackfill &&
       bundle.event.$type === "space.roomy.room.createRoom.v0" &&
       "kind" in bundle.event &&
-      bundle.event.kind === "space.roomy.thread"
+      bundle.event.kind === "space.roomy.thread" &&
+      readStateDb
     ) {
       const timestamp = decodeTimeFromId(bundle.event.id);
-      await upsertUserThreadActivity(db, bundle.user, bundle.event.id, timestamp);
+      await upsertUserThreadActivity(readStateDb, bundle.user, bundle.event.id, timestamp);
     }
 
     // Track reaction activity in threads (non-backfill only).
@@ -236,7 +235,8 @@ async function applyBundleInner(
        bundle.event.$type === "space.roomy.reaction.addBridgedReaction.v0" ||
        bundle.event.$type === "space.roomy.reaction.removeReaction.v0" ||
        bundle.event.$type === "space.roomy.reaction.removeBridgedReaction.v0") &&
-      bundle.event.room
+      bundle.event.room &&
+      readStateDb
     ) {
       if (await cachedIsThread(bundle.event.room)) {
         const timestamp = decodeTimeFromId(bundle.event.id);
@@ -246,80 +246,41 @@ async function applyBundleInner(
           "reactingUser" in bundle.event && typeof bundle.event.reactingUser === "string"
             ? bundle.event.reactingUser
             : bundle.user;
-        await upsertUserThreadActivity(db, reactingUser, bundle.event.room, timestamp);
+        await upsertUserThreadActivity(readStateDb, reactingUser, bundle.event.room, timestamp);
       }
     }
 
-    // Commit the monolithic savepoint FIRST — the derived writes below must
-    // never abort the main DB's already-consistent state.
+    // SetUserProfile events update the global profile store (bridged users
+    // don't go through HappyView, so the materialiser is the only writer).
+    if (bundle.event.$type === "space.roomy.user.updateProfile.v0") {
+      await writeSetUserProfileToGlobal(
+        bundle.event as unknown as {
+          did: string;
+          name?: unknown;
+          avatar?: unknown;
+          description?: unknown;
+          extensions?: Record<string, unknown>;
+        },
+      );
+    }
+
+    // Commit the per-space savepoint.
     await db.exec(`release ${savepoint}`);
   } catch (e) {
-    // Main-DB failure: roll back and rethrow — the event is lost everywhere.
+    // Per-space failure: roll back and rethrow — the event is lost.
     await db.exec(`rollback to ${savepoint}`);
     await db.exec(`release ${savepoint}`);
     throw e;
-  }
-
-  // ── Derived DBs ─────────────────────────────────────────────────────
-  // Run after the main savepoint is committed. A failure rolls back only
-  // the derived target's savepoint; the monolithic DB is already consistent
-  // and the space DB is repaired by deleting + re-backfilling it.
-  if (spaceDb) {
-    try {
-      await spaceDb.exec(`savepoint ${savepoint}`);
-      for (const statement of bundle.statements) {
-        await runStatementForTargets(spaceDb, globalDb, statement);
-      }
-      await setMessageSortIdxByTimestamp(spaceDb, bundle.event);
-      await setMessageSortIdxByReorder(spaceDb, opts.streamId, bundle.event);
-      await setMessageSortIdxByForward(spaceDb, bundle.event);
-      if (
-        bundle.event.$type === "space.roomy.message.createMessage.v0" &&
-        bundle.event.room
-      ) {
-        await upsertActivityItem(spaceDb, {
-          roomId: bundle.event.room,
-          spaceId: opts.streamId,
-          messageId: bundle.event.id,
-        });
-      }
-      // SetUserProfile events update the global profile store (bridged users
-      // don't go through HappyView, so the materialiser is the only writer).
-      if (bundle.event.$type === "space.roomy.user.updateProfile.v0") {
-        await writeSetUserProfileToGlobal(
-          bundle.event as unknown as {
-            did: string;
-            name?: unknown;
-            avatar?: unknown;
-            description?: unknown;
-            extensions?: Record<string, unknown>;
-          },
-        );
-      }
-      await spaceDb.exec(`release ${savepoint}`);
-    } catch (spaceErr) {
-      try {
-        await spaceDb.exec(`rollback to ${savepoint}`);
-        await spaceDb.exec(`release ${savepoint}`);
-      } catch {
-        /* best-effort */
-      }
-      const message =
-        spaceErr instanceof Error ? spaceErr.message : String(spaceErr);
-      console.error(
-        `[materialize] spaceDb dual-write failed for ${opts.streamId} (monolithic intact): ${message}`,
-      );
-    }
   }
 }
 
 /**
  * Run a statement against the derived DBs: global-edge statements go to the
  * global DB, everything else to the per-space DB. A missing target is a
- * silent no-op (tests that don't exercise dual-write pass no derived DBs).
+ * silent no-op (tests that don't exercise the split pass no derived DBs).
  */
 async function runStatementForTargets(
-  spaceDb: DbLike,
+  db: DbLike,
   globalDb: DbLike | undefined,
   statement: SqlStatement,
 ): Promise<void> {
@@ -327,7 +288,7 @@ async function runStatementForTargets(
     if (globalDb) await runStatement(globalDb, statement);
     return;
   }
-  await runStatement(spaceDb, statement);
+  await runStatement(db, statement);
 }
 
 async function runStatement(db: DbLike, statement: SqlStatement): Promise<void> {

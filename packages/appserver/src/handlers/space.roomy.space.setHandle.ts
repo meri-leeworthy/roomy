@@ -10,7 +10,7 @@
  * @see packages/appserver/docs/plans/app-lite-space-handle.md
  */
 
-import { openDb, openSpaceDb } from "../db/db.ts";
+import { openSpaceDb } from "../db/db.ts";
 import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { Router as InvalidationRouter } from "../invalidation/index.ts";
@@ -49,7 +49,6 @@ export const setHandleHandler: ProcedureHandler<SetHandleBody, void> = async (
     throw new XrpcError(401, "AuthRequired", "Authentication required");
   }
   const db = openSpaceDb(spaceId);
-  const mainDb = openDb();
 
   // ── Require admin access ─────────────────────────────────────────────
   const access = await requireSpaceAccess(db, spaceId, callerDid);
@@ -64,23 +63,15 @@ export const setHandleHandler: ProcedureHandler<SetHandleBody, void> = async (
   // setHandle was formerly a Leaf operation; the handle is now persisted in the local DB below.
 
   // ── Persist handle in local DB for fast query access ────────────
-  // Phase 2 (read cutover): the per-space DB is the read source, but the
-  // monolithic DB is still dual-written for rollback safety.
+  // Phase 3: the per-space DB is the source of truth for `comp_space`; the
+  // monolithic DB no longer exists, so there is no dual-write.
   if (handle !== null) {
     await db.run(
       `update comp_space set handle = ?, updated_at = unixepoch() * 1000 where entity = ?`,
       [handle, spaceId],
     );
-    await mainDb.run(
-      `update comp_space set handle = ?, updated_at = unixepoch() * 1000 where entity = ?`,
-      [handle, spaceId],
-    );
   } else {
     await db.run(
-      `update comp_space set handle = null, updated_at = unixepoch() * 1000 where entity = ?`,
-      [spaceId],
-    );
-    await mainDb.run(
       `update comp_space set handle = null, updated_at = unixepoch() * 1000 where entity = ?`,
       [spaceId],
     );

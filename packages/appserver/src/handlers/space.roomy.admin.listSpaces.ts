@@ -13,7 +13,7 @@
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
 
-import { openDb } from "../db/db.ts";
+import { openDb, openSpaceDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { optionalInt, optionalString } from "../xrpc/params.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
@@ -67,71 +67,104 @@ export const adminListSpacesHandler: QueryHandler<
   const cursorRaw = optionalString(params, "cursor") ?? null;
   const cursor = cursorRaw ? parseCursor(cursorRaw) : null;
 
-  const db = openDb();
+  const eventsDb = openDb();
   const todayMidnight = new Date();
   todayMidnight.setUTCHours(0, 0, 0, 0);
   const todayStart = todayMidnight.getTime();
 
-  // ── Per-space aggregates, sorted by member count desc, did asc ──────────
+  // ── Enumerate spaces + event counters from the event-log DB ─────────────
   //
-  // The events DB is ATTACHed as `events`, so its `stream_events` table is
-  // queryable from the main handle. Event counters are correlated
-  // subqueries against the events DB; member count is a left-joined count
-  // over `edges` (head = space, label in ('member','admin')).
-  //
-  // The cursor filter preserves the sort: rows strictly after
-  // (memberCount, did) under (member_count desc, did asc) ordering — i.e.
-  // member_count < cursor.memberCount, OR equal member_count AND did >
-  // cursor.did. member count binds twice (used in both branches).
-  const cursorClause = cursor
-    ? `and (member_count < ? or (member_count = ? and cs.entity > ?))`
-    : "";
-
-  const rows = await db
+  // Phase 3: there is no monolithic DB to enumerate `comp_space` from, and
+  // `stream_events` is no longer ATTACHed to the same handle as the
+  // materialised tables. The event-log DB (openDb) is the source of the
+  // space list: every space has a stream, and every stream with events is
+  // counted here. Per-space details (member edges, comp_space/comp_info)
+  // are read from each space's per-space DB via openSpaceDb(spaceDid)
+  // below.
+  const eventRows = await eventsDb
     .query(
-      `select
-         cs.entity as did,
-         ci.name as name,
-         (
-           select count(*) from edges
-            where head = cs.entity and label in ('member','admin')
-         ) as member_count,
-         (
-           select count(*) from events.stream_events where stream_id = cs.entity
-         ) as total_events,
-         (
-           select count(*) from events.stream_events
-            where stream_id = cs.entity and created_at >= ?
-         ) as events_today
-       from comp_space cs
-       left join comp_info ci on ci.entity = cs.entity
-      where 1=1 ${cursorClause}
-       order by member_count desc, cs.entity asc
-       limit ?`,
+      `select stream_id,
+              count(*) as total_events,
+              count(case when created_at >= ? then 1 end) as events_today
+         from stream_events
+        group by stream_id`,
     )
     .all<{
-      did: string;
-      name: string | null;
-      member_count: number;
+      stream_id: string;
       total_events: number;
       events_today: number;
-    }>(
-      cursor
-        ? [todayStart, cursor.memberCount, cursor.memberCount, cursor.did, limit + 1]
-        : [todayStart, limit + 1],
+    }>(todayStart);
+
+  // ── Per-space aggregates ────────────────────────────────────────────────
+  //
+  // Member count is a count over `edges` (head = space, label in
+  // ('member','admin')); name comes from comp_info. Both live in the
+  // per-space DB. Event counters come from the grouped event-log query
+  // above. The cursor filter preserves the sort: rows strictly after
+  // (memberCount, did) under (member_count desc, did asc) ordering — i.e.
+  // member_count < cursor.memberCount, OR equal member_count AND did >
+  // cursor.did.
+  const spaceStats: Array<{
+    did: string;
+    name: string | null;
+    member_count: number;
+    total_events: number;
+    events_today: number;
+  }> = [];
+
+  for (const r of eventRows) {
+    const spaceDb = openSpaceDb(r.stream_id);
+    const spaceRow = await spaceDb
+      .query(
+        `select
+           (select count(*) from edges
+             where head = cs.entity and label in ('member','admin')
+           ) as member_count,
+           ci.name as name
+         from comp_space cs
+         left join comp_info ci on ci.entity = cs.entity
+        where cs.entity = ?`,
+      )
+      .get<{ member_count: number; name: string | null }>(r.stream_id);
+
+    spaceStats.push({
+      did: r.stream_id,
+      name: spaceRow?.name ?? null,
+      member_count: spaceRow?.member_count ?? 0,
+      total_events: r.total_events,
+      events_today: r.events_today,
+    });
+  }
+
+  // Sort by member count desc, ties broken by did asc so the order is
+  // stable across pages.
+  spaceStats.sort(
+    (a, b) =>
+      b.member_count - a.member_count ||
+      (a.did < b.did ? -1 : a.did > b.did ? 1 : 0),
+  );
+
+  let paged = spaceStats;
+  if (cursor) {
+    paged = spaceStats.filter(
+      (s) =>
+        s.member_count < cursor.memberCount ||
+        (s.member_count === cursor.memberCount && s.did > cursor.did),
     );
+  }
 
   // Fetch one extra row to detect a next page without a second query.
-  const hasMore = rows.length > limit;
-  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const pageRows = paged.slice(0, limit + 1);
+  const hasMore = pageRows.length > limit;
+  const visibleRows = hasMore ? pageRows.slice(0, limit) : pageRows;
 
   // ── Event-type breakdown per space (one grouped query per space) ──────
   const spaces: AdminSpaceStats[] = [];
-  for (const r of pageRows) {
-    const breakdownRows = await db
+  for (const r of visibleRows) {
+    const breakdownRows = await eventsDb
       .query(
         `select event_type, count(*) as n
-           from events.stream_events
+           from stream_events
           where stream_id = ? and event_type is not null
           group by event_type
           order by n desc`,
@@ -154,8 +187,8 @@ export const adminListSpacesHandler: QueryHandler<
   }
 
   const result: ListSpacesResult = { spaces };
-  if (hasMore && pageRows.length > 0) {
-    const last = pageRows[pageRows.length - 1]!;
+  if (hasMore && visibleRows.length > 0) {
+    const last = visibleRows[visibleRows.length - 1]!;
     result.cursor = `${last.member_count}|${last.did}`;
   }
   return result;

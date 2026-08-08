@@ -1,16 +1,11 @@
 /**
- * E2E coverage for the per-space DB split (Phase 1):
- *   - membership (joinedSpace/leftSpace) is tracked consistently in the global DB
- *   - rooms/messages dual-write to the per-space DB
- *   - handler fast-paths and the materialiser keep mono + global + per-space in lockstep
+ * E2E coverage for the per-space DB split (Phase 3):
+ *   - membership (joinedSpace/leftSpace) lives ONLY in the global DB
+ *   - space data (entities, comp_* tables, member|admin edges) lives in the per-space DB
+ *   - there is no monolithic materialised DB
  *
  * These run through the real HTTP transport (test-mode X-Test-Did auth) with
  * :memory: DBs and disabled backfill, mirroring the boot path.
- *
- * Accepted limitation: left-space persistence does not survive a fresh rebuild
- * until the post-migration wipe+replay (see docs/plans/per-space-dbs.md). The
- * assertions here validate the WRITE path keeps mono and global consistent for
- * the live flow; cross-restart leftSpace persistence is out of scope.
  *
  * Run: bun test --cwd packages/appserver src/e2e/perSpaceMembership.test.ts
  */
@@ -41,35 +36,38 @@ type AnyDb = any;
 
 // ─── DB assertion helpers ─────────────────────────────────────────────
 
-/** Membership edge presence in the monolithic DB vs the global DB.
- *
- * Edge direction differs by label:
- *  - joinedSpace / leftSpace: head = user, tail = space (membership store)
- *  - member / admin: head = space, tail = user (auth / role state, mono only)
- */
-async function membershipIn(
+/** Membership edge presence in the global DB (joinedSpace/leftSpace). */
+async function globalEdge(
   db: AnyDb,
   user: string,
   space: string,
-  label: "joinedSpace" | "leftSpace" | "member" | "admin",
-): Promise<{ mono: boolean; global: boolean }> {
-  const [head, tail] =
-    label === "member" || label === "admin" ? [space, user] : [user, space];
+  label: "joinedSpace" | "leftSpace",
+): Promise<boolean> {
   const q = "select 1 as n from edges where head = ? and tail = ? and label = ?";
-  const mono = await db.query(q).get(head, tail, label);
-  const global = await db.global().query(q).get(head, tail, label);
-  return { mono: mono != null, global: global != null };
+  const row = await db.global().query(q).get(user, space, label);
+  return row != null;
 }
 
-/** Count of rows of a table in the monolithic vs per-space DB. */
+/** member/admin edge presence in the per-space DB (auth / role state). */
+async function spaceEdge(
+  db: AnyDb,
+  space: string,
+  user: string,
+  label: "member" | "admin",
+): Promise<boolean> {
+  const q = "select 1 as n from edges where head = ? and tail = ? and label = ?";
+  const row = await db.forSpace(space).query(q).get(space, user, label);
+  return row != null;
+}
+
+/** Count of rows of a table in the per-space DB. */
 async function tableIn(
   db: AnyDb,
   table: "comp_room" | "comp_content",
   space: string,
-): Promise<{ mono: number; per: number }> {
-  const mono = await db.query(`select count(*) as n from ${table}`).get() as { n: number } | undefined;
+): Promise<number> {
   const per = await db.forSpace(space).query(`select count(*) as n from ${table}`).get() as { n: number } | undefined;
-  return { mono: mono?.n ?? 0, per: per?.n ?? 0 };
+  return per?.n ?? 0;
 }
 
 async function joinSpace(ctx: E2eContext, did: string, space: string, invite?: string) {
@@ -88,20 +86,18 @@ async function leaveSpace(ctx: E2eContext, did: string, space: string) {
 
 // ─── Membership in the global DB ───────────────────────────────────────
 
-describe("per-space dual-write: membership tracked in the global DB", () => {
-  test("joinSpace (public) writes joinedSpace to mono + global", async () => {
+describe("membership tracked in the global DB", () => {
+  test("joinSpace (public) writes joinedSpace to the global DB", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
 
     const res = await joinSpace(ctx, USER, SPACE);
     expect(res.status).toBe(200);
 
-    const m = await membershipIn(ctx.db as AnyDb, USER, SPACE, "joinedSpace");
-    expect(m.mono).toBe(true);
-    expect(m.global).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE, "joinedSpace")).toBe(true);
   });
 
-  test("joinSpace (private, invite) writes joinedSpace to mono + global", async () => {
+  test("joinSpace (private, invite) writes joinedSpace to the global DB", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 0 });
     seedInvite(ctx.db as AnyDb, SPACE, INVITE, USER);
@@ -109,12 +105,10 @@ describe("per-space dual-write: membership tracked in the global DB", () => {
     const res = await joinSpace(ctx, USER, SPACE, INVITE);
     expect(res.status).toBe(200);
 
-    const m = await membershipIn(ctx.db as AnyDb, USER, SPACE, "joinedSpace");
-    expect(m.mono).toBe(true);
-    expect(m.global).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE, "joinedSpace")).toBe(true);
   });
 
-  test("leaveSpace removes joinedSpace and writes leftSpace in mono + global", async () => {
+  test("leaveSpace removes joinedSpace and writes leftSpace in the global DB", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     await joinSpace(ctx, USER, SPACE);
@@ -122,16 +116,11 @@ describe("per-space dual-write: membership tracked in the global DB", () => {
     const res = await leaveSpace(ctx, USER, SPACE);
     expect(res.status).toBe(200);
 
-    const j = await membershipIn(ctx.db as AnyDb, USER, SPACE, "joinedSpace");
-    expect(j.mono).toBe(false);
-    expect(j.global).toBe(false);
-
-    const l = await membershipIn(ctx.db as AnyDb, USER, SPACE, "leftSpace");
-    expect(l.mono).toBe(true);
-    expect(l.global).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE, "joinedSpace")).toBe(false);
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE, "leftSpace")).toBe(true);
   });
 
-  test("rejoin after leave clears leftSpace and restores joinedSpace in mono + global", async () => {
+  test("rejoin after leave clears leftSpace and restores joinedSpace in the global DB", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     await joinSpace(ctx, USER, SPACE);
@@ -140,16 +129,11 @@ describe("per-space dual-write: membership tracked in the global DB", () => {
     const res = await joinSpace(ctx, USER, SPACE);
     expect(res.status).toBe(200);
 
-    const j = await membershipIn(ctx.db as AnyDb, USER, SPACE, "joinedSpace");
-    expect(j.mono).toBe(true);
-    expect(j.global).toBe(true);
-
-    const l = await membershipIn(ctx.db as AnyDb, USER, SPACE, "leftSpace");
-    expect(l.mono).toBe(false);
-    expect(l.global).toBe(false);
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE, "joinedSpace")).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE, "leftSpace")).toBe(false);
   });
 
-  test("multi-user churn keeps mono and global in lockstep", async () => {
+  test("multi-user churn keeps global membership consistent", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     seedSpace(ctx.db as AnyDb, SPACE2, USER, { allowPublicJoin: 1 });
@@ -165,23 +149,18 @@ describe("per-space dual-write: membership tracked in the global DB", () => {
     await leaveSpace(ctx, USER2, SPACE);
 
     // USER still in SPACE; USER2 in nothing; USER left SPACE2.
-    const u1s1 = await membershipIn(ctx.db as AnyDb, USER, SPACE, "joinedSpace");
-    expect(u1s1).toEqual({ mono: true, global: true });
-    const u1s2 = await membershipIn(ctx.db as AnyDb, USER, SPACE2, "joinedSpace");
-    expect(u1s2).toEqual({ mono: false, global: false });
-    const u1s2l = await membershipIn(ctx.db as AnyDb, USER, SPACE2, "leftSpace");
-    expect(u1s2l).toEqual({ mono: true, global: true });
-    const u2s1 = await membershipIn(ctx.db as AnyDb, USER2, SPACE, "joinedSpace");
-    expect(u2s1).toEqual({ mono: false, global: false });
-    const u2s1l = await membershipIn(ctx.db as AnyDb, USER2, SPACE, "leftSpace");
-    expect(u2s1l).toEqual({ mono: true, global: true });
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE, "joinedSpace")).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE2, "joinedSpace")).toBe(false);
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE2, "leftSpace")).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER2, SPACE, "joinedSpace")).toBe(false);
+    expect(await globalEdge(ctx.db as AnyDb, USER2, SPACE, "leftSpace")).toBe(true);
   });
 
-  test("banned user cannot join → no edge in mono or global", async () => {
+  test("banned user cannot join → no edge in the global DB", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     seedUser(ctx.db as AnyDb, BANNED);
-    (ctx.db as AnyDb).run(
+    await (ctx.db as AnyDb).forSpace(SPACE).run(
       "insert into comp_bans (entity, user_did) values (?, ?)",
       [SPACE, BANNED],
     );
@@ -189,11 +168,10 @@ describe("per-space dual-write: membership tracked in the global DB", () => {
     const res = await joinSpace(ctx, BANNED, SPACE);
     expect(res.status).toBe(403);
 
-    const m = await membershipIn(ctx.db as AnyDb, BANNED, SPACE, "joinedSpace");
-    expect(m).toEqual({ mono: false, global: false });
+    expect(await globalEdge(ctx.db as AnyDb, BANNED, SPACE, "joinedSpace")).toBe(false);
   });
 
-  test("non-member cannot leave → no leftSpace in mono or global", async () => {
+  test("non-member cannot leave → no leftSpace in the global DB", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     seedUser(ctx.db as AnyDb, USER2);
@@ -201,20 +179,18 @@ describe("per-space dual-write: membership tracked in the global DB", () => {
     const res = await leaveSpace(ctx, USER2, SPACE);
     expect(res.status).toBe(403);
 
-    const l = await membershipIn(ctx.db as AnyDb, USER2, SPACE, "leftSpace");
-    expect(l).toEqual({ mono: false, global: false });
+    expect(await globalEdge(ctx.db as AnyDb, USER2, SPACE, "leftSpace")).toBe(false);
   });
 
-  test("join materialises member edge in mono (auth/role state)", async () => {
+  test("join materialises member edge in the per-space DB (auth/role state)", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     seedUser(ctx.db as AnyDb, USER2);
 
     await joinSpace(ctx, USER2, SPACE);
-    const mem = await membershipIn(ctx.db as AnyDb, USER2, SPACE, "member");
-    // member edge is space-scoped (auth), lives in mono — not in global.
-    expect(mem.mono).toBe(true);
-    expect(mem.global).toBe(false);
+    // member edge is space-scoped (auth), lives in the per-space DB — not global.
+    expect(await spaceEdge(ctx.db as AnyDb, SPACE, USER2, "member")).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER2, SPACE, "joinedSpace")).toBe(true);
   });
 
   test("getSpaces reflects a freshly joined membership (read path)", async () => {
@@ -237,7 +213,7 @@ describe("per-space dual-write: membership tracked in the global DB", () => {
     expect(body.spaces.some((sp: { id: string }) => sp.id === SPACE)).toBe(true);
   });
 
-  test("createSpace writes joinedSpace to mono + global (when PLC available)", async () => {
+  test("createSpace writes joinedSpace to the global DB (when PLC available)", async () => {
     const ctx = await startAppserver();
     const res = await ctx.authedFetch(USER)(
       `${ctx.baseUrl}/xrpc/space.roomy.space.createSpace`,
@@ -249,15 +225,13 @@ describe("per-space dual-write: membership tracked in the global DB", () => {
       return;
     }
     const { spaceId } = await res.json();
-    const m = await membershipIn(ctx.db as AnyDb, USER, spaceId, "joinedSpace");
-    expect(m.mono).toBe(true);
-    expect(m.global).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER, spaceId, "joinedSpace")).toBe(true);
   });
 });
 
-// ─── Rooms + messages dual-write to the per-space DB ───────────────────
+// ─── Rooms + messages in the per-space DB ───────────────────────────────
 
-describe("per-space dual-write: rooms and messages", () => {
+describe("rooms and messages live in the per-space DB", () => {
   async function send(ctx: E2eContext, did: string, space: string, events: unknown[]) {
     return ctx.authedFetch(did)(`${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`, {
       method: "POST",
@@ -265,17 +239,11 @@ describe("per-space dual-write: rooms and messages", () => {
     });
   }
 
-  test("createRoom dual-writes comp_room to mono + per-space", async () => {
+  test("createRoom writes comp_room to the per-space DB", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     await joinSpace(ctx, USER, SPACE);
-    // Phase 2: the per-space DB is the read source, so the admin edge must
-    // be present there too (the per-space DB is backfilled from mono on first
-    // open, which already happened during joinSpace).
-    (ctx.db as AnyDb).run(
-      "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
-      [SPACE, USER],
-    );
+    // The admin edge must be present in the per-space DB (auth/role state).
     await (ctx.db as AnyDb).forSpace(SPACE).run(
       "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
       [SPACE, USER],
@@ -287,9 +255,7 @@ describe("per-space dual-write: rooms and messages", () => {
     ]);
     expect(res.status).toBe(200);
 
-    const rooms = await tableIn(ctx.db as AnyDb, "comp_room", SPACE);
-    expect(rooms.mono).toBe(1);
-    expect(rooms.per).toBe(1);
+    expect(await tableIn(ctx.db as AnyDb, "comp_room", SPACE)).toBe(1);
 
     // The room entity row must exist in the per-space DB too.
     const roomInPer = await (ctx.db as AnyDb)
@@ -299,23 +265,13 @@ describe("per-space dual-write: rooms and messages", () => {
     expect(roomInPer).not.toBeNull();
   });
 
-  test("createMessage dual-writes comp_content + author edge to mono + per-space", async () => {
+  test("createMessage writes comp_content + author edge to the per-space DB", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     await joinSpace(ctx, USER, SPACE);
 
-    // Need a room to target. Phase 2: the per-space DB is the read source,
-    // so the room must exist there too (the per-space DB was backfilled from
-    // mono on first open during joinSpace).
+    // Need a room to target, present in the per-space DB.
     const room = newUlid();
-    await (ctx.db as AnyDb).run(
-      "insert or ignore into entities (id, stream_id) values (?, ?)",
-      [room, SPACE],
-    );
-    await (ctx.db as AnyDb).run(
-      "insert or ignore into comp_room (entity, label) values (?, 'space.roomy.channel')",
-      [room],
-    );
     await (ctx.db as AnyDb).forSpace(SPACE).run(
       "insert or ignore into entities (id, stream_id) values (?, ?)",
       [room, SPACE],
@@ -342,18 +298,13 @@ describe("per-space dual-write: rooms and messages", () => {
 
     // comp_content may also hold a system "joined" message, so assert the
     // specific message row exists rather than a total count.
-    const msgMono = await (ctx.db as AnyDb)
-      .query("select 1 as n from comp_content where entity = ?")
-      .get(msgId);
-    expect(msgMono).not.toBeNull();
     const msgPer = await (ctx.db as AnyDb)
       .forSpace(SPACE)
       .query("select 1 as n from comp_content where entity = ?")
       .get(msgId);
     expect(msgPer).not.toBeNull();
 
-    const author = await membershipIn(ctx.db as AnyDb, USER, SPACE, "member");
-    expect(author.mono).toBe(true);
+    expect(await spaceEdge(ctx.db as AnyDb, SPACE, USER, "member")).toBe(true);
   });
 
   test("membership edges are routed to global, not the per-space DB", async () => {
@@ -369,26 +320,7 @@ describe("per-space dual-write: rooms and messages", () => {
     expect(per).toBeNull();
 
     // But it is in the global DB.
-    const g = await (ctx.db as AnyDb)
-      .global()
-      .query("select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
-      .get(USER, SPACE);
-    expect(g).not.toBeNull();
-  });
-});
-
-// ─── Backfill ──────────────────────────────────────────────────────────
-
-describe("per-space dual-write: global DB backfill", () => {
-  test("a mono joinedSpace edge backfills into the global DB on first access", async () => {
-    const ctx = await startAppserver();
-    seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
-    seedJoinedSpace(ctx.db as AnyDb, USER, SPACE);
-
-    // First touch of the global DB triggers the backfill from mono.
-    const g = await membershipIn(ctx.db as AnyDb, USER, SPACE, "joinedSpace");
-    expect(g.mono).toBe(true);
-    expect(g.global).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE, "joinedSpace")).toBe(true);
   });
 });
 
@@ -406,15 +338,15 @@ describe("cross-stream profiles resolve from the global store", () => {
     seedRoom(db as AnyDb, room, SPACE);
     seedMessage(db as AnyDb, msg, room, SPACE, "a");
 
-    // Author edge: msg → USER2. USER2's profile entity lives in USER2's OWN
-    // stream (not SPACE's), so the per-space DB backfill does NOT carry
-    // USER2's comp_user/comp_info — the author resolves to blank from the
-    // per-space join. The authoritative profile lives in the global store.
-    (db as AnyDb).run(
+    // Author edge: msg → USER2, in the per-space DB. USER2's profile entity
+    // lives in USER2's OWN stream (not SPACE's), so the per-space DB does NOT
+    // carry USER2's comp_user/comp_info — the author resolves to blank from
+    // the per-space join. The authoritative profile lives in the global store.
+    await (db as AnyDb).forSpace(SPACE).run(
       "insert or ignore into entities (id, stream_id) values (?, ?)",
       [USER2, USER2],
     );
-    (db as AnyDb).run(
+    await (db as AnyDb).forSpace(SPACE).run(
       "insert or ignore into edges (head, tail, label) values (?, ?, 'author')",
       [msg, USER2],
     );
@@ -440,17 +372,15 @@ describe("cross-stream profiles resolve from the global store", () => {
 
 // ─── Concurrency ───────────────────────────────────────────────────────
 
-describe("per-space dual-write: concurrency", () => {
-  test("concurrent joins keep mono and global consistent", async () => {
+describe("concurrency", () => {
+  test("concurrent joins keep global membership consistent", async () => {
     const ctx = await startAppserver();
     seedSpace(ctx.db as AnyDb, SPACE, USER, { allowPublicJoin: 1 });
     seedUser(ctx.db as AnyDb, USER2);
 
     await Promise.all([joinSpace(ctx, USER, SPACE), joinSpace(ctx, USER2, SPACE)]);
 
-    const u1 = await membershipIn(ctx.db as AnyDb, USER, SPACE, "joinedSpace");
-    expect(u1).toEqual({ mono: true, global: true });
-    const u2 = await membershipIn(ctx.db as AnyDb, USER2, SPACE, "joinedSpace");
-    expect(u2).toEqual({ mono: true, global: true });
+    expect(await globalEdge(ctx.db as AnyDb, USER, SPACE, "joinedSpace")).toBe(true);
+    expect(await globalEdge(ctx.db as AnyDb, USER2, SPACE, "joinedSpace")).toBe(true);
   });
 });

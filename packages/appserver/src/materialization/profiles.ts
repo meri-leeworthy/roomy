@@ -3,8 +3,8 @@
  *
  * Mirrors the frontend `worker.ts → ensureProfiles` flow: scan a batch of
  * events for user DIDs that need a profile, look up which ones we don't yet
- * have, fetch profiles, and insert `entities` + `comp_user` + `comp_info`
- * rows.
+ * have, fetch profiles, and write them to the global `profiles` table (the
+ * authoritative per-user Roomy profile store).
  *
  * **HappyView-first with Bluesky fallback.** When a HappyView index service
  * is configured, bulk profile fetches query it in batch (one HTTP call per 25
@@ -13,9 +13,9 @@
  * configured, all fetches go through Bluesky directly — the original fast
  * path.
  *
- * Profile inserts run in their own short transaction *before* the batch's
- * apply transaction. A profile row left behind from a later-failing batch is
- * harmless — `entities` rows are reusable.
+ * Profile writes go to the global DB (via `tryOpenGlobalDb()`), not the
+ * per-space DBs. A profile row left behind from a later-failing batch is
+ * harmless — the global `profiles` upsert is idempotent.
  */
 
 import type { DbLike } from "../db/types.ts";
@@ -85,7 +85,8 @@ export const defaultGetProfiles: GetProfilesFn = async (dids: UserDid[]) => {
       } catch (err) {
         // Per-chunk isolation: a network/parse failure on one chunk must not
         // abort the remaining chunks. Affected DIDs self-heal on the next
-        // backfill (comp_info still missing → filterMissing returns them).
+        // backfill (profile still missing from the global store →
+        // filterMissing returns them).
         const message = err instanceof Error ? err.message : String(err);
         console.warn(
           `[materialize] defaultGetProfiles: chunk failed (${chunk.length} DIDs): ${message}`,
@@ -150,8 +151,8 @@ export async function getProfilesRoomyFirst(
 }
 
 /**
- * Ensure entities + comp_user + comp_info rows exist for every user DID
- * referenced by a profile-relevant event in the batch.
+ * Ensure a global `profiles` row exists for every user DID referenced by a
+ * profile-relevant event in the batch.
  *
  * Uses the Roomy-first fetcher (`getProfilesRoomyFirst`) by default. Tests
  * can pass a custom `getProfiles` to bypass HappyView/Bluesky calls.
@@ -231,16 +232,20 @@ function collectCandidateDids(events: DecodedStreamEvent[]): Set<UserDid> {
 
 /**
  * Narrow to DIDs we can resolve via the bsky appview AND that don't yet have
- * a profile row locally. DIDs that don't start with `did:plc:` or
+ * a profile row in the global store. DIDs that don't start with `did:plc:` or
  * `did:web:` are skipped — they're synthetic (e.g. `did:space:...`,
  * `did:discord:...`) and have no profile to fetch.
  *
- * We key "have we fetched this profile" off `comp_info`, NOT `entities`:
- * the message/space materialisers insert `entities` rows for an author
- * independently of any profile fetch (via `ensureEntity`), so an `entities`
- * row can exist with no `comp_info`/`comp_user` — e.g. after a failed fetch.
- * Checking `entities` would permanently skip such DIDs and never retry.
- * Checking `comp_info` retries until the profile is actually materialised.
+ * We key "have we fetched this profile" off the global `profiles` table (the
+ * authoritative per-user Roomy profile store), NOT the per-space
+ * `comp_info`/`comp_user` rows: those are a denormalised copy and may lag the
+ * global store (or be absent entirely for a space that hasn't re-materialised
+ * a cross-stream author). Checking the global store retries until the profile
+ * is actually materialised there.
+ *
+ * When the worker-backed global DB isn't available (e.g. a raw in-memory
+ * `Database` in tests), we can't tell which profiles already exist, so we
+ * return all resolvable candidates and let the fetch path decide.
  */
 async function filterMissing(db: DbLike, candidates: Set<UserDid>): Promise<UserDid[]> {
   const resolvable = [...candidates].filter(
@@ -248,21 +253,27 @@ async function filterMissing(db: DbLike, candidates: Set<UserDid>): Promise<User
   );
   if (resolvable.length === 0) return [];
 
+  const globalDb = tryOpenGlobalDb();
+  // No worker-backed global DB (e.g. a raw in-memory Database in tests) —
+  // can't tell which profiles already exist, so return all resolvable
+  // candidates.
+  if (!globalDb) return resolvable;
+
   const placeholders = resolvable.map(() => "?").join(",");
 
-  // DIDs that already have a profile (comp_info exists)
+  // DIDs that already have a profile in the global store
   const present = new Set(
-    (await db
-      .query(`select entity from comp_info where entity in (${placeholders})`)
-      .all<{ entity: string }>(...resolvable)
-    ).map((r) => r.entity),
+    (await globalDb
+      .query(`select did from profiles where did in (${placeholders})`)
+      .all<{ did: string }>(...resolvable)
+    ).map((r) => r.did),
   );
 
   // DIDs with a stale handle.invalid — re-fetch if cooldown has elapsed
   const cutoff = Date.now() - STALE_HANDLE_COOLDOWN_MS;
   const staleHandleDids = new Set(
-    (await db
-      .query(`select did from comp_user where handle = 'handle.invalid' and updated_at < ? and did in (${placeholders})`)
+    (await globalDb
+      .query(`select did from profiles where handle = 'handle.invalid' and updated_at < ? and did in (${placeholders})`)
       .all<{ did: string }>(cutoff, ...resolvable)
     ).map((r) => r.did),
   );
@@ -287,7 +298,7 @@ async function writeGlobalProfile(
 ): Promise<void> {
   const globalDb = tryOpenGlobalDb();
   // No worker-backed global DB (e.g. a raw in-memory Database in tests) —
-  // skip the global write; the per-space/monolithic write still happens.
+  // skip the global write.
   if (!globalDb) return;
   const isRoomy = ex !== undefined;
   const did = p.did;
@@ -362,31 +373,34 @@ export async function writeSetUserProfileToGlobal(event: {
   );
 }
 
-/** Insert one transaction's worth of profile rows (Bluesky-only path). */
+/**
+ * Insert one batch of profile rows (Bluesky-only path) into the global
+ * `profiles` table.
+ *
+ * Phase 3: profiles are global — the authoritative copy lives in the global
+ * `profiles` table. The per-space `entities`/`comp_user`/`comp_info` writes
+ * are dropped; per-space DBs keep their own denormalised copy via their own
+ * materialisation, and cross-stream reads resolve from the global store.
+ */
 async function insertProfiles(db: DbLike, profiles: ProfileViewDetailed[]): Promise<void> {
-  const steps: Array<{ type: "query" | "run" | "exec"; sql: string; params?: unknown[] }> = [];
   for (const p of profiles) {
-    steps.push({ type: "run", sql: "insert into entities (id, stream_id) values (?, ?) on conflict(id) do nothing", params: [p.did, p.did] });
-    steps.push({ type: "run", sql: "insert into comp_user (did, handle) values (?, ?) on conflict(did) do update set handle = excluded.handle, updated_at = unixepoch() * 1000", params: [p.did, p.handle] });
-    steps.push({ type: "run", sql: "insert into comp_info (entity, name, avatar) values (?, ?, ?) on conflict(entity) do nothing", params: [p.did, p.displayName ?? p.handle, p.avatar ?? null] });
     await writeGlobalProfile(p, undefined);
   }
-  await db.transaction(steps);
 }
 
 /**
- * Insert profile rows with Roomy-specific extras (banner, pronouns, website).
+ * Insert profile rows with Roomy-specific extras (banner, pronouns, website)
+ * into the global `profiles` table.
  *
  * Two conflict strategies depending on the source:
  * - **Roomy record**: `on conflict do update` — the Roomy profile record is
  *   the authoritative source and should take precedence over prior data
  *   (e.g. a stale Bluesky fetch or a `SetUserProfile` event).
- * - **Bluesky fallback**: `on conflict do nothing` — first writer wins. This
- *   preserves display names set by `SetUserProfile` events (bridged users)
- *   and avoids overwriting a prior fetch that had a `displayName` with one
- *   that doesn't. Critically, the Bluesky fallback sets `name` to
- *   `displayName ?? handle` — if `displayName` is absent, writing the handle
- *   as the name would clobber a real display name set elsewhere.
+ * - **Bluesky fallback**: first writer wins — `handle` is always refreshed
+ *   but display fields (name/avatar/description) are only set when absent.
+ *   This preserves display names set by `SetUserProfile` events (bridged
+ *   users) and avoids overwriting a prior fetch that had a `displayName`
+ *   with one that doesn't.
  *
  * The `extras` map identifies which profiles came from Roomy records (they
  * have an entry) vs Bluesky (no entry).
@@ -396,56 +410,8 @@ export async function insertProfilesWithExtras(
   profiles: ProfileViewDetailed[],
   extras: Map<string, RoomyProfileExtras>,
 ): Promise<void> {
-  const steps: Array<{ type: "query" | "run" | "exec"; sql: string; params?: unknown[] }> = [];
   for (const p of profiles) {
     const ex = extras.get(p.did);
-    const isRoomy = ex !== undefined;
-
-    steps.push({ type: "run", sql: "insert into entities (id, stream_id) values (?, ?) on conflict(id) do nothing", params: [p.did, p.did] });
-
-    // Handle: only update from Bluesky-sourced profiles (Roomy records have
-    // no handle). For Roomy profiles, insert a null handle row if none exists.
-    if (isRoomy) {
-      steps.push({ type: "run", sql: "insert into comp_user (did, handle) values (?, ?) on conflict(did) do nothing", params: [p.did, null] });
-    } else {
-      steps.push({ type: "run", sql: "insert into comp_user (did, handle) values (?, ?) on conflict(did) do update set handle = excluded.handle, updated_at = unixepoch() * 1000", params: [p.did, p.handle] });
-    }
-
-    if (isRoomy) {
-      // Roomy record: authoritative — overwrite all fields.
-      steps.push({
-        type: "run",
-        sql: "insert into comp_info (entity, name, avatar, description, banner, pronouns, website) values (?, ?, ?, ?, ?, ?, ?) on conflict(entity) do update set name = excluded.name, avatar = excluded.avatar, description = excluded.description, banner = excluded.banner, pronouns = excluded.pronouns, website = excluded.website, updated_at = unixepoch() * 1000",
-        params: [
-          p.did,
-          p.displayName ?? null,
-          p.avatar ?? null,
-          p.description ?? null,
-          ex?.banner ?? null,
-          ex?.pronouns ?? null,
-          ex?.website ?? null,
-        ],
-      });
-    } else {
-      // Bluesky fallback: first writer wins — don't clobber existing names
-      // (e.g. display names set by SetUserProfile events for bridged users).
-      // Use displayName only (not handle fallback) so we don't write the
-      // handle as the name when displayName is absent.
-      steps.push({
-        type: "run",
-        sql: "insert into comp_info (entity, name, avatar, description, banner, pronouns, website) values (?, ?, ?, ?, ?, ?, ?) on conflict(entity) do nothing",
-        params: [
-          p.did,
-          p.displayName ?? null,
-          p.avatar ?? null,
-          p.description ?? null,
-          null,
-          null,
-          null,
-        ],
-      });
-    }
     await writeGlobalProfile(p, ex);
   }
-  await db.transaction(steps);
 }

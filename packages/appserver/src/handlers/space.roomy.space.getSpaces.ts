@@ -9,7 +9,7 @@
  * (with `isMember=false`).
  */
 
-import { openDb, openGlobalDb } from "../db/db.ts";
+import { openReadStateDb, openGlobalDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { selectJoinedSpaces, type SpaceRow } from "../queries/joinedSpaces.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
@@ -39,7 +39,7 @@ export const getSpacesHandler: QueryHandler<
   const includeLeft = params.includeLeft === "true" || params.includeLeft === "1";
 
   const globalDb = openGlobalDb();
-  const mainDb = openDb();
+  const mainDb = openReadStateDb();
   return {
     spaces: await selectJoinedSpaces(globalDb, mainDb, userDid, { includeLeft }),
   };

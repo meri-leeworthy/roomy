@@ -1,10 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test, mock } from "bun:test";
-import { Database } from "bun:sqlite";
 import {
-  StreamDid,
   StreamIndex,
   UserDid,
   newUlid,
@@ -13,29 +8,24 @@ import {
 } from "@roomy-space/sdk";
 import type { ProfileViewDetailed } from "@atproto/api/dist/client/types/app/bsky/actor/defs";
 
-import { toAsyncDb } from "../db/syncAdapter.ts";
+import { closeDb, openDb, openGlobalDb } from "../db/db.ts";
 import { defaultGetProfiles, ensureProfilesForBatch } from "./profiles.ts";
 import type { DbLike } from "../db/types.ts";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const SCHEMA_PATH = join(__dirname, "..", "db", "schema.sql");
-const SCHEMA_VERSION = "10-appserver.4";
-
-const STREAM = StreamDid.assert("did:web:profiles-test.example");
 const ALICE = UserDid.assert("did:plc:alice");
 const BOB = UserDid.assert("did:plc:bob");
 const DISCORD_USER = UserDid.assert("did:discord:9999");
 
-function freshDb(): { db: Database; asyncDb: DbLike } {
-  const db = new Database(":memory:");
-  db.exec("pragma journal_mode = wal");
-  db.exec("pragma synchronous = normal");
-  db.exec("pragma foreign_keys = on");
-  const schemaSql = readFileSync(SCHEMA_PATH, "utf8");
-  db.exec(schemaSql);
-  db.run("insert into roomy_schema_version (id, version) values (1, ?)", [SCHEMA_VERSION]);
-  return { db, asyncDb: toAsyncDb(db) };
+/**
+ * Set up the worker-backed global DB (the authoritative `profiles` store).
+ * Phase 3: profiles live in the global `profiles` table, so these tests seed
+ * and assert against the global DB rather than a monolithic materialised DB.
+ */
+function freshGlobal(): { globalDb: DbLike } {
+  closeDb();
+  openDb({ path: ":memory:" });
+  const globalDb = openGlobalDb();
+  return { globalDb };
 }
 
 function decodedAs(
@@ -76,20 +66,20 @@ function createMessageEvent(authorOverride?: string): Event {
 
 describe("ensureProfilesForBatch", () => {
   test("is a no-op when getProfiles is undefined", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb } = freshGlobal();
     const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
 
-    await ensureProfilesForBatch(asyncDb, events, undefined);
+    await ensureProfilesForBatch(globalDb, events, undefined);
 
     expect(
-      (await asyncDb
-        .query("select count(*) as count from entities")
+      (await globalDb
+        .query("select count(*) as count from profiles")
         .get<{ count: number }>())?.count,
     ).toBe(0);
   });
 
   test("is a no-op when no events trigger profile lookup", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb } = freshGlobal();
     // createRoom isn't a NEW_USER_SIGNAL — should not trigger fetch.
     const events = [
       decodedAs(
@@ -104,51 +94,35 @@ describe("ensureProfilesForBatch", () => {
     ];
     const getProfiles = mock(async () => [] as ProfileViewDetailed[]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
     expect(getProfiles).toHaveBeenCalledTimes(0);
   });
 
-  test("fetches profiles for joinSpace authors and inserts entity + comp_user + comp_info", async () => {
-    const { db, asyncDb } = freshDb();
+  test("fetches profiles for joinSpace authors and inserts a global profile row", async () => {
+    const { globalDb } = freshGlobal();
     const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
     const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
 
     expect(getProfiles).toHaveBeenCalledTimes(1);
     expect(getProfiles).toHaveBeenCalledWith([ALICE]);
 
-    expect(
-      (await asyncDb
-        .query("select id from entities where id = ?")
-        .get<{ id: string }>(ALICE))?.id,
-    ).toBe(ALICE);
-    expect(
-      (await asyncDb
-        .query("select handle from comp_user where did = ?")
-        .get<{ handle: string }>(ALICE))?.handle,
-    ).toBe("alice.test");
-    expect(
-      await asyncDb
-        .query("select name, avatar from comp_info where entity = ?")
-        .get<{ name: string; avatar: string }>(ALICE),
-    ).toEqual({
-      name: "alice.test display",
-      avatar: "https://cdn.example/alice.test.png",
-    });
+    const row = await globalDb
+      .query("select did, handle, name, avatar from profiles where did = ?")
+      .get<{ did: string; handle: string; name: string; avatar: string }>(ALICE);
+    expect(row?.did).toBe(ALICE);
+    expect(row?.handle).toBe("alice.test");
+    expect(row?.name).toBe("alice.test display");
+    expect(row?.avatar).toBe("https://cdn.example/alice.test.png");
   });
 
-  test("skips DIDs we already have comp_info rows for", async () => {
-    const { db, asyncDb } = freshDb();
-    db.run("insert into entities (id, stream_id) values (?, ?)", [
-      ALICE,
-      STREAM,
-    ]);
-    db.run("insert into comp_info (entity, name, avatar) values (?, ?, ?)", [
-      ALICE,
-      "alice.test",
-      null,
-    ]);
+  test("skips DIDs we already have a global profile row for", async () => {
+    const { globalDb } = freshGlobal();
+    await globalDb.run(
+      "insert into profiles (did, handle, name) values (?, ?, ?)",
+      [ALICE, "alice.test", "alice.test display"],
+    );
 
     const events = [
       decodedAs(joinSpaceEvent(), 1, ALICE),
@@ -156,50 +130,44 @@ describe("ensureProfilesForBatch", () => {
     ];
     const getProfiles = mock(async () => [profileFor(BOB, "bob.test")]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
 
     expect(getProfiles).toHaveBeenCalledTimes(1);
     expect(getProfiles).toHaveBeenCalledWith([BOB]);
   });
 
-  test("retries DIDs that have an entities row but no comp_info (failed fetch recovery)", async () => {
-    // Regression: the message materialiser inserts an `entities` row for an
-    // author via ensureEntity regardless of whether a profile was fetched.
-    // A DID with entities-but-no-comp_info (e.g. after a failed getProfiles)
-    // must still be retried, not permanently skipped.
-    const { db, asyncDb } = freshDb();
-    db.run("insert into entities (id, stream_id) values (?, ?)", [
-      ALICE,
-      STREAM,
-    ]);
-    // NOTE: no comp_info row for ALICE — profile fetch previously failed.
+  test("retries DIDs that have no global profile row (failed fetch recovery)", async () => {
+    // Regression: a DID whose profile fetch previously failed has no row in
+    // the global `profiles` table, so it must be retried, not skipped.
+    const { globalDb } = freshGlobal();
+    // NOTE: no profile row for ALICE — profile fetch previously failed.
 
     const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
     const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
 
     expect(getProfiles).toHaveBeenCalledTimes(1);
     expect(getProfiles).toHaveBeenCalledWith([ALICE]);
     expect(
-      (await asyncDb
-        .query("select name from comp_info where entity = ?")
+      (await globalDb
+        .query("select name from profiles where did = ?")
         .get<{ name: string }>(ALICE))?.name,
     ).toBe("alice.test display");
   });
 
   test("filters out non-bsky DIDs (e.g. did:discord:)", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb } = freshGlobal();
     const events = [decodedAs(joinSpaceEvent(), 1, DISCORD_USER)];
     const getProfiles = mock(async () => [] as ProfileViewDetailed[]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
 
     expect(getProfiles).toHaveBeenCalledTimes(0);
   });
 
   test("includes authorOverride DIDs from createMessage extensions", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb } = freshGlobal();
     const events = [
       decodedAs(createMessageEvent("did:plc:override-author"), 1, ALICE),
     ];
@@ -208,7 +176,7 @@ describe("ensureProfilesForBatch", () => {
       profileFor("did:plc:override-author", "override.test"),
     ]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
 
     expect(getProfiles).toHaveBeenCalledTimes(1);
     const arg = (getProfiles.mock.calls as unknown as UserDid[][][])[0]![0];
@@ -218,7 +186,7 @@ describe("ensureProfilesForBatch", () => {
   });
 
   test("dedupes the same DID across events", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb } = freshGlobal();
     const events = [
       decodedAs(joinSpaceEvent(), 1, ALICE),
       decodedAs(joinSpaceEvent(), 2, ALICE),
@@ -226,14 +194,14 @@ describe("ensureProfilesForBatch", () => {
     ];
     const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
 
     expect(getProfiles).toHaveBeenCalledTimes(1);
     expect(getProfiles).toHaveBeenCalledWith([ALICE]);
   });
 
   test("tolerates getProfiles returning fewer profiles than requested", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb } = freshGlobal();
     const events = [
       decodedAs(joinSpaceEvent(), 1, ALICE),
       decodedAs(joinSpaceEvent(), 2, BOB),
@@ -241,61 +209,56 @@ describe("ensureProfilesForBatch", () => {
     // Bob is unresolvable — appview returned only alice.
     const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
 
     expect(
-      (await asyncDb
-        .query("select count(*) as count from entities")
+      (await globalDb
+        .query("select count(*) as count from profiles")
         .get<{ count: number }>())?.count,
     ).toBe(1);
   });
 
-
   test("re-fetches profiles for handle.invalid after cooldown elapses", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb } = freshGlobal();
     // Seed ALICE with handle.invalid and an old updated_at (past cooldown)
-    db.run("insert into entities (id, stream_id) values (?, ?)", [ALICE, STREAM]);
-    db.run("insert into comp_info (entity, name, avatar) values (?, ?, ?)", [ALICE, "alice display", null]);
-    db.run(
-      "insert into comp_user (did, handle, updated_at) values (?, ?, ?)",
-      [ALICE, "handle.invalid", Date.now() - 2 * 60 * 60 * 1000], // 2 hours ago
+    await globalDb.run(
+      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
+      [ALICE, "handle.invalid", "alice display", Date.now() - 2 * 60 * 60 * 1000], // 2 hours ago
     );
 
     const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
     const getProfiles = mock(async () => [profileFor(ALICE, "alice.renewed.test")]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
 
-    // Should have fetched despite comp_info existing, because handle is stale
+    // Should have fetched despite a profile existing, because handle is stale
     expect(getProfiles).toHaveBeenCalledTimes(1);
     expect(getProfiles).toHaveBeenCalledWith([ALICE]);
     expect(
-      (await asyncDb
-        .query("select handle from comp_user where did = ?")
+      (await globalDb
+        .query("select handle from profiles where did = ?")
         .get<{ handle: string }>(ALICE))?.handle,
     ).toBe("alice.renewed.test");
   });
 
   test("does NOT re-fetch handle.invalid within cooldown period", async () => {
-    const { db, asyncDb } = freshDb();
+    const { globalDb } = freshGlobal();
     // Seed ALICE with handle.invalid and a recent updated_at (within cooldown)
-    db.run("insert into entities (id, stream_id) values (?, ?)", [ALICE, STREAM]);
-    db.run("insert into comp_info (entity, name, avatar) values (?, ?, ?)", [ALICE, "alice display", null]);
-    db.run(
-      "insert into comp_user (did, handle, updated_at) values (?, ?, ?)",
-      [ALICE, "handle.invalid", Date.now() - 10 * 60 * 1000], // 10 minutes ago
+    await globalDb.run(
+      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
+      [ALICE, "handle.invalid", "alice display", Date.now() - 10 * 60 * 1000], // 10 minutes ago
     );
 
     const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
     const getProfiles = mock(async () => [profileFor(ALICE, "alice.renewed.test")]);
 
-    await ensureProfilesForBatch(asyncDb, events, getProfiles);
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
 
     // Should NOT fetch — cooldown hasn't elapsed
     expect(getProfiles).toHaveBeenCalledTimes(0);
     expect(
-      (await asyncDb
-        .query("select handle from comp_user where did = ?")
+      (await globalDb
+        .query("select handle from profiles where did = ?")
         .get<{ handle: string }>(ALICE))?.handle,
     ).toBe("handle.invalid");
   });
@@ -402,11 +365,8 @@ describe("defaultGetProfiles", () => {
 
 describe("global profile store (Phase 2)", () => {
   test("insertProfilesWithExtras writes the global profiles table", async () => {
-    const { closeDb, openDb, openGlobalDb } = await import("../db/db.ts");
     const { insertProfilesWithExtras } = await import("./profiles.ts");
-    closeDb();
-    openDb({ path: ":memory:" });
-    const globalDb = openGlobalDb();
+    const { globalDb } = freshGlobal();
 
     const p = profileFor(ALICE, "alice.test");
     await insertProfilesWithExtras(openDb(), [p], new Map());
@@ -418,16 +378,11 @@ describe("global profile store (Phase 2)", () => {
     expect(row?.handle).toBe("alice.test");
     expect(row?.name).toBe("alice.test display");
     expect(row?.avatar).toBe("https://cdn.example/alice.test.png");
-
-    closeDb();
   });
 
   test("writeSetUserProfileToGlobal updates the global profile", async () => {
-    const { closeDb, openDb, openGlobalDb } = await import("../db/db.ts");
     const { writeSetUserProfileToGlobal } = await import("./profiles.ts");
-    closeDb();
-    openDb({ path: ":memory:" });
-    const globalDb = openGlobalDb();
+    const { globalDb } = freshGlobal();
 
     await writeSetUserProfileToGlobal({
       did: BOB,
@@ -445,7 +400,5 @@ describe("global profile store (Phase 2)", () => {
     expect(row?.handle).toBe("bob#1234");
     expect(row?.name).toBe("Bob");
     expect(row?.avatar).toBe("https://cdn.example/bob.png");
-
-    closeDb();
   });
 });

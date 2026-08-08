@@ -1,7 +1,7 @@
 # Per-Space Database Architecture
 
 **Date:** 2026-07-03
-**Status:** Phase 1 (dual-write) + Phase 2 (read cutover, dual-write kept) shipped. Phase 3 (remove monolithic) pending.
+**Status:** Phase 1 (dual-write) + Phase 2 (read cutover, dual-write kept) + Phase 3 (remove monolithic) shipped. The monolithic materialised DB is gone; per-space DBs are the source of truth for space data, the global DB holds membership/profiles/entity index, and the event-log DB is the append-only source of truth.
 
 ## Problem
 

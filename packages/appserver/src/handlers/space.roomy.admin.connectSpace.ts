@@ -10,7 +10,7 @@
  */
 
 import { StreamDid } from "@roomy-space/sdk";
-import { openDb } from "../db/db.ts";
+import { openSpaceDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
@@ -35,7 +35,9 @@ export const connectSpaceHandler: QueryHandler<
 
   const parsed = StreamDid.assert(did);
 
-  const db = openDb();
+  // Phase 3: comp_room / comp_info / edges / entities live in the
+  // per-space DB, not the event-log DB.
+  const db = openSpaceDb(parsed);
   const rooms = await db
     .query(
       `SELECT r.entity as id, i.name, r.label as kind, r.deleted,

@@ -8,7 +8,7 @@
  */
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
-import { openDb, openSpaceDbForEntity } from "../db/db.ts";
+import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
 import { getReadPositions } from "../queries/readPositions.ts";
@@ -64,7 +64,7 @@ export const getRoomThreadsHandler: QueryHandler<
   if (!db) {
     throw new XrpcError(404, "NotFound", `Room not found: ${roomId}`);
   }
-  const mainDb = openDb();
+  const mainDb = openReadStateDb();
   // Per-request memo: all threads in this channel share the same space-level
   // membership/admin/ban flags — without the memo, each thread's roomAccess
   // call re-queries them (~5 queries × N threads).
