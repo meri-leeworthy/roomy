@@ -9,3 +9,49 @@ Most XRPC methods are authenticated by proxying via the PDS. The appserver can b
 The appserver owns its event store locally; no external event-stream server (Leaf) is required as a runtime dependency.
 
 `APPSERVER_PERSONAL_STREAM_NSID` will determine the collection to refer to for the personal stream. The appserver caches the personal stream DID with no TTL, so the `roomy.sqlite` db files need to be deleted to clear that cache. The `roomy-readstate.sqlite` db is only used to store unread count read states. It is meant as a persistent source of truth whereas the `roomy` db is derived data.
+
+## Deployment
+
+Deployed on Railway from `Dockerfile.appserver` (build context is the repo root).
+
+### Backup & restore (Litestream → S3)
+
+The container runs several SQLite databases in WAL mode under `/app/data` (see
+`docs/plans/per-space-dbs.md` for the per-space split):
+
+| DB | Path | Kind |
+|---|---|---|
+| monolithic materialised view | `roomy.sqlite` | derived (source for per-space backfill) |
+| event log | `roomy-events.sqlite` | **source of truth** (append-only) |
+| read-state | `roomy-readstate.sqlite` | persistent source of truth (unread) |
+| global membership | `global.sqlite` | derived |
+| per-space views | `spaces/<spaceDid>.sqlite` | derived (lazy backfill from `roomy.sqlite`) |
+
+The Docker entrypoint (`packages/appserver/docker-entrypoint.sh`) restores the
+**static** DBs (`roomy.sqlite`, `roomy-events.sqlite`, `roomy-readstate.sqlite`,
+`global.sqlite`) from an S3-compatible bucket via Litestream when no local copy
+exists, then runs the app under `litestream replicate` so every WAL change is
+continuously copied to the bucket. Replication config lives in
+`packages/appserver/litestream.yml`.
+
+The **per-space DBs** (`spaces/*.sqlite`) are deliberately *not* replicated:
+they are derived data that regenerate lazily via backfill from `roomy.sqlite`
+on first access after a restore (litestream also needs static paths, which
+can't enumerate an unbounded set of spaces).
+
+Railway gives the appserver no persistent disk, so `/app/data` is wiped on
+every deploy — the static DBs are re-restored from the backup at boot. If a
+Railway volume is later attached, an existing local DB wins and replication
+simply continues.
+
+### Setting up the Railway S3 bucket
+
+1. In Railway, create a **Storage** service and add an **S3** bucket.
+2. Link the bucket to the appserver service. Railway injects these variables:
+   `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`,
+   `S3_SECRET_ACCESS_KEY`. No other config is needed — Litestream reads them
+   from the environment.
+
+Litestream is only active when the app runs in the container. For local
+development, run the appserver directly (`bun run packages/appserver/src/index.ts`)
+with no backup config.
