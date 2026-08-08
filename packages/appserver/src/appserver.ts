@@ -20,7 +20,7 @@ import { selectAuthVerifier } from "./xrpc/auth.ts";
 import { Router as InvalidationRouter } from "./invalidation/index.ts";
 import { startEmbedSweeper, stopEmbedSweeper, embedSweeperStats } from "./embed/sweeper.ts";
 import { countPendingLinks } from "./embed/enricher.ts";
-import { openDb, closeDb } from "./db/db.ts";
+import { openDb, openGlobalDb, openReadStateDb, closeDb } from "./db/db.ts";
 import { StreamManager, setStreamManager, _resetStreamManager } from "./streams/StreamManager.ts";
 import { purgeStaleThreadActivity } from "./queries/userActiveThreads.ts";
 import { getConnectionTicketHandler } from "./handlers/space.roomy.auth.getConnectionTicket.ts";
@@ -28,7 +28,6 @@ import { createSyncSubscribeHandler } from "./handlers/space.roomy.sync.subscrib
 import { connectSpaceHandler } from "./handlers/space.roomy.admin.connectSpace.ts";
 import { getEventsHandler } from "./handlers/space.roomy.sync.getEvents.ts";
 import { materializeSpaceHandler } from "./handlers/space.roomy.admin.materializeSpace.ts";
-import { checkDualWriteHandler } from "./handlers/space.roomy.admin.checkDualWrite.ts";
 import { getFlagsHandler } from "./handlers/space.roomy.getFlags.ts";
 import { adminGetFlagsHandler } from "./handlers/space.roomy.admin.getFlags.ts";
 import { adminSetFlagHandler } from "./handlers/space.roomy.admin.setFlag.ts";
@@ -181,9 +180,6 @@ export function buildRouter(
     })
     .query("space.roomy.admin.materializeSpace", {
       handler: materializeSpaceHandler,
-    })
-    .query("space.roomy.admin.checkDualWrite", {
-      handler: checkDualWriteHandler,
     })
     // ── Feature flags ─────────────────────────────────────────────────────
     .query("space.roomy.getFlags", {
@@ -378,7 +374,7 @@ export async function createAppserver(
   // Purge stale user_thread_activity rows older than 72 hours once per hour.
   const maintenanceTimer = setInterval(async () => {
     const cutoff = Date.now() - 72 * 60 * 60 * 1000;
-    const purged = await purgeStaleThreadActivity(mainDb, cutoff);
+    const purged = await purgeStaleThreadActivity(openReadStateDb(), cutoff);
     if (purged > 0) {
       console.log(`[maintenance] purged ${purged} stale user_thread_activity rows`);
     }
@@ -399,7 +395,7 @@ export async function createAppserver(
   });
   setStreamManager(streamManager);
   // Start the centralized embed enrichment sweeper.
-  startEmbedSweeper({ db: mainDb, invalidationRouter });
+  startEmbedSweeper({ globalDb: openGlobalDb(), invalidationRouter });
   // Start the centralized push dispatcher unconditionally. The dispatcher is
   // global infrastructure that processes every live createMessage and
   // computes fan-out; the `push-notifications` feature flag is a per-recipient
@@ -407,7 +403,7 @@ export async function createAppserver(
   // level kill switch. Starting it here means the StreamManager's pokes are
   // always queued and evaluated regardless of flag state. No-op-safe when
   // VAPID isn't configured (deliveries just find no subscriptions).
-  startPushDispatcher({ db: mainDb });
+  startPushDispatcher({ db: openReadStateDb() });
 
   // ─── XRPC routes ──────────────────────────────────────────────────────
   const authVerifier = opts.authVerifier ?? selectAuthVerifier();
@@ -464,7 +460,7 @@ export async function createAppserver(
         const stats = embedSweeperStats();
         let pending: number;
         try {
-          pending = await countPendingLinks(mainDb);
+          pending = await countPendingLinks(openGlobalDb());
         } catch {
           pending = -1;
         }

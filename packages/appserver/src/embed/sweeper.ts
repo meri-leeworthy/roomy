@@ -28,11 +28,14 @@
 import type { DbLike } from "../db/types.ts";
 import type { Ulid } from "@roomy-space/sdk";
 import {
-  enrichLink,
+  enrichLinkAcrossSpaces,
   findPendingLinks,
+  findPendingLinksForUrls,
   filterPendingUrls,
   inFlightCount,
+  type PendingLink,
 } from "./enricher.ts";
+import { openSpaceDb } from "../db/db.ts";
 import type { Embed } from "./types.ts";
 import { selectMessages } from "../queries/selectMessages.ts";
 import type { MessageDto } from "../queries/selectMessages.ts";
@@ -59,7 +62,7 @@ const CONCURRENCY = Number(process.env.EMBED_SWEEPER_CONCURRENCY ?? 8);
 
 // ─── Singleton state ────────────────────────────────────────────────────
 
-let sweeperDb: DbLike | undefined;
+let sweeperGlobalDb: DbLike | undefined;
 let sweeperRouter: InvalidationRouter | undefined;
 let started = false;
 /** Resolved when the background loop exits. Used by stopEmbedSweeper. */
@@ -94,8 +97,8 @@ let dbBackoffUntil = 0;
 const priorityLinks = new Set<string>();
 
 export interface EmbedSweeperOpts {
-  /** Process-wide materialisation DB. Pending links live here. */
-  db: DbLike;
+  /** Global DB — the `pending_links` index lives here. */
+  globalDb: DbLike;
   /** Optional invalidation router — used to push re-fetch signals to clients. */
   invalidationRouter?: InvalidationRouter;
 }
@@ -107,7 +110,7 @@ export interface EmbedSweeperOpts {
 export function startEmbedSweeper(opts: EmbedSweeperOpts): void {
   if (started) return;
   started = true;
-  sweeperDb = opts.db;
+  sweeperGlobalDb = opts.globalDb;
   sweeperRouter = opts.invalidationRouter;
   // Detached background loop — must never reject the process. Any throw is
   // logged and the loop continues (see inner try/catch per sweep).
@@ -228,7 +231,7 @@ function markDbOk(): void {
  * `markDbError`). Any *unexpected* throw bubbles to {@link runSweeperLoop}'s
  * outer guard so the loop self-heals instead of dying.
  */
-export async function sweepCycle(db: DbLike): Promise<boolean> {
+export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
   // Bail out early if the sweeper has been stopped (e.g. during test teardown).
   if (!started) return false;
   // If the DB has been erroring, wait out the backoff before touching it
@@ -241,18 +244,18 @@ export async function sweepCycle(db: DbLike): Promise<boolean> {
     return false;
   }
 
-  let pending: string[] = [];
+  let pending: PendingLink[] = [];
 
   // 1. Priority: freshly-detected live links first, so a newly posted
   //    link is enriched within seconds instead of waiting behind the
-  //    entire backfill backlog. filterPendingUrls skips any that are
-  //    already enriched (e.g. a popular URL reposted) or no longer present.
+  //    entire backfill backlog. Resolve which spaces each priority URL is
+  //    still pending in via the global `pending_links` index.
   const priority = drainPriorityLinks(SWEEP_BATCH);
   if (priority.length > 0) {
     try {
-      pending = await filterPendingUrls(db, priority);
+      pending = await findPendingLinksForUrls(globalDb, priority);
     } catch (err) {
-      console.warn("[embed-sweeper] filterPendingUrls failed:", err);
+      console.warn("[embed-sweeper] findPendingLinksForUrls failed:", err);
       markDbError(err);
       pending = [];
     }
@@ -261,10 +264,10 @@ export async function sweepCycle(db: DbLike): Promise<boolean> {
   // 2. Backlog: fill the rest of the batch with the oldest pending links.
   if (pending.length < SWEEP_BATCH) {
     try {
-      const backlog = await findPendingLinks(db, SWEEP_BATCH - pending.length);
+      const backlog = await findPendingLinks(globalDb, SWEEP_BATCH - pending.length);
       // Dedupe in case a priority URL is also among the oldest pending
       // (rare — priority URLs are newest, backlog is oldest-first).
-      pending = [...new Set([...pending, ...backlog])];
+      pending = dedupePending([...pending, ...backlog]);
     } catch (err) {
       // A transient DB error shouldn't kill the loop. Back off so a
       // dead DB doesn't cause a tight fetch-and-fail cycle.
@@ -274,40 +277,70 @@ export async function sweepCycle(db: DbLike): Promise<boolean> {
   }
 
   if (pending.length > 0) {
+    // Group pending rows by URL → the set of spaces it is pending in (a URL
+    // can appear in multiple spaces). enrichLinkAcrossSpaces fetches ONCE per
+    // URL and stores the result to every space's DB.
+    const spacesByUrl = new Map<string, string[]>();
+    for (const p of pending) {
+      const arr = spacesByUrl.get(p.url) ?? [];
+      arr.push(p.spaceDid);
+      spacesByUrl.set(p.url, arr);
+    }
+
     // Drain the batch with bounded concurrency so N links complete in
     // ~ceil(N/CONCURRENCY) fetch round-trips rather than N. Each
-    // enrichLink is deduplicated (inFlightLinks) + timeout-bounded, and
-    // resolves to the stored embed (null on failure).
+    // enrichLinkAcrossSpaces is deduplicated (inFlightLinks) + timeout-bounded,
+    // and resolves to the stored embed (null on failure).
     //
     // We stream invalidations per-URL as they SUCCEED (non-null embed): a
-    // freshly-posted live link's card appears the moment ITS fetch
-    // resolves — never waiting behind a slow/hung backlog URL in the same
-    // batch (which can take up to FETCH_TIMEOUT_MS). Failed (null)
-    // enrichments emit nothing: there is no new data to show, so we skip
-    // the no-op diff and avoid spamming clients / the router while the
-    // backfill backlog drains. Per-URL error isolation keeps one throwing
-    // enrichLink from killing the whole loop.
+    // freshly-posted live link's card appears the moment ITS fetch resolves.
+    // Failed (null) enrichments emit nothing. Per-URL error isolation keeps
+    // one throwing enrichLinkAcrossSpaces from killing the whole loop.
     let cycleDbError: unknown = null;
-    await mapWithConcurrency(pending, CONCURRENCY, async (url) => {
+    const enrichedUrls = new Set<string>();
+    await mapWithConcurrency([...spacesByUrl.entries()], CONCURRENCY, async ([url, spaces]) => {
       let embed: Embed | null = null;
       try {
-        embed = await enrichLink(db, url);
+        embed = await enrichLinkAcrossSpaces(url, spaces);
       } catch (err) {
-        // enrichLink only throws for DB (storeEmbedData) errors — fetch
-        // errors are handled inside fetchEmbedData (returns a
+        // enrichLinkAcrossSpaces only throws for DB (storeEmbedData) errors —
+        // fetch errors are handled inside fetchEmbedData (returns a
         // FetchResult). Capture once per cycle to drive backoff (don't
         // escalate per-link). Logged at debug: a failing DB under I/O
         // pressure can throw per-link per-cycle, which floods logs.
         if (cycleDbError === null) cycleDbError = err;
-        log.debug(`[embed-sweeper] enrichLink threw for ${url}:`, err);
+        log.debug(`[embed-sweeper] enrichLinkAcrossSpaces threw for ${url}:`, err);
       }
       if (embed) {
         statsEnrichedOk++;
-        await emitEnrichmentInvalidation(db, [url]);
+        enrichedUrls.add(url);
+        // Emit per-URL invalidation routed to each space's per-space DB.
+        for (const spaceDid of spaces) {
+          await emitEnrichmentInvalidation(openSpaceDb(spaceDid), [url]);
+        }
       } else {
         statsEnrichedNull++;
       }
     });
+
+    // Delete the processed rows from the global `pending_links` index. Only
+    // rows for successfully-enriched URLs are removed; failed URLs stay
+    // pending so they are retried on a later cycle.
+    if (enrichedUrls.size > 0) {
+      try {
+        for (const p of pending) {
+          if (enrichedUrls.has(p.url)) {
+            await globalDb.run(
+              `delete from pending_links where space_did = ? and url = ?`,
+              [p.spaceDid, p.url],
+            );
+          }
+        }
+      } catch (err) {
+        if (cycleDbError === null) cycleDbError = err;
+      }
+    }
+
     if (cycleDbError !== null) markDbError(cycleDbError);
     else markDbOk(); // a successful write cycle → DB is healthy again
   }
@@ -318,13 +351,13 @@ export async function sweepCycle(db: DbLike): Promise<boolean> {
 }
 
 async function runSweeperLoop(): Promise<void> {
-  const db = sweeperDb;
-  if (!db) return;
+  const globalDb = sweeperGlobalDb;
+  if (!globalDb) return;
 
   for (;;) {
     if (!started) return; // allow clean exit via stopEmbedSweeper
     try {
-      const full = await sweepCycle(db);
+      const full = await sweepCycle(globalDb);
       if (full) continue;
       // Wait for a poke (new links) or the idle poll, whichever comes first.
       // This bounds latency for newly posted links while also self-healing
@@ -350,6 +383,23 @@ function drainPriorityLinks(limit: number): string[] {
     if (out.length >= limit) break;
     out.push(url);
     priorityLinks.delete(url);
+  }
+  return out;
+}
+
+/**
+ * Dedupe pending rows by (spaceDid, url) so the same URL isn't enriched twice
+ * in the same space within one batch (a URL can be pending under multiple
+ * message ids in the same space).
+ */
+function dedupePending(links: PendingLink[]): PendingLink[] {
+  const seen = new Set<string>();
+  const out: PendingLink[] = [];
+  for (const l of links) {
+    const key = `${l.spaceDid}\u0000${l.url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(l);
   }
   return out;
 }
@@ -486,7 +536,7 @@ async function emitEnrichmentInvalidation(
  */
 export function _resetEmbedSweeper(): void {
   started = false;
-  sweeperDb = undefined;
+  sweeperGlobalDb = undefined;
   sweeperRouter = undefined;
   wake = null;
   priorityLinks.clear();
@@ -504,7 +554,7 @@ export function _resetEmbedSweeper(): void {
  */
 export function stopEmbedSweeper(): Promise<void> {
   started = false;
-  sweeperDb = undefined;
+  sweeperGlobalDb = undefined;
   sweeperRouter = undefined;
   const w = wake;
   wake = null;

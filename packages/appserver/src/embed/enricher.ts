@@ -11,6 +11,7 @@
 
 import type { DbLike } from "../db/types.ts";
 import type { Embed, EmbedServiceResponse } from "./types.ts";
+import { openSpaceDb } from "../db/db.ts";
 import { log } from "../log.ts";
 
 // ─── Configuration ──────────────────────────────────────────────────────
@@ -201,27 +202,65 @@ export async function filterPendingUrls(db: DbLike, urls: string[]): Promise<str
 }
 
 /**
- * Find all `comp_embed_link` entries that still need enrichment: either
- * never attempted (no `comp_embed_link_data` row) or a transient failure
- * whose backoff has elapsed (`retry_after` set and in the past). Definitive
- * failures (404) and successes have a data row with no `retry_after` and
- * are excluded. Ordered oldest-first by link creation so backfill drains
- * before newer transient-failure retries.
+ * A pending embed link, as recorded in the global `pending_links` index.
+ * Carries the owning space DID and the message id that contained the URL so
+ * the sweeper can route enrichment + invalidation to the correct per-space
+ * DB and delete the row once processed.
  */
-export async function findPendingLinks(db: DbLike, limit = 50): Promise<string[]> {
-  const now = Date.now();
+export interface PendingLink {
+  url: string;
+  spaceDid: string;
+  messageId: string;
+}
+
+/**
+ * Read the global `pending_links` index (Phase 3): the pending embed links
+ * awaiting enrichment across ALL per-space DBs. Ordered oldest-first by
+ * `created_at` so backfill drains before newer links. Returns the pending
+ * rows (URL + owning space + message) so the sweeper can group by space and
+ * route enrichment/invalidation to the correct per-space DB.
+ */
+export async function findPendingLinks(db: DbLike, limit = 50): Promise<PendingLink[]> {
   const rows = await db
     .query(
-      `select el.entity
-       from comp_embed_link el
-       left join comp_embed_link_data eld on eld.entity = el.entity
-       where eld.entity is null
-          or (eld.retry_after is not null and eld.retry_after <= ?)
-       order by el.created_at asc
+      `select space_did, message_id, url
+       from pending_links
+       order by created_at asc
        limit ?`,
     )
-    .all<{ entity: string }>([now, limit]);
-  return rows.map((r) => r.entity);
+    .all<{ space_did: string; message_id: string; url: string }>([limit]);
+  return rows.map((r) => ({
+    url: r.url,
+    spaceDid: r.space_did,
+    messageId: r.message_id,
+  }));
+}
+
+/**
+ * Read the global `pending_links` index for a specific set of URLs, returning
+ * only those still pending. Used by the sweeper's priority path to resolve
+ * which spaces a freshly-poked URL is pending in (a URL can appear in
+ * multiple spaces).
+ */
+export async function findPendingLinksForUrls(
+  db: DbLike,
+  urls: string[],
+): Promise<PendingLink[]> {
+  if (urls.length === 0) return [];
+  const placeholders = urls.map(() => "?").join(",");
+  const rows = await db
+    .query(
+      `select space_did, message_id, url
+       from pending_links
+       where url in (${placeholders})
+       order by created_at asc`,
+    )
+    .all<{ space_did: string; message_id: string; url: string }>([...urls]);
+  return rows.map((r) => ({
+    url: r.url,
+    spaceDid: r.space_did,
+    messageId: r.message_id,
+  }));
 }
 
 /**
@@ -337,6 +376,40 @@ export async function enrichLink(
   return promise;
 }
 
+/**
+ * Enrich a single URL and store the result to EVERY per-space DB where it is
+ * pending (a URL can appear in multiple spaces). Fetches ONCE per URL (reusing
+ * the {@link inFlightLinks} dedup pattern shared with {@link enrichLink}), then
+ * calls {@link storeEmbedData} for each space's DB.
+ *
+ * Returns the embed that was stored — non-null on success, `null` on a
+ * non-DB failure. A DB write failure (e.g. `storeEmbedData` throwing) is
+ * RE-THROWN so the sweeper can detect a failing DB and back off.
+ */
+export async function enrichLinkAcrossSpaces(
+  url: string,
+  spaces: string[],
+  signal?: AbortSignal,
+): Promise<Embed | null> {
+  const existing = inFlightLinks.get(url);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    try {
+      const result = await fetchEmbedData(url, signal);
+      for (const spaceDid of spaces) {
+        await storeEmbedData(openSpaceDb(spaceDid), url, result);
+      }
+      return result.status === "ok" ? result.embed : null;
+    } finally {
+      inFlightLinks.delete(url);
+    }
+  })();
+
+  inFlightLinks.set(url, promise);
+  return promise;
+}
+
 // Bulk pending-link enrichment is owned by the centralized sweeper
 // (see `embed/sweeper.ts`). There is intentionally no per-call
 // `enrichPendingLinks` here — it was the root cause of the over-fetching bug
@@ -352,22 +425,14 @@ export function inFlightCount(): number {
 }
 
 /**
- * Total `comp_embed_link` rows still awaiting enrichment — never attempted,
- * or a transient failure whose backoff has elapsed. Mirrors the
- * {@link findPendingLinks} predicate but unbounded, for the `/health/embed`
+ * Total rows in the global `pending_links` index still awaiting enrichment.
+ * Mirrors {@link findPendingLinks} but unbounded, for the `/health/embed`
  * endpoint so operators can watch the backlog drain.
  */
 export async function countPendingLinks(db: DbLike): Promise<number> {
-  const now = Date.now();
   const row = await db
-    .query(
-      `select count(*) as n
-         from comp_embed_link el
-         left join comp_embed_link_data eld on eld.entity = el.entity
-        where eld.entity is null
-           or (eld.retry_after is not null and eld.retry_after <= ?)`,
-    )
-    .get<{ n: number }>([now]);
+    .query(`select count(*) as n from pending_links`)
+    .get<{ n: number }>();
   return row?.n ?? 0;
 }
 
