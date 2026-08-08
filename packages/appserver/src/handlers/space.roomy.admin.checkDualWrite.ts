@@ -66,22 +66,27 @@ type AnyDb = {
  * Count a table's rows for one space in the monolithic DB, using the SAME
  * criterion the per-space backfill copies them by (worker.ts backfillSpaceDb),
  * otherwise spaces whose root entity carries a differing stream_id would
- * false-positive as diverged. comp_space is copied by `entity = spaceDid`
- * (the root's stream_id may differ from the space DID); the other tables are
- * stream-scoped.
+ * false-positive as diverged.
+ *
+ * - comp_space is copied by `entity = spaceDid` (the root's stream_id may
+ *   differ from the space DID), so it is counted the same way.
+ * - the other stream tables are copied by `entity in (entities where
+ *   stream_id = spaceDid) OR entity = spaceDid` — a space's own comp_info /
+ *   comp_room rows are included regardless of the root entity's stream_id
+ *   (backfillSpaceDb STREAM_OR_SPACE).
  */
 async function monoTableCount(
   db: AnyDb,
   spaceDid: string,
   table: (typeof STREAM_TABLES)[number],
 ): Promise<number> {
-  const where =
-    table === "comp_space"
-      ? "entity = ?"
-      : "entity in (select id from entities where stream_id = ?)";
+  const isSpace = table === "comp_space";
+  const where = isSpace
+    ? "entity = ?"
+    : "entity in (select id from entities where stream_id = ?) or entity = ?";
   const row = await db
     .query(`select count(*) as n from ${table} where ${where}`)
-    .get<{ n: number }>(spaceDid);
+    .get<{ n: number }>(...([spaceDid, ...(isSpace ? [] : [spaceDid])]));
   return row?.n ?? 0;
 }
 
