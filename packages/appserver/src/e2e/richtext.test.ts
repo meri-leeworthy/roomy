@@ -130,7 +130,7 @@ describe("rich text message E2E", () => {
     // The link entity row should exist (message_id = the link entity's room).
     const row = ctx.db
       .query("select ei.entity from comp_embed_link ei where ei.entity = ?")
-      .get<{ entity: string }>(event.id);
+      .get(event.id) as { entity: string } | undefined;
     expect(row).toBeDefined();
   });
 

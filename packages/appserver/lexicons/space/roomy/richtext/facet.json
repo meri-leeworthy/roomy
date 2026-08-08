@@ -43,23 +43,28 @@
     },
     "bold": {
       "type": "object",
-      "description": "Bold text."
+      "description": "Bold text.",
+      "properties": {}
     },
     "italic": {
       "type": "object",
-      "description": "Italic text."
+      "description": "Italic text.",
+      "properties": {}
     },
     "strikethrough": {
       "type": "object",
-      "description": "Strikethrough text."
+      "description": "Strikethrough text.",
+      "properties": {}
     },
     "underline": {
       "type": "object",
-      "description": "Underlined text."
+      "description": "Underlined text.",
+      "properties": {}
     },
     "code": {
       "type": "object",
-      "description": "Inline code."
+      "description": "Inline code.",
+      "properties": {}
     },
     "highlight": {
       "type": "object",

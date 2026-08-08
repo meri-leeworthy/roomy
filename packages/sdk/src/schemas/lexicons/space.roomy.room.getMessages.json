@@ -282,6 +282,9 @@
           "type": "ref",
           "ref": "#forwardedFrom"
         },
+        "mimeType": {
+          "type": "string"
+        },
         "replyTo": {
           "type": "string"
         },

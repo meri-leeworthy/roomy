@@ -111,7 +111,8 @@
     },
     "horizontalRule": {
       "type": "object",
-      "description": "A thematic break (horizontal rule)."
+      "description": "A thematic break (horizontal rule).",
+      "properties": {}
     }
   }
 }

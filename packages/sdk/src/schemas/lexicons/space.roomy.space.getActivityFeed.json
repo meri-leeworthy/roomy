@@ -260,6 +260,9 @@
             "ref": "#media"
           }
         },
+        "mimeType": {
+          "type": "string"
+        },
         "reactions": {
           "type": "array",
           "items": {
