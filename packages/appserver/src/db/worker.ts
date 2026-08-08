@@ -453,24 +453,36 @@ function backfillSpaceDb(db: Database, spaceDid: string): void {
     }
   };
 
+  // The monolithic DB is shared across streams, and a space's own entity
+  // row can carry a DIFFERENT stream_id than the space DID (it is created by
+  // whichever materialiser ran first). A space's own rows — its comp_info
+  // row, and the member/admin edges whose endpoint is the space DID — must
+  // be copied regardless of that root entity's stream_id, or the per-space
+  // DB silently omits them (space shows as a bare DID, membership checks
+  // 403, getSpaces filters the space out). So every stream-scoped predicate
+  // below also matches the space DID directly.
+  const STREAM_OR_SPACE =
+    "entity in (select id from entities where stream_id = ?) or entity = ?";
+  const EDGES_OF_SPACE =
+    "(head in (select id from entities where stream_id = ?) or " +
+    "tail in (select id from entities where stream_id = ?) or " +
+    "head = ? or tail = ?)";
+
   db.transaction(() => {
     copy("entities", "stream_id = ?", [spaceDid]);
 
-    // The monolithic DB is shared across streams, and a space's own entity
-    // row can carry a DIFFERENT stream_id than the space DID (it is created
-    // by whichever materialiser ran first). Rows we are about to copy carry
-    // FK constraints onto entities (comp_space.entity, comp_room.entity,
-    // edge endpoints, reaction users, ...), so ensure every entity they
-    // reference exists BEFORE copying any FK-carrying table.
+    // Rows we are about to copy carry FK constraints onto entities
+    // (comp_space.entity, comp_room.entity, edge endpoints, reaction users,
+    // ...), so ensure every entity they reference exists BEFORE copying any
+    // FK-carrying table.
     const referencedIds = new Set<string>([spaceDid]);
     for (const r of main
       .query(
         `select head, tail from edges
-          where (head in (select id from entities where stream_id = ?)
-             or tail in (select id from entities where stream_id = ?))
+          where ${EDGES_OF_SPACE}
             and label not in ('joinedSpace', 'leftSpace')`,
       )
-      .all(spaceDid, spaceDid) as Array<{ head: string; tail: string }>) {
+      .all(spaceDid, spaceDid, spaceDid, spaceDid) as Array<{ head: string; tail: string }>) {
       referencedIds.add(r.head);
       referencedIds.add(r.tail);
     }
@@ -513,24 +525,30 @@ function backfillSpaceDb(db: Database, spaceDid: string): void {
       }
     }
 
-    // FK-carrying per-space tables (entity/stream-scoped).
+    // FK-carrying per-space tables (entity/stream-scoped). Every entity-
+    // scoped predicate also matches the space DID directly (STREAM_OR_SPACE)
+    // so the space's own comp_info/comp_room/etc. rows are copied even when
+    // the monolithic root entity's stream_id differs from the space DID.
     copy("comp_space", "entity = ?", [spaceDid]);
-    copy("comp_room", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_discord_origin", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_room", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_discord_origin", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    // comp_user is keyed by `did` (not `entity`); keep the stream filter.
+    // Member profiles whose entity lives in another stream are hydrated on
+    // demand by getMembers' per-space read path.
     copy("comp_user", "did in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_content", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_info", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_page_edits", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_comment", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_embed_image", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_embed_video", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_embed_file", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_embed_link", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_embed_link_data", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_last_read", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_reaction", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_calendar_link", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
-    copy("comp_calendar_event", "entity in (select id from entities where stream_id = ?)", [spaceDid]);
+    copy("comp_content", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_info", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_page_edits", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_comment", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_embed_image", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_embed_video", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_embed_file", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_embed_link", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_embed_link_data", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_last_read", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_reaction", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_calendar_link", STREAM_OR_SPACE, [spaceDid, spaceDid]);
+    copy("comp_calendar_event", STREAM_OR_SPACE, [spaceDid, spaceDid]);
     copy("roles", "stream_id = ?", [spaceDid]);
     copy("member_roles", "stream_id = ?", [spaceDid]);
     copy("role_rooms", "stream_id = ?", [spaceDid]);
@@ -541,16 +559,17 @@ function backfillSpaceDb(db: Database, spaceDid: string): void {
     // (edge cases) are skipped — each space DB is self-describing.
     copy("materialization_cursor", "stream_id = ?", [spaceDid]);
     // Per-space `edges` exclude joinedSpace/leftSpace (those live in the
-    // global DB). Copy all other labels.
+    // global DB). Copy all other labels — including member/admin edges whose
+    // endpoint is the space DID (EDGES_OF_SPACE), so membership truth is
+    // present even when the root entity's stream_id differs from the space.
     const edgeRows = main
       .query(
         `select head, tail, label, payload, created_at, updated_at
            from edges
-          where (head in (select id from entities where stream_id = ?)
-             or tail in (select id from entities where stream_id = ?))
+          where ${EDGES_OF_SPACE}
             and label not in ('joinedSpace', 'leftSpace')`,
       )
-      .all(spaceDid, spaceDid) as Record<string, unknown>[];
+      .all(spaceDid, spaceDid, spaceDid, spaceDid) as Record<string, unknown>[];
     for (const row of edgeRows) {
       db.run(
         `insert or ignore into edges (head, tail, label, payload, created_at, updated_at)
