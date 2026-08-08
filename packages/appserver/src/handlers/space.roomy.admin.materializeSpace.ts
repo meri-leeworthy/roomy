@@ -2,15 +2,15 @@
  * XRPC: space.roomy.admin.materializeSpace (query).
  *
  * Reports the current materialization state for a stream by reading
- * cursor from `events.stream_state` and backfill status from
- * `comp_space.backfilled_to`.
+ * cursor from `stream_state` (event-log DB) and backfill status from
+ * `comp_space.backfilled_to` (per-space DB).
  *
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
 
 import { StreamDid } from "@roomy-space/sdk";
 import { requireAdmin } from "../admin.ts";
-import { openDb } from "../db/db.ts";
+import { openDb, openSpaceDb } from "../db/db.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
 
@@ -42,14 +42,17 @@ export const materializeSpaceHandler: QueryHandler<
 
   const db = openDb();
 
-  // Read cursor from events.stream_state
+  // Read cursor from stream_state (event-log DB)
   const cursorRow = await db
-    .query("select latest_event from events.stream_state where stream_id = ?")
+    .query("select latest_event from stream_state where stream_id = ?")
     .get<{ latest_event: number }>(parsed);
   const cursor = cursorRow?.latest_event ?? 0;
 
+  // comp_space / entities / comp_room live in the per-space DB (Phase 3).
+  const spaceDb = openSpaceDb(parsed);
+
   // Read backfill status from comp_space
-  const backfillRow = await db
+  const backfillRow = await spaceDb
     .query("select backfilled_to from comp_space where entity = ?")
     .get<{ backfilled_to: number | null }>(parsed);
   const backfillSettled = backfillRow != null && backfillRow.backfilled_to != null;
@@ -58,7 +61,7 @@ export const materializeSpaceHandler: QueryHandler<
   // room_events count (which tracks every createMessage/room-event forwarded
   // to the materializer). A large discrepancy indicates missing
   // events due to subscription pagination issues.
-  const rooms = await db
+  const rooms = await spaceDb
     .query(
       `select
          e.room as room_id,

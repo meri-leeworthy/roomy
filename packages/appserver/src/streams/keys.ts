@@ -19,15 +19,15 @@ export async function storeStreamKey(
 ): Promise<void> {
   const rawKey = await key.export();
 
-  await db.run("insert or ignore into events.dids (did) values (?)", did);
+  await db.run("insert or ignore into dids (did) values (?)", did);
   await db.run(
-    "insert or ignore into events.did_keys (did, p256_key, k256_key) values (?, ?, ?)",
+    "insert or ignore into did_keys (did, p256_key, k256_key) values (?, ?, ?)",
     did,
     null,
     rawKey,
   );
   await db.run(
-    "insert or ignore into events.did_owners (did, owner) values (?, ?)",
+    "insert or ignore into did_owners (did, owner) values (?, ?)",
     did,
     owner,
   );
@@ -44,7 +44,7 @@ export async function getStreamSigningKey(
   did: string,
 ): Promise<Secp256k1Keypair | null> {
   const row = await db
-    .query("select k256_key from events.did_keys where did = ?")
+    .query("select k256_key from did_keys where did = ?")
     .get<{ k256_key: Uint8Array | null }>(did);
 
   if (!row || !row.k256_key) return null;
@@ -60,7 +60,7 @@ export async function listStreamOwners(
   did: string,
 ): Promise<string[]> {
   const rows = await db
-    .query("select owner from events.did_owners where did = ?")
+    .query("select owner from did_owners where did = ?")
     .all<{ owner: string }>(did);
 
   return rows.map((r) => r.owner);

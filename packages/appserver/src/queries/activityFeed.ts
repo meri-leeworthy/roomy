@@ -91,9 +91,9 @@ const NOT_DELETED = "(cr.deleted is null or cr.deleted = 0)";
 /**
  * Select the activity feed by fanning out to per-space DBs (Phase 2).
  *
- * `mainDb` is the MONOLITHIC handle, used ONLY for the readstate unread-count
- * query (readstate tables are not split and live on the monolithic DB). All
- * other reads go against the per-space DBs, one per joined space.
+ * `mainDb` is the READ-STATE handle, used ONLY for the read-state unread-count
+ * query (read_positions lives in the read-state DB). All other reads go
+ * against the per-space DBs, one per joined space.
  */
 export async function selectActivityFeed(
   mainDb: DbLike,
@@ -346,8 +346,8 @@ async function batchFetchMessages(
  * Returns a Map<roomId, unreadCount>.
  *
  * Uses a single batched query (WHERE IN) rather than N individual
- * prepared statements. The readstate DB is ATTACHed to the main DB
- * as "readstate" at startup, so cross-database queries work fine.
+ * prepared statements. The read-state DB is a separate database, so the
+ * query targets `read_positions` directly.
  */
 async function batchFetchUnreadCounts(
   db: DbLike,
@@ -361,7 +361,7 @@ async function batchFetchUnreadCounts(
   const rows = await db
     .query(
       `select room_id, unread_count
-         from readstate.read_positions
+         from read_positions
         where user_did = ? and room_id in (${placeholders})`,
     )
     .all<{room_id: string; unread_count: number}>([userDid, ...roomIds]);

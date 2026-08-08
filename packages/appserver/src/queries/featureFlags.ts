@@ -1,5 +1,5 @@
 /**
- * Feature flag query helpers, backed by the read-state DB (`readstate.*`).
+ * Feature flag query helpers, backed by the read-state DB (`*`).
  *
  * All flags default to false. A flag is enabled for a user iff:
  *   `global_enabled = 1`  OR  the user's DID is in `feature_flag_assignments`.
@@ -26,10 +26,10 @@ export async function getEnabledFlagsForUser(
 ): Promise<string[]> {
   const rows = await db
     .query(
-      `select f.key from readstate.feature_flags f
+      `select f.key from feature_flags f
        where f.global_enabled = 1
        union
-       select a.flag_key from readstate.feature_flag_assignments a
+       select a.flag_key from feature_flag_assignments a
        where a.user_did = ?`,
     )
     .all<{ key: string }>(userDid);
@@ -47,7 +47,7 @@ export async function getAllFlagState(db: DbLike): Promise<FlagState[]> {
   // Fetch global flags
   const globalRows = await db
     .query(
-      "select key, global_enabled from readstate.feature_flags",
+      "select key, global_enabled from feature_flags",
     )
     .all<{ key: string; global_enabled: number }>();
 
@@ -58,7 +58,7 @@ export async function getAllFlagState(db: DbLike): Promise<FlagState[]> {
   // Fetch all assignments
   const assignRows = await db
     .query(
-      "select flag_key, user_did from readstate.feature_flag_assignments order by flag_key, user_did",
+      "select flag_key, user_did from feature_flag_assignments order by flag_key, user_did",
     )
     .all<{ flag_key: string; user_did: string }>();
 
@@ -90,7 +90,7 @@ export async function setFlagGlobal(
   enabled: boolean,
 ): Promise<void> {
   await db.run(
-    `insert into readstate.feature_flags (key, global_enabled, updated_at)
+    `insert into feature_flags (key, global_enabled, updated_at)
      values (?, ?, (unixepoch() * 1000))
      on conflict(key) do update set
        global_enabled = excluded.global_enabled,
@@ -112,12 +112,12 @@ export async function setFlagAssignments(
   await db.transaction([
     {
       type: "run",
-      sql: "delete from readstate.feature_flag_assignments where flag_key = ?",
+      sql: "delete from feature_flag_assignments where flag_key = ?",
       params: [key],
     },
     ...dids.map((did) => ({
       type: "run" as const,
-      sql: `insert into readstate.feature_flag_assignments (flag_key, user_did, updated_at)
+      sql: `insert into feature_flag_assignments (flag_key, user_did, updated_at)
             values (?, ?, (unixepoch() * 1000))`,
       params: [key, did],
     })),
@@ -132,12 +132,12 @@ export async function clearFlag(db: DbLike, key: string): Promise<void> {
   await db.transaction([
     {
       type: "run",
-      sql: "delete from readstate.feature_flags where key = ?",
+      sql: "delete from feature_flags where key = ?",
       params: [key],
     },
     {
       type: "run",
-      sql: "delete from readstate.feature_flag_assignments where flag_key = ?",
+      sql: "delete from feature_flag_assignments where flag_key = ?",
       params: [key],
     },
   ]);

@@ -25,7 +25,7 @@
  * }
  */
 
-import { openDb } from "../db/db.ts";
+import { openDb, openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { getSyncManager } from "../sync/handler.ts";
 import { isPushConfigured } from "../push/webpush.ts";
@@ -63,20 +63,20 @@ export const adminGetDashboardStatsHandler: QueryHandler<
   // ── Activity stats ──────────────────────────────────────────────────────
 
   const totalRow = await db
-    .query("SELECT count(*) AS n FROM events.stream_events")
+    .query("SELECT count(*) AS n FROM stream_events")
     .get<{ n: number }>();
   const totalEvents = totalRow?.n ?? 0;
 
   const todayRow = await db
     .query(
-      "SELECT count(*) AS n FROM events.stream_events WHERE created_at >= ?",
+      "SELECT count(*) AS n FROM stream_events WHERE created_at >= ?",
     )
     .get<{ n: number }>(todayStart);
   const eventsToday = todayRow?.n ?? 0;
 
   const activeRow = await db
     .query(
-      "SELECT count(DISTINCT stream_id) AS n FROM events.stream_events WHERE created_at >= ?",
+      "SELECT count(DISTINCT stream_id) AS n FROM stream_events WHERE created_at >= ?",
     )
     .get<{ n: number }>(oneHourAgo);
   const activeSpaces = activeRow?.n ?? 0;
@@ -102,9 +102,11 @@ export const adminGetDashboardStatsHandler: QueryHandler<
     // File not found or not accessible.
   }
 
-  // Push stats.
-  const totalSubRow = await db
-    .query("SELECT count(*) AS n FROM readstate.push_subscriptions")
+  // Push stats. push_subscriptions lives in the read-state DB, not the
+  // event-log DB (openDb), so it is counted via a read-state handle.
+  const readStateDb = openReadStateDb();
+  const totalSubRow = await readStateDb
+    .query("SELECT count(*) AS n FROM push_subscriptions")
     .get<{ n: number }>();
   const pushTotalSubscriptions = totalSubRow?.n ?? 0;
 

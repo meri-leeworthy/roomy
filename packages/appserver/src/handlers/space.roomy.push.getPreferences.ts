@@ -5,7 +5,7 @@
  * plus any per-space overrides. Authenticated via `parseUserDid`.
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { getPreferences } from "../queries/pushPreferences.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -25,6 +25,6 @@ export const getPreferencesHandler: QueryHandler<
   if (userDid === null) {
     throw new XrpcError(401, "AuthRequired", "Authentication required");
   }
-  const db = openDb();
+  const db = openReadStateDb();
   return await getPreferences(db, userDid);
 };

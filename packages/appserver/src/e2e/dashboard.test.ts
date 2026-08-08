@@ -40,7 +40,7 @@ afterEach(() => {
   }
 });
 
-/** Insert one event row into the attached events DB. */
+/** Insert one event row into the event-log DB (ctx.db IS the event-log DB). */
 function seedEvent(
   ctx: E2eContext,
   streamId: string,
@@ -49,7 +49,7 @@ function seedEvent(
   createdAt: number,
 ): void {
   ctx.db.run(
-    `insert into events.stream_events (stream_id, idx, user, payload, signature, event_type, created_at)
+    `insert into stream_events (stream_id, idx, user, payload, signature, event_type, created_at)
      values (?, ?, ?, x'', x'', ?, ?)`,
     [streamId, idx, USER_A, eventType, createdAt],
   );
@@ -60,26 +60,38 @@ function seedUsers(ctx: E2eContext): void {
   for (const u of [USER_A, USER_B, USER_C]) seedUser(ctx.db, u);
 }
 
+/** Routed per-space handle for seeding materialised rows. */
+function spaceDb(ctx: E2eContext, spaceId: string) {
+  return (ctx.db as unknown as { forSpace(did: string): { run(sql: string, ...p: unknown[]): Promise<unknown> } }).forSpace(spaceId);
+}
+
 /** Seed a bare space (no built-in membership) so member counts are exact. */
 function seedBareSpace(ctx: E2eContext, spaceId: string, name: string): void {
-  ctx.db.run(
+  const sp = spaceDb(ctx, spaceId);
+  sp.run(
     "insert or ignore into entities (id, stream_id) values (?, ?)",
     [spaceId, spaceId],
   );
-  ctx.db.run(
+  sp.run(
     "insert or ignore into comp_space (entity) values (?)",
     [spaceId],
   );
-  ctx.db.run(
+  sp.run(
     "insert or ignore into comp_info (entity, name) values (?, ?)",
     [spaceId, name],
   );
 }
 
 /** Seed a forward membership edge (head=space, tail=user) — the direction
- * the member-count query reads (`edges where head=space and label='member'`). */
+ * the member-count query reads (`edges where head=space and label='member'`).
+ * Also seeds the user entity in the per-space DB so the edge FK resolves. */
 function addMember(ctx: E2eContext, spaceId: string, userDid: string): void {
-  ctx.db.run(
+  const sp = spaceDb(ctx, spaceId);
+  sp.run(
+    "insert or ignore into entities (id, stream_id) values (?, ?)",
+    [userDid, userDid],
+  );
+  sp.run(
     `insert or ignore into edges (head, tail, label) values (?, ?, 'member')`,
     [spaceId, userDid],
   );
@@ -158,6 +170,10 @@ describe("space.roomy.admin.listSpaces", () => {
     addMember(ctx, "did:web:space-b.example", USER_B);
 
     const now = Date.now();
+    // Every space needs at least one event to appear in listSpaces (the
+    // handler enumerates spaces from the event-log stream_events table).
+    seedEvent(ctx, "did:web:space-a.example", 0, "space.roomy.message.createMessage.v0", now);
+    seedEvent(ctx, "did:web:space-b.example", 0, "space.roomy.message.createMessage.v0", now);
     seedEvent(ctx, "did:web:space-c.example", 0, "space.roomy.message.createMessage.v0", now);
     seedEvent(ctx, "did:web:space-c.example", 1, "space.roomy.reaction.addReaction.v0", now);
     seedEvent(ctx, "did:web:space-c.example", 2, "space.roomy.message.createMessage.v0", now);
@@ -201,6 +217,12 @@ describe("space.roomy.admin.listSpaces", () => {
 
     seedBareSpace(ctx, "did:web:s1.example", "S1");
     addMember(ctx, "did:web:s1.example", USER_A);
+
+    // Every space needs at least one event to appear in listSpaces.
+    const now = Date.now();
+    seedEvent(ctx, "did:web:s1.example", 0, "space.roomy.message.createMessage.v0", now);
+    seedEvent(ctx, "did:web:s2.example", 0, "space.roomy.message.createMessage.v0", now);
+    seedEvent(ctx, "did:web:s3.example", 0, "space.roomy.message.createMessage.v0", now);
 
     // Page 1: limit 2 → S3, S2 + cursor.
     const res1 = await ctx.authedFetch(ADMIN)(
@@ -258,6 +280,8 @@ describe("space.roomy.admin.listSpaces", () => {
     seedUsers(ctx);
     seedBareSpace(ctx, "did:web:s1.example", "S1");
     addMember(ctx, "did:web:s1.example", USER_A);
+    // The space needs at least one event to appear in listSpaces.
+    seedEvent(ctx, "did:web:s1.example", 0, "space.roomy.message.createMessage.v0", Date.now());
 
     const res = await ctx.authedFetch(ADMIN)(
       `${ctx.baseUrl}/xrpc/space.roomy.admin.listSpaces?cursor=not-a-valid-cursor`,

@@ -11,7 +11,7 @@
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { isPushConfigured, getVapidPublicKey } from "../push/webpush.ts";
 import { pushDispatcherStats } from "../push/dispatcher.ts";
@@ -45,12 +45,12 @@ export const adminGetPushStatsHandler: QueryHandler<
 > = async (_params: QueryParams, auth: AuthCtx) => {
   requireAdmin(auth);
 
-  const db = openDb();
+  const db = openReadStateDb();
   const stats = pushDispatcherStats();
 
   // Count total subscriptions across all users.
   const countRow = await db.query(
-    "select count(*) as n from readstate.push_subscriptions",
+    "select count(*) as n from push_subscriptions",
   ).get<{ n: number }>();
   const totalSubscriptions = countRow?.n ?? 0;
 

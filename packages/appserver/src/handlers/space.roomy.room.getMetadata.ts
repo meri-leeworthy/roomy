@@ -6,7 +6,7 @@
  */
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
-import { openDb, openSpaceDbForEntity } from "../db/db.ts";
+import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { getReadPosition, getReadPositions, type ReadPosition } from "../queries/readPositions.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
@@ -52,7 +52,7 @@ export const getRoomMetadataHandler: QueryHandler<
   if (!db) {
     throw new XrpcError(404, "NotFound", `Room not found: ${roomId}`);
   }
-  const mainDb = openDb();
+  const mainDb = openReadStateDb();
   // Per-request access memo: this handler calls roomAccess for the room
   // itself plus up to 20 recent threads, and each roomAccess call
   // internally checks isMember/isAdmin/isBanned/allowsPublicJoin on the

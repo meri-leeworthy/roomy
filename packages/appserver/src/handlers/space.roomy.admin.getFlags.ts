@@ -7,7 +7,7 @@
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { getAllFlagState } from "../queries/featureFlags.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
@@ -27,7 +27,7 @@ export const adminGetFlagsHandler: QueryHandler<
 > = async (_params: QueryParams, auth: AuthCtx) => {
   requireAdmin(auth);
 
-  const db = openDb();
+  const db = openReadStateDb();
   const flags = await getAllFlagState(db);
   return { flags };
 };

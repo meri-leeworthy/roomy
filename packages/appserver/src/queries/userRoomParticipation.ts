@@ -27,7 +27,7 @@ export async function upsertUserRoomParticipation(
   timestamp: number,
 ): Promise<void> {
   await db.run(
-    `insert into readstate.user_room_participation
+    `insert into user_room_participation
        (user_did, room_id, last_message_at, updated_at)
      values (?, ?, ?, (unixepoch() * 1000))
      on conflict(user_did, room_id) do update set
@@ -49,7 +49,7 @@ export async function hasUserParticipated(
   roomId: string,
 ): Promise<boolean> {
   const row = await db.query(
-    "select 1 as n from readstate.user_room_participation where user_did = ? and room_id = ?",
+    "select 1 as n from user_room_participation where user_did = ? and room_id = ?",
   ).get<{ n: number }>(userDid, roomId);
   return row != null;
 }
@@ -71,7 +71,7 @@ export async function backfillUserRoomParticipation(
   spaceId: string,
 ): Promise<void> {
   await db.run(
-    `insert or ignore into readstate.user_room_participation
+    `insert or ignore into user_room_participation
        (user_did, room_id, last_message_at, updated_at)
      select ?, e.room, max(cc.timestamp), (unixepoch() * 1000)
        from entities e

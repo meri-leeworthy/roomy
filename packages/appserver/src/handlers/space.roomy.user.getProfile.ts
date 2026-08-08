@@ -11,15 +11,15 @@
  * (which indexes the Jetstream firehose and caches Roomy profile records
  * locally) and re-materialises from it when a record exists.
  *
- * When no Roomy record exists in HappyView, it falls back to the
- * materialised `comp_info` row, then to on-demand Bluesky hydration.
+ * When no Roomy record exists in HappyView, it falls back to the global
+ * `profiles` row, then to on-demand Bluesky hydration.
  *
  * Profile fields (handle, displayName, etc.) may be absent when the user
  * has no Roomy profile record and no Bluesky profile — that's expected and
  * not an error. Only `did` is always present.
  */
 
-import { openDb } from "../db/db.ts";
+import { openGlobalDb } from "../db/db.ts";
 import { idResolver } from "../identity.ts";
 import { insertProfilesWithExtras, defaultGetProfiles } from "../materialization/profiles.ts";
 import { getHappyView } from "../happyview.ts";
@@ -53,7 +53,7 @@ export const getProfileHandler: QueryHandler<
   // Resolve handle → DID if the actor param isn't a DID.
   const did = await resolveActorToDid(actor);
 
-  const db = openDb();
+  const db = openGlobalDb();
 
   // ── Roomy profile record from HappyView (authoritative) ──────────────
   // The appserver processes events from its local event store, not ATProto repo commits,
@@ -82,9 +82,9 @@ export const getProfileHandler: QueryHandler<
       new Map([[did, freshEx]]),
     );
 
-    // Re-read the materialised row to get the handle (Roomy records don't
-    // carry one — the handle comes from comp_user, populated by prior
-    // Bluesky/hydration).
+    // Re-read the global profile row to get the handle (Roomy records don't
+    // carry one — the handle comes from the global `profiles` row, populated
+    // by prior Bluesky/hydration).
     const row = await readProfileRow(db, did);
     return stripNulls({
       did,
@@ -98,10 +98,11 @@ export const getProfileHandler: QueryHandler<
     }) as GetProfileResult;
   }
 
-  // ── Materialised row (stale but fast) ─────────────────────────────────
+  // ── Global profile row (stale but fast) ────────────────────────────────
   // No Roomy record in HappyView (or HappyView not configured). Return
-  // whatever is materialised — this covers Bluesky-sourced profiles and
-  // bridged users whose profile data comes from event processing.
+  // whatever is in the global `profiles` table — this covers Bluesky-sourced
+  // profiles and bridged users whose profile data comes from event
+  // processing.
   const row = await readProfileRow(db, did);
   if (row) {
     return stripNulls({
@@ -116,7 +117,7 @@ export const getProfileHandler: QueryHandler<
     }) as GetProfileResult;
   }
 
-  // ── On-demand hydration (no materialised row) ──────────────────────────
+  // ── On-demand hydration (no global profile row) ────────────────────────
   // Try Bluesky batch fetch as a last resort.
   const bskyProfiles = await defaultGetProfiles([did as UserDid]);
   if (bskyProfiles.length > 0) {
@@ -136,16 +137,10 @@ export const getProfileHandler: QueryHandler<
 };
 
 /**
- * Read the materialised profile row (comp_user + comp_info) for a DID.
- * Returns null when no comp_user row exists (user never seen by the
- * appserver). comp_info fields may be null when the user has comp_user but
- * no materialised profile data.
- *
- * Profiles are global (one Roomy profile per user) and also written to the
- * global `profiles` table via `writeGlobalProfile`, but during the per-space
- * split the monolithic DB remains the source of truth and is dual-written,
- * so it is the reliable read home here. (Phase 3 removes the monolithic DB;
- * at that point this read moves to the global profiles table.)
+ * Read the profile row from the global `profiles` table (the authoritative
+ * per-user Roomy profile store). Returns null when no row exists (user never
+ * seen by the appserver). Fields may be null when the user has a row but no
+ * profile data for a given field.
  */
 async function readProfileRow(
   db: DbLike,
@@ -163,17 +158,16 @@ async function readProfileRow(
   return db
     .query(
       `select
-        u.did      as did,
-        u.handle   as handle,
-        i.name     as displayName,
-        i.avatar   as avatar,
-        i.description as description,
-        i.banner   as banner,
-        i.pronouns as pronouns,
-        i.website  as website
-      from comp_user u
-      left join comp_info i on i.entity = u.did
-      where u.did = ?`,
+        did,
+        handle,
+        name     as displayName,
+        avatar,
+        description,
+        banner,
+        pronouns,
+        website
+      from profiles
+      where did = ?`,
     )
     .get<{
       did: string;

@@ -8,7 +8,7 @@
  * Authenticated: requires a valid user DID.
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { getEnabledFlagsForUser } from "../queries/featureFlags.ts";
@@ -27,7 +27,7 @@ export const getFlagsHandler: QueryHandler<
     throw new XrpcError(401, "AuthRequired", "Authentication required");
   }
 
-  const db = openDb();
+  const db = openReadStateDb();
   const flags = await getEnabledFlagsForUser(db, userDid);
   return { flags };
 };

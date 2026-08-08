@@ -24,7 +24,7 @@ import type { DbLike } from "../db/types.ts";
 import type { StreamDid, Ulid } from "@roomy-space/sdk";
 import { inferSignals } from "./inferSignals.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
-import { openDb } from "../db/db.ts";
+import { openSpaceDb } from "../db/db.ts";
 
 export class Router implements IInvalidationRouter {
   readonly #listeners = new Set<InvalidationListener>();
@@ -64,11 +64,11 @@ export class Router implements IInvalidationRouter {
     // messageDiff by `event.id`; editMessage keys it by `details.messageId`.
     // Without batching, `inferSignals` would issue 5 queries per message
     // event (5N for a batch of N); this collapses them to 5 queries total.
-    const messageSnapshots = await this.#fetchMessageSnapshots(events, db);
+    const messageSnapshots = await this.#fetchMessageSnapshots(streamDid, events);
 
     const allSignals: InvalidationEvent[] = [];
     for (const event of events) {
-      const signals = await inferSignals(event, db, messageSnapshots);
+      const signals = await inferSignals(event, undefined, messageSnapshots);
       for (const signal of signals) {
         if (signal.kind === "messageDiff" || signal.kind === "roomMetadataDiff") {
           signal.signal.seq = ++this.#seq;
@@ -93,6 +93,7 @@ export class Router implements IInvalidationRouter {
    * fallback path stays a no-op.
    */
   async #fetchMessageSnapshots(
+    streamDid: StreamDid,
     events: readonly AppliedEvent[],
     db?: DbLike,
   ): Promise<ReadonlyMap<Ulid, MessageDto>> {
@@ -115,7 +116,7 @@ export class Router implements IInvalidationRouter {
       }
     }
     if (ids.size === 0) return new Map();
-    const { messages } = await selectMessages(db ?? openDb(), {
+    const { messages } = await selectMessages(db ?? openSpaceDb(streamDid), {
       kind: "ids",
       ids: [...ids],
     });

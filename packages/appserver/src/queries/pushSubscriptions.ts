@@ -1,5 +1,5 @@
 /**
- * Push subscription store, backed by the read-state DB (`readstate.*`).
+ * Push subscription store, backed by the read-state DB (`*`).
  *
  * A user may have many subscriptions (one per browser/device). Registrations
  * are idempotent on endpoint: re-registering the same endpoint updates its
@@ -28,7 +28,7 @@ export async function upsertSubscription(
   },
 ): Promise<void> {
   await db.run(
-    `insert into readstate.push_subscriptions
+    `insert into push_subscriptions
        (user_did, endpoint, p256dh, auth, expiration_time, updated_at)
      values (?, ?, ?, ?, ?, (unixepoch() * 1000))
      on conflict(user_did, endpoint) do update set
@@ -51,7 +51,7 @@ export async function deleteSubscription(
   endpoint: string,
 ): Promise<void> {
   await db.run(
-    "delete from readstate.push_subscriptions where user_did = ? and endpoint = ?",
+    "delete from push_subscriptions where user_did = ? and endpoint = ?",
     userDid,
     endpoint,
   );
@@ -63,7 +63,7 @@ export async function selectSubscriptions(
   userDid: string,
 ): Promise<PushSubscriptionRow[]> {
   const rows = await db.query(
-    "select user_did, endpoint, p256dh, auth, expiration_time from readstate.push_subscriptions where user_did = ?",
+    "select user_did, endpoint, p256dh, auth, expiration_time from push_subscriptions where user_did = ?",
   ).all<{
     user_did: string;
     endpoint: string;
@@ -91,7 +91,7 @@ export async function pruneSubscriptionByEndpoint(
   endpoint: string,
 ): Promise<void> {
   await db.run(
-    "delete from readstate.push_subscriptions where endpoint = ?",
+    "delete from push_subscriptions where endpoint = ?",
     endpoint,
   );
 }

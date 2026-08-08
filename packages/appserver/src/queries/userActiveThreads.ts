@@ -5,7 +5,7 @@
  * reaction) and provides query support for the sidebar `activeThreads` in
  * `space.getMetadata`.
  *
- * All data lives in the read-state database (`readstate.user_thread_activity`),
+ * All data lives in the read-state database (`user_thread_activity`),
  * which is appserver-owned and cannot be reconstructed from the event log.
  */
 
@@ -33,7 +33,7 @@ export async function upsertUserThreadActivity(
   timestamp: number,
 ): Promise<void> {
   await db.run(
-    `insert into readstate.user_thread_activity (user_did, thread_id, last_active_at, updated_at)
+    `insert into user_thread_activity (user_did, thread_id, last_active_at, updated_at)
      values (?, ?, ?, ?)
      on conflict(user_did, thread_id) do update set
        last_active_at = excluded.last_active_at,
@@ -175,7 +175,8 @@ export async function resolveThreadsByIds(
  * the user authored in threads within the 72h window.
  */
 export async function queryActiveThreads(
-  db: DbLike,
+  readStateDb: DbLike,
+  spaceDb: DbLike,
   userDid: string,
   spaceId: string,
 ): Promise<Array<{
@@ -185,37 +186,56 @@ export async function queryActiveThreads(
   const now = Date.now();
   const windowStart = now - ACTIVE_WINDOW_MS;
 
-  // Lazy backfill: if no rows exist for this user+space, seed from authored messages
-  const existingCount = await db
-    .query(
-      `select count(*) as count
-         from readstate.user_thread_activity uta
-         join entities e on e.id = uta.thread_id
-        where uta.user_did = ?
-          and e.stream_id = ?`,
-    )
-    .get<{ count: number }>([userDid, spaceId]);
-
-  if (!existingCount || existingCount.count === 0) {
-    await backfillUserThreadActivity(db, userDid, spaceId, windowStart);
+  // Lazy backfill: if no `user_thread_activity` rows exist for this user in
+  // THIS space, seed from authored messages. `user_thread_activity` lives in
+  // the read-state DB; the entity/room checks live in the per-space DB (Phase
+  // 3 — entities moved out of the read-state DB).
+  const myThreads = await readStateDb
+    .query("select thread_id from user_thread_activity where user_did = ?")
+    .all<{ thread_id: string }>([userDid]);
+  let existingCount = 0;
+  if (myThreads.length > 0) {
+    const ids = myThreads.map((r) => r.thread_id);
+    const ph = ids.map(() => "?").join(",");
+    const row = await spaceDb
+      .query(`select count(*) as count from entities where id in (${ph}) and stream_id = ?`)
+      .get<{ count: number }>([...ids, spaceId]);
+    existingCount = row?.count ?? 0;
+  }
+  if (existingCount === 0) {
+    await backfillUserThreadActivity(readStateDb, spaceDb, userDid, spaceId, windowStart);
   }
 
-  // Query active threads within the 72h window
-  const rows = await db
+  // Query active threads within the 72h window. Two-step: fetch candidate
+  // `user_thread_activity` rows from the read-state DB, then confirm each is a
+  // non-deleted thread in this space via the per-space DB.
+  const utaRows = await readStateDb
     .query(
-      `select uta.thread_id, uta.last_active_at
-         from readstate.user_thread_activity uta
-         join entities e on e.id = uta.thread_id
-         join comp_room cr on cr.entity = uta.thread_id
-        where uta.user_did = ?
-          and uta.last_active_at > ?
-          and cr.label = 'space.roomy.thread'
-          and coalesce(cr.deleted, 0) = 0
-          and e.stream_id = ?
-        order by uta.last_active_at desc
+      `select thread_id, last_active_at
+         from user_thread_activity
+        where user_did = ?
+          and last_active_at > ?
+        order by last_active_at desc
         limit ?`,
     )
-    .all<{ thread_id: string; last_active_at: number }>([userDid, windowStart, spaceId, MAX_ACTIVE_THREADS]);
+    .all<{ thread_id: string; last_active_at: number }>([userDid, windowStart, MAX_ACTIVE_THREADS]);
+
+  const rows: Array<{ thread_id: string; last_active_at: number }> = [];
+  for (const r of utaRows) {
+    const thread = await spaceDb
+      .query(
+        `select 1 as n from entities e
+           join comp_room cr on cr.entity = e.id
+          where e.id = ?
+            and e.stream_id = ?
+            and cr.label = 'space.roomy.thread'
+            and coalesce(cr.deleted, 0) = 0
+          limit 1`,
+      )
+      .get<{ n: number }>([r.thread_id, spaceId]);
+    if (thread) rows.push(r);
+    if (rows.length >= MAX_ACTIVE_THREADS) break;
+  }
 
   return rows.map((r) => ({
     id: r.thread_id,
@@ -226,26 +246,37 @@ export async function queryActiveThreads(
 /**
  * Backfill `user_thread_activity` from messages the user authored in threads
  * within the given window. This gives the user an immediate populated sidebar
- * without needing to write a new message first.
+ * without needing to write a new message first. Reads candidate threads from
+ * the per-space DB (`spaceDb`), writes rows to the read-state DB
+ * (`readStateDb`) — Phase 3: entities/content/edges are per-space.
  */
 async function backfillUserThreadActivity(
-  db: DbLike,
+  readStateDb: DbLike,
+  spaceDb: DbLike,
   userDid: string,
   spaceId: string,
   windowStart: number,
 ): Promise<void> {
-  await (await db.prepare(
-    `insert or ignore into readstate.user_thread_activity (user_did, thread_id, last_active_at, updated_at)
-     select distinct author_e.tail, e.room, max(cc.timestamp), unixepoch() * 1000
-       from entities e
-       join comp_content cc on cc.entity = e.id
-       join edges author_e on author_e.head = e.id and author_e.label = 'author'
-       join comp_room cr on cr.entity = e.room and cr.label = 'space.roomy.thread'
-      where author_e.tail = ?
-        and e.stream_id = ?
-        and cc.timestamp > ?
-      group by author_e.tail, e.room`,
-  )).run([userDid, spaceId, windowStart]);
+  const candidates = await spaceDb
+    .query(
+      `select e.room as room, max(cc.timestamp) as ts
+         from entities e
+         join comp_content cc on cc.entity = e.id
+         join edges author_e on author_e.head = e.id and author_e.label = 'author'
+         join comp_room cr on cr.entity = e.room and cr.label = 'space.roomy.thread'
+        where author_e.tail = ?
+          and e.stream_id = ?
+          and cc.timestamp > ?
+        group by e.room`,
+    )
+    .all<{ room: string; ts: number | null }>([userDid, spaceId, windowStart]);
+  for (const c of candidates) {
+    await readStateDb.run(
+      `insert or ignore into user_thread_activity (user_did, thread_id, last_active_at, updated_at)
+       values (?, ?, ?, ?)`,
+      userDid, c.room, c.ts ?? windowStart, Date.now(),
+    );
+  }
 }
 
 /**
@@ -269,7 +300,7 @@ export async function purgeStaleThreadActivity(
   olderThan: number,
 ): Promise<number> {
   const result = await (await db.prepare(
-    `delete from readstate.user_thread_activity
+    `delete from user_thread_activity
      where last_active_at < ?`,
   )).run([olderThan]);
   return result.changes;

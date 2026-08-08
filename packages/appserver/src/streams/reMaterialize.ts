@@ -4,7 +4,7 @@
  *
  * Uses the `materialization_cursor` table to determine which streams need
  * replay: for each stream with events, compares the cursor's `materialized_to`
- * against the latest event idx in `events.stream_events`. Streams that are
+ * against the latest event idx in `stream_events`. Streams that are
  * already caught up are skipped; the rest are replayed from `cursor + 1`.
  *
  * After a schema-version wipe the cursor table is empty (all cursors default
@@ -55,23 +55,12 @@ export async function reMaterializeFromLocalEvents(
   happyView: HappyViewConfig | null = null,
 ): Promise<void> {
   const streams = await db
-    .query("SELECT DISTINCT stream_id FROM events.stream_events ORDER BY stream_id")
+    .query("SELECT DISTINCT stream_id FROM stream_events ORDER BY stream_id")
     .all<{ stream_id: string }>();
 
   if (streams.length === 0) {
     log.info("startup", "no streams to re-materialize from local events DB");
     return;
-  }
-
-  // Read the materialization cursor for all streams in one query. Streams
-  // without a cursor row (e.g. after a schema-version wipe, or first boot)
-  // default to -1, meaning "nothing materialized yet — replay everything".
-  const cursors = new Map<string, number>();
-  const cursorRows = await db
-    .query("SELECT stream_id, materialized_to FROM materialization_cursor")
-    .all<{ stream_id: string; materialized_to: number }>();
-  for (const row of cursorRows) {
-    cursors.set(row.stream_id, row.materialized_to);
   }
 
   // Partition streams: those already fully materialized (cursor >= latest
@@ -81,12 +70,21 @@ export async function reMaterializeFromLocalEvents(
   const toReplay: Array<{ streamId: string; fromIdx: number }> = [];
 
   for (const { stream_id } of streams) {
-    const materializedTo = cursors.get(stream_id) ?? -1;
+    // Phase 3: the materialization_cursor lives in the per-space DB (each
+    // space DB is self-describing about its own re-materialization state),
+    // not the event-log DB. Read it from the per-space handle. Streams
+    // without a cursor row (e.g. after a schema-version wipe, or first boot)
+    // default to -1, meaning "nothing materialized yet — replay everything".
+    const cursorRow = await db
+      .forSpace!(stream_id as StreamDid)
+      .query("SELECT materialized_to FROM materialization_cursor WHERE stream_id = ?")
+      .get<{ materialized_to: number }>(stream_id);
+    const materializedTo = cursorRow?.materialized_to ?? -1;
 
     // Check the latest event idx for this stream in the events DB.
     const latestRow = await db
       .query(
-        "SELECT coalesce(max(idx), -1) AS latest FROM events.stream_events WHERE stream_id = ?",
+        "SELECT coalesce(max(idx), -1) AS latest FROM stream_events WHERE stream_id = ?",
       )
       .get<{ latest: number }>(stream_id);
     const latest = latestRow?.latest ?? -1;
@@ -119,7 +117,7 @@ export async function reMaterializeFromLocalEvents(
     try {
       const rawEvents = await db
         .query(
-          "SELECT idx, user, payload FROM events.stream_events WHERE stream_id = ? AND idx >= ? ORDER BY idx",
+          "SELECT idx, user, payload FROM stream_events WHERE stream_id = ? AND idx >= ? ORDER BY idx",
         )
         .all<RawEvent>(streamDid, fromIdx);
 
@@ -148,11 +146,10 @@ export async function reMaterializeFromLocalEvents(
         await ensureProfilesRoomyFirst(db, decodedEvents, happyView);
       }
 
-      const spaceDb = db.forSpace?.(streamDid as StreamDid);
       const globalDb = db.global?.();
-      const stats = await applyBatch(db, streamDid as StreamDid, decodedEvents, {
+      const stats = await applyBatch(db.forSpace!(streamDid as StreamDid), streamDid as StreamDid, decodedEvents, {
         isBackfill: true,
-      }, spaceDb, globalDb);
+      }, globalDb);
       succeeded++;
       const total = toReplay.length;
       const pct = Math.round((succeeded / total) * 100);

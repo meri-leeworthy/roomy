@@ -12,7 +12,7 @@
  * a separate concern on a separate endpoint.
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { isLevel, type Level } from "../push/level.ts";
 import { setSpaceLevel, setUserDefault } from "../queries/pushPreferences.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
@@ -89,7 +89,7 @@ export const setPreferencesHandler: ProcedureHandler<
     );
   }
 
-  const db = openDb();
+  const db = openReadStateDb();
   if (defaultLevel !== undefined) {
     await setUserDefault(db, userDid, defaultLevel);
   }

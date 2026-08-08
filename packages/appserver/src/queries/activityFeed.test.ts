@@ -9,16 +9,18 @@
  *   - Missing/deleted messages gracefully skipped
  *   - Empty feed for empty DB
  *
- * Phase 2 (per-space read cutover): `selectActivityFeed` fans out to per-space
- * DBs. Like the joinedSpaces test, we seed the MONOLITHIC DB directly (it is
- * the dual-write source of truth), then trigger lazy backfill of the per-space
- * and global DBs via `openSpaceDb`/`openGlobalDb` before querying.
+ * Phase 3 (per-space read cutover): `selectActivityFeed` fans out to per-space
+ * DBs. Space-scoped rows (entities, comp_space, comp_room, comp_info, edges,
+ * activity_item) are seeded into the per-space DB via `openSpaceDb`;
+ * `joinedSpace` edges go into the global DB via `openGlobalDb`; unread counts
+ * go into the read-state DB via `openReadStateDb`. `selectActivityFeed` takes
+ * the read-state handle as its first argument.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { closeDb, openDb, openGlobalDb, openSpaceDb } from "../db/db.ts";
+import { closeDb, openDb, openGlobalDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
 import type { DbLike } from "../db/types.ts";
-import { selectActivityFeed, type ActivityFeedScope } from "./activityFeed.ts";
+import { selectActivityFeed } from "./activityFeed.ts";
 
 const SPACE = "did:web:space.example";
 const OTHER_SPACE = "did:web:other-space.example";
@@ -48,71 +50,70 @@ function ulidForTimestamp(ts: number): string {
 }
 
 /**
- * Seed the worker-backed DBs for the Phase 2 fan-out read path:
- *   - the monolithic DB is seeded directly (it is the dual-write source)
- *   - the global DB and per-space DBs are lazily backfilled from it on first
- *     access (openGlobalDb / openSpaceDb), mirroring production.
+ * Seed the worker-backed DBs for the Phase 3 fan-out read path:
+ *   - space-scoped rows are seeded into the per-space DBs
+ *   - `joinedSpace` edges into the global DB
+ *   - unread counts into the read-state DB
+ *
+ * Returns the read-state handle, which `selectActivityFeed` takes as its
+ * first argument (used only for the read-state unread-count query).
  */
-function setup(): { mainDb: DbLike } {
+function setup(): { readState: DbLike } {
   closeDb();
-  // Readstate is not split — it lives on the monolithic DB. The worker's
-  // readstate DB is a file by default and would persist across tests, so pin
-  // it to an in-memory DB (fresh per worker) like the other derived DBs.
   process.env.READSTATE_DB_PATH = ":memory:";
-  const mainDb = openDb({ path: ":memory:" });
-  return { mainDb };
+  openDb({ path: ":memory:" });
+  const readState = openReadStateDb();
+  return { readState };
 }
 
-function seedSpace(db: DbLike, spaceId: string) {
-  void db.run("insert into entities (id, stream_id) values (?, ?)", [spaceId, spaceId]);
-  void db.run("insert into comp_space (entity) values (?)", [spaceId]);
-  void db.run("insert into comp_info (entity, name, avatar) values (?, ?, ?)", [
+async function seedSpace(spaceId: string) {
+  const db = openSpaceDb(spaceId);
+  await db.run("insert into entities (id, stream_id) values (?, ?)", [spaceId, spaceId]);
+  await db.run("insert into comp_space (entity) values (?)", [spaceId]);
+  await db.run("insert into comp_info (entity, name, avatar) values (?, ?, ?)", [
     spaceId,
     spaceId === SPACE ? "Test Space" : "Other Space",
     null,
   ]);
 }
 
-function seedUser(db: DbLike, did: string) {
-  void db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [did, did]);
-  void db.run("insert into comp_info (entity, name, avatar) values (?, ?, ?)", [
+async function seedUser(spaceId: string, did: string) {
+  const db = openSpaceDb(spaceId);
+  await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [did, did]);
+  await db.run("insert into comp_info (entity, name, avatar) values (?, ?, ?)", [
     did,
     did.split(":").pop() ?? did,
     null,
   ]);
 }
 
-function seedJoinedSpace(db: DbLike, userDid: string, spaceId: string) {
-  // User must exist as an entity for the FK constraint.
-  void db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
-    userDid,
-    userDid,
-  ]);
-  void db.run("insert into edges (head, tail, label) values (?, ?, 'joinedSpace')", [
+async function seedJoinedSpace(userDid: string, spaceId: string) {
+  const db = openGlobalDb();
+  await db.run("insert into edges (head, tail, label) values (?, ?, 'joinedSpace')", [
     userDid,
     spaceId,
   ]);
 }
 
-function seedRoom(
-  db: DbLike,
-  roomId: string,
+async function seedRoom(
   spaceId: string,
+  roomId: string,
   label: string,
   name: string | null,
   parentChannelId: string | null = null,
   parentChannelName: string | null = null,
 ) {
-  void db.run("insert into entities (id, stream_id) values (?, ?)", [roomId, spaceId]);
-  void db.run(
+  const db = openSpaceDb(spaceId);
+  await db.run("insert into entities (id, stream_id) values (?, ?)", [roomId, spaceId]);
+  await db.run(
     "insert into comp_room (entity, label, default_access) values (?, ?, 'readwrite')",
     [roomId, label],
   );
   if (name !== null) {
-    void db.run("insert into comp_info (entity, name) values (?, ?)", [roomId, name]);
+    await db.run("insert into comp_info (entity, name) values (?, ?)", [roomId, name]);
   }
   if (parentChannelId !== null) {
-    void db.run(
+    await db.run(
       `insert into edges (head, tail, label, payload)
        values (?, ?, 'link', json_object('canonical_parent', 1))`,
       [parentChannelId, roomId],
@@ -120,35 +121,34 @@ function seedRoom(
   }
 }
 
-function postMessage(
-  db: DbLike,
-  roomId: string,
+async function postMessage(
   spaceId: string,
+  roomId: string,
   authorDid: string,
   ts: number,
   content: string = "hello",
-): string {
+): Promise<string> {
+  const db = openSpaceDb(spaceId);
   const msgId = ulidForTimestamp(ts);
-  void db.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
+  await db.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
     msgId,
     spaceId,
     roomId,
   ]);
-  void db.run(
+  await db.run(
     "insert into comp_content (entity, mime_type, data, last_edit, timestamp) values (?, 'text/plain', ?, ?, ?)",
     [msgId, Buffer.from(content), msgId, ts],
   );
-  void db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+  await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
     msgId,
     authorDid,
   ]);
   return msgId;
 }
 
-function seedActivityItem(
-  db: DbLike,
-  roomId: string,
+async function seedActivityItem(
   spaceId: string,
+  roomId: string,
   isThread: number,
   lastActivityAt: number,
   messageIds: string[],
@@ -158,7 +158,8 @@ function seedActivityItem(
   parentChannelId: string | null = null,
   parentChannelName: string | null = null,
 ) {
-  void db.run(
+  const db = openSpaceDb(spaceId);
+  await db.run(
     `insert into activity_item
        (room_id, space_id, is_thread, parent_channel_id, parent_channel_name,
         last_activity_at, recent_message_ids,
@@ -180,22 +181,16 @@ function seedActivityItem(
   );
 }
 
-function seedUnreadCount(
-  db: DbLike,
+async function seedUnreadCount(
   userDid: string,
   roomId: string,
   count: number,
 ) {
-  void db.run(
-    "insert into readstate.read_positions (user_did, room_id, seen_up_to, unread_count) values (?, ?, ?, ?)",
+  const db = openReadStateDb();
+  await db.run(
+    "insert into read_positions (user_did, room_id, seen_up_to, unread_count) values (?, ?, ?, ?)",
     [userDid, roomId, "idx-0", count],
   );
-}
-
-/** Trigger lazy backfill of the per-space + global DBs from the monolithic DB. */
-function backfill(spaceDids: string[]) {
-  for (const did of spaceDids) openSpaceDb(did);
-  openGlobalDb();
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -203,19 +198,18 @@ function backfill(spaceDids: string[]) {
 describe("selectActivityFeed", () => {
   describe("basic feed assembly", () => {
     test("returns feed items with messages and authors", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
 
       const ts = 1_717_536_000_000;
-      const msgId = postMessage(mainDb, CHANNEL, SPACE, USER, ts, "Hello world");
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msgId], "general", "Test Space");
-      seedUnreadCount(mainDb, USER, CHANNEL, 3);
-      backfill([SPACE]);
+      const msgId = await postMessage(SPACE, CHANNEL, USER, ts, "Hello world");
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msgId], "general", "Test Space");
+      await seedUnreadCount(USER, CHANNEL, 3);
 
-      const { feed, cursor } = await selectActivityFeed(openDb(), USER, {
+      const { feed, cursor } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -235,22 +229,21 @@ describe("selectActivityFeed", () => {
     });
 
     test("includes parent channel info for thread items", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
-      seedRoom(mainDb, THREAD_A, SPACE, "space.roomy.thread", "My Thread", CHANNEL, "general");
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
+      await seedRoom(SPACE, THREAD_A, "space.roomy.thread", "My Thread", CHANNEL, "general");
 
       const ts = 1_717_536_000_000;
-      const msgId = postMessage(mainDb, THREAD_A, SPACE, USER, ts);
-      seedActivityItem(
-        mainDb, THREAD_A, SPACE, 1, ts, [msgId],
+      const msgId = await postMessage(SPACE, THREAD_A, USER, ts);
+      await seedActivityItem(
+        SPACE, THREAD_A, 1, ts, [msgId],
         "My Thread", "Test Space", null, CHANNEL, "general",
       );
-      backfill([SPACE]);
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -261,13 +254,12 @@ describe("selectActivityFeed", () => {
     });
 
     test("returns empty feed when no activity exists", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
-      backfill([SPACE]);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
 
-      const { feed, cursor } = await selectActivityFeed(openDb(), USER, {
+      const { feed, cursor } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -279,26 +271,25 @@ describe("selectActivityFeed", () => {
 
   describe("cursor pagination", () => {
     test("returns cursor when more pages exist", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
 
       // Two rooms with different timestamps.
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
-      seedRoom(mainDb, THREAD_A, SPACE, "space.roomy.thread", "Thread A");
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
+      await seedRoom(SPACE, THREAD_A, "space.roomy.thread", "Thread A");
 
       const ts1 = 1_717_536_000_000;
       const ts2 = 1_717_536_000_001;
-      const msg1 = postMessage(mainDb, CHANNEL, SPACE, USER, ts1);
-      const msg2 = postMessage(mainDb, THREAD_A, SPACE, USER, ts2);
+      const msg1 = await postMessage(SPACE, CHANNEL, USER, ts1);
+      const msg2 = await postMessage(SPACE, THREAD_A, USER, ts2);
 
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts1, [msg1], "general", "Test Space");
-      seedActivityItem(mainDb, THREAD_A, SPACE, 1, ts2, [msg2], "Thread A", "Test Space");
-      backfill([SPACE]);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts1, [msg1], "general", "Test Space");
+      await seedActivityItem(SPACE, THREAD_A, 1, ts2, [msg2], "Thread A", "Test Space");
 
       // Limit 1 → should return 1 item + cursor.
-      const { feed, cursor } = await selectActivityFeed(openDb(), USER, {
+      const { feed, cursor } = await selectActivityFeed(readState, USER, {
         limit: 1,
         cursor: null,
       });
@@ -310,25 +301,24 @@ describe("selectActivityFeed", () => {
     });
 
     test("cursor pagination returns the next page", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
 
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
-      seedRoom(mainDb, THREAD_A, SPACE, "space.roomy.thread", "Thread A");
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
+      await seedRoom(SPACE, THREAD_A, "space.roomy.thread", "Thread A");
 
       const ts1 = 1_717_536_000_000;
       const ts2 = 1_717_536_000_001;
-      const msg1 = postMessage(mainDb, CHANNEL, SPACE, USER, ts1);
-      const msg2 = postMessage(mainDb, THREAD_A, SPACE, USER, ts2);
+      const msg1 = await postMessage(SPACE, CHANNEL, USER, ts1);
+      const msg2 = await postMessage(SPACE, THREAD_A, USER, ts2);
 
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts1, [msg1], "general", "Test Space");
-      seedActivityItem(mainDb, THREAD_A, SPACE, 1, ts2, [msg2], "Thread A", "Test Space");
-      backfill([SPACE]);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts1, [msg1], "general", "Test Space");
+      await seedActivityItem(SPACE, THREAD_A, 1, ts2, [msg2], "Thread A", "Test Space");
 
       // Page 1: limit 1.
-      const page1 = await selectActivityFeed(openDb(), USER, {
+      const page1 = await selectActivityFeed(readState, USER, {
         limit: 1,
         cursor: null,
       });
@@ -337,7 +327,7 @@ describe("selectActivityFeed", () => {
       expect(page1.cursor).not.toBeNull();
 
       // Page 2: use cursor from page 1.
-      const page2 = await selectActivityFeed(openDb(), USER, {
+      const page2 = await selectActivityFeed(readState, USER, {
         limit: 1,
         cursor: page1.cursor,
       });
@@ -347,24 +337,23 @@ describe("selectActivityFeed", () => {
     });
 
     test("handles ties (same last_activity_at) correctly", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
 
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
-      seedRoom(mainDb, THREAD_A, SPACE, "space.roomy.thread", "Thread A");
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
+      await seedRoom(SPACE, THREAD_A, "space.roomy.thread", "Thread A");
 
       const ts = 1_717_536_000_000; // same timestamp
-      const msg1 = postMessage(mainDb, CHANNEL, SPACE, USER, ts);
-      const msg2 = postMessage(mainDb, THREAD_A, SPACE, USER, ts);
+      const msg1 = await postMessage(SPACE, CHANNEL, USER, ts);
+      const msg2 = await postMessage(SPACE, THREAD_A, USER, ts);
 
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msg1], "general", "Test Space");
-      seedActivityItem(mainDb, THREAD_A, SPACE, 1, ts, [msg2], "Thread A", "Test Space");
-      backfill([SPACE]);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msg1], "general", "Test Space");
+      await seedActivityItem(SPACE, THREAD_A, 1, ts, [msg2], "Thread A", "Test Space");
 
       // Limit 1 → should return one item with a cursor.
-      const page1 = await selectActivityFeed(openDb(), USER, {
+      const page1 = await selectActivityFeed(readState, USER, {
         limit: 1,
         cursor: null,
       });
@@ -372,7 +361,7 @@ describe("selectActivityFeed", () => {
       expect(page1.cursor).not.toBeNull();
 
       // Page 2 should return the other room.
-      const page2 = await selectActivityFeed(openDb(), USER, {
+      const page2 = await selectActivityFeed(readState, USER, {
         limit: 1,
         cursor: page1.cursor,
       });
@@ -384,26 +373,26 @@ describe("selectActivityFeed", () => {
 
   describe("space filter", () => {
     test("filters to a single space when spaceId is provided", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedSpace(mainDb, OTHER_SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
-      seedJoinedSpace(mainDb, USER, OTHER_SPACE);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedSpace(OTHER_SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
+      await seedJoinedSpace(USER, OTHER_SPACE);
+      await seedUser(OTHER_SPACE, USER);
 
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
-      seedRoom(mainDb, THREAD_A, OTHER_SPACE, "space.roomy.thread", "Other Thread");
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
+      await seedRoom(OTHER_SPACE, THREAD_A, "space.roomy.thread", "Other Thread");
 
       const ts = 1_717_536_000_000;
-      const msg1 = postMessage(mainDb, CHANNEL, SPACE, USER, ts);
-      const msg2 = postMessage(mainDb, THREAD_A, OTHER_SPACE, USER, ts);
+      const msg1 = await postMessage(SPACE, CHANNEL, USER, ts);
+      const msg2 = await postMessage(OTHER_SPACE, THREAD_A, USER, ts);
 
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msg1], "general", "Test Space");
-      seedActivityItem(mainDb, THREAD_A, OTHER_SPACE, 1, ts, [msg2], "Other Thread", "Other Space");
-      backfill([SPACE, OTHER_SPACE]);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msg1], "general", "Test Space");
+      await seedActivityItem(OTHER_SPACE, THREAD_A, 1, ts, [msg2], "Other Thread", "Other Space");
 
       // Filter to SPACE only.
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
         spaceId: SPACE,
@@ -414,25 +403,25 @@ describe("selectActivityFeed", () => {
     });
 
     test("aggregates across all joined spaces when no spaceId", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedSpace(mainDb, OTHER_SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
-      seedJoinedSpace(mainDb, USER, OTHER_SPACE);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedSpace(OTHER_SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
+      await seedJoinedSpace(USER, OTHER_SPACE);
+      await seedUser(OTHER_SPACE, USER);
 
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
-      seedRoom(mainDb, THREAD_A, OTHER_SPACE, "space.roomy.thread", "Other Thread");
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
+      await seedRoom(OTHER_SPACE, THREAD_A, "space.roomy.thread", "Other Thread");
 
       const ts = 1_717_536_000_000;
-      const msg1 = postMessage(mainDb, CHANNEL, SPACE, USER, ts);
-      const msg2 = postMessage(mainDb, THREAD_A, OTHER_SPACE, USER, ts);
+      const msg1 = await postMessage(SPACE, CHANNEL, USER, ts);
+      const msg2 = await postMessage(OTHER_SPACE, THREAD_A, USER, ts);
 
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msg1], "general", "Test Space");
-      seedActivityItem(mainDb, THREAD_A, OTHER_SPACE, 1, ts, [msg2], "Other Thread", "Other Space");
-      backfill([SPACE, OTHER_SPACE]);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msg1], "general", "Test Space");
+      await seedActivityItem(OTHER_SPACE, THREAD_A, 1, ts, [msg2], "Other Thread", "Other Space");
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -441,25 +430,25 @@ describe("selectActivityFeed", () => {
     });
 
     test("excludes spaces the user has not joined", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedSpace(mainDb, OTHER_SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedSpace(OTHER_SPACE);
+      await seedUser(SPACE, USER);
+      await seedUser(OTHER_SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
       // Not joined OTHER_SPACE
 
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
-      seedRoom(mainDb, THREAD_A, OTHER_SPACE, "space.roomy.thread", "Other Thread");
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
+      await seedRoom(OTHER_SPACE, THREAD_A, "space.roomy.thread", "Other Thread");
 
       const ts = 1_717_536_000_000;
-      const msg1 = postMessage(mainDb, CHANNEL, SPACE, USER, ts);
-      const msg2 = postMessage(mainDb, THREAD_A, OTHER_SPACE, USER, ts);
+      const msg1 = await postMessage(SPACE, CHANNEL, USER, ts);
+      const msg2 = await postMessage(OTHER_SPACE, THREAD_A, USER, ts);
 
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msg1], "general", "Test Space");
-      seedActivityItem(mainDb, THREAD_A, OTHER_SPACE, 1, ts, [msg2], "Other Thread", "Other Space");
-      backfill([SPACE, OTHER_SPACE]);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msg1], "general", "Test Space");
+      await seedActivityItem(OTHER_SPACE, THREAD_A, 1, ts, [msg2], "Other Thread", "Other Space");
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -471,24 +460,24 @@ describe("selectActivityFeed", () => {
 
   describe("deleted room exclusion", () => {
     test("excludes rooms marked as deleted", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
 
       // Room with deleted=1
-      void mainDb.run("insert into entities (id, stream_id) values (?, ?)", [CHANNEL, SPACE]);
-      void mainDb.run(
+      const db = openSpaceDb(SPACE);
+      await db.run("insert into entities (id, stream_id) values (?, ?)", [CHANNEL, SPACE]);
+      await db.run(
         "insert into comp_room (entity, label, default_access, deleted) values (?, 'space.roomy.channel', 'readwrite', 1)",
         [CHANNEL],
       );
 
       const ts = 1_717_536_000_000;
-      const msgId = postMessage(mainDb, CHANNEL, SPACE, USER, ts);
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msgId], "deleted-room", "Test Space");
-      backfill([SPACE]);
+      const msgId = await postMessage(SPACE, CHANNEL, USER, ts);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msgId], "deleted-room", "Test Space");
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -497,24 +486,24 @@ describe("selectActivityFeed", () => {
     });
 
     test("includes rooms with deleted=0 or null", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
 
       // Room with deleted=0
-      void mainDb.run("insert into entities (id, stream_id) values (?, ?)", [CHANNEL, SPACE]);
-      void mainDb.run(
+      const db = openSpaceDb(SPACE);
+      await db.run("insert into entities (id, stream_id) values (?, ?)", [CHANNEL, SPACE]);
+      await db.run(
         "insert into comp_room (entity, label, default_access, deleted) values (?, 'space.roomy.channel', 'readwrite', 0)",
         [CHANNEL],
       );
 
       const ts = 1_717_536_000_000;
-      const msgId = postMessage(mainDb, CHANNEL, SPACE, USER, ts);
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msgId], "active-room", "Test Space");
-      backfill([SPACE]);
+      const msgId = await postMessage(SPACE, CHANNEL, USER, ts);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msgId], "active-room", "Test Space");
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -525,21 +514,20 @@ describe("selectActivityFeed", () => {
 
   describe("message handling", () => {
     test("skips message IDs that no longer exist (deleted messages)", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
 
       const ts = 1_717_536_000_000;
-      const msgId = postMessage(mainDb, CHANNEL, SPACE, USER, ts, "I exist");
+      const msgId = await postMessage(SPACE, CHANNEL, USER, ts, "I exist");
 
       // Store a second message ID that doesn't exist in entities.
       const ghostId = "01GHOST00000000000000000000";
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msgId, ghostId], "general", "Test Space");
-      backfill([SPACE]);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msgId, ghostId], "general", "Test Space");
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -550,18 +538,17 @@ describe("selectActivityFeed", () => {
     });
 
     test("returns empty messages array when all message IDs are gone", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
 
       const ts = 1_717_536_000_000;
       const ghostId = "01GHOST00000000000000000000";
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [ghostId], "general", "Test Space");
-      backfill([SPACE]);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [ghostId], "general", "Test Space");
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -573,19 +560,18 @@ describe("selectActivityFeed", () => {
 
   describe("unread counts", () => {
     test("returns 0 for rooms with no readstate row", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
 
       const ts = 1_717_536_000_000;
-      const msgId = postMessage(mainDb, CHANNEL, SPACE, USER, ts);
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msgId], "general", "Test Space");
+      const msgId = await postMessage(SPACE, CHANNEL, USER, ts);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msgId], "general", "Test Space");
       // No readstate row for this room.
-      backfill([SPACE]);
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -594,24 +580,23 @@ describe("selectActivityFeed", () => {
     });
 
     test("returns correct unread counts per room", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "general");
-      seedRoom(mainDb, THREAD_A, SPACE, "space.roomy.thread", "Thread A");
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "general");
+      await seedRoom(SPACE, THREAD_A, "space.roomy.thread", "Thread A");
 
       const ts = 1_717_536_000_000;
-      const msg1 = postMessage(mainDb, CHANNEL, SPACE, USER, ts);
-      const msg2 = postMessage(mainDb, THREAD_A, SPACE, USER, ts);
+      const msg1 = await postMessage(SPACE, CHANNEL, USER, ts);
+      const msg2 = await postMessage(SPACE, THREAD_A, USER, ts);
 
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts, [msg1], "general", "Test Space");
-      seedActivityItem(mainDb, THREAD_A, SPACE, 1, ts, [msg2], "Thread A", "Test Space");
-      seedUnreadCount(mainDb, USER, CHANNEL, 5);
-      seedUnreadCount(mainDb, USER, THREAD_A, 2);
-      backfill([SPACE]);
+      await seedActivityItem(SPACE, CHANNEL, 0, ts, [msg1], "general", "Test Space");
+      await seedActivityItem(SPACE, THREAD_A, 1, ts, [msg2], "Thread A", "Test Space");
+      await seedUnreadCount(USER, CHANNEL, 5);
+      await seedUnreadCount(USER, THREAD_A, 2);
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });
@@ -625,28 +610,27 @@ describe("selectActivityFeed", () => {
 
   describe("ordering", () => {
     test("returns items newest-first by last_activity_at", async () => {
-      const { mainDb } = setup();
-      seedSpace(mainDb, SPACE);
-      seedUser(mainDb, USER);
-      seedJoinedSpace(mainDb, USER, SPACE);
+      const { readState } = setup();
+      await seedSpace(SPACE);
+      await seedUser(SPACE, USER);
+      await seedJoinedSpace(USER, SPACE);
 
-      seedRoom(mainDb, THREAD_A, SPACE, "space.roomy.thread", "Old");
-      seedRoom(mainDb, CHANNEL, SPACE, "space.roomy.channel", "New");
-      seedRoom(mainDb, THREAD_B, SPACE, "space.roomy.thread", "Middle");
+      await seedRoom(SPACE, THREAD_A, "space.roomy.thread", "Old");
+      await seedRoom(SPACE, CHANNEL, "space.roomy.channel", "New");
+      await seedRoom(SPACE, THREAD_B, "space.roomy.thread", "Middle");
 
       const ts1 = 1_000;
       const ts2 = 3_000;
       const ts3 = 2_000;
-      const msg1 = postMessage(mainDb, THREAD_A, SPACE, USER, ts1);
-      const msg2 = postMessage(mainDb, CHANNEL, SPACE, USER, ts2);
-      const msg3 = postMessage(mainDb, THREAD_B, SPACE, USER, ts3);
+      const msg1 = await postMessage(SPACE, THREAD_A, USER, ts1);
+      const msg2 = await postMessage(SPACE, CHANNEL, USER, ts2);
+      const msg3 = await postMessage(SPACE, THREAD_B, USER, ts3);
 
-      seedActivityItem(mainDb, THREAD_A, SPACE, 1, ts1, [msg1], "Old", "Test Space");
-      seedActivityItem(mainDb, CHANNEL, SPACE, 0, ts2, [msg2], "New", "Test Space");
-      seedActivityItem(mainDb, THREAD_B, SPACE, 1, ts3, [msg3], "Middle", "Test Space");
-      backfill([SPACE]);
+      await seedActivityItem(SPACE, THREAD_A, 1, ts1, [msg1], "Old", "Test Space");
+      await seedActivityItem(SPACE, CHANNEL, 0, ts2, [msg2], "New", "Test Space");
+      await seedActivityItem(SPACE, THREAD_B, 1, ts3, [msg3], "Middle", "Test Space");
 
-      const { feed } = await selectActivityFeed(openDb(), USER, {
+      const { feed } = await selectActivityFeed(readState, USER, {
         limit: 50,
         cursor: null,
       });

@@ -126,7 +126,7 @@ export class StreamManager {
       const eventType = events[i]!.$type;
       steps.push({
         type: "run",
-        sql: "insert into events.stream_events (stream_id, idx, user, payload, signature, event_type, created_at) select ?, coalesce(max(idx), -1) + 1, ?, ?, x'', ?, unixepoch() * 1000 from events.stream_events where stream_id = ?",
+        sql: "insert into stream_events (stream_id, idx, user, payload, signature, event_type, created_at) select ?, coalesce(max(idx), -1) + 1, ?, ?, x'', ?, unixepoch() * 1000 from stream_events where stream_id = ?",
         params: [streamDid, user, encoded[i] as Uint8Array, eventType, streamDid],
       });
     }
@@ -134,14 +134,14 @@ export class StreamManager {
     // Update stream_state with the latest idx
     steps.push({
       type: "run",
-      sql: "insert into events.stream_state (stream_id, latest_event) select ?, coalesce(max(idx), -1) from events.stream_events where stream_id = ? on conflict (stream_id) do update set latest_event = excluded.latest_event",
+      sql: "insert into stream_state (stream_id, latest_event) select ?, coalesce(max(idx), -1) from stream_events where stream_id = ? on conflict (stream_id) do update set latest_event = excluded.latest_event",
       params: [streamDid, streamDid],
     });
 
     // Final step: return the startIdx we just used
     steps.push({
       type: "query",
-      sql: "select coalesce(max(idx), -1) + 1 - ? as start_idx from events.stream_events where stream_id = ?",
+      sql: "select coalesce(max(idx), -1) + 1 - ? as start_idx from stream_events where stream_id = ?",
       params: [encoded.length, streamDid],
     });
 
@@ -173,16 +173,13 @@ export class StreamManager {
         await ensureProfilesRoomyFirst(this.#db, decodedEvents, this.#happyView);
       }
 
-      // 5. Apply batch to materialize. When the main DB handle supports the
-      // per-space split (Phase 1), dual-write the same batch to the space DB
-      // and the global DB. The monolithic DB is written first and stays the
-      // source of truth; the space DB is derived and repaired by
-      // re-materialisation if a write fails.
-      const spaceDb = this.#db.forSpace?.(streamDid);
+      // 5. Apply batch to materialize. The per-space DB is the source of
+      // truth (Phase 3); the global DB receives membership edges + the
+      // entity→space index.
       const globalDb = this.#db.global?.();
-      await applyBatch(this.#db, streamDid, decodedEvents, {
+      await applyBatch(this.#db.forSpace!(streamDid), streamDid, decodedEvents, {
         isBackfill: false,
-      }, spaceDb, globalDb);
+      }, globalDb);
 
       // 6. Convert to applied events once — shared by invalidation (6a) and
       //    the push dispatcher poke (6b).
@@ -257,7 +254,7 @@ export class StreamManager {
 
     try {
       // 2. Insert space entity row (before addAdmin so materialization FK resolves)
-      await this.#db.run(
+      await this.#db.forSpace!(streamDid).run(
         "insert into entities (id, stream_id) values (?, ?)",
         streamDid,
         streamDid,
@@ -276,7 +273,7 @@ export class StreamManager {
     } catch (err) {
       // Best-effort cleanup: remove the entities row. PLC registration
       // cannot be rolled back.
-      await this.#db.run("delete from entities where id = ?", streamDid);
+      await this.#db.forSpace!(streamDid).run("delete from entities where id = ?", streamDid);
       throw err;
     }
 
@@ -289,7 +286,7 @@ export class StreamManager {
   async getLatestEventIdx(streamDid: StreamDid): Promise<StreamIndex> {
     const row = await this.#db
       .query(
-        "select latest_event from events.stream_state where stream_id = ?",
+        "select latest_event from stream_state where stream_id = ?",
       )
       .get<{ latest_event: number }>(streamDid);
     return (row?.latest_event ?? 0) as StreamIndex;
@@ -320,7 +317,7 @@ export class StreamManager {
   ): Promise<{ events: DecodedStreamEvent[]; cursor: number }> {
     const rows = await this.#db
       .query(
-        "select idx, user, payload from events.stream_events where stream_id = ? and idx > ? order by idx limit ?",
+        "select idx, user, payload from stream_events where stream_id = ? and idx > ? order by idx limit ?",
       )
       .all<{ idx: number; user: string; payload: Uint8Array }>(
         streamDid,

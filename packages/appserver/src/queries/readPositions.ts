@@ -31,18 +31,19 @@ export async function ensureReadPositions(
   if (roomIds.length === 0) return;
 
   const now = Date.now();
+  // Phase 3: `entities` lives in the per-space DBs, not the read-state DB, so
+  // `space_did` / `seen_up_to` can't be derived from a subquery here. They are
+  // write-only today (nothing reads them back — `getReadPosition` returns
+  // `lastRead: null`), so default them to ''/'0'. Materialization populates
+  // them correctly via `applyBundle` for live message creates.
   const insert = await db.prepare(
-    `insert into readstate.read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
-     values (?, ?, coalesce(
-       (select stream_id from entities where id = ?), ''
-     ), coalesce(
-       (select max(sort_idx) from entities where room = ?), '0'
-     ), 0, ?)
+    `insert into read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
+     values (?, ?, '', '0', 0, ?)
      on conflict(user_did, room_id) do nothing`,
   );
 
   for (const roomId of roomIds) {
-    await insert.run([userDid, roomId, roomId, roomId, now]);
+    await insert.run([userDid, roomId, now]);
   }
 
 }
@@ -60,7 +61,7 @@ export async function getReadPosition(
 
   const row = await db
     .query(
-      "select unread_count, seen_up_to from readstate.read_positions where user_did = ? and room_id = ?",
+      "select unread_count, seen_up_to from read_positions where user_did = ? and room_id = ?",
     )
     .get<{ unread_count: number; seen_up_to: string }>([userDid, roomId]);
 
@@ -90,7 +91,7 @@ export async function getReadPositions(
   await ensureReadPositions(db, userDid, roomIds);
 
   const stmt = await db.prepare(
-    "select room_id, unread_count, seen_up_to from readstate.read_positions where user_did = ? and room_id = ?",
+    "select room_id, unread_count, seen_up_to from read_positions where user_did = ? and room_id = ?",
   );
 
   for (const roomId of roomIds) {
@@ -112,13 +113,14 @@ export async function getReadPositions(
  * (e.g. role-gated or invite-only) are excluded from the total.
  */
 export async function getSpaceUnreadCount(
-  db: DbLike,
+  readStateDb: DbLike,
+  spaceDb: DbLike,
   userDid: string,
   spaceId: string,
   memo?: AccessMemo,
 ): Promise<number> {
-  // Fetch all non-deleted channels in the space.
-  const allChannels = await db
+  // Fetch all non-deleted channels in the space (per-space DB).
+  const allChannels = await spaceDb
     .query(
       `select e.id from entities e
          join comp_room cr on cr.entity = e.id
@@ -134,36 +136,43 @@ export async function getSpaceUnreadCount(
   const m = memo ?? createAccessMemo();
   const accessible: string[] = [];
   for (const ch of allChannels) {
-    const acc = await roomAccess(db, ch.id, userDid, m);
+    const acc = await roomAccess(spaceDb, ch.id, userDid, m);
     if (acc.canRead) accessible.push(ch.id);
   }
 
-  await ensureReadPositions(db, userDid, accessible);
+  await ensureReadPositions(readStateDb, userDid, accessible);
 
-  // Also include threads the user has engaged with (user_thread_activity).
-  const engagedThreads = await db
+  // Also include threads the user has engaged with (user_thread_activity,
+  // read-state DB) that belong to this space (entities, per-space DB).
+  const engagedThreads = await readStateDb
     .query(
       `select uta.thread_id
-         from readstate.user_thread_activity uta
-         join entities e on e.id = uta.thread_id
-        where uta.user_did = ?
-          and e.stream_id = ?`,
+         from user_thread_activity uta
+        where uta.user_did = ?`,
     )
-    .all<{ thread_id: string }>([userDid, spaceId]);
+    .all<{ thread_id: string }>([userDid]);
 
-  const threadIds = engagedThreads.map((r) => r.thread_id);
+  const threadIds: string[] = [];
+  for (const t of engagedThreads) {
+    const belongs = await spaceDb
+      .query(
+        "select 1 as n from entities where id = ? and stream_id = ? limit 1",
+      )
+      .get<{ n: number }>([t.thread_id, spaceId]);
+    if (belongs) threadIds.push(t.thread_id);
+  }
   // Ensure read_positions rows exist for engaged threads too.
-  await ensureReadPositions(db, userDid, threadIds);
+  await ensureReadPositions(readStateDb, userDid, threadIds);
 
   const allRoomIds = [...accessible, ...threadIds];
   if (allRoomIds.length === 0) return 0;
 
   // Sum unread counts across accessible channels and engaged threads.
   const placeholders = allRoomIds.map(() => "?").join(",");
-  const row = await db
+  const row = await readStateDb
     .query(
       `select coalesce(sum(unread_count), 0) as total
-         from readstate.read_positions
+         from read_positions
         where user_did = ? and room_id in (${placeholders})`,
     )
     .get<{ total: number }>([userDid, ...allRoomIds]);
@@ -188,7 +197,7 @@ export async function getRoomReadPositionUsers(
 ): Promise<UserDid[]> {
   const rows = await db
     .query(
-      `select user_did from readstate.read_positions where room_id = ?`,
+      `select user_did from read_positions where room_id = ?`,
     )
     .all<{ user_did: string }>([roomId]);
   return rows.map((r) => r.user_did as UserDid);

@@ -17,7 +17,7 @@ const USER_DID = "did:plc:alice" as UserDid;
 // message-event paths produce diffs as they do in production.
 async function seedMessageDb(messageId: string): Promise<void> {
   closeDb();
-  const db = openDb({ path: ":memory:" });
+  const db = openDb({ path: ":memory:" }).forSpace(STREAM_DID);
   await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", USER_DID, USER_DID);
   await db.run(
     "insert or ignore into comp_info (entity, name, avatar) values (?, ?, ?)",
@@ -155,7 +155,7 @@ describe("Router", () => {
     // Seed both rows into a single in-memory DB (seedMessageDb wipes on
     // each call, so do it inline here to keep both rows alive).
     closeDb();
-    const db = openDb({ path: ":memory:" });
+    const db = openDb({ path: ":memory:" }).forSpace(STREAM_DID);
     await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", USER_DID, USER_DID);
     await db.run(
       "insert or ignore into comp_info (entity, name, avatar) values (?, ?, ?)",

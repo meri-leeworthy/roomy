@@ -178,25 +178,25 @@ import type { UserDid } from "@roomy-space/sdk";
  * Must be called AFTER createAppserver has opened the singleton DB.
  */
 function seedMinimalSpace(spaceId: string, userDid: string): void {
-  const db = openDb();
-  // Space entity + comp_space + comp_info.
-  db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [spaceId, spaceId]);
-  db.run(
+  const sp = openDb().forSpace(spaceId);
+  // Space entity + comp_space + comp_info (per-space DB).
+  sp.run("insert or ignore into entities (id, stream_id) values (?, ?)", [spaceId, spaceId]);
+  sp.run(
     `insert or ignore into comp_space (entity, allow_public_join, allow_member_invites)
      values (?, ?, ?)`,
     [spaceId, null, 1],
   );
-  db.run(
+  sp.run(
     `insert or ignore into comp_info (entity, name) values (?, ?)`,
     [spaceId, "Cache Test Space"],
   );
-  db.run(
+  sp.run(
     `update comp_space set sidebar_config = '{}' where entity = ?`,
     [spaceId],
   );
   // User entity so hydrateUserMembership has an FK target for joinedSpace
   // edges without trying to resolve the DID via PLC (no server in tests).
-  db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [userDid, userDid]);
+  sp.run("insert or ignore into entities (id, stream_id) values (?, ?)", [userDid, userDid]);
 }
 
 describe("query response cache", () => {
@@ -264,8 +264,10 @@ describe("query response cache", () => {
     seedMinimalSpace("did:web:cache-test.space", "did:plc:user1");
     // Also seed user2's entity (the space entity already exists).
     {
-      const db = openDb();
-      db.run("insert or ignore into entities (id, stream_id) values (?, ?)", ["did:plc:user2", "did:plc:user2"]);
+      openDb().forSpace("did:web:cache-test.space").run(
+        "insert or ignore into entities (id, stream_id) values (?, ?)",
+        ["did:plc:user2", "did:plc:user2"],
+      );
     }
     const base = `http://localhost:${handle.port}`;
     const url = `${base}/xrpc/space.roomy.space.getMetadata?spaceId=did:web:cache-test.space`;

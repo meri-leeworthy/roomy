@@ -8,13 +8,12 @@
  */
 
 import { newUlid, StreamDid, parseEvent } from "@roomy-space/sdk";
-import { openDb, openGlobalDb, openSpaceDb } from "../db/db.ts";
+import { openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import { isMember, isAdmin } from "../auth/access.ts";
 import {
   JOINED_SPACE_LABEL,
   LEFT_SPACE_LABEL,
-  recordLeftSpaceEdge,
   recordGlobalMembership,
   deleteGlobalMembership,
 } from "../queries/joinedSpaces.ts";
@@ -47,7 +46,6 @@ export const leaveSpaceHandler: ProcedureHandler<LeaveSpaceBody, void> = async (
     throw new XrpcError(401, "AuthRequired", "Authentication required");
   }
 
-  const db = openDb();
   const spaceDb = openSpaceDb(spaceId);
 
   // ── Authorisation: caller must be a member or admin ──────────────────
@@ -89,11 +87,6 @@ export const leaveSpaceHandler: ProcedureHandler<LeaveSpaceBody, void> = async (
   // the global DB), but remove it here directly too for read-after-write
   // consistency, in both the monolithic DB (Phase-1 read source) and the
   // global DB (membership store).
-  await db.run(
-    `delete from edges
-      where head = ? and tail = ? and label = ?`,
-    [callerDid, spaceId, JOINED_SPACE_LABEL],
-  );
   await deleteGlobalMembership(
     openGlobalDb(),
     spaceStreamDid,
@@ -102,7 +95,6 @@ export const leaveSpaceHandler: ProcedureHandler<LeaveSpaceBody, void> = async (
   );
 
   // ── 3. Write leftSpace edge so the space appears with includeLeft ────
-  await recordLeftSpaceEdge(db, spaceStreamDid, callerDid);
   await recordGlobalMembership(
     openGlobalDb(),
     spaceStreamDid,

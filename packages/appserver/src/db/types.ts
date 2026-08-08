@@ -61,8 +61,8 @@ export interface WorkerRequest {
   sql?: string;
   /** Bind parameters (for query/run/prepareRun/prepareAll/prepareGet). */
   params?: unknown[];
-  /** Which DB the request targets. Defaults to the monolithic materialised DB. */
-  targetDb?: "main" | "space" | "global";
+  /** Which DB the request targets. Defaults to the event-log DB. */
+  targetDb?: "main" | "space" | "global" | "readstate" | "events";
   /** Per-space DB selector (required when targetDb is "space"). */
   spaceDid?: string;
   /** Query mode: "all" (default) or "get" (single row). */

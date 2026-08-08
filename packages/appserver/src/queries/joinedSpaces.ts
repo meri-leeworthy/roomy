@@ -87,7 +87,7 @@ export async function selectJoinedSpaces(
       // Left spaces are always included (isMember/isAdmin false). Joined
       // spaces require a member/admin edge (real membership truth).
       if (!isLeft && !row.is_member && !row.is_admin) return null;
-      const unreadCount = await getSpaceUnreadCount(mainDb, userDid, r.id);
+      const unreadCount = await getSpaceUnreadCount(mainDb, spaceDb, userDid, r.id);
       const space: SpaceRow = {
         id: r.id,
         unreadCount,

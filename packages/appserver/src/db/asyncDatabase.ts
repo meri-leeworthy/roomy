@@ -173,7 +173,7 @@ export class WorkerLink {
 
 /** Which DB a handle's requests target on the shared worker. */
 export interface DbRoute {
-  targetDb?: "space" | "global";
+  targetDb?: "space" | "global" | "readstate" | "events";
   spaceDid?: string;
 }
 
@@ -200,6 +200,16 @@ export class AsyncDatabase {
   /** A handle that routes requests to the global DB. */
   global(): AsyncDatabase {
     return new AsyncDatabase(this.#link, { targetDb: "global" });
+  }
+
+  /** A handle that routes requests to the read-state DB. */
+  readState(): AsyncDatabase {
+    return new AsyncDatabase(this.#link, { targetDb: "readstate" });
+  }
+
+  /** A handle that routes requests to the event-log DB. */
+  events(): AsyncDatabase {
+    return new AsyncDatabase(this.#link, { targetDb: "events" });
   }
 
   /** Initialize: open DBs, apply schema, ATTACH read-state. */

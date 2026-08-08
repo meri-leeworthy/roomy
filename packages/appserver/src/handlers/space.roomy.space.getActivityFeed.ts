@@ -10,7 +10,7 @@
  */
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
-import { openDb, openSpaceDb } from "../db/db.ts";
+import { openReadStateDb, openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import {
   selectActivityFeed,
@@ -44,7 +44,7 @@ export const getActivityFeedHandler: QueryHandler<
   const cursor = optionalString(params, "cursor") ?? null;
 
   await hydrateUserMembership(userDid);
-  const mainDb = openDb();
+  const mainDb = openReadStateDb();
 
   // Per-request memo: the feed spans multiple spaces/rooms but each
   // (space, did) membership decision is reused across all items in that

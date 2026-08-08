@@ -78,37 +78,39 @@ beforeEach(async () => {
   const testId = Math.random().toString(36).slice(2, 8);
   process.env.EVENTS_DB_PATH = `/tmp/roomy-events-${testId}.sqlite`;
 
-  // Open the singleton DB in-memory so handlers' internal openDb() resolves.
+  // Open the singleton event-log DB in-memory so handlers' internal
+  // openDb() resolves. Materialised rows live in the per-space DB.
   const db = openDb({ path: ":memory:" });
+  const space = db.forSpace!(SPACE);
 
-  // Seed the space with a channel room and membership for USER.
-  await db.run("insert into entities (id, stream_id) values (?, ?)", [SPACE, SPACE]);
-  await db.run(
+  // Seed the space with a channel room and membership for USER (per-space DB).
+  await space.run("insert into entities (id, stream_id) values (?, ?)", [SPACE, SPACE]);
+  await space.run(
     "insert into comp_space (entity) values (?)",
     [SPACE],
   );
-  await db.run(
+  await space.run(
     "insert into comp_info (entity, name) values (?, ?)",
     [SPACE, "Test Space"],
   );
   // User entity
-  await db.run("insert into entities (id, stream_id) values (?, ?)", [USER, USER]);
-  await db.run(
+  await space.run("insert into entities (id, stream_id) values (?, ?)", [USER, USER]);
+  await space.run(
     "insert into comp_user (did) values (?)",
     [USER],
   );
   // Membership edge (both directions)
-  await db.run(
+  await space.run(
     "insert into edges (head, tail, label) values (?, ?, 'member')",
     [SPACE, USER],
   );
-  await db.run(
+  await space.run(
     "insert into edges (head, tail, label) values (?, ?, 'member')",
     [USER, SPACE],
   );
   // Channel room entity
-  await db.run("insert into entities (id, stream_id) values (?, ?)", [CHANNEL, SPACE]);
-  await db.run(
+  await space.run("insert into entities (id, stream_id) values (?, ?)", [CHANNEL, SPACE]);
+  await space.run(
     "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', 'readwrite')",
     [CHANNEL],
   );
@@ -153,12 +155,13 @@ describe("space.roomy.space.sendEvents", () => {
     // Assert events.stream_events has 1 row
     const db = openDb();
     const eventRows = await db
-      .query("select idx from events.stream_events where stream_id = ? order by idx")
+      .query("select idx from stream_events where stream_id = ? order by idx")
       .all<{ idx: number }>(SPACE);
     expect(eventRows).toHaveLength(1);
     expect(eventRows[0]!.idx).toBe(0);
 
     const contentRows = await db
+      .forSpace!(SPACE)
       .query("select entity from comp_content")
       .all<{ entity: string }>();
   });
@@ -269,7 +272,7 @@ describe("space.roomy.space.sendEvents", () => {
     // Assert idx values are 0,1,2,3,4 (no gaps)
     const db = openDb();
     const rows = await db
-      .query("select idx from events.stream_events where stream_id = ? order by idx")
+      .query("select idx from stream_events where stream_id = ? order by idx")
       .all<{ idx: number }>(SPACE);
     expect(rows).toHaveLength(5);
     for (let i = 0; i < rows.length; i++) {

@@ -9,14 +9,12 @@
  */
 
 import { newUlid, StreamDid, parseEvent } from "@roomy-space/sdk";
-import { openDb, openGlobalDb, openSpaceDb } from "../db/db.ts";
+import { openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import { isBanned } from "../auth/access.ts";
 import {
   JOINED_SPACE_LABEL,
   LEFT_SPACE_LABEL,
-  recordPersonalSpaceMembership,
-  removeLeftSpaceEdge,
   recordGlobalMembership,
   deleteGlobalMembership,
 } from "../queries/joinedSpaces.ts";
@@ -63,7 +61,6 @@ export const joinSpaceHandler: ProcedureHandler<
     throw new XrpcError(401, "AuthRequired", "Authentication required");
   }
 
-  const db = openDb();
   const spaceDb = openSpaceDb(spaceId);
 
   // ── Verify space exists ──────────────────────────────────────────────
@@ -136,7 +133,6 @@ export const joinSpaceHandler: ProcedureHandler<
   // the time the HTTP response returns. Writing directly to both the
   // monolithic DB (Phase-1 read source) and the global DB (membership store)
   // makes the space immediately visible and keeps the global DB consistent.
-  await recordPersonalSpaceMembership(db, spaceStreamDid, callerDid);
   await recordGlobalMembership(
     openGlobalDb(),
     spaceStreamDid,
@@ -145,7 +141,6 @@ export const joinSpaceHandler: ProcedureHandler<
   );
 
   // ── 3. Remove any leftSpace edge since the user is now rejoined ────
-  await removeLeftSpaceEdge(db, spaceStreamDid, callerDid);
   await deleteGlobalMembership(
     openGlobalDb(),
     spaceStreamDid,

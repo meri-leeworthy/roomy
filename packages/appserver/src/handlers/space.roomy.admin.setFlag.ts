@@ -11,7 +11,7 @@
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import {
   requireRegisteredFlag,
@@ -42,7 +42,7 @@ export const adminSetFlagHandler: ProcedureHandler<
   }
   requireRegisteredFlag(body.flag);
 
-  const db = openDb();
+  const db = openReadStateDb();
 
   // Handle `all` (global enable/disable)
   if (body.all !== undefined) {

@@ -6,7 +6,7 @@
  * an error. Authenticated via `parseUserDid` like the other push procedures.
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { deleteSubscription } from "../queries/pushSubscriptions.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -33,6 +33,6 @@ export const unregisterSubscriptionHandler: ProcedureHandler<
     );
   }
 
-  const db = openDb();
+  const db = openReadStateDb();
   await deleteSubscription(db, userDid, body.endpoint);
 };

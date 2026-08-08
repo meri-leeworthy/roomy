@@ -23,6 +23,7 @@ import {
   type E2eContext,
 } from "./helpers.ts";
 import { _setAdminDids } from "../admin.ts";
+import type { AsyncDatabase } from "../db/asyncDatabase.ts";
 
 // ─── Shared test identities ──────────────────────────────────────────────
 
@@ -448,9 +449,10 @@ describe("space.roomy.room.updateSeen", () => {
     expect(res.status).toBe(200);
 
     // Assert DB state changed: read position was written with sort_idx.
-    const row = await ctx.db
-      .query<{ seen_up_to: string }, [string, string]>("select seen_up_to from readstate.read_positions where user_did = ? and room_id = ?")
-      .get(USER, ROOM);
+    const row = await (ctx.db as unknown as AsyncDatabase)
+      .readState()
+      .query("select seen_up_to from read_positions where user_did = ? and room_id = ?")
+      .get<{ seen_up_to: string }>(USER, ROOM);
   });
 
   test("anonymous → 401", async () => {
@@ -588,11 +590,13 @@ describe("space.roomy.space.leaveSpace", () => {
 
     // Leave removes join intent: the joinedSpace edge must be deleted and a
     // leftSpace edge written (so includeLeft still lists the space once).
-    const joined = await db
+    const joined = await (db as any)
+      .global()
       .query("select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'")
       .get(USER, SPACE);
     expect(joined).toBeNull();
-    const left = await db
+    const left = await (db as any)
+      .global()
       .query("select 1 as n from edges where head = ? and tail = ? and label = 'leftSpace'")
       .get(USER, SPACE);
     expect(left).not.toBeNull();
@@ -617,8 +621,8 @@ describe("space.roomy.space.setHandle", () => {
   test("authenticated → persists handle in local DB (no remote backend needed)", async () => {
     const ctx = await setupBasicSpace();
     const { db } = ctx;
-    // setHandle requires admin access. Seed an admin edge.
-    await db.run(
+    // setHandle requires admin access. Seed an admin edge in the per-space DB.
+    await (db as any).forSpace(SPACE).run(
       "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
       [SPACE, USER],
     );
@@ -631,9 +635,10 @@ describe("space.roomy.space.setHandle", () => {
       },
     );
     expect(res.status).toBe(200);
-    const row = await db
-      .query<{ handle: string | null }, [string]>("select handle from comp_space where entity = ?")
-      .get(SPACE);
+    const row = await (db as unknown as AsyncDatabase)
+      .forSpace(SPACE)
+      .query("select handle from comp_space where entity = ?")
+      .get<{ handle: string | null }>(SPACE);
     expect(row?.handle).toBe("my-space.example");
   });
 
@@ -667,8 +672,8 @@ describe("space.roomy.space.sendEvents", () => {
   test("authenticated → sends events and returns 200", async () => {
     const ctx = await setupBasicSpace();
     const { db } = ctx;
-    // createRoom requires admin. Seed an admin edge.
-    db.run(
+    // createRoom requires admin. Seed an admin edge in the per-space DB.
+    (db as any).forSpace(SPACE).run(
       "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
       [SPACE, USER],
     );

@@ -65,7 +65,7 @@ describe("sendEvents", () => {
     await sm.sendEvents(stream, [makeEvent("c")], ADMIN);
 
     const rows = await db
-      .query("select idx from events.stream_events where stream_id = ? order by idx")
+      .query("select idx from stream_events where stream_id = ? order by idx")
       .all<{ idx: number }>(stream);
 
     expect(rows).toHaveLength(3);
@@ -88,7 +88,7 @@ describe("sendEvents", () => {
     );
 
     const rows = await db
-      .query("select idx from events.stream_events where stream_id = ? order by idx")
+      .query("select idx from stream_events where stream_id = ? order by idx")
       .all<{ idx: number }>(stream);
 
     // Expect N * M rows with unique contiguous idx
@@ -105,7 +105,7 @@ describe("sendEvents", () => {
     await sm.sendEvents(stream, [event], ADMIN);
 
     const row = await db
-      .query("select payload from events.stream_events where stream_id = ? and idx = 0")
+      .query("select payload from stream_events where stream_id = ? and idx = 0")
       .get<{ payload: Uint8Array }>(stream);
 
     expect(row).not.toBeNull();
@@ -122,8 +122,9 @@ describe("createStream", () => {
   test("writes the addAdmin event and the entities row", async () => {
     const streamDid = await sm.createStream(ADMIN);
 
-    // Entities row exists
+    // Entities row exists (in the per-space DB)
     const entityRow = await db
+      .forSpace!(streamDid)
       .query("select id, stream_id from entities where id = ?")
       .get<{ id: string; stream_id: string }>(streamDid);
     expect(entityRow).not.toBeNull();
@@ -132,7 +133,7 @@ describe("createStream", () => {
 
     // addAdmin event exists in events DB
     const eventRow = await db
-      .query("select idx, user from events.stream_events where stream_id = ? order by idx")
+      .query("select idx, user from stream_events where stream_id = ? order by idx")
       .all<{ idx: number; user: string }>(streamDid);
     expect(eventRow.length).toBeGreaterThanOrEqual(1);
     expect(eventRow[0]!.user).toBe(ADMIN);
@@ -168,6 +169,31 @@ describe("createStream", () => {
         throw new Error("simulated sendEvents failure");
       },
       close: async () => {},
+      // createStream writes the entities row via the per-space handle.
+      forSpace: () => ({
+        query: () => {
+          throw new Error("query not expected in this test");
+        },
+        prepare: async () => {
+          throw new Error("prepare not expected in this test");
+        },
+        exec: async () => {
+          throw new Error("exec not expected in this test");
+        },
+        run: async (sql: string, ...params: unknown[]) => {
+          if (sql.includes("insert into entities")) {
+            insertedEntity = params[0] as string;
+          }
+          if (sql.includes("delete from entities")) {
+            insertedEntity = null;
+          }
+          return { changes: 1 };
+        },
+        transaction: async <T>(): Promise<T> => {
+          throw new Error("simulated sendEvents failure");
+        },
+        close: async () => {},
+      }),
     };
 
     const failingSm = new StreamManager(mockDb, {

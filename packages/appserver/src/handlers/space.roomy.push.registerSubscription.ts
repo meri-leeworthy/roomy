@@ -8,7 +8,7 @@
  * to `updateSeen` / `joinSpace`.
  */
 
-import { openDb } from "../db/db.ts";
+import { openReadStateDb } from "../db/db.ts";
 import { upsertSubscription } from "../queries/pushSubscriptions.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -76,7 +76,7 @@ export const registerSubscriptionHandler: ProcedureHandler<
     );
   }
 
-  const db = openDb();
+  const db = openReadStateDb();
   await upsertSubscription(db, {
     userDid,
     endpoint: body.endpoint,
