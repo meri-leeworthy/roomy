@@ -422,14 +422,51 @@ function openGlobalDbInternal(): Database {
   globalDb.exec("pragma journal_mode = wal");
   globalDb.exec("pragma synchronous = normal");
   globalDb.exec("pragma foreign_keys = on");
-  initializeVersionedSchema(
-    globalDb,
-    GLOBAL_SCHEMA_PATH,
-    "global_schema_version",
-    globalSchemaVersion ?? "",
-  );
+  try {
+    initializeVersionedSchema(
+      globalDb,
+      GLOBAL_SCHEMA_PATH,
+      "global_schema_version",
+      globalSchemaVersion ?? "",
+    );
+  } catch (err) {
+    // The global DB is derived data (regenerable from the event log), so a
+    // schema-version mismatch means the on-disk schema is stale. Wipe and
+    // re-derive transparently rather than failing every request — the
+    // membership edges / profiles / entity index are rebuilt by
+    // re-materialization. Mirrors the per-space DB handling.
+    deleteGlobalDbFile(globalDb);
+    globalDb = new Database(globalDbPath, { create: true });
+    globalDb.exec("pragma journal_mode = wal");
+    globalDb.exec("pragma synchronous = normal");
+    globalDb.exec("pragma foreign_keys = on");
+    initializeVersionedSchema(
+      globalDb,
+      GLOBAL_SCHEMA_PATH,
+      "global_schema_version",
+      globalSchemaVersion ?? "",
+    );
+  }
 
   return globalDb;
+}
+
+/** Close and delete the global DB file (best-effort). */
+function deleteGlobalDbFile(db: Database): void {
+  try {
+    db.close();
+  } catch {
+    /* best-effort */
+  }
+  if (globalDbPath !== ":memory:" && globalDbPath !== null) {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        unlinkSync(globalDbPath + suffix);
+      } catch {
+        /* already gone */
+      }
+    }
+  }
 }
 
 
