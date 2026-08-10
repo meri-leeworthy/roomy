@@ -22,7 +22,7 @@ import {
 	SPACE_A,
 	SPACE_B,
 } from "./helpers/test-data.ts";
-import { expectToBe, expectToBeDefined } from "./utils.ts";
+import { decodeRichText, expectToBe, expectToBeDefined } from "./utils.ts";
 
 /** Extract the editMessage event. */
 function editMessageEvent(roomy: MockRoomyGateway, spaceDid: string) {
@@ -68,8 +68,7 @@ describe("handleMessageEdit", () => {
 		expectToBeDefined(event);
 		expectToBe(event.$type, "space.roomy.message.editMessage.v0");
 		expectToBe(event.messageId, ROOMY_MESSAGE_ULID);
-		const decoded = atob(event.body.data.$bytes);
-		expect(decoded).toBe("Updated content");
+		expect(decodeRichText(event.body).text).toBe("Updated content");
 	});
 
 	// ED02: Edit without editedTimestamp skipped
@@ -172,8 +171,9 @@ describe("handleMessageEdit", () => {
 
 		const event = editMessageEvent(roomy, SPACE_A);
 		expectToBe(event?.$type, "space.roomy.message.editMessage.v0");
-		const decoded = atob(event.body.data.$bytes);
-		expect(decoded).toContain("[@Test User]()");
+		const rich = decodeRichText(event.body);
+		expect(rich.text).toContain("@Test User");
+		expect(rich.didMentions).toContain("did:discord:111111111111111111");
 	});
 
 	// ED10: Edit fan-out to multiple spaces

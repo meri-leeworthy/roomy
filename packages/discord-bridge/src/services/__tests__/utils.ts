@@ -13,3 +13,61 @@ export function expectToBe<T, V extends T>(
 ): asserts value is V {
 	expect(value).toBe(toBe);
 }
+
+/** Decode a base64 `$bytes` body into a UTF-8 string (handles multibyte). */
+export function decodeBodyString(body: { data: { $bytes: string } }): string {
+	const binary = atob(body.data.$bytes);
+	const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+	return new TextDecoder().decode(bytes);
+}
+
+/** Summary of a rich text body for assertions. */
+export interface RichTextSummary {
+	text: string;
+	didMentions: string[];
+	roomRefs: { spaceId: string; roomId?: string }[];
+	links: string[];
+}
+
+/**
+ * Decode a `application/vnd.roomy.richtext+json` event body and summarise its
+ * text + facet features (mentions, room refs, links).
+ */
+export function decodeRichText(body: {
+	mimeType: string;
+	data: { $bytes: string };
+}): RichTextSummary {
+	const doc: {
+		blocks?: {
+			text?: string;
+			facets?: {
+				index: { byteStart: number; byteEnd: number };
+				features: {
+					$type: string;
+					did?: string;
+					spaceId?: string;
+					roomId?: string;
+					uri?: string;
+				}[];
+			}[];
+		}[];
+	} = JSON.parse(decodeBodyString(body));
+	const didMentions: string[] = [];
+	const roomRefs: { spaceId: string; roomId?: string }[] = [];
+	const links: string[] = [];
+	const text = (doc.blocks ?? []).map((b) => b.text ?? "").join("");
+	for (const block of doc.blocks ?? []) {
+		for (const facet of block.facets ?? []) {
+			for (const feat of facet.features) {
+				if (feat.$type === "space.roomy.richtext.facet#didMention") {
+					didMentions.push(feat.did ?? "");
+				} else if (feat.$type === "space.roomy.richtext.facet#roomRef") {
+					roomRefs.push({ spaceId: feat.spaceId ?? "", roomId: feat.roomId });
+				} else if (feat.$type === "space.roomy.richtext.facet#link") {
+					links.push(feat.uri ?? "");
+				}
+			}
+		}
+	}
+	return { text, didMentions, roomRefs, links };
+}

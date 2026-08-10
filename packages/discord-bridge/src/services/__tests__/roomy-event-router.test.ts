@@ -9,7 +9,14 @@
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
-import { Did, type Event, newUlid, toBytes, Ulid } from "@roomy-space/sdk";
+import {
+	Did,
+	type Event,
+	newUlid,
+	serializeBlocks,
+	toBytes,
+	Ulid,
+} from "@roomy-space/sdk";
 import { BridgeRepository } from "../../db/repository.ts";
 import { FileDiscordSender } from "../../discord/file-sender.ts";
 import { FileWebhookManager } from "../../discord/file-webhook-manager.ts";
@@ -45,6 +52,7 @@ function makeCreateMessageEvent(options: {
 	content?: string;
 	authorDid?: string;
 	origin?: { snowflake: string; channelId: string; guildId: string };
+	body?: { mimeType: string; data: ReturnType<typeof toBytes> };
 }): Event {
 	const id = options.id ? Ulid.assert(options.id) : newUlid();
 	const room = options.room ? Ulid.assert(options.room) : ROOMY_CHANNEL_ULID;
@@ -65,7 +73,7 @@ function makeCreateMessageEvent(options: {
 		id,
 		room,
 		$type: "space.roomy.message.createMessage.v0",
-		body: makeTextBody(options.content ?? "Hello from Roomy"),
+		body: options.body ?? makeTextBody(options.content ?? "Hello from Roomy"),
 		extensions,
 	} satisfies Event;
 }
@@ -213,6 +221,32 @@ describe("RoomyEventRouter", () => {
 			ROOMY_MESSAGE_ULID,
 		);
 		expect(mappedDiscordId).toBe(sent?.messageId);
+	});
+
+	/**
+	 * RER28: a rich text (blocks+facets) createMessage is decoded and bridged
+	 * to Discord as rendered Discord markdown.
+	 */
+	test("RER28: bridges a rich text createMessage to Discord", async () => {
+		const { roomy, discord, router } = setup();
+		await router.subscribeToSpace(SPACE_A);
+
+		const blocks = [
+			{ $type: "space.roomy.richtext.blocks#text", text: "Hello from blocks" },
+			{ $type: "space.roomy.richtext.blocks#code", text: "const x = 1;" },
+		];
+		const body = serializeBlocks(blocks);
+		const event = makeCreateMessageEvent({
+			id: ROOMY_MESSAGE_ULID,
+			body: { mimeType: body.mimeType, data: toBytes(body.data) },
+		});
+
+		await roomy.fireEvent(SPACE_A, event);
+
+		expect(discord.sent).toHaveLength(1);
+		expect(discord.sent[0]?.content).toBe(
+			"Hello from blocks\n```\nconst x = 1;\n```",
+		);
 	});
 
 	/**

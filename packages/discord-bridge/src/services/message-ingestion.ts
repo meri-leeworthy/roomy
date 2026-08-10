@@ -4,6 +4,7 @@ import {
 	Did,
 	type Event,
 	newUlid,
+	serializeBlocks,
 	toBytes,
 	Ulid,
 } from "@roomy-space/sdk";
@@ -12,7 +13,10 @@ import type { DiscordMessageData } from "../discord/data.ts";
 import { MsgType } from "../discord/data.ts";
 import { createLogger } from "../logger.ts";
 import type { RoomyGateway } from "../roomy/gateway.ts";
-import { type MentionContext, resolveMentions } from "./mention-resolver.ts";
+import {
+	type MentionContext,
+	resolveMentionsToBlocks,
+} from "./mention-resolver.ts";
 import { syncUserProfile } from "./profile-sync.ts";
 
 const log = createLogger("ingest");
@@ -78,11 +82,7 @@ export async function ingestDiscordMessage(
 	// the webhook message is created; backfill only observes the message via
 	// a later REST fetch, so the mapping always exists by the time backfill
 	// reaches it.
-	if (
-		!backfill &&
-		message.webhookId &&
-		repo.isOurWebhook(message.webhookId)
-	) {
+	if (!backfill && message.webhookId && repo.isOurWebhook(message.webhookId)) {
 		log.debug(`Skipping own webhook message ${messageId}`);
 		writeSkipRecord("own_webhook_message", message);
 		return { synced: 0, skipped: 1 };
@@ -193,11 +193,13 @@ export async function ingestDiscordMessage(
 			username: m.name,
 			globalName: m.globalName,
 		}));
-		const resolvedContent = resolveMentions(
+		const blocks = resolveMentionsToBlocks(
 			message.content || "",
 			userMentions,
 			mentionCtx,
+			spaceDid,
 		);
+		const serializedBody = serializeBlocks(blocks);
 		const eventUlid = newUlid();
 		const extensions: Record<string, unknown> = {
 			"space.roomy.extension.discordMessageOrigin.v0": {
@@ -230,8 +232,8 @@ export async function ingestDiscordMessage(
 			room: Ulid.assert(roomyRoomId),
 			$type: "space.roomy.message.createMessage.v0",
 			body: {
-				mimeType: "text/markdown",
-				data: toBytes(new TextEncoder().encode(resolvedContent)),
+				mimeType: serializedBody.mimeType,
+				data: toBytes(serializedBody.data),
 			},
 			extensions,
 		};

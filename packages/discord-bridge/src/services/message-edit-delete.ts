@@ -1,9 +1,19 @@
-import { Did, type Event, newUlid, toBytes, Ulid } from "@roomy-space/sdk";
+import {
+	Did,
+	type Event,
+	newUlid,
+	serializeBlocks,
+	toBytes,
+	Ulid,
+} from "@roomy-space/sdk";
 import type { BridgeRepository } from "../db/repository.ts";
 import type { DiscordMessageData } from "../discord/data.ts";
 import { createLogger } from "../logger.ts";
 import type { RoomyGateway } from "../roomy/gateway.ts";
-import { type MentionContext, resolveMentions } from "./mention-resolver.ts";
+import {
+	type MentionContext,
+	resolveMentionsToBlocks,
+} from "./mention-resolver.ts";
 import { syncUserProfile } from "./profile-sync.ts";
 
 const log = createLogger("edit-delete");
@@ -87,11 +97,13 @@ export async function handleMessageEdit(
 			username: m.name,
 			globalName: m.globalName,
 		}));
-		const resolvedContent = resolveMentions(
+		const blocks = resolveMentionsToBlocks(
 			message.content || "",
 			userMentions,
 			mentionCtx,
+			spaceDid,
 		);
+		const serializedBody = serializeBlocks(blocks);
 
 		const extensions: Record<string, unknown> = {
 			"space.roomy.extension.discordMessageOrigin.v0": {
@@ -112,8 +124,8 @@ export async function handleMessageEdit(
 			$type: "space.roomy.message.editMessage.v0",
 			messageId: Ulid.assert(roomyMessageId),
 			body: {
-				mimeType: "text/markdown",
-				data: toBytes(new TextEncoder().encode(resolvedContent)),
+				mimeType: serializedBody.mimeType,
+				data: toBytes(serializedBody.data),
 			},
 			extensions,
 		};

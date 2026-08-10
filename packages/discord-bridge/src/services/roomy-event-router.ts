@@ -28,26 +28,48 @@
  */
 
 import type { Event } from "@roomy-space/sdk";
-import { fromBytes } from "@roomy-space/sdk";
+import { deserializeBody, fromBytes, RICHTEXT_MIME } from "@roomy-space/sdk";
 import type { BridgeRepository } from "../db/repository.ts";
 import type { DiscordSender } from "../discord/sender.ts";
 import type { WebhookManager } from "../discord/webhook-manager.ts";
 import { createLogger } from "../logger.ts";
 import type { RoomyGateway } from "../roomy/gateway.ts";
 import type { ProfileResolver } from "../roomy/profile-resolver.ts";
+import { blocksToDiscordMarkdown } from "./blocks-to-discord.ts";
 
 const log = createLogger("roomy-router");
 
 /**
- * Decode a message body from a Roomy event into a plain text string.
- * Uses the SDK's `fromBytes` to handle both BytesWrapper instances and
- * `{ $bytes }` JSON form. Returns undefined for unsupported MIME types
- * so callers can skip forwarding them to Discord.
+ * Decode a message body from a Roomy event into a Discord-renderable string.
+ *
+ * - Rich text bodies (`application/vnd.roomy.richtext+json`) are parsed into
+ *   blocks and rendered to Discord markdown via `blocksToDiscordMarkdown`.
+ * - Legacy `text/markdown` / `text/plain` bodies are passed through as-is
+ *   (Roomy markdown is largely Discord-compatible).
+ *
+ * Uses the SDK's `fromBytes` to handle both BytesWrapper instances and the
+ * `{ $bytes }` JSON form. Returns undefined for unsupported MIME types (or an
+ * unparseable rich text body) so callers can skip forwarding them to Discord.
  */
 function decodeBody(body: {
 	mimeType: string;
 	data: { buf?: Uint8Array; $bytes: string };
 }): string | undefined {
+	if (body.mimeType === RICHTEXT_MIME) {
+		let bytes: Uint8Array | null;
+		try {
+			bytes = fromBytes(body.data);
+		} catch {
+			return undefined;
+		}
+		const blocks = deserializeBody(body.mimeType, bytes);
+		if (Array.isArray(blocks)) {
+			return blocksToDiscordMarkdown(blocks);
+		}
+		// Empty or invalid rich text body — treat as skipped (like empty legacy).
+		return undefined;
+	}
+
 	if (body.mimeType !== "text/markdown" && body.mimeType !== "text/plain") {
 		return undefined;
 	}

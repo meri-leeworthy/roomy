@@ -27,7 +27,7 @@ import {
 	SPACE_B,
 	USER_ID,
 } from "./helpers/test-data.ts";
-import { expectToBe, expectToBeDefined } from "./utils.ts";
+import { decodeRichText, expectToBe, expectToBeDefined } from "./utils.ts";
 
 /** Extract the createMessage event from a gateway (skip profile sync events). */
 function createMessageEvent(roomy: MockRoomyGateway, spaceDid: string) {
@@ -37,12 +37,6 @@ function createMessageEvent(roomy: MockRoomyGateway, spaceDid: string) {
 /** Extract the forwardMessages event. */
 function forwardMessageEvent(roomy: MockRoomyGateway, spaceDid: string) {
 	return roomy.findEvent(spaceDid, "space.roomy.message.forwardMessages.v0");
-}
-
-/** Decode the body data from a createMessage event. */
-function decodeBody(event: { body: { data: { $bytes: string } } }): string {
-	const bytes: { $bytes: string } = event.body.data;
-	return atob(bytes.$bytes);
 }
 
 /** Convenience: create a fresh repository with a pre-configured bridge. */
@@ -368,9 +362,13 @@ describe("ingestDiscordMessage — mention resolution", () => {
 
 		const event = createMessageEvent(roomy, SPACE_A);
 		expectToBeDefined(event);
-		const decoded = decodeBody(event);
-		expect(decoded).toContain("[@Test User]()");
-		expect(decoded).toContain(`[#general](${ROOMY_CHANNEL_ULID})`);
+		const rich = decodeRichText(event.body);
+		expect(rich.text).toContain("@Test User");
+		expect(rich.didMentions).toContain(`did:discord:${USER_ID}`);
+		expect(rich.text).toContain("#general");
+		expect(rich.roomRefs).toEqual([
+			{ spaceId: SPACE_A, roomId: ROOMY_CHANNEL_ULID },
+		]);
 	});
 
 	test("MI14b: strips custom emoji from content", async () => {
@@ -383,8 +381,8 @@ describe("ingestDiscordMessage — mention resolution", () => {
 
 		const event = createMessageEvent(roomy, SPACE_A);
 		expectToBeDefined(event);
-		const decoded = decodeBody(event);
-		expectToBe(decoded, "This is  amazing!");
+		const rich = decodeRichText(event.body);
+		expectToBe(rich.text, "This is  amazing!");
 	});
 });
 
@@ -527,8 +525,8 @@ describe("ingestDiscordMessage — backfill path & subset mode", () => {
 
 		const event = createMessageEvent(roomy, SPACE_A);
 		expectToBeDefined(event);
-		const decoded = decodeBody(event);
-		expectToBe(decoded, longContent);
+		const rich = decodeRichText(event.body);
+		expectToBe(rich.text, longContent);
 	});
 });
 
@@ -580,7 +578,9 @@ describe("ingestDiscordMessage — webhook echo prevention", () => {
 		expect(result).toEqual({ synced: 1, skipped: 0 });
 		const event = createMessageEvent(roomy, SPACE_A);
 		expectToBeDefined(event);
-		expect(decodeBody(event)).toBe("historical webhook message from previous bridge");
+		expect(decodeRichText(event.body).text).toBe(
+			"historical webhook message from previous bridge",
+		);
 	});
 
 	// WE03: Backfill still skips own-webhook messages that are already mapped
