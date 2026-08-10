@@ -4,7 +4,7 @@
   import { IconReplyLine } from "@roomy/design/icons";
   import { createMessageQuery } from "$lib/queries/message";
   import { resolveBlobUrl } from "$lib/utils";
-  import { renderMarkdownPlaintext } from "@roomy/design/utils";
+  import { messageContentToPlaintext } from "./messagePreview";
 
   type Props = {
     replyToId: string;
@@ -65,7 +65,7 @@
     {/if}
   </div>
   <div class="line-clamp-1 overflow-hidden italic">
-    {@html renderMarkdownPlaintext(target.data.content ?? "")}
+    {@html messageContentToPlaintext(target.data.content ?? "", target.data.mimeType)}
   </div>
 {:else if target.isPending}
   <div class="h-5"></div>

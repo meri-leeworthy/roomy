@@ -1,7 +1,7 @@
 import type { Ulid } from "@roomy-space/sdk";
-import { renderMarkdownPlaintext } from "@roomy/design/utils";
 import type { Message } from "$lib/queries/messages";
 import { setInputFocus } from "./ChatInput.svelte";
+import { messageContentToPlaintext } from "./messagePreview";
 
 export type Normal = {
   kind: "normal";
@@ -113,7 +113,7 @@ class MessagingStateManager {
     console.debug("Start threading", message);
     const currentState = this.state;
     const name = message
-      ? renderMarkdownPlaintext(message.content)
+      ? messageContentToPlaintext(message.content, message.mimeType)
       : "Thread";
     this.state = {
       ...currentState,

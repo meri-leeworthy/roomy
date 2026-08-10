@@ -17,7 +17,7 @@
 <script lang="ts">
   import { getContext } from "svelte";
   import MessageContextReply from "./MessageContextReply.svelte";
-  import { renderMarkdownPlaintext } from "@roomy/design/utils";
+  import { messageContentToPlaintext } from "./messagePreview";
 
   type Props = {
     context: MessageContext;
@@ -40,8 +40,9 @@
   {#if context.kind === "replying"}
     <MessageContextReply replyToId={context.replyTo.id} {roomId} />
   {:else if context.kind === "threading"}
+    {@const first = context.selectedMessages[0]}
     <div class="line-clamp-1 overflow-hidden italic">
-      {renderMarkdownPlaintext(context.selectedMessages[0]?.content || "")}
+      {@html messageContentToPlaintext(first?.content ?? "", first?.mimeType)}
     </div>
   {/if}
 </button>

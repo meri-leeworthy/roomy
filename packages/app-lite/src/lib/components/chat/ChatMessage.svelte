@@ -15,6 +15,9 @@
   import { editMessage } from "$lib/mutations/message";
   import type { Message } from "$lib/queries/messages";
   import { resolveBlobUrl } from "$lib/utils";
+  import { RICHTEXT_MIME } from "@roomy-space/sdk";
+  import type { Block } from "@roomy-space/sdk";
+  import { parseRichTextContent } from "./enrich-internal-links";
 
   type Props = {
     spaceId: string;
@@ -56,11 +59,25 @@
   // Rising-edge only, so in-progress edits aren't clobbered if the server
   // pushes an updated message while editing.
   let editContent = $state("");
+  // Blocks+facets form of the in-place editor's content. Only used when the
+  // message is rich-text (`application/vnd.roomy.richtext+json`): seeded from
+  // the decoded blocks when editing begins and kept in sync by ChatInput so
+  // the save path re-encodes the same format instead of downgrading to
+  // markdown.
+  let editBlocks: Block[] | undefined = $state();
   let prevEditing = false;
   $effect.pre(() => {
     const editing = isEditing;
     if (editing && !prevEditing) {
-      editContent = message.content;
+      if (message.mimeType === RICHTEXT_MIME) {
+        // Seed the editor from the decoded blocks (ChatInput reads these via
+        // `initialBlocks`); `editContent` is synced to markdown on mount.
+        editBlocks = parseRichTextContent(message.content) ?? [];
+        editContent = "";
+      } else {
+        editBlocks = undefined;
+        editContent = message.content;
+      }
     }
     prevEditing = editing;
   });
@@ -89,11 +106,20 @@
 
 
   async function handleEdit(newContent: string, _mentions: string[]) {
-    if (newContent === message.content) {
+    const isRichText = message.mimeType === RICHTEXT_MIME;
+    if (!isRichText && newContent === message.content) {
       onCancelEdit();
       return;
     }
-    await editMessage(spaceId, roomId, message.id, newContent);
+    await editMessage(
+      spaceId,
+      roomId,
+      message.id,
+      newContent,
+      // Rich-text messages stay rich-text: send the blocks (which ChatInput
+      // keeps in sync) rather than the base64-encoded wire body or markdown.
+      isRichText ? { blocks: editBlocks ?? [] } : {},
+    );
     onCancelEdit();
   }
 </script>
@@ -140,6 +166,8 @@
           >
             <ChatInput
               bind:content={editContent}
+              bind:blocks={editBlocks}
+              initialBlocks={editBlocks}
               onEnter={handleEdit}
               placeholder="Edit message..."
               disabled={false}

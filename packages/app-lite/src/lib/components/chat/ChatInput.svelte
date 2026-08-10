@@ -22,8 +22,8 @@
   import { RichTextLink } from "$lib/tiptap/RichTextLink";
   import { cn } from "@roomy/design/utils";
   import { Markdown } from "tiptap-markdown";
-  import { proseMirrorDocToBlocks } from "@roomy-space/sdk";
-  import type { Block } from "@roomy-space/sdk";
+  import { blocksToProseMirrorDoc, proseMirrorDocToBlocks } from "@roomy-space/sdk";
+  import type { Block, ProseMirrorDoc } from "@roomy-space/sdk";
 
   type Props = {
     content: string;
@@ -34,6 +34,14 @@
      * path and for messaging-state's string `input` binding.
      */
     blocks?: Block[];
+    /**
+     * When editing a rich-text message, the decoded blocks that seeded this
+     * editor. When present, the editor initializes from
+     * `blocksToProseMirrorDoc(initialBlocks)` instead of the markdown
+     * `content` string, so structured messages open as their decoded text
+     * (not the base64-encoded wire body) and stay rich-text on save.
+     */
+    initialBlocks?: Block[];
     /** Server-search fetcher for `@user` mentions (hits `getMembers?search=`). */
     mentionSearch?: (query: string) => Promise<TypeaheadUser[]>;
     /** Rooms in space that can be mentioned with #room */
@@ -48,6 +56,7 @@
   let {
     content = $bindable(""),
     blocks = $bindable(),
+    initialBlocks,
     mentionSearch,
     context,
     onEnter,
@@ -64,6 +73,27 @@
   async function wrappedOnEnter() {
     const mentions = tiptap ? extractMentionDids(tiptap) : [];
     await onEnter(content, mentions);
+  }
+
+  /**
+   * The composer editor schema (StarterKit + link) has no `userMention` /
+   * `channelThreadMention` marks. `blocksToProseMirrorDoc` emits those marks
+   * for `#didMention` / `#roomRef` facets, so loading such a doc directly
+   * would crash the editor (`There is no mark type userMention in this
+   * schema`). Drop those marks before seeding the editor — the mention text
+   * itself stays (as plain text), only its special formatting is lost.
+   */
+  function stripUnsupportedMarks(doc: ProseMirrorDoc): ProseMirrorDoc {
+    const walk = (node: ProseMirrorDoc): void => {
+      if (node.marks) {
+        node.marks = node.marks.filter(
+          (m) => m.type !== "userMention" && m.type !== "channelThreadMention",
+        );
+      }
+      for (const child of node.content ?? []) walk(child);
+    };
+    walk(doc);
+    return doc;
   }
 
   onMount(() => {
@@ -86,10 +116,20 @@
       extensions.push(initSpaceContextMention({ context }) as Extension);
     }
 
+    // When editing a rich-text message, initialize the editor from the
+    // decoded blocks (as a ProseMirror doc) instead of the base64-encoded
+    // wire `content` string. This surfaces the decoded message text to the
+    // user and keeps the body rich-text on save. Sync the bindings so the
+    // parent sees the initial markdown/blocks even before the user types.
+    const initialDoc =
+      initialBlocks && initialBlocks.length > 0
+        ? stripUnsupportedMarks(blocksToProseMirrorDoc(initialBlocks))
+        : null;
+
     tiptap = new Editor({
       element,
       extensions,
-      content,
+      content: initialDoc ?? content,
       editable: !disabled,
       editorProps: {
         attributes: {
@@ -105,6 +145,10 @@
         blocks = proseMirrorDocToBlocks(ctx.editor.getJSON());
       },
     });
+    if (initialDoc) {
+      content = tiptap.storage.markdown.getMarkdown();
+      blocks = proseMirrorDocToBlocks(tiptap.getJSON());
+    }
     editor = tiptap;
     if (setFocus) {
       // focus at the end of the content
