@@ -545,9 +545,44 @@ function handleRequest(req: WorkerRequest): unknown {
       return handleClose();
     case "health":
       return { ok: true };
+    case "backfillEntitySpace":
+      return handleBackfillEntitySpace(req);
     default:
       throw new Error(`Unknown request type: ${req.type}`);
   }
+}
+
+// ─── Entity→space index backfill ──────────────────────────────────────────
+
+/**
+ * Backfill the global `entity_space` index from a per-space DB's `entities`
+ * table. Runs entirely in the worker (no round-trips): reads every entity
+ * row from the per-space DB and inserts its (id, stream_id) mapping into the
+ * global DB. Idempotent (`insert or ignore`).
+ *
+ * Phase 3: `openSpaceDbForEntity` resolves a room/message id to its owning
+ * space via this index. Existing per-space DBs materialized before the index
+ * existed (or before a schema bump) have no entries, so this backfill is run
+ * on boot for every stream to make room-scoped handlers work.
+ */
+function handleBackfillEntitySpace(req: WorkerRequest): { backfilled: number } {
+  if (!req.spaceDid) throw new Error("spaceDid required for backfillEntitySpace");
+  const spaceDb = openSpaceDb(req.spaceDid);
+  const global = openGlobalDbInternal();
+  const rows = spaceDb
+    .query(
+      "select id, stream_id from entities where stream_id is not null and stream_id != ''",
+    )
+    .all() as Array<{ id: string; stream_id: string }>;
+  if (rows.length === 0) return { backfilled: 0 };
+  const insert = global.prepare(
+    "insert or ignore into entity_space (entity_id, space_did) values (?, ?)",
+  );
+  const run = global.transaction(() => {
+    for (const r of rows) insert.run(r.id, r.stream_id);
+  });
+  run();
+  return { backfilled: rows.length };
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────

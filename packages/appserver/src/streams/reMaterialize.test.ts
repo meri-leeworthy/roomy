@@ -510,4 +510,27 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(user?.handle).toBe("backfill.test");
   });
 
+  test("backfills the global entity_space index for materialized rooms", async () => {
+    const streamDid = StreamDid.assert("did:web:entity-space-backfill.example");
+    const roomId = newUlid();
+    await seedEvents(db, streamDid, [
+      {
+        $type: "space.roomy.room.createRoom.v0",
+        id: roomId,
+        kind: "space.roomy.channel",
+        name: "general",
+      },
+    ]);
+
+    await reMaterializeFromLocalEvents(db);
+
+    // The room entity must be resolvable via the global entity_space index
+    // (Phase 3: openSpaceDbForEntity reads this to find the owning space).
+    const row = await db
+      .global!()
+      .query("select space_did from entity_space where entity_id = ?")
+      .get<{ space_did: string }>(roomId);
+    expect(row?.space_did).toBe(streamDid);
+  });
+
 });

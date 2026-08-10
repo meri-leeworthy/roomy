@@ -70,6 +70,20 @@ export async function reMaterializeFromLocalEvents(
   const toReplay: Array<{ streamId: string; fromIdx: number }> = [];
 
   for (const { stream_id } of streams) {
+    // Phase 3: backfill the global `entity_space` index from this space's
+    // per-space DB. Existing per-space DBs materialized before the index
+    // existed have no entries, so `openSpaceDbForEntity` would 404 on every
+    // room/message. This runs for every stream (caught up or not) and is
+    // idempotent. Worker-internal, so it's one round-trip per space.
+    try {
+      await db.backfillEntitySpace?.(stream_id);
+    } catch (err) {
+      log.warn(
+        "startup",
+        `entity_space backfill failed for ${stream_id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     // Phase 3: the materialization_cursor lives in the per-space DB (each
     // space DB is self-describing about its own re-materialization state),
     // not the event-log DB. Read it from the per-space handle. Streams
