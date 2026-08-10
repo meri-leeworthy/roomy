@@ -422,3 +422,86 @@ function globalDb(db: Database): AsyncLike {
 function readStateDb(db: Database): AsyncLike {
   return (db as unknown as RoutedDb).readState();
 }
+
+// ─── Full-path materialization helper ────────────────────────────────────
+
+export interface MaterializedSpace {
+  roomId: string;
+  messageId: string;
+}
+
+/**
+ * Set up a fully-materialized space through the REAL write path, so tests
+ * exercise the materializer (applyBatch → per-space DB + global entity_space
+ * index) rather than seeding rows directly. This is what catches regressions
+ * like room-scoped handlers 404ing because the entity→space index was never
+ * populated.
+ *
+ * Seeds the space + membership + admin edge directly (createSpace needs a
+ * reachable PLC directory, which CI doesn't have), then sends a createRoom
+ * and a createMessage via `space.roomy.space.sendEvents`. Returns the
+ * materialized room + message ids.
+ */
+export async function materializeSpace(
+  ctx: E2eContext,
+  spaceId: string,
+  userDid: string,
+  opts?: { roomName?: string; messageText?: string },
+): Promise<MaterializedSpace> {
+  seedSpace(ctx.db as unknown as Database, spaceId, userDid, { allowPublicJoin: 1 });
+  seedJoinedSpace(ctx.db as unknown as Database, userDid, spaceId);
+  await (ctx.db as unknown as RoutedDb).forSpace(spaceId).run(
+    "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
+    [spaceId, userDid],
+  );
+
+  const roomId = newUlid();
+  const r1 = await ctx.authedFetch(userDid)(
+    `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        spaceId,
+        events: [
+          {
+            id: roomId,
+            $type: "space.roomy.room.createRoom.v0",
+            kind: "space.roomy.channel",
+            name: opts?.roomName ?? "general",
+          },
+        ],
+      }),
+    },
+  );
+  if (r1.status !== 200) {
+    throw new Error(`materializeSpace: createRoom failed ${r1.status}: ${await r1.text()}`);
+  }
+
+  const messageId = newUlid();
+  const r2 = await ctx.authedFetch(userDid)(
+    `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        spaceId,
+        events: [
+          {
+            id: messageId,
+            $type: "space.roomy.message.createMessage.v0",
+            room: roomId,
+            body: {
+              mimeType: "text/plain",
+              data: { $bytes: Buffer.from(opts?.messageText ?? "hello").toString("base64") },
+            },
+            extensions: {},
+          },
+        ],
+      }),
+    },
+  );
+  if (r2.status !== 200) {
+    throw new Error(`materializeSpace: createMessage failed ${r2.status}: ${await r2.text()}`);
+  }
+
+  return { roomId, messageId };
+}
