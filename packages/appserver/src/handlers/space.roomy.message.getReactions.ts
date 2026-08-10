@@ -8,6 +8,7 @@
 
 import { openSpaceDbForEntity } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
+import { resolveProfiles } from "../queries/profileStore.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { requireString } from "../xrpc/params.ts";
@@ -64,6 +65,12 @@ export const getReactionsHandler: QueryHandler<
   await requireRoomRead(db, row.room, userDid);
 
   // Fetch reactions with user profile info.
+  // NOTE: the per-space comp_user/comp_info joins are only populated for
+  // users whose profile entity lives in *this* space's stream. A user's
+  // profile lives in their own stream, so cross-stream reactors resolve as
+  // NULL here. The global `profiles` store (written by the profile fetch
+  // path) is authoritative; the per-space value acts as a fallback, exactly
+  // as for message authors (see selectMessages → hydrateProfiles).
   const rows = await db
     .query(
       `select r.reaction, r.user, u.handle, i.name, i.avatar
@@ -81,6 +88,10 @@ export const getReactionsHandler: QueryHandler<
       avatar: string | null;
     }>(messageId);
 
+  // Resolve reactor profiles from the global store (with an in-memory
+  // cache), filling in name/handle/avatar that the per-space join missed.
+  const profiles = await resolveProfiles(rows.map((r) => r.user));
+
   // Group by emoji.
   const groups = new Map<string, ReactorInfo[]>();
   for (const r of rows) {
@@ -89,11 +100,14 @@ export const getReactionsHandler: QueryHandler<
       reactors = [];
       groups.set(r.reaction, reactors);
     }
+    const p = profiles.get(r.user);
+    const handle = p?.handle ?? r.handle ?? undefined;
+    const avatar = p?.avatar ?? r.avatar ?? undefined;
     reactors.push({
       did: r.user,
-      name: r.name ?? r.user,
-      ...(r.handle ? { handle: r.handle } : {}),
-      ...(r.avatar ? { avatar: r.avatar } : {}),
+      name: p?.name ?? r.name ?? r.user,
+      ...(handle ? { handle } : {}),
+      ...(avatar ? { avatar } : {}),
     });
   }
 

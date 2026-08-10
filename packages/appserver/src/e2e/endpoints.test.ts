@@ -19,6 +19,7 @@ import {
   seedMemberRole,
   seedInvite,
   seedReaction,
+  seedUser,
   seedActivityItem,
   type E2eContext,
 } from "./helpers.ts";
@@ -431,6 +432,40 @@ describe("space.roomy.message.getReactions", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.reactions).toEqual([]);
+  });
+
+  test("resolves reactor profiles from the global store (cross-stream)", async () => {
+    const ctx = await setupBasicSpace();
+    const REACTOR = "did:plc:e2e-reactor";
+    // The reactor's profile lives in their OWN stream, not this space's.
+    // Seed it only in the global `profiles` table (the authoritative store).
+    // Insert the reactor as an entity in the space DB (comp_reaction.user
+    // has an FK to entities.id).
+    await (ctx.db as unknown as AsyncDatabase)
+      .forSpace(SPACE)
+      .run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+        REACTOR,
+        REACTOR,
+      ]);
+    seedUser(ctx.db, REACTOR, "reactor.test");
+    await seedReaction(ctx.db, MSG_A, REACTOR, "❤️");
+
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.message.getReactions?messageId=${MSG_A}`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const group = body.reactions.find(
+      (g: { emoji: string }) => g.emoji === "❤️",
+    );
+    expect(group).toBeDefined();
+    const reactor = group.reactors.find(
+      (r: { did: string }) => r.did === REACTOR,
+    );
+    expect(reactor).toBeDefined();
+    // Handle should resolve from the global store, not fall back to the DID.
+    expect(reactor.handle).toBe("reactor.test");
+    expect(reactor.did).toBe(REACTOR);
   });
 });
 
