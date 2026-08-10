@@ -67,14 +67,25 @@ class AsyncMutex {
 }
 
 /**
- * Process-wide mutex for savepoint-managed SQL sections on the per-space DB.
- * Shared by `applyBundle` (side-effects) and `applyBatch`'s inline per-event
- * loop — both manage SAVEPOINT/RELEASE via individual async `db.exec` calls
- * on the same DB handle, so any two concurrent sections can interleave and
- * destroy each other's savepoints. Exporting the instance lets `applyBatch`
- * acquire the same lock as `applyBundle`.
+ * Per-space async mutexes for savepoint-managed SQL sections.
+ *
+ * Keyed by `streamId` so concurrent materialization on DIFFERENT spaces is
+ * not serialized (they can reach their own pool workers in parallel), while
+ * same-space sections (statement transactions + applyBundle's SAVEPOINT
+ * section) never overlap — which would otherwise let a `db.transaction`
+ * `BEGIN` nest inside an open SAVEPOINT and fail with "cannot start a
+ * transaction within a transaction".
  */
-export const savepointMutex = new AsyncMutex();
+const spaceMutexes = new Map<string, AsyncMutex>();
+
+export function getSavepointMutex(streamId: string): AsyncMutex {
+  let m = spaceMutexes.get(streamId);
+  if (!m) {
+    m = new AsyncMutex();
+    spaceMutexes.set(streamId, m);
+  }
+  return m;
+}
 
 export interface ApplyBundleOpts {
   /** True for backfill events — skips the unread-counter increment. */
@@ -92,7 +103,7 @@ export async function applyBundle(
   // Serialize the savepoint-managed section: manual SAVEPOINT/RELEASE via
   // individual async db.exec calls is not atomic. Without this lock,
   // concurrent calls destroy each other's savepoints (see file header).
-  return savepointMutex.run(() =>
+  return getSavepointMutex(opts.streamId).run(() =>
     applyBundleInner(db, bundle, opts, globalDb, readStateDb),
   );
 }

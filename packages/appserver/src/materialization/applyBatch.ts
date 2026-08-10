@@ -25,7 +25,7 @@ import type {
 } from "@roomy-space/sdk";
 
 import { materialize } from "./materializer.ts";
-import { applyBundle, savepointMutex } from "./applyBundle.ts";
+import { applyBundle, getSavepointMutex } from "./applyBundle.ts";
 import { isGlobalEdgeStatement } from "./statementRouting.ts";
 import type { StatementBundleSuccess } from "./types.ts";
 import {
@@ -238,107 +238,86 @@ export async function applyBatch(
     // advances past chunks with apply errors, preventing infinite retry
     // loops on every boot.
     //
-    // The savepoint-managed section is serialized on the process-wide
-    // `savepointMutex` shared with `applyBundle`: both manage
-    // SAVEPOINT/RELEASE via individual async db.exec calls, and concurrent
-    // sections interleave and destroy each other's savepoints. This is the
-    // race between boot-time re-materialization (backfill) and live
-    // `sendEvents` on the same space — the replay is fire-and-forget and
-    // does not share the StreamManager's per-stream serialization queue.
-    await savepointMutex.run(async () => {
-      if (chunkSteps.length > 0) {
-        for (let i = 0; i < chunkSteps.length; i++) {
-          const step = chunkSteps[i]!;
-          if (step.type === "exec" && step.sql.startsWith("savepoint evt_")) {
-            // Collect all steps for this event (savepoint → statements → release)
-            const eventSteps: ChunkStep[] = [];
-            for (let j = i; j < chunkSteps.length; j++) {
-              const s = chunkSteps[j]!;
-              eventSteps.push(s);
-              if (s.type === "exec" && s.sql.startsWith("release evt_")) {
-                i = j;
-                break;
-              }
+    // Run this chunk's event SQL batched into per-event transactions
+    // (Phase 4b). Each event's statements go to the per-space DB in a single
+    // `transaction` message — one worker round-trip instead of one per
+    // statement. The worker runs it as an atomic SQLite transaction, giving
+    // the same per-event error isolation the old SAVEPOINT/RELEASE did, but
+    // collapsing ~N round-trips into one. Global statements (membership edges
+    // + entity_space index) go to the global DB in a second single
+    // `transaction` message. This directly attacks the dominant materialization
+    // cost — main-thread postMessage round-trip overhead was ~28% self-time in
+    // the CPU profile.
+    //
+    // Concurrency: each event is a single atomic transaction message, so the
+    // worker serializes them — no SAVEPOINT/RELEASE to interleave. Different
+    // spaces no longer wait on one process-wide `savepointMutex`. But same-space
+    // sections still take a per-space lock shared with `applyBundle`: its
+    // SAVEPOINT section must never overlap our `transaction` (a `BEGIN` nested
+    // in an open SAVEPOINT fails). Per-space lock keeps cross-space parallelism.
+    await getSavepointMutex(streamId).run(async () => {
+      for (let i = 0; i < chunkSteps.length; i++) {
+        const step = chunkSteps[i]!;
+        if (step.type === "exec" && step.sql.startsWith("savepoint evt_")) {
+          // Collect all steps for this event (savepoint → statements → release)
+          const eventSteps: ChunkStep[] = [];
+          for (let j = i; j < chunkSteps.length; j++) {
+            const s = chunkSteps[j]!;
+            eventSteps.push(s);
+            if (s.type === "exec" && s.sql.startsWith("release evt_")) {
+              i = j;
+              break;
             }
-            // ── Per-space DB (source of truth) ──────────────────────────
-            // Run the space statements first; the savepoint commits on
-            // release. A failure here rolls back the event on the space DB.
-            let spaceFailed = false;
+          }
+          const spaceSteps = eventSteps
+            .filter((s) => s.type === "run" && s.derived === "space")
+            .map((s) => ({ type: "run" as const, sql: s.sql, params: s.params }));
+          const globalSteps = eventSteps
+            .filter((s) => s.type === "run" && s.derived === "global")
+            .map((s) => ({ type: "run" as const, sql: s.sql, params: s.params }));
+
+          // ── Per-space DB (source of truth) ──────────────────────────────
+          // One atomic transaction per event; a failure rolls back just this
+          // event (equivalent to the old savepoint isolation).
+          let spaceFailed = false;
+          try {
+            if (spaceSteps.length > 0) {
+              await db.transaction(spaceSteps);
+            }
+          } catch (err) {
+            spaceFailed = true;
+            const message = err instanceof Error ? err.message : String(err);
+            stats.applyErrors++;
+            stats.applied--;
+            recordFailure(stats, {
+              eventId: "" as unknown as Ulid,
+              type: "unknown",
+              reason: "apply",
+              message,
+            });
+          }
+          if (spaceFailed) continue;
+
+          // ── Global DB ──────────────────────────────────────────────────
+          // Membership edges + entity_space index. A failure here never
+          // rolls back the per-space DB — the event stays applied there
+          // and the global DB is repaired by re-materialisation.
+          if (globalDb && globalSteps.length > 0) {
             try {
-              for (const s of eventSteps) {
-                if (s.type === "run") {
-                  if (s.derived === "space") {
-                    await db.run(s.sql, ...(s.params ?? []));
-                  }
-                } else if (s.sql.startsWith("release evt_")) {
-                  continue;
-                } else {
-                  await db.exec(s.sql);
-                }
-              }
-              await db.exec(`release ${savepointName(eventSteps[0]!)}`);
-            } catch (err) {
-              spaceFailed = true;
-              const name = savepointName(eventSteps[0]!);
-              try {
-                await db.exec(`rollback to ${name}`);
-                await db.exec(`release ${name}`);
-              } catch {
-                // Best-effort cleanup
-              }
-              const message = err instanceof Error ? err.message : String(err);
+              await globalDb.transaction(globalSteps);
+            } catch (globalErr) {
+              const message =
+                globalErr instanceof Error ? globalErr.message : String(globalErr);
               stats.applyErrors++;
-              stats.applied--;
               recordFailure(stats, {
                 eventId: "" as unknown as Ulid,
-                type: "unknown",
+                type: "global-db",
                 reason: "apply",
-                message,
+                message: `[globalDb] ${message}`,
               });
-            }
-            if (spaceFailed) continue;
-
-            // ── Global DB ──────────────────────────────────────────────
-            // Membership edges + entity_space index. A failure here never
-            // rolls back the per-space DB — the event stays applied there
-            // and the global DB is repaired by re-materialisation.
-            if (globalDb) {
-              const globalSteps = eventSteps.filter(
-                (s) => s.derived === "global",
+              console.error(
+                `[materialize] globalDb write failed for ${streamId} (per-space intact): ${message}`,
               );
-              if (globalSteps.length > 0) {
-                try {
-                  await globalDb.exec(`savepoint ${savepointName(eventSteps[0]!)}`);
-                  for (const s of globalSteps) {
-                    if (s.type === "run") {
-                      await globalDb.run(s.sql, ...(s.params ?? []));
-                    } else {
-                      await globalDb.exec(s.sql);
-                    }
-                  }
-                  await globalDb.exec(`release ${savepointName(eventSteps[0]!)}`);
-                } catch (globalErr) {
-                  const name = savepointName(eventSteps[0]!);
-                  try {
-                    await globalDb.exec(`rollback to ${name}`);
-                    await globalDb.exec(`release ${name}`);
-                  } catch {
-                    /* best-effort */
-                  }
-                  const message =
-                    globalErr instanceof Error ? globalErr.message : String(globalErr);
-                  stats.applyErrors++;
-                  recordFailure(stats, {
-                    eventId: "" as unknown as Ulid,
-                    type: "global-db",
-                    reason: "apply",
-                    message: `[globalDb] ${message}`,
-                  });
-                  console.error(
-                    `[materialize] globalDb write failed for ${streamId} (per-space intact): ${message}`,
-                  );
-                }
-              }
             }
           }
         }
@@ -386,12 +365,6 @@ export async function applyBatch(
   ]);
 
   return stats;
-}
-
-function savepointName(step: ChunkStep): string {
-  return step.sql.startsWith("savepoint ")
-    ? step.sql.slice("savepoint ".length)
-    : `evt_${step.sql.length}`;
 }
 
 /**
