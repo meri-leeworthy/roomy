@@ -1,21 +1,25 @@
 /**
  * SQLite handles for the appserver.
  *
- * One Bun.Worker owns ALL SQLite I/O process-wide: the read-state DB, the
- * event-log DB, lazily-created per-space DBs (`data/spaces/<spaceDid>.sqlite`)
- * and a global DB (`data/global.sqlite`). There is no monolithic materialised
- * DB — the per-space DBs are the source of truth for space data (Phase 3 of
+ * Phase 4 (worker pool): the per-space DBs run on a pool of N `Bun.Worker`
+ * threads, hash-routed by `spaceDid` (`hash(spaceDid) % N`), so different
+ * spaces' materialization and reads run on different threads in parallel. A
+ * dedicated "system" worker owns the global DB, the read-state DB and the
+ * event-log DB. There is no monolithic materialised DB — the per-space DBs
+ * are the source of truth for space data (Phase 3 of
  * docs/plans/per-space-dbs.md).
  *
- * This module owns the shared WorkerLink and hands out routed handles:
- * `openDb()` → event-log DB, `openSpaceDb(spaceDid)` → per-space DB,
- * `openGlobalDb()` → global DB, `openReadStateDb()` → read-state DB,
- * `openEventsDb()` → event-log DB. All are proxies over the same worker.
+ * This module owns the shared `DatabasePool` and hands out routed handles:
+ * `openDb()` → the router (event-log DB by default, with `forSpace`/`global`/
+ * `readState`/`events`/`backfillEntitySpace` dispatch), `openSpaceDb(spaceDid)`
+ * → per-space DB, `openGlobalDb()` → global DB, `openReadStateDb()` →
+ * read-state DB, `openEventsDb()` → event-log DB.
  */
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AsyncDatabase, WorkerLink } from "./asyncDatabase.ts";
+import { AsyncDatabase } from "./asyncDatabase.ts";
+import { DatabasePool, PooledDatabase } from "./pool.ts";
 import { READSTATE_SCHEMA_VERSION } from "./readStateDb.ts";
 
 /**
@@ -42,8 +46,11 @@ export const SPACE_SCHEMA_VERSION = "1";
  */
 export const GLOBAL_SCHEMA_VERSION = "4";
 
-let link: WorkerLink | null = null;
-let mainDb: AsyncDatabase | null = null;
+/** Default pool size (per-space workers). Override via `APPSERVER_DB_POOL_SIZE`. */
+const DEFAULT_POOL_SIZE = 4;
+
+let pool: DatabasePool | null = null;
+let router: PooledDatabase | null = null;
 let globalDb: AsyncDatabase | null = null;
 
 export interface OpenDbOptions {
@@ -53,34 +60,32 @@ export interface OpenDbOptions {
   isolated?: boolean;
 }
 
+function poolSizeFromEnv(): number {
+  const raw = process.env.APPSERVER_DB_POOL_SIZE;
+  if (!raw) return DEFAULT_POOL_SIZE;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1 ? n : DEFAULT_POOL_SIZE;
+}
+
 /**
- * Open the process-wide event-log DB handle (the "main" remaining DB).
- * Routes every request to the event-log DB (`data/roomy-events.sqlite`).
+ * Open the process-wide router handle (the "main" remaining DB). Default
+ * operations target the event-log DB (`data/roomy-events.sqlite`) on the
+ * system worker; `forSpace`/`global`/`readState`/`events`/`backfillEntitySpace`
+ * dispatch to the correct worker.
  *
  * `opts.path` is accepted for backwards compatibility with tests that pass
  * `:memory:`; it selects the event-log DB path. `opts.isolated` spins up a
- * dedicated worker (tests).
+ * dedicated pool (tests).
  */
-export function openDb(opts: OpenDbOptions = {}): AsyncDatabase {
-  if (!opts.isolated && mainDb) return mainDb;
+export function openDb(opts: OpenDbOptions = {}): PooledDatabase {
+  if (!opts.isolated && router) return router;
 
   const path = opts.path ?? process.env.EVENTS_DB_PATH ?? "data/roomy-events.sqlite";
   const workerPath = join(dirname(fileURLToPath(import.meta.url)), "worker.ts");
-
-  // Isolated mode (tests) gets its own worker link, terminated on close().
-  // Non-isolated handles share one process-wide link.
-  let owned: WorkerLink | null = null;
-  let shared: WorkerLink | null = link;
-  if (opts.isolated) {
-    owned = new WorkerLink(workerPath);
-    shared = null;
-  } else if (!link) {
-    shared = new WorkerLink(workerPath);
-    link = shared;
-  }
+  const size = opts.isolated ? 1 : poolSizeFromEnv();
+  const p = new DatabasePool(size, workerPath);
   const isMemory = path === ":memory:";
-  const db = new AsyncDatabase(shared ?? owned!, undefined, opts.isolated);
-  void db.init({
+  void p.init({
     readStateDbPath: process.env.READSTATE_DB_PATH ?? "data/roomy-readstate.sqlite",
     eventsDbPath: path,
     // In-memory event-log DB (tests) ⇒ in-memory derived DBs too, so tests
@@ -96,30 +101,33 @@ export function openDb(opts: OpenDbOptions = {}): AsyncDatabase {
     // Error already propagates via the first queued request's response.
   });
 
-  if (!opts.isolated) mainDb = db;
-  return db;
+  if (!opts.isolated) {
+    pool = p;
+    router = p.router();
+  }
+  return p.router();
 }
 
-/** Return the singleton AsyncDatabase, or throw if not yet opened. */
-export function getDb(): AsyncDatabase {
-  if (!mainDb) throw new Error("Database not opened. Call openDb() first.");
-  return mainDb;
+/** Return the singleton router, or throw if not yet opened. */
+export function getDb(): PooledDatabase {
+  if (!router) throw new Error("Database not opened. Call openDb() first.");
+  return router;
 }
 
 /**
  * Return a handle that routes every request to the per-space DB for
- * `spaceDid` (`data/spaces/<spaceDid>.sqlite`), over the shared worker.
- * The space DB is created lazily on first use in the worker and populated
- * by re-materialising the stream from the event log.
+ * `spaceDid` (`data/spaces/<spaceDid>.sqlite`), pinned to the pool worker
+ * that owns it. The space DB is created lazily on first use in that worker
+ * and populated by re-materialising the stream from the event log.
  *
  * Safe to call before `openDb()`; the routed handle's first request will
- * resolve against whichever worker link is active. Callers that rely on the
- * worker being initialised should call `openDb()` first (the appserver boot
- * path always does).
+ * resolve against whichever pool is active. Callers that rely on the worker
+ * being initialised should call `openDb()` first (the appserver boot path
+ * always does).
  */
 export function openSpaceDb(spaceDid: string): AsyncDatabase {
-  ensureLink();
-  return mainDb!.forSpace(spaceDid);
+  ensurePool();
+  return pool!.forSpace(spaceDid);
 }
 
 /**
@@ -146,68 +154,80 @@ export async function openSpaceDbForEntity(
 
 /**
  * Return a handle that routes every request to the global DB
- * (`data/global.sqlite`), over the shared worker. The global DB is created
+ * (`data/global.sqlite`), on the system worker. The global DB is created
  * lazily on first use and holds `joinedSpace`/`leftSpace` edges, the global
  * `profiles` table, and the `entity_space` entity→space index.
  */
 export function openGlobalDb(): AsyncDatabase {
-  ensureLink();
+  ensurePool();
   if (!globalDb) {
-    globalDb = mainDb!.global();
+    globalDb = pool!.global();
   }
   return globalDb;
 }
 
 /**
- * Return the global DB handle if the worker-backed DBs are initialised, or
- * `null` otherwise. Unlike `openGlobalDb()`, this does NOT lazily initialise
- * the worker — used by code paths that may run against a raw in-memory
- * `Database` in tests (where the global DB isn't set up) and should skip the
- * global write rather than spin up a worker.
+ * Return the global DB handle if the pool is initialised, or `null`
+ * otherwise. Unlike `openGlobalDb()`, this does NOT lazily initialise the
+ * pool — used by code paths that may run against a raw in-memory `Database`
+ * in tests (where the global DB isn't set up) and should skip the global
+ * write rather than spin up a pool.
  */
 export function tryOpenGlobalDb(): AsyncDatabase | null {
-  if (!mainDb) return null;
+  if (!pool) return null;
   if (!globalDb) {
-    globalDb = mainDb.global();
+    globalDb = pool.global();
   }
   return globalDb;
 }
 
 /**
  * Return a handle that routes every request to the read-state DB
- * (`data/roomy-readstate.sqlite`), over the shared worker.
+ * (`data/roomy-readstate.sqlite`), on the system worker.
  */
 export function openReadStateDb(): AsyncDatabase {
-  ensureLink();
-  return mainDb!.readState();
+  ensurePool();
+  return pool!.readState();
 }
 
 /**
  * Return a handle that routes every request to the event-log DB
- * (`data/roomy-events.sqlite`), over the shared worker.
+ * (`data/roomy-events.sqlite`), on the system worker.
  */
 export function openEventsDb(): AsyncDatabase {
-  ensureLink();
-  return mainDb!.events();
+  ensurePool();
+  return pool!.events();
 }
 
-function ensureLink(): void {
-  if (!mainDb) {
-    // Initialise the shared worker (with default paths) so routed handles
-    // have a link. Mirrors what openDb() does for the main handle.
+function ensurePool(): void {
+  if (!pool) {
+    // Initialise the shared pool (with default paths) so routed handles
+    // have a link. Mirrors what openDb() does for the router.
     openDb();
   }
 }
 
 /**
+ * Per-worker pool stats for `/health/pool` (Phase 4 observability). Returns
+ * `null` when the pool isn't initialised.
+ */
+export function poolStats(): {
+  size: number;
+  spaceWorkers: Array<{ pending: number }>;
+  systemWorker: { pending: number };
+} | null {
+  return pool?.stats() ?? null;
+}
+
+/**
  * Close the process-wide database singleton. Used by tests to reset state.
- * Terminates the worker immediately so in-flight requests fail fast.
+ * Terminates every worker immediately so in-flight requests fail fast.
  */
 export function closeDb(): void {
-  if (link) {
-    link.terminate();
-    link = null;
+  if (pool) {
+    pool.close();
+    pool = null;
   }
-  mainDb = null;
+  router = null;
   globalDb = null;
 }

@@ -167,6 +167,11 @@ export class WorkerLink {
     this.#pending.clear();
     this.#worker.terminate();
   }
+
+  /** Number of in-flight (pending) requests on this worker. */
+  get pendingCount(): number {
+    return this.#pending.size;
+  }
 }
 
 // ─── DbRoute ──────────────────────────────────────────────────────────────

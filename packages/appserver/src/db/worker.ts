@@ -59,6 +59,12 @@ let spaceSchemaVersion: string | null = null;
 let globalSchemaVersion: string | null = null;
 /** Max concurrently-open space DBs before LRU eviction. */
 let maxSpaceDbs = 100;
+/**
+ * Worker role (Phase 4). "space" workers only open per-space DBs; "system"
+ * workers own the global/read-state/event-log DBs. Defaults to "system" for
+ * backward compatibility with the single-worker path.
+ */
+let role: "space" | "system" = "system";
 
 // ─── Schema paths ─────────────────────────────────────────────────────────
 
@@ -476,6 +482,11 @@ function dbForRequest(req: WorkerRequest): Database {
     if (!req.spaceDid) throw new Error("spaceDid required for space target");
     return openSpaceDb(req.spaceDid);
   }
+  if (role === "space") {
+    throw new Error(
+      `targetDb "${req.targetDb}" not available on a space worker`,
+    );
+  }
   if (req.targetDb === "global") {
     return openGlobalDbInternal();
   }
@@ -566,6 +577,9 @@ function handleRequest(req: WorkerRequest): unknown {
  * on boot for every stream to make room-scoped handlers work.
  */
 function handleBackfillEntitySpace(req: WorkerRequest): { backfilled: number } {
+  if (role === "space") {
+    throw new Error("backfillEntitySpace requires the global DB (system worker)");
+  }
   if (!req.spaceDid) throw new Error("spaceDid required for backfillEntitySpace");
   const spaceDb = openSpaceDb(req.spaceDid);
   const global = openGlobalDbInternal();
@@ -606,6 +620,14 @@ function handleInit(req: WorkerRequest): {
   spaceSchemaVersion = opts.spaceSchemaVersion ?? "";
   globalSchemaVersion = opts.globalSchemaVersion ?? "";
   if (opts.maxSpaceDbs !== undefined) maxSpaceDbs = opts.maxSpaceDbs;
+  role = opts.role ?? "system";
+
+  // Phase 4: a "space" worker only opens per-space DBs (lazily on first
+  // request). It does NOT open the read-state, event-log or global DBs —
+  // those live on the dedicated system worker(s).
+  if (role === "space") {
+    return { readStateDbPath: "", eventsDbPath: "" };
+  }
 
   // Open read-state DB (own file, no ATTACH — Phase 3)
   if (isMemory) {

@@ -358,4 +358,25 @@ describe("query response cache", () => {
     expect(body.hits).toBe(0);
     expect(body.size).toBe(1);
   });
+
+  test("/health/pool reports per-worker pool stats", async () => {
+    handle = await createAppserver({
+      port: ephemeralPort(),
+      authVerifier: testAuthVerifier,
+      dbPath: ":memory:",
+      readStateDbPath: ":memory:",
+      quiet: true,
+      disableEmbedSweeper: true,
+    });
+
+    const base = `http://localhost:${handle.port}`;
+    const res = await fetch(`${base}/health/pool`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.enabled).toBe(true);
+    expect(body.size).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(body.spaceWorkers)).toBe(true);
+    expect(body.spaceWorkers.length).toBe(body.size);
+    expect(body.systemWorker).toBeDefined();
+  });
 });

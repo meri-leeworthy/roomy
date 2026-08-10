@@ -20,7 +20,7 @@ import { selectAuthVerifier } from "./xrpc/auth.ts";
 import { Router as InvalidationRouter } from "./invalidation/index.ts";
 import { startEmbedSweeper, stopEmbedSweeper, embedSweeperStats } from "./embed/sweeper.ts";
 import { countPendingLinks } from "./embed/enricher.ts";
-import { openDb, openGlobalDb, openReadStateDb, closeDb } from "./db/db.ts";
+import { openDb, openGlobalDb, openReadStateDb, closeDb, poolStats } from "./db/db.ts";
 import { StreamManager, setStreamManager, _resetStreamManager } from "./streams/StreamManager.ts";
 import { purgeStaleThreadActivity } from "./queries/userActiveThreads.ts";
 import { getConnectionTicketHandler } from "./handlers/space.roomy.auth.getConnectionTicket.ts";
@@ -486,6 +486,16 @@ export async function createAppserver(
             enabled: queryCache !== undefined,
             ...cacheStats,
           }),
+          { headers: { "content-type": "application/json", ...corsHeaders } },
+        );
+      }
+      if (url.pathname === "/health/pool") {
+        // Phase 4: per-worker pool stats (size + in-flight per worker) so an
+        // operator can see whether load is spreading across the pool or
+        // collapsing onto one worker.
+        const stats = poolStats();
+        return new Response(
+          JSON.stringify(stats ? { enabled: true, ...stats } : { enabled: false }),
           { headers: { "content-type": "application/json", ...corsHeaders } },
         );
       }
