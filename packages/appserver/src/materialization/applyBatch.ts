@@ -149,7 +149,7 @@ export async function applyBatch(
         // which per-space DB a room/message id lives in. Skip entities with
         // an empty stream_id (e.g. link entities) — they are never resolved
         // via openSpaceDbForEntity.
-        if (stmt.sql.startsWith("insert into entities")) {
+        if (stmt.sql.trim().startsWith("insert into entities")) {
           const p = Array.isArray(params) ? params : [params];
           const id = p[0];
           const sid = p[1];

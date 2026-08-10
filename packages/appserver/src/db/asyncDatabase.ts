@@ -268,6 +268,17 @@ export class AsyncDatabase {
     return this.#link.send({ type: "transaction", steps }, this.#route) as Promise<T>;
   }
 
+  /**
+   * Backfill the global `entity_space` index from a per-space DB's `entities`
+   * table (worker-internal). Used on boot to index rooms/messages that were
+   * materialized before the index existed. Idempotent.
+   */
+  async backfillEntitySpace(spaceDid: string): Promise<{ backfilled: number }> {
+    return this.#link.send({ type: "backfillEntitySpace", spaceDid }) as Promise<{
+      backfilled: number;
+    }>;
+  }
+
   async close(): Promise<void> {
     if (this.#ownedLink) {
       this.#link.terminate();
