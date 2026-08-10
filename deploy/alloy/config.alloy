@@ -1,0 +1,61 @@
+// Grafana Alloy config — Roomy production log collector (Grafana Cloud).
+//
+// Receives logs from the Railway app services and forwards them to Grafana
+// Cloud Loki. The apps POST to this collector (see deploy/alloy/README.md).
+//
+// Required env vars:
+//   - GRAFANA_CLOUD_LOKI_URL    full push URL, e.g.
+//                               https://logs-prod-<region>.grafana.net/loki/api/v1/push
+//   - GRAFANA_CLOUD_LOKI_ID     Grafana Cloud Loki instance ID (basic auth user)
+//   - GRAFANA_CLOUD_LOKI_TOKEN  Grafana Cloud access policy token (basic auth pass)
+//
+// Optional: ALLOY_LOG_LEVEL (default `info`).
+
+logging {
+	level = "info" // override via ALLOY_LOG_LEVEL at runtime if desired
+}
+
+// ── Ship to Grafana Cloud Loki ────────────────────────────────────────
+loki.write "cloud" {
+	endpoint {
+		url = env("GRAFANA_CLOUD_LOKI_URL")
+		basic_auth {
+			username = env("GRAFANA_CLOUD_LOKI_ID")
+			password = env("GRAFANA_CLOUD_LOKI_TOKEN")
+		}
+	}
+}
+
+// ── Receive logs from the Roomy app services ─────────────────────────
+// Loki Push API receiver. Each app forwards its stdout here over the
+// Railway private network. The forwarder POSTs Loki-compatible JSON to
+//   http://<alloy>:3100/loki/api/v1/push
+loki.source.api "apps" {
+	http {
+		listen_address = "0.0.0.0"
+		listen_port    = 3100
+	}
+	forward_to = [loki.write.cloud.receiver]
+}
+
+// ── Optional: OTLP logs receiver (4317 gRPC / 4318 HTTP) ─────────────
+// Enable if you later instrument an app with OpenTelemetry and want to send
+// OTLP logs directly to Alloy instead of the Loki push API above.
+otelcol.receiver.otlp "apps" {
+	grpc { endpoint = "0.0.0.0:4317" }
+	http  { endpoint = "0.0.0.0:4318" }
+
+	output {
+		logs = [otelcol.processor.batch.default.input]
+	}
+}
+
+otelcol.processor.batch "default" {
+	output {
+		logs = [otelcol.exporter.loki.apps.input]
+	}
+}
+
+otelcol.exporter.loki "apps" {
+	forward_to = [loki.write.cloud.receiver]
+}
