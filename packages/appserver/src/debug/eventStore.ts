@@ -31,6 +31,7 @@ function openDebugDb(): Database | null {
   db = new Database(DEBUG_DB_PATH, { create: true });
   db.exec("pragma journal_mode = wal");
   db.exec("pragma synchronous = normal");
+  db.exec("pragma busy_timeout = 5000");
 
   db.exec(`
     create table if not exists raw_events (

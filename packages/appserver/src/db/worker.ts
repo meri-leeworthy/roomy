@@ -402,6 +402,7 @@ function openSpaceDbFile(spaceDid: string): Database {
     db.exec("pragma journal_mode = wal");
     db.exec("pragma synchronous = normal");
     db.exec("pragma foreign_keys = on");
+    db.exec("pragma busy_timeout = 5000");
     return db;
   }
   const path = join(spacesDir!, `${spaceDid}.sqlite`);
@@ -410,6 +411,7 @@ function openSpaceDbFile(spaceDid: string): Database {
   db.exec("pragma journal_mode = wal");
   db.exec("pragma synchronous = normal");
   db.exec("pragma foreign_keys = on");
+  db.exec("pragma busy_timeout = 5000");
   return db;
 }
 
@@ -428,6 +430,7 @@ function openGlobalDbInternal(): Database {
   globalDb.exec("pragma journal_mode = wal");
   globalDb.exec("pragma synchronous = normal");
   globalDb.exec("pragma foreign_keys = on");
+  globalDb.exec("pragma busy_timeout = 5000");
   try {
     initializeVersionedSchema(
       globalDb,
@@ -446,6 +449,7 @@ function openGlobalDbInternal(): Database {
     globalDb.exec("pragma journal_mode = wal");
     globalDb.exec("pragma synchronous = normal");
     globalDb.exec("pragma foreign_keys = on");
+    globalDb.exec("pragma busy_timeout = 5000");
     initializeVersionedSchema(
       globalDb,
       GLOBAL_SCHEMA_PATH,
@@ -639,6 +643,7 @@ function handleInit(req: WorkerRequest): {
   readStateDb.exec("pragma journal_mode = wal");
   readStateDb.exec("pragma synchronous = normal");
   readStateDb.exec("pragma foreign_keys = on");
+  readStateDb.exec("pragma busy_timeout = 5000");
   initializeReadStateSchema(
     readStateDb,
     READSTATE_SCHEMA_PATH,
@@ -654,6 +659,7 @@ function handleInit(req: WorkerRequest): {
   }
   eventsDb.exec("pragma journal_mode = wal");
   eventsDb.exec("pragma synchronous = normal");
+  eventsDb.exec("pragma busy_timeout = 5000");
   const eventsSchemaSql = readFileSync(EVENTS_SCHEMA_PATH, "utf-8");
   eventsDb.exec(eventsSchemaSql);
 
