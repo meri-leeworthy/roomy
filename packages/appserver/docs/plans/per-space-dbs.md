@@ -728,7 +728,7 @@ Every SQLite operation — every per-space read, every materialization batch, ev
 
 5. **`db.ts` wiring.** `openSpaceDb(spaceDid)` returns `pool.forSpace(spaceDid)`; `openGlobalDb`/`openReadStateDb`/`openEventsDb` return their dedicated handles. `openSpaceDbForEntity` still reads the global `entity_space` index first, then `pool.forSpace(spaceDid)`.
 
-6. **Materialization routing.** `SpaceMaterializer` for stream S writes through `pool.forSpace(S)`. Different streams' materializers now run on different workers concurrently. The event-log reads during `reMaterializeFromLocalEvents` still hit the single event-log worker — the *writes* (applyBatch, sortIdx, activity upserts) parallelize across the pool, which is where the round-trip cost is.
+6. **Materialization routing.** `SpaceMaterializer` for stream S writes through `pool.forSpace(S)`. Different streams' materializers now run on different workers concurrently. `reMaterializeFromLocalEvents` replays streams with bounded concurrency (up to the pool size, `DEFAULT_REMATERIALIZE_CONCURRENCY`), so different streams' event-log *reads* still hit the single event-log worker but their *writes* (applyBatch, sortIdx, activity upserts) land on different pool workers in parallel — which is where the round-trip cost is.
 
 7. **Embed sweeper.** Reads `pending_links` from the global worker, groups by space, and writes enrichment results through `pool.forSpace(spaceDid)` — so enrichment writes for different spaces land on different pool workers.
 
@@ -782,7 +782,7 @@ This is the subtle part. Cross-space queries fan out to many per-space DBs, and 
 | Risk | Mitigation |
 |---|---|
 | **Cross-space fan-out doesn't parallelize** (user's spaces collide on one worker) | Correctness is unaffected; only speed. Measure hash distribution; if real DIDs cluster, switch to a better hash or a two-level scheme (e.g. hash on a per-space salt). |
-| **Event-log worker becomes the backfill bottleneck** | Backfill reads the event log sequentially per stream; the *writes* still parallelize across the pool. If event-log reads dominate, consider sharding the event log (out of scope) or accepting the read-bound ceiling. |
+| **Event-log worker becomes the backfill bottleneck** | Backfill replays streams with bounded concurrency (up to the pool size), so the event-log *reads* are still serialized per stream on the single event-log worker while the *writes* parallelize across the pool. If event-log reads dominate, consider sharding the event log (out of scope) or accepting the read-bound ceiling. |
 | **More workers = more open file descriptors** | Per-worker LRU cap (default ~100) bounds open handles per worker; N workers × cap is the ceiling. Tune cap down if FD limits are hit. |
 | **Worker crash takes out a space** | Each space DB is independent and re-materializable from the event log. Pool worker crash only affects spaces pinned to it; they recover on next access. |
 | **Hash instability across restarts** | Use a stable hash (FNV-1a/xxhash over DID bytes), not a per-process seed. Changing N re-distributes but is safe (caches re-warm). |

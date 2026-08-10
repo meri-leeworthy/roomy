@@ -10,8 +10,11 @@
 
 import { createAppserver, type AppserverHandle } from "./appserver.ts";
 import { log } from "./log.ts";
-import { reMaterializeFromLocalEvents } from "./streams/reMaterialize.ts";
-import { openDb } from "./db/db.ts";
+import {
+  reMaterializeFromLocalEvents,
+  DEFAULT_REMATERIALIZE_CONCURRENCY,
+} from "./streams/reMaterialize.ts";
+import { openDb, poolStats } from "./db/db.ts";
 import { getHappyView } from "./happyview.ts";
 
 // ─── Server construction ───────────────────────────────────────────────────
@@ -36,7 +39,9 @@ const app: AppserverHandle = await createAppserver();
 // fallback, or Bluesky-only when HappyView is not configured).
 const db = openDb();
 const happyView = getHappyView();
-reMaterializeFromLocalEvents(db, undefined, happyView).catch((err) => {
+const poolSize = poolStats()?.size;
+const concurrency = poolSize ?? DEFAULT_REMATERIALIZE_CONCURRENCY;
+reMaterializeFromLocalEvents(db, undefined, happyView, concurrency).catch((err) => {
   log.error("startup", `re-materialization failed: ${err instanceof Error ? err.message : String(err)}`);
 });
 

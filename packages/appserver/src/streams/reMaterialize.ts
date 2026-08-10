@@ -31,14 +31,20 @@ interface RawEvent {
   payload: Uint8Array;
 }
 
+/** Default number of streams re-materialized concurrently (matches the Phase 4 pool default). */
+export const DEFAULT_REMATERIALIZE_CONCURRENCY = 4;
+
 /**
  * Re-materialize streams that have un-materialized events in the local events DB.
  *
- * Streams are processed sequentially (one at a time) to keep memory bounded.
- * Within a stream, the un-materialized events are batched — read in one query
- * and materialized in one `applyBatch` call, which is the fastest path for a
- * replay. Streams whose cursor is already at the latest event idx are skipped
- * entirely (no event reads, no materialization).
+ * Streams are processed with bounded concurrency (up to `concurrency` at
+ * once) so different spaces' replay lands on different Phase-4 pool workers
+ * in parallel. The cap keeps memory bounded — we never load every stream's
+ * event batch into memory at once. Within a stream, the un-materialized
+ * events are batched — read in one query and materialized in one
+ * `applyBatch` call, which is the fastest path for a replay. Streams whose
+ * cursor is already at the latest event idx are skipped entirely (no event
+ * reads, no materialization).
  *
  * Profiles for any user DIDs referenced by profile-relevant events
  * (joinSpace / createMessage / addAdmin) are hydrated from the bsky appview
@@ -53,6 +59,7 @@ export async function reMaterializeFromLocalEvents(
   db: DbLike,
   getProfiles: GetProfilesFn | undefined = undefined,
   happyView: HappyViewConfig | null = null,
+  concurrency: number = DEFAULT_REMATERIALIZE_CONCURRENCY,
 ): Promise<void> {
   const streams = await db
     .query("SELECT DISTINCT stream_id FROM stream_events ORDER BY stream_id")
@@ -126,68 +133,86 @@ export async function reMaterializeFromLocalEvents(
 
   let succeeded = 0;
   let failed = 0;
+  const total = toReplay.length;
+  const cap = Math.max(1, Math.min(Math.floor(concurrency), total));
 
-  for (const { streamId: streamDid, fromIdx } of toReplay) {
-    try {
-      const rawEvents = await db
-        .query(
-          "SELECT idx, user, payload FROM stream_events WHERE stream_id = ? AND idx >= ? ORDER BY idx",
-        )
-        .all<RawEvent>(streamDid, fromIdx);
+  // Bounded-concurrency worker pool: up to `cap` streams are replayed at
+  // once, each pulling the next pending stream as it finishes. Different
+  // streams hash to different Phase-4 pool workers, so their applyBatch
+  // runs in parallel. The cap keeps memory bounded (never all streams in
+  // flight at once) while still using the pool.
+  const nextIndex = { i: 0 };
 
-      if (rawEvents.length === 0) {
+  const replayWorker = async (): Promise<void> => {
+    while (true) {
+      const idx = nextIndex.i++;
+      if (idx >= total) return;
+      const { streamId: streamDid, fromIdx } = toReplay[idx]!;
+      try {
+        const rawEvents = await db
+          .query(
+            "SELECT idx, user, payload FROM stream_events WHERE stream_id = ? AND idx >= ? ORDER BY idx",
+          )
+          .all<RawEvent>(streamDid, fromIdx);
+
+        if (rawEvents.length > 0) {
+          const decodedEvents: DecodedStreamEvent[] = rawEvents.map(
+            (e): DecodedStreamEvent => ({
+              idx: e.idx as StreamIndex,
+              event: decode(e.payload) as Event,
+              user: e.user as UserDid,
+            }),
+          );
+
+          // Hydrate profiles for any new-user events in this batch before
+          // materializing, mirroring the live sendEvents path. Without this,
+          // backfilled messages render with blank author profiles. When a
+          // custom fetcher is provided (tests), use the injectable path.
+          // Otherwise use the HappyView-first fetcher (HappyView → Bluesky
+          // fallback, or Bluesky-only when HappyView is not configured).
+          if (getProfiles) {
+            await ensureProfilesForBatch(db, decodedEvents, getProfiles);
+          } else {
+            await ensureProfilesRoomyFirst(db, decodedEvents, happyView);
+          }
+
+          const globalDb = db.global?.();
+          const stats = await applyBatch(db.forSpace!(streamDid as StreamDid), streamDid as StreamDid, decodedEvents, {
+            isBackfill: true,
+          }, globalDb);
+
+          if (stats.materializerErrors > 0 || stats.applyErrors > 0) {
+            log.warn(
+              "startup",
+              `re-materialize ${streamDid}: ${stats.applied} applied, ${stats.materializerErrors} materializer errors, ${stats.applyErrors} apply errors`,
+            );
+          } else {
+            log.info(
+              "startup",
+              `re-materialize ${streamDid}: ${stats.applied} applied, 0 errors`,
+            );
+          }
+        }
         succeeded++;
-        continue;
-      }
-
-      const decodedEvents: DecodedStreamEvent[] = rawEvents.map(
-        (e): DecodedStreamEvent => ({
-          idx: e.idx as StreamIndex,
-          event: decode(e.payload) as Event,
-          user: e.user as UserDid,
-        }),
-      );
-
-      // Hydrate profiles for any new-user events in this batch before
-      // materializing, mirroring the live sendEvents path. Without this,
-      // backfilled messages render with blank author profiles. When a
-      // custom fetcher is provided (tests), use the injectable path.
-      // Otherwise use the HappyView-first fetcher (HappyView → Bluesky
-      // fallback, or Bluesky-only when HappyView is not configured).
-      if (getProfiles) {
-        await ensureProfilesForBatch(db, decodedEvents, getProfiles);
-      } else {
-        await ensureProfilesRoomyFirst(db, decodedEvents, happyView);
-      }
-
-      const globalDb = db.global?.();
-      const stats = await applyBatch(db.forSpace!(streamDid as StreamDid), streamDid as StreamDid, decodedEvents, {
-        isBackfill: true,
-      }, globalDb);
-      succeeded++;
-      const total = toReplay.length;
-      const pct = Math.round((succeeded / total) * 100);
-      const progress = `[${succeeded}/${total} ${pct}%]`;
-
-      if (stats.materializerErrors > 0 || stats.applyErrors > 0) {
-        log.warn(
+      } catch (err) {
+        failed++;
+        log.error(
           "startup",
-          `${progress} re-materialize ${streamDid}: ${stats.applied} applied, ${stats.materializerErrors} materializer errors, ${stats.applyErrors} apply errors`,
+          `re-materialize failed for ${streamDid}: ${err instanceof Error ? err.message : String(err)}`,
         );
-      } else {
+      }
+
+      if ((succeeded + failed) % 25 === 0 || succeeded + failed === total) {
+        const pct = Math.round(((succeeded + failed) / total) * 100);
         log.info(
           "startup",
-          `${progress} re-materialize ${streamDid}: ${stats.applied} applied, 0 errors`,
+          `re-materialization progress [${succeeded + failed}/${total} ${pct}%]`,
         );
       }
-    } catch (err) {
-      failed++;
-      log.error(
-        "startup",
-        `re-materialize failed for ${streamDid}: ${err instanceof Error ? err.message : String(err)}`,
-      );
     }
-  }
+  };
+
+  await Promise.all(Array.from({ length: cap }, () => replayWorker()));
 
   log.info(
     "startup",

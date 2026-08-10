@@ -533,4 +533,58 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(row?.space_did).toBe(streamDid);
   });
 
+  test("re-materializes streams concurrently, bounded by the concurrency cap", async () => {
+    // With a pool of N workers available, boot rematerialization should run
+    // several streams at once (different spaces land on different pool
+    // workers) rather than strictly one at a time — but never more than the
+    // `concurrency` cap, keeping memory bounded. We observe concurrency via
+    // the injected getProfiles fetcher: each stream hydrates its author
+    // before materializing, so in-flight getProfiles calls measure how many
+    // streams are being replayed simultaneously.
+    const streamCount = 4;
+    const streams = Array.from({ length: streamCount }, (_, i) =>
+      StreamDid.assert(`did:web:concurrent-${i}.example`),
+    );
+
+    let active = 0;
+    let maxActive = 0;
+    const getProfiles = mock(async (dids: UserDid[]) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 100));
+      active--;
+      return dids.map((d) => ({
+        did: d,
+        handle: `${d.replace(/:/g, "-")}.test`,
+        displayName: "Concurrent Author",
+      }));
+    });
+
+    for (let i = 0; i < streamCount; i++) {
+      const author = UserDid.assert(`did:plc:conc-author-${i}`);
+      await seedEvents(db, streams[i]!, [
+        {
+          $type: "space.roomy.space.joinSpace.v0",
+          id: newUlid(),
+        },
+      ], author);
+    }
+
+    await reMaterializeFromLocalEvents(db, getProfiles as never, null, 2);
+
+    // All streams were materialized.
+    for (const s of streams) {
+      const cnt = await db
+        .forSpace!(s)
+        .query("select count(*) as cnt from entities where stream_id = ?")
+        .get<{ cnt: number }>(s);
+      expect(cnt!.cnt).toBeGreaterThan(0);
+    }
+
+    // Exactly 2 profile fetches were in flight at once — proving parallel
+    // stream replay AND that the cap (not the pool) bound the concurrency.
+    expect(maxActive).toBeGreaterThanOrEqual(2);
+    expect(maxActive).toBeLessThanOrEqual(2);
+  });
+
 });
