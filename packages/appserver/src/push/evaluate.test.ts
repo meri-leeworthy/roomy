@@ -784,7 +784,7 @@ describe("push/evaluate — rich-text message content", () => {
       ],
     );
 
-    const deliveries = await evaluatePush(db, {
+    const deliveries = await evaluatePush(db, db, {
       spaceId: SPACE,
       roomId: CHANNEL,
       messageId: MESSAGE_ID,
