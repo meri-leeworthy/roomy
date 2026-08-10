@@ -6,17 +6,21 @@
 # The appserver's per-space database split means there are two kinds of data:
 #
 #   Static files replicated here:
-#     /app/data/roomy-events.sqlite    - append-only event log (ULTIMATE source
+#     /data/roomy-events.sqlite    - append-only event log (ULTIMATE source
 #                                         of truth; re-materialisation replays it)
-#     /app/data/roomy-readstate.sqlite - read-state (unread counts; persistent
+#     /data/roomy-readstate.sqlite - read-state (unread counts; persistent
 #                                         source of truth)
-#     /app/data/global.sqlite           - cross-space membership / profiles
+#     /data/global.sqlite           - cross-space membership / profiles
 #
-#   Derived, regenerable (NOT replicated):
-#     /app/data/spaces/<spaceDid>.sqlite - per-space materialised DBs. Created
+#   Derived, regenerable (NOT replicated, but persisted on the /data volume):
+#     /data/spaces/<spaceDid>.sqlite - per-space materialised DBs. Created
 #                                          lazily and re-materialised from the
-#                                          event log on first access, so after a
-#                                          restore they rebuild on demand.
+#                                          event log on first access. They hold
+#                                          the materialization_cursor, so keeping
+#                                          them on the persistent volume lets boot
+#                                          re-materialisation skip caught-up spaces
+#                                          instead of rebuilding all of them on
+#                                          every deploy.
 #
 # Litestream needs static `dbs:` entries, so the dynamic per-space files are
 # intentionally excluded — they are derived data and self-rebuild. See
@@ -28,7 +32,7 @@
 # placeholders at startup.
 
 dbs:
-  - path: /app/data/roomy-events.sqlite
+  - path: /data/roomy-events.sqlite
     replicas:
       - type: s3
         bucket: ${S3_BUCKET}
@@ -39,7 +43,7 @@ dbs:
         secret-access-key: ${S3_SECRET_ACCESS_KEY}
         force-path-style: true
 
-  - path: /app/data/roomy-readstate.sqlite
+  - path: /data/roomy-readstate.sqlite
     replicas:
       - type: s3
         bucket: ${S3_BUCKET}
@@ -50,7 +54,7 @@ dbs:
         secret-access-key: ${S3_SECRET_ACCESS_KEY}
         force-path-style: true
 
-  - path: /app/data/global.sqlite
+  - path: /data/global.sqlite
     replicas:
       - type: s3
         bucket: ${S3_BUCKET}

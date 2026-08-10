@@ -16,7 +16,8 @@ Deployed on Railway from `Dockerfile.appserver` (build context is the repo root)
 
 ### Backup & restore (Litestream → S3)
 
-The container runs several SQLite databases in WAL mode under `/app/data` (see
+The container runs several SQLite databases in WAL mode under `/data`, a
+Railway persistent volume that survives deploys (see
 `docs/plans/per-space-dbs.md` for the per-space split):
 
 | DB | Path | Kind |
@@ -38,17 +39,21 @@ they are derived data that regenerate lazily via re-materialisation from the
 event log on first access after a restore (litestream also needs static paths,
 which can't enumerate an unbounded set of spaces).
 
-Railway gives the appserver no persistent disk, so `/app/data` is wiped on
-every deploy — the static DBs are re-restored from the backup at boot. If a
-Railway volume is later attached, an existing local DB wins and replication
-simply continues.
+The `/data` volume persists across deploys, so the DBs (including the
+per-space views and their `materialization_cursor`) are not wiped on redeploy.
+On boot, an existing valid local DB wins and replication simply continues; a
+DB is only restored from S3 when it is absent or corrupt (first deploy, or a
+manual reset). This is what makes boot re-materialisation cheap: with the
+per-space DBs intact, re-materialisation skips caught-up spaces instead of
+rebuilding every space on each deploy.
 
 ### Fail-closed restore (data-loss protection)
 
-Because `/app/data` is ephemeral, a redeploy with a failed or missing backup
-would silently discard all data if the container just "started fresh". The
-entrypoint therefore **refuses to start fresh** unless it can restore a backup
-or the operator has explicitly opted in:
+Because `/data` is a persistent volume, a redeploy with a failed or missing
+backup still has its local DBs and does not silently discard data. The
+entrypoint still **refuses to start fresh** as a safety net for the case where
+a local DB is absent AND no backup can be restored, unless the operator has
+explicitly opted in:
 
 - If a local DB exists and is a valid SQLite file, it is used as-is.
 - If a local DB is missing (or corrupt), the entrypoint restores it from S3.

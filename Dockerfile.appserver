@@ -67,16 +67,21 @@ COPY packages/appserver/litestream.yml /etc/litestream.yml
 COPY packages/appserver/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Create data directory for SQLite databases
-RUN mkdir -p /app/data
+# Create data directory for SQLite databases. These live on the Railway
+# persistent volume mounted at /data (the legacy APPSERVER_DB_PATH=
+# /data/roomy.sqlite points at it too). Because the volume survives deploys,
+# the per-space DBs (and their materialization_cursor / schema-version state)
+# persist, so boot re-materialisation only replays the gap instead of
+# rebuilding every space on each deploy.
+RUN mkdir -p /data/spaces
 
 # Static DBs (replicated by Litestream). The monolithic materialised DB was
 # removed in the per-space split, so there is no APPSERVER_DB_PATH. Per-space
 # DBs live under SPACES_DIR and are derived/regenerable, so not listed here.
-ENV EVENTS_DB_PATH=/app/data/roomy-events.sqlite
-ENV READSTATE_DB_PATH=/app/data/roomy-readstate.sqlite
-ENV GLOBAL_DB_PATH=/app/data/global.sqlite
-ENV SPACES_DIR=/app/data/spaces
+ENV EVENTS_DB_PATH=/data/roomy-events.sqlite
+ENV READSTATE_DB_PATH=/data/roomy-readstate.sqlite
+ENV GLOBAL_DB_PATH=/data/global.sqlite
+ENV SPACES_DIR=/data/spaces
 
 EXPOSE 8080
 

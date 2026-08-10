@@ -12,25 +12,26 @@ set -euo pipefail
 # starts the app wrapped in `litestream replicate` so every WAL change is
 # continuously copied to the backup bucket.
 #
-# On Railway the appserver runs without persistent disk, so /app/data is
-# wiped on every deploy — the local DBs are absent on boot and must be
-# restored from the S3 backup before the app starts.
+# On Railway the appserver's SQLite databases live on a persistent volume at
+# /data, so they survive deploys. If a DB is absent/corrupt at boot (first
+# deploy, or manual reset) it is restored from the S3 backup; otherwise the
+# existing file wins and replication simply continues.
 #
 # ── Fail-closed safety ───────────────────────────────────────────────────
-# Because /app/data is ephemeral, a redeploy with a failed/missing backup
-# would silently discard ALL data if we just "started fresh". So when S3 is
-# configured we refuse to start fresh unless we can positively confirm there
-# is no backup (S3 reachable, empty replica) or the operator has explicitly
-# opted in via LITESTREAM_ALLOW_FRESH_START=true.
+# Because /data is a persistent volume, a redeploy with a failed/missing
+# backup still has its local DBs and does not silently discard data. The
+# fail-closed check remains a safety net for the case where a local DB is
+# absent AND no backup is restorable: we refuse to start fresh unless the
+# operator has explicitly opted in via LITESTREAM_ALLOW_FRESH_START=true.
 #
 # Only the STATIC DBs (see litestream.yml) are restored. Per-space DBs under
-# /app/data/spaces/ are derived and regenerate lazily via re-materialisation
+# /data/spaces/ are derived and regenerate lazily via re-materialisation
 # from the event log on first access, so they are intentionally not
 # replicated or restored here.
 
-DATA_DIR="${APPSERVER_DATA_DIR:-/app/data}"
+DATA_DIR="${APPSERVER_DATA_DIR:-/data}"
 mkdir -p "$DATA_DIR"
-mkdir -p "$DATA_DIR/spaces"
+mkdir -p "${SPACES_DIR:-$DATA_DIR/spaces}"
 
 # ── Optional Litestream ──────────────────────────────────────────────────
 # If any required S3 var is missing, run the app directly (no backups). This
@@ -51,9 +52,9 @@ ALLOW_FRESH_START="${LITESTREAM_ALLOW_FRESH_START:-false}"
 # source of truth; read-state is a persistent source of truth; global holds
 # membership/profiles. Per-space DBs are derived and excluded.
 STATIC_DBS=(
-  "$DATA_DIR/roomy-events.sqlite"
-  "$DATA_DIR/roomy-readstate.sqlite"
-  "$DATA_DIR/global.sqlite"
+  "${EVENTS_DB_PATH:-$DATA_DIR/roomy-events.sqlite}"
+  "${READSTATE_DB_PATH:-$DATA_DIR/roomy-readstate.sqlite}"
+  "${GLOBAL_DB_PATH:-$DATA_DIR/global.sqlite}"
 )
 
 # SQLite database files begin with the 16-byte magic "SQLite format 3\0".
@@ -100,6 +101,7 @@ restore_or_fail() {
 }
 
 for db in "${STATIC_DBS[@]}"; do
+  mkdir -p "$(dirname "$db")"
   restore_or_fail "$db"
 done
 
