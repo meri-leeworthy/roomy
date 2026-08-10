@@ -8,8 +8,9 @@ The config is **baked into the image** so no Railway volume is required.
 
 ## Deploy on Railway
 
-1. **New Project → Deploy from Dockerfile**, pointing at `deploy/alloy/`
-   (this directory). Railway uses `Dockerfile` here.
+1. **New Project → Deploy from Dockerfile**, pointing at the repo root.
+   Set the **Dockerfile path** to `deploy/alloy/Dockerfile`. The build context
+   is the repo root, so the config is referenced as `deploy/alloy/config.alloy`.
 2. Under the service → **Variables**, set:
    | Variable | Value |
    |---|---|

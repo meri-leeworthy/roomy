@@ -13,7 +13,9 @@
 
 FROM grafana/alloy:latest
 
-COPY config.alloy /etc/alloy/config.alloy
+# Build context is the repo root (Railway builds from the repo, not this
+# subdir), so reference the config relative to the root.
+COPY deploy/alloy/config.alloy /etc/alloy/config.alloy
 
 # Alloy writes WAL/positions to disk — keep the volume small but writable.
 ENV ALLOY_WAL_DIR=/var/lib/alloy
