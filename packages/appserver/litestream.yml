@@ -6,19 +6,17 @@
 # The appserver's per-space database split means there are two kinds of data:
 #
 #   Static files replicated here:
-#     /app/data/roomy.sqlite            - monolithic materialised view (Phase 1
-#                                          source of truth for per-space backfill)
-#     /app/data/roomy-readstate.sqlite  - read-state (unread counts; persistent
-#                                          source of truth)
-#     /app/data/roomy-events.sqlite     - append-only event log (ULTIMATE source
-#                                          of truth; re-materialisation replays it)
-#     /app/data/global.sqlite           - cross-space membership edges
+#     /app/data/roomy-events.sqlite    - append-only event log (ULTIMATE source
+#                                         of truth; re-materialisation replays it)
+#     /app/data/roomy-readstate.sqlite - read-state (unread counts; persistent
+#                                         source of truth)
+#     /app/data/global.sqlite           - cross-space membership / profiles
 #
 #   Derived, regenerable (NOT replicated):
 #     /app/data/spaces/<spaceDid>.sqlite - per-space materialised DBs. Created
-#                                          lazily and backfilled from
-#                                          roomy.sqlite on first access, so after
-#                                          a restore they rebuild on demand.
+#                                          lazily and re-materialised from the
+#                                          event log on first access, so after a
+#                                          restore they rebuild on demand.
 #
 # Litestream needs static `dbs:` entries, so the dynamic per-space files are
 # intentionally excluded — they are derived data and self-rebuild. See
@@ -30,17 +28,6 @@
 # placeholders at startup.
 
 dbs:
-  - path: /app/data/roomy.sqlite
-    replicas:
-      - type: s3
-        bucket: ${S3_BUCKET}
-        path: appserver/roomy.sqlite
-        endpoint: ${S3_ENDPOINT}
-        region: ${S3_REGION}
-        access-key-id: ${S3_ACCESS_KEY_ID}
-        secret-access-key: ${S3_SECRET_ACCESS_KEY}
-        force-path-style: true
-
   - path: /app/data/roomy-events.sqlite
     replicas:
       - type: s3

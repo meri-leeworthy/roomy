@@ -70,15 +70,19 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # Create data directory for SQLite databases
 RUN mkdir -p /app/data
 
-ENV APPSERVER_DB_PATH=/app/data/roomy.sqlite
-ENV READSTATE_DB_PATH=/app/data/roomy-readstate.sqlite
+# Static DBs (replicated by Litestream). The monolithic materialised DB was
+# removed in the per-space split, so there is no APPSERVER_DB_PATH. Per-space
+# DBs live under SPACES_DIR and are derived/regenerable, so not listed here.
 ENV EVENTS_DB_PATH=/app/data/roomy-events.sqlite
+ENV READSTATE_DB_PATH=/app/data/roomy-readstate.sqlite
 ENV GLOBAL_DB_PATH=/app/data/global.sqlite
 ENV SPACES_DIR=/app/data/spaces
 
 EXPOSE 8080
 
-# The entrypoint restores the static DBs from S3 if absent, then runs the app
-# under `litestream replicate` so WAL changes are continuously backed up.
-# Per-space DBs (data/spaces/) are derived and regenerate via lazy backfill.
+# The entrypoint restores the static DBs from S3 if absent (fail-closed: it
+# refuses to start fresh when no backup is restorable, to avoid data loss),
+# then runs the app under `litestream replicate` so WAL changes are
+# continuously backed up. Per-space DBs (data/spaces/) are derived and
+# regenerate via re-materialisation from the event log.
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

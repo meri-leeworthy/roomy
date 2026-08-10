@@ -21,28 +21,43 @@ The container runs several SQLite databases in WAL mode under `/app/data` (see
 
 | DB | Path | Kind |
 |---|---|---|
-| monolithic materialised view | `roomy.sqlite` | derived (source for per-space backfill) |
 | event log | `roomy-events.sqlite` | **source of truth** (append-only) |
 | read-state | `roomy-readstate.sqlite` | persistent source of truth (unread) |
-| global membership | `global.sqlite` | derived |
-| per-space views | `spaces/<spaceDid>.sqlite` | derived (lazy backfill from `roomy.sqlite`) |
+| global membership | `global.sqlite` | derived (regenerable from event log) |
+| per-space views | `spaces/<spaceDid>.sqlite` | derived (re-materialised from event log) |
 
 The Docker entrypoint (`packages/appserver/docker-entrypoint.sh`) restores the
-**static** DBs (`roomy.sqlite`, `roomy-events.sqlite`, `roomy-readstate.sqlite`,
-`global.sqlite`) from an S3-compatible bucket via Litestream when no local copy
-exists, then runs the app under `litestream replicate` so every WAL change is
-continuously copied to the bucket. Replication config lives in
+**static** DBs (`roomy-events.sqlite`, `roomy-readstate.sqlite`, `global.sqlite`)
+from an S3-compatible bucket via Litestream when no local copy exists, then
+runs the app under `litestream replicate` so every WAL change is continuously
+copied to the bucket. Replication config lives in
 `packages/appserver/litestream.yml`.
 
 The **per-space DBs** (`spaces/*.sqlite`) are deliberately *not* replicated:
-they are derived data that regenerate lazily via backfill from `roomy.sqlite`
-on first access after a restore (litestream also needs static paths, which
-can't enumerate an unbounded set of spaces).
+they are derived data that regenerate lazily via re-materialisation from the
+event log on first access after a restore (litestream also needs static paths,
+which can't enumerate an unbounded set of spaces).
 
 Railway gives the appserver no persistent disk, so `/app/data` is wiped on
 every deploy — the static DBs are re-restored from the backup at boot. If a
 Railway volume is later attached, an existing local DB wins and replication
 simply continues.
+
+### Fail-closed restore (data-loss protection)
+
+Because `/app/data` is ephemeral, a redeploy with a failed or missing backup
+would silently discard all data if the container just "started fresh". The
+entrypoint therefore **refuses to start fresh** unless it can restore a backup
+or the operator has explicitly opted in:
+
+- If a local DB exists and is a valid SQLite file, it is used as-is.
+- If a local DB is missing (or corrupt), the entrypoint restores it from S3.
+- If the restore fails (no backup yet, or S3 unreachable/misconfigured), the
+  container **exits with an error** instead of starting fresh.
+- For the **very first deploy** (no backup exists yet), set
+  `LITESTREAM_ALLOW_FRESH_START=true` to allow a fresh start. Leave it unset
+  (or `false`) on all subsequent deploys so a backup failure fails loudly
+  rather than wiping data.
 
 ### Setting up the Railway S3 bucket
 

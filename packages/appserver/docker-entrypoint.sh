@@ -3,47 +3,104 @@ set -euo pipefail
 
 # ── Roomy appserver Docker entrypoint ────────────────────────────────────
 #
-# Restores the appserver's static SQLite databases from S3 (via Litestream)
-# when no local copy exists, then starts the app wrapped in `litestream
-# replicate` so every WAL change is continuously copied to the backup bucket.
+# Litestream backups are OPTIONAL. If S3 credentials are not configured (e.g.
+# the Railway S3 bucket isn't linked yet), the app runs directly with no
+# backups — so the container never crashes just because backups aren't set up.
+#
+# When S3 IS configured, the entrypoint restores the appserver's static
+# SQLite databases from S3 (via Litestream) when no local copy exists, then
+# starts the app wrapped in `litestream replicate` so every WAL change is
+# continuously copied to the backup bucket.
 #
 # On Railway the appserver runs without persistent disk, so /app/data is
-# wiped on every deploy — the local DBs are absent on boot and restored from
-# the S3 backup before the app starts. If a local copy already exists (e.g.
-# a Railway volume is attached), the local DB wins and replication continues
-# from there.
+# wiped on every deploy — the local DBs are absent on boot and must be
+# restored from the S3 backup before the app starts.
+#
+# ── Fail-closed safety ───────────────────────────────────────────────────
+# Because /app/data is ephemeral, a redeploy with a failed/missing backup
+# would silently discard ALL data if we just "started fresh". So when S3 is
+# configured we refuse to start fresh unless we can positively confirm there
+# is no backup (S3 reachable, empty replica) or the operator has explicitly
+# opted in via LITESTREAM_ALLOW_FRESH_START=true.
 #
 # Only the STATIC DBs (see litestream.yml) are restored. Per-space DBs under
-# /app/data/spaces/ are derived and regenerate lazily via backfill on first
-# access, so they are intentionally not replicated or restored here.
+# /app/data/spaces/ are derived and regenerate lazily via re-materialisation
+# from the event log on first access, so they are intentionally not
+# replicated or restored here.
 
 DATA_DIR="${APPSERVER_DATA_DIR:-/app/data}"
 mkdir -p "$DATA_DIR"
 mkdir -p "$DATA_DIR/spaces"
 
-# Restore each static database individually, but only if a local copy is
-# missing. `-if-replica-exists` makes the restore a no-op (exit 0) when no
-# backup has been written to the bucket yet (fresh bucket / first deploy).
+# ── Optional Litestream ──────────────────────────────────────────────────
+# If any required S3 var is missing, run the app directly (no backups). This
+# keeps the container deployable before the bucket is linked and avoids the
+# "bucket required for s3 replica" crash.
+if [ -z "${S3_BUCKET:-}" ] || [ -z "${S3_ENDPOINT:-}" ] || \
+   [ -z "${S3_ACCESS_KEY_ID:-}" ] || [ -z "${S3_SECRET_ACCESS_KEY:-}" ]; then
+  echo "[entrypoint] S3 backup not configured (need S3_BUCKET, S3_ENDPOINT, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY)."
+  echo "[entrypoint] Running WITHOUT Litestream backups."
+  exec bun run packages/appserver/src/index.ts
+fi
+
+# Set to "true" ONLY to force a fresh start when S3 is unreachable and no
+# backup can be restored (e.g. first deploy against a misconfigured bucket).
+ALLOW_FRESH_START="${LITESTREAM_ALLOW_FRESH_START:-false}"
+
+# Static DBs replicated by litestream.yml. The event-log DB is the append-only
+# source of truth; read-state is a persistent source of truth; global holds
+# membership/profiles. Per-space DBs are derived and excluded.
 STATIC_DBS=(
-  "$DATA_DIR/roomy.sqlite"
-  "$DATA_DIR/roomy-readstate.sqlite"
   "$DATA_DIR/roomy-events.sqlite"
+  "$DATA_DIR/roomy-readstate.sqlite"
   "$DATA_DIR/global.sqlite"
 )
 
-restore_if_missing() {
+# SQLite database files begin with the 16-byte magic "SQLite format 3\0".
+# Used to detect a corrupt/truncated local DB so we restore over it instead of
+# trusting a bad file.
+is_valid_sqlite() {
   local db="$1"
-  if [ ! -f "$db" ]; then
-    echo "[entrypoint] no local DB at $db; attempting Litestream restore"
-    litestream restore -if-replica-exists -config /etc/litestream.yml "$db" || \
-      echo "[entrypoint] no backup for $db yet; starting fresh"
-  else
-    echo "[entrypoint] existing DB at $db; skipping restore"
+  [ -f "$db" ] || return 1
+  [ "$(head -c 16 "$db" 2>/dev/null)" = $'SQLite format 3\0' ]
+}
+
+restore_or_fail() {
+  local db="$1"
+
+  if [ -f "$db" ] && is_valid_sqlite "$db"; then
+    echo "[entrypoint] existing valid DB at $db; skipping restore"
+    return 0
   fi
+
+  if [ -f "$db" ]; then
+    echo "[entrypoint] WARNING: existing DB at $db is not a valid SQLite file; restoring over it" >&2
+    rm -f "$db" "$db-wal" "$db-shm"
+  fi
+
+  echo "[entrypoint] no local DB at $db; attempting Litestream restore"
+  # -if-replica-exists: exit 0 when the replica is absent (S3 reachable) OR
+  # when it was restored; exit non-zero when S3 is unreachable/misconfigured.
+  if litestream restore -if-replica-exists -config /etc/litestream.yml "$db"; then
+    echo "[entrypoint] restored $db (or no backup exists yet)"
+    return 0
+  fi
+
+  # Restore failed because S3 is unreachable/misconfigured. Do NOT start fresh
+  # unless explicitly allowed, to avoid silently discarding data.
+  if [ "$ALLOW_FRESH_START" = "true" ]; then
+    echo "[entrypoint] WARNING: restore failed for $db; starting fresh (LITESTREAM_ALLOW_FRESH_START=true)" >&2
+    return 0
+  fi
+
+  echo "[entrypoint] ERROR: no local DB and restore failed for $db (S3 unreachable or misconfigured)." >&2
+  echo "[entrypoint] Refusing to start fresh to avoid data loss." >&2
+  echo "[entrypoint] If this is intentional, set LITESTREAM_ALLOW_FRESH_START=true." >&2
+  exit 1
 }
 
 for db in "${STATIC_DBS[@]}"; do
-  restore_if_missing "$db"
+  restore_or_fail "$db"
 done
 
 # Run the app under `litestream replicate`: Litestream monitors the static
