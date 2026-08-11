@@ -134,6 +134,11 @@ function flattenInline(node: ProseMirrorNode): TextRun[] {
         text: `#${label}`,
         marks: [{ type: "channelThreadMention", attrs: child.attrs }],
       });
+    } else if (child.type === "hardBreak") {
+      // Preserve line breaks within a paragraph as a newline in the block
+      // text (otherwise `line1` + hardBreak + `line2` would collapse to
+      // `line1line2`).
+      runs.push({ text: "\n", marks: [] });
     } else if (child.content) {
       runs.push(...flattenInline(child));
     }
@@ -380,6 +385,33 @@ function featureToMark(feature: FacetFeature): ProseMirrorMark | null {
 }
 
 /**
+ * Split any text node containing `\n` into text + hardBreak nodes, so a
+ * newline preserved in block text round-trips back to a hard break in the
+ * editor (mirrors `flattenInline`'s hardBreak → `\n` handling).
+ */
+function splitNewlines(nodes: ProseMirrorNode[]): ProseMirrorNode[] {
+  const out: ProseMirrorNode[] = [];
+  for (const node of nodes) {
+    if (node.type === "text" && node.text?.includes("\n")) {
+      const parts = node.text.split("\n");
+      parts.forEach((part, i) => {
+        if (i > 0) out.push({ type: "hardBreak" });
+        if (part) {
+          out.push(
+            node.marks && node.marks.length > 0
+              ? { type: "text", text: part, marks: node.marks }
+              : { type: "text", text: part },
+          );
+        }
+      });
+    } else {
+      out.push(node);
+    }
+  }
+  return out;
+}
+
+/**
  * Split a block's text into ProseMirror text nodes with marks, applying all
  * facets that cover each segment. Overlapping facets accumulate marks.
  */
@@ -388,7 +420,7 @@ function textNodesWithFacets(
   facets: Facet[] | undefined,
 ): ProseMirrorNode[] {
   if (!facets || facets.length === 0) {
-    return text ? [{ type: "text", text }] : [];
+    return splitNewlines(text ? [{ type: "text", text }] : []);
   }
   const sorted = sortedFacets(facets);
   const nodes: ProseMirrorNode[] = [];
@@ -419,7 +451,7 @@ function textNodesWithFacets(
     }
     nodes.push(marks.length > 0 ? { type: "text", text: segment, marks } : { type: "text", text: segment });
   }
-  return nodes;
+  return splitNewlines(nodes);
 }
 
 /** Convert a UTF-8 byte offset into a string to a UTF-16 code-unit index. */

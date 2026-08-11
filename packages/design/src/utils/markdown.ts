@@ -61,7 +61,7 @@ function cachedGet(cache: Map<string, string>, key: string, compute: () => strin
 /** Render the markdown string to sanitized HTML, ready for display in the app. */
 export function renderMarkdownSanitized(markdown: string) {
   return cachedGet(htmlCache, markdown, () =>
-    DOMPurify.sanitize(marked.parse(markdown, { async: false }), {
+    DOMPurify.sanitize(marked.parse(markdown, { async: false, breaks: true }), {
       ADD_ATTR: ["target", "rel", "data-roomy-internal-link"],
     }) as string,
   );
@@ -69,7 +69,7 @@ export function renderMarkdownSanitized(markdown: string) {
 
 export function renderMarkdownPlaintext(markdown: string): string {
   return cachedGet(plaintextCache, markdown, () => {
-    const html = DOMPurify.sanitize(marked.parse(markdown, { async: false }), {
+    const html = DOMPurify.sanitize(marked.parse(markdown, { async: false, breaks: true }), {
       ADD_ATTR: ["target", "rel"],
     }) as string;
     const doc = new DOMParser().parseFromString(html, "text/html");

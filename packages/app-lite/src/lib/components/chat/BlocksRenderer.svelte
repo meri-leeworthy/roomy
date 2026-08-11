@@ -40,6 +40,11 @@
       .replace(/>/g, "&gt;");
   }
 
+  /** Escape HTML and convert newlines to `<br>` (for text-bearing blocks). */
+  function escapeText(s: string): string {
+    return escapeHtml(s).replace(/\n/g, "<br>");
+  }
+
   function escapeAttr(s: string): string {
     return s
       .replace(/&/g, "&amp;")
@@ -57,7 +62,7 @@
    * and faceted slice is escaped independently, then wrapped.
    */
   function renderFaceted(text: string, facets: Facet[] | undefined): string {
-    if (!facets || facets.length === 0) return escapeHtml(text);
+    if (!facets || facets.length === 0) return escapeText(text);
     const sorted = [...facets].sort(
       (a, b) => a.index.byteStart - b.index.byteStart,
     );
@@ -68,18 +73,18 @@
       if (end <= pos) continue; // fully consumed (nested inside an earlier facet)
       const sliceStart = Math.max(start, pos);
       if (sliceStart > pos) {
-        out.push(escapeHtml(text.slice(pos, sliceStart)));
+        out.push(escapeText(text.slice(pos, sliceStart)));
       }
       const slice = text.slice(sliceStart, end);
       pos = end;
       out.push(wrapFeatures(slice, facet.features));
     }
-    if (pos < text.length) out.push(escapeHtml(text.slice(pos)));
+    if (pos < text.length) out.push(escapeText(text.slice(pos)));
     return out.join("");
   }
 
   function wrapFeatures(slice: string, features: FacetFeature[]): string {
-    let inner = escapeHtml(slice);
+    let inner = escapeText(slice);
     for (const feature of features) {
       switch (feature.$type) {
         case "space.roomy.richtext.facet#bold":

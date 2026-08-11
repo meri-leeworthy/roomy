@@ -98,7 +98,10 @@
 
   onMount(() => {
     const extensions = [
-      StarterKit.configure({ heading: false }),
+      // Headings enabled so markdown shortcuts (`# `, `## `, …) convert to
+      // header blocks as the user types. Bullet/ordered list shortcuts
+      // (`- `, `1. `) come from StarterKit's input rules by default.
+      StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] } }),
       Placeholder.configure({ placeholder }),
       RichTextLink.configure({
         openOnClick: false,
@@ -106,7 +109,10 @@
         defaultProtocol: "https",
       }),
       initKeyboardShortcutHandler({ onEnter: wrappedOnEnter }),
-      Markdown,
+      // `breaks: true` keeps single newlines (soft breaks) as hard breaks
+      // instead of collapsing them to spaces — fixes newlines being stripped
+      // when a message is re-parsed or edited.
+      Markdown.configure({ breaks: true }),
     ];
 
     if (mentionSearch) {
