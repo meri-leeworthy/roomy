@@ -279,4 +279,38 @@ describe("space.roomy.space.sendEvents", () => {
       expect(rows[i]!.idx).toBe(i);
     }
   });
+
+  test("P2/P8: write to a rebuilding space is rejected with SpaceRematerializing and not logged", async () => {
+    // Mark the space as rebuilding (blue-green). The shared pool's worker
+    // flags it, so the singleton StreamManager's write gate sees it.
+    const db = openDb();
+    await db.spaceRebuildBegin!(SPACE);
+    expect(await db.isSpaceRebuilding!(SPACE)).toBe(true);
+
+    const res = await authedFetch(USER)(
+      `${baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          spaceId: SPACE,
+          events: [makeCreateMessageEvent(CHANNEL)],
+        }),
+      },
+    );
+
+    // A specific, retryable status — not a 500.
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error?: string; message?: string };
+    expect(body.error).toBe("SpaceRematerializing");
+
+    // The event did NOT land in the event log (P2/P8 reject-before-log).
+    const eventRows = await db
+      .query("select idx from stream_events where stream_id = ?")
+      .all<{ idx: number }>(SPACE);
+    expect(eventRows).toHaveLength(0);
+
+    // Clean up so the shared pool isn't left rebuilding.
+    await db.spaceRebuildAbort!(SPACE);
+    expect(await db.isSpaceRebuilding!(SPACE)).toBe(false);
+  });
 });
