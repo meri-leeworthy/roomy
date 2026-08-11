@@ -22,6 +22,10 @@ export const initKeyboardShortcutHandler = ({
 }: KeyboardShortcutHandlerProps) =>
   Extension.create({
     name: "keyboardShortcutHandler",
+    // Higher than StarterKit's default (100) so this keymap runs before the
+    // HardBreak extension's `Shift-Enter`/`Mod-Enter` → setHardBreak bindings,
+    // letting us override them with splitListItem/splitBlock (new block).
+    priority: 1000,
     addProseMirrorPlugins() {
       return [
         keymap({
@@ -30,15 +34,20 @@ export const initKeyboardShortcutHandler = ({
             onEnter();
             return true;
           },
-          // Shift/Cmd+Enter create a new block (paragraph, list item, …)
-          // instead of a hard break, so users can build lists and stack
-          // multiple headers in one message without sending.
+          // Shift/Cmd+Enter create a new block. In a list this means a new
+          // list item (splitListItem); elsewhere a new paragraph (splitBlock).
+          // This lets users build lists and stack multiple headers in one
+          // message without sending.
           "Shift-Enter": (state, dispatch) => {
-            splitBlock(state, dispatch);
+            if (!this.editor.commands.splitListItem("listItem")) {
+              splitBlock(state, dispatch);
+            }
             return true;
           },
           "Mod-Enter": (state, dispatch) => {
-            splitBlock(state, dispatch);
+            if (!this.editor.commands.splitListItem("listItem")) {
+              splitBlock(state, dispatch);
+            }
             return true;
           },
         }),
