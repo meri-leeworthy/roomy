@@ -15,7 +15,10 @@ import { checkWriteAuth } from "../auth/writeAuth.ts";
 import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import type { AuthCtx, ProcedureHandler, QueryParams } from "../xrpc/types.ts";
-import { getStreamManager } from "../streams/StreamManager.ts";
+import {
+  getStreamManager,
+  SpaceRematerializingError,
+} from "../streams/StreamManager.ts";
 
 const MAX_BATCH_SIZE = 50;
 
@@ -97,7 +100,22 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
   const streamManager = getStreamManager();
   log.info("sendEvents", "writing to events DB", { spaceId, count: parsedEvents.length });
   const streamDid = StreamDid.assert(spaceId);
-  await streamManager.sendEvents(streamDid, parsedEvents, callerDid);
+  try {
+    await streamManager.sendEvents(streamDid, parsedEvents, callerDid);
+  } catch (err) {
+    // Blue-green (P2/P8): a write to a space that is currently being rebuilt
+    // is rejected before it lands in the event log. Surface it as a retryable
+    // 409 so clients can back off and retry once the rebuild commits — not a
+    // 500 (the write is safe to retry; nothing was applied).
+    if (err instanceof SpaceRematerializingError) {
+      throw new XrpcError(
+        409,
+        "SpaceRematerializing",
+        `Space ${spaceId} is being rematerialized; retry the write shortly`,
+      );
+    }
+    throw err;
+  }
 
   log.info("sendEvents", "done", { spaceId, count: parsedEvents.length });
 };
