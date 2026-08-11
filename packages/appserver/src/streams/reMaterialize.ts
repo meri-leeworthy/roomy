@@ -70,18 +70,48 @@ export async function reMaterializeFromLocalEvents(
     return;
   }
 
-  // Partition streams: those already fully materialized (cursor >= latest
-  // event idx in the events DB) are skipped; the rest get replayed from
-  // cursor + 1.
+  // Partition streams into blue-green rebuilds and incremental catch-ups.
+  //
+  // Blue-green (P1/P3/P5/P6): a stream whose canonical per-space DB is on a
+  // STALE schema is rebuilt from the event log into a temp `.sqlite.new` DB
+  // (fresh, current schema) and atomically swapped over the canonical file.
+  // Reads keep serving the old DB until the swap, so a schema bump never
+  // makes a space appear empty. On any failure the temp DB is aborted and the
+  // old DB keeps serving (P6).
+  //
+  // A stream whose canonical DB is on the CURRENT schema uses the existing
+  // incremental catch-up path unchanged (skip if caught up, else replay the
+  // un-materialized gap from cursor + 1).
   let skipped = 0;
-  const toReplay: Array<{ streamId: string; fromIdx: number }> = [];
+  const toReplay: Array<{
+    streamId: string;
+    fromIdx: number;
+    /** Rebuild the whole stream into a temp new-schema DB and swap it in. */
+    rebuild: boolean;
+  }> = [];
 
   for (const { stream_id } of streams) {
+    // Blue-green decision point: is the canonical per-space DB on the current
+    // schema? When `checkSpaceSchema` is absent (sync adapters in tests that
+    // don't exercise the rebuild), default to current so behavior is unchanged.
+    const { current } =
+      (await db.checkSpaceSchema?.(stream_id)) ?? { current: true };
+
+    if (!current) {
+      // Stale schema ⇒ full rebuild. Replay the entire stream (idx from 0)
+      // into the temp rebuild DB, then commit the swap. `applyBatch` writes
+      // entity_space + materialization_cursor into the new DB, so no backfill
+      // of the old DB is needed.
+      toReplay.push({ streamId: stream_id, fromIdx: 0, rebuild: true });
+      continue;
+    }
+
     // Phase 3: backfill the global `entity_space` index from this space's
     // per-space DB. Existing per-space DBs materialized before the index
     // existed have no entries, so `openSpaceDbForEntity` would 404 on every
-    // room/message. This runs for every stream (caught up or not) and is
-    // idempotent. Worker-internal, so it's one round-trip per space.
+    // room/message. This runs for every current-schema stream (caught up or
+    // not) and is idempotent. Worker-internal, so it's one round-trip per
+    // space. (Rebuild streams skip this — applyBatch populates the index.)
     try {
       await db.backfillEntitySpace?.(stream_id);
     } catch (err) {
@@ -115,7 +145,11 @@ export async function reMaterializeFromLocalEvents(
       continue;
     }
 
-    toReplay.push({ streamId: stream_id, fromIdx: materializedTo + 1 });
+    toReplay.push({
+      streamId: stream_id,
+      fromIdx: materializedTo + 1,
+      rebuild: false,
+    });
   }
 
   if (toReplay.length === 0) {
@@ -147,8 +181,24 @@ export async function reMaterializeFromLocalEvents(
     while (true) {
       const idx = nextIndex.i++;
       if (idx >= total) return;
-      const { streamId: streamDid, fromIdx } = toReplay[idx]!;
+      const { streamId: streamDid, fromIdx, rebuild } = toReplay[idx]!;
       try {
+        // Blue-green rebuild: begin explicitly so the temp `.sqlite.new` DB is
+        // created and the space is flagged rebuilding BEFORE replay starts
+        // (and before any slow profile hydration holds the window open) —
+        // otherwise `isSpaceRebuilding` is still false while we replay and the
+        // write gate (P2) wouldn't reject during the window. Idempotent, so it
+        // is safe alongside the lazy `forSpaceRebuild` auto-begin.
+        if (rebuild) {
+          await db.spaceRebuildBegin!(streamDid as StreamDid);
+        }
+        // Blue-green rebuild targets the temp new-schema DB; the canonical
+        // (read-serving) DB is untouched until commit. Incremental catch-up
+        // targets the canonical DB as before.
+        const handle = rebuild
+          ? db.forSpaceRebuild!(streamDid as StreamDid)
+          : db.forSpace!(streamDid as StreamDid);
+
         const rawEvents = await db
           .query(
             "SELECT idx, user, payload FROM stream_events WHERE stream_id = ? AND idx >= ? ORDER BY idx",
@@ -177,7 +227,7 @@ export async function reMaterializeFromLocalEvents(
           }
 
           const globalDb = db.global?.();
-          const stats = await applyBatch(db.forSpace!(streamDid as StreamDid), streamDid as StreamDid, decodedEvents, {
+          const stats = await applyBatch(handle, streamDid as StreamDid, decodedEvents, {
             isBackfill: true,
           }, globalDb);
 
@@ -193,8 +243,23 @@ export async function reMaterializeFromLocalEvents(
             );
           }
         }
+
+        if (rebuild) {
+          // Atomic swap: the temp rebuild DB replaces the canonical file and
+          // routing flips. The cursor was advanced by applyBatch (P5).
+          await db.spaceRebuildCommit!(streamDid as StreamDid);
+        }
         succeeded++;
       } catch (err) {
+        if (rebuild) {
+          // Never swap in a broken/partial DB — abort and keep serving the
+          // old DB (P6). The next boot re-runs the rebuild for this stream.
+          try {
+            await db.spaceRebuildAbort!(streamDid as StreamDid);
+          } catch {
+            /* best-effort */
+          }
+        }
         failed++;
         log.error(
           "startup",
