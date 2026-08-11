@@ -33,6 +33,20 @@ export type StreamEventListener = (
 ) => void;
 
 /**
+ * Thrown by the single write gate in `StreamManager.sendEvents()` when a write
+ * targets a space that is currently being rebuilt (blue-green). The event is
+ * NOT written to the event log. Callers should retry once the rebuild commits.
+ */
+export class SpaceRematerializingError extends Error {
+  readonly streamDid: string;
+  constructor(streamDid: string) {
+    super(`Space is being rematerialized; retry write to ${streamDid}`);
+    this.name = "SpaceRematerializingError";
+    this.streamDid = streamDid;
+  }
+}
+
+/**
  * Singleton StreamManager — writes events directly to the events DB,
  * materializes inline, and emits invalidation signals.
  */
@@ -107,6 +121,17 @@ export class StreamManager {
     events: Event[],
     userOverride?: string,
   ): Promise<void> {
+    // 0. Blue-green write gate (P2/P8). If the space is currently rebuilding
+    // (a temp `.sqlite.new` is being materialised), reject the write BEFORE
+    // it lands in the event log — otherwise it would be double-applied or
+    // lost at the swap. This is the single choke point every handler's write
+    // funnels through. `isSpaceRebuilding` is optional on `DbLike` (absent on
+    // sync adapters used in tests that don't exercise the rebuild), so the
+    // gate is a no-op when the seam isn't present.
+    if (await this.#db.isSpaceRebuilding?.(streamDid)) {
+      throw new SpaceRematerializingError(streamDid);
+    }
+
     // 1. Encode each event to CBOR bytes
     const encoded = events.map((event) => encode(event));
 
