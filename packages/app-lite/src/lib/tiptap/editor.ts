@@ -1,5 +1,6 @@
 import { mount, unmount } from "svelte";
 import { keymap } from "@tiptap/pm/keymap";
+import { splitBlock } from "@tiptap/pm/commands";
 import { PluginKey } from "@tiptap/pm/state";
 import Mention from "@tiptap/extension-mention";
 import SuggestionSelect from "@roomy/design/components/helper/SuggestionSelect.svelte";
@@ -24,8 +25,20 @@ export const initKeyboardShortcutHandler = ({
     addProseMirrorPlugins() {
       return [
         keymap({
+          // Bare Enter sends the message (chat convention).
           Enter: () => {
             onEnter();
+            return true;
+          },
+          // Shift/Cmd+Enter create a new block (paragraph, list item, …)
+          // instead of a hard break, so users can build lists and stack
+          // multiple headers in one message without sending.
+          "Shift-Enter": (state, dispatch) => {
+            splitBlock(state, dispatch);
+            return true;
+          },
+          "Mod-Enter": (state, dispatch) => {
+            splitBlock(state, dispatch);
             return true;
           },
         }),
