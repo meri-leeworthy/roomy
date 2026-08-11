@@ -8,6 +8,7 @@
 
 import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
 import { resetNotificationState } from "../queries/notificationState.ts";
+import { isThread, upsertUserThreadActivity } from "../queries/userActiveThreads.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -123,6 +124,15 @@ export const updateSeenHandler: ProcedureHandler<UpdateSeenBody, void> = async (
        updated_at = excluded.updated_at`,
   );
   await stmt.run([userDid, roomId, seenUpTo, unreadCount]);
+
+  // Treat reads as engagement: reading a thread counts toward its activity
+  // window, so a thread you've read (but not necessarily written to) stays in
+  // your sidebar. Only threads get tracked -- channel reads don't touch the
+  // sidebar's user_thread_activity. `db` is the per-space DB (isThread reads
+  // comp_room there); `mainDb` is the read-state DB where activity lives.
+  if (await isThread(db, roomId)) {
+    await upsertUserThreadActivity(mainDb, userDid, roomId, Date.now());
+  }
 
   // Reset the Engaged push-digest batch for this (user, room): the user has
   // opened the room, so cancel any pending digest and re-arm the batch for the

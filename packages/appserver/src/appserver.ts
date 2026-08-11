@@ -22,7 +22,7 @@ import { startEmbedSweeper, stopEmbedSweeper, embedSweeperStats } from "./embed/
 import { countPendingLinks } from "./embed/enricher.ts";
 import { openDb, openGlobalDb, openReadStateDb, closeDb, poolStats } from "./db/db.ts";
 import { StreamManager, setStreamManager, _resetStreamManager } from "./streams/StreamManager.ts";
-import { purgeStaleThreadActivity } from "./queries/userActiveThreads.ts";
+import { ACTIVE_WINDOW_MS, purgeStaleThreadActivity } from "./queries/userActiveThreads.ts";
 import { getConnectionTicketHandler } from "./handlers/space.roomy.auth.getConnectionTicket.ts";
 import { createSyncSubscribeHandler } from "./handlers/space.roomy.sync.subscribe.ts";
 import { connectSpaceHandler } from "./handlers/space.roomy.admin.connectSpace.ts";
@@ -371,9 +371,10 @@ export async function createAppserver(
   const mainDb = openDb();
 
   // ─── Periodic maintenance ────────────────────────────────────────────
-  // Purge stale user_thread_activity rows older than 72 hours once per hour.
+  // Purge stale user_thread_activity rows older than the activity window
+  // (120 hours) once per hour.
   const maintenanceTimer = setInterval(async () => {
-    const cutoff = Date.now() - 72 * 60 * 60 * 1000;
+    const cutoff = Date.now() - ACTIVE_WINDOW_MS;
     const purged = await purgeStaleThreadActivity(openReadStateDb(), cutoff);
     if (purged > 0) {
       console.log(`[maintenance] purged ${purged} stale user_thread_activity rows`);

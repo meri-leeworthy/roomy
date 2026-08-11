@@ -35,7 +35,7 @@ import {
   setMessageSortIdxByReorder,
   setMessageSortIdxByTimestamp,
 } from "./sortIdx.ts";
-import { isThread, upsertUserThreadActivity } from "../queries/userActiveThreads.ts";
+import { isThread, refreshThreadActivityOnMessage, upsertUserThreadActivity } from "../queries/userActiveThreads.ts";
 import { upsertUserRoomParticipation } from "../queries/userRoomParticipation.ts";
 import { upsertActivityItem } from "./activityItem.ts";
 import { writeSetUserProfileToGlobal } from "./profiles.ts";
@@ -201,11 +201,12 @@ async function applyBundleInner(
         );
       }
 
-      // Track thread activity: if the message is in a thread, upsert the
-      // author's interaction so the thread appears in their sidebar.
+      // Track thread activity: a message in a thread refreshes the activity
+      // window for every user tracking the thread (re-surfacing it in their
+      // sidebar when someone else posts) and registers the author.
       if (isThreadRoom) {
         const timestamp = decodeTimeFromId(bundle.event.id);
-        await upsertUserThreadActivity(readStateDb, bundle.user, bundle.event.room, timestamp);
+        await refreshThreadActivityOnMessage(readStateDb, bundle.event.room, bundle.user, timestamp);
       }
 
       // Track the author's participation in this room (all room types —

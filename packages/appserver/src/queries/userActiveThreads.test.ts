@@ -22,6 +22,7 @@ import { closeDb, openDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
 import type { DbLike } from "../db/types.ts";
 import {
   upsertUserThreadActivity,
+  refreshThreadActivityOnMessage,
   queryActiveThreads,
   resolveThreadsByIds,
   isThread,
@@ -139,6 +140,50 @@ describe("upsertUserThreadActivity", () => {
   });
 });
 
+describe("refreshThreadActivityOnMessage", () => {
+  test("refreshes last_active_at for every user tracking the thread and registers the author", async () => {
+    const { readState, spaceDb } = freshDb();
+    await seedBasic(spaceDb);
+
+    const now = Date.now();
+    await upsertUserThreadActivity(readState, USER, THREAD_A, now - 60_000);
+    await upsertUserThreadActivity(readState, OTHER_USER, THREAD_A, now - 60_000);
+
+    const AUTHOR = "did:plc:carol";
+    await spaceDb.run("insert or ignore into entities (id, stream_id) values (?, ?)", [AUTHOR, SPACE]);
+    const msgTime = now - 10_000;
+    await refreshThreadActivityOnMessage(readState, THREAD_A, AUTHOR, msgTime);
+
+    const rows = await readState
+      .query(
+        "select user_did, last_active_at from user_thread_activity where thread_id = ?",
+      )
+      .all<{ user_did: string; last_active_at: number }>(THREAD_A);
+    expect(rows).toHaveLength(3);
+    for (const r of rows) {
+      expect(r.last_active_at).toBe(msgTime);
+    }
+    expect(rows.some((r) => r.user_did === AUTHOR)).toBe(true);
+  });
+
+  test("does not touch activity for other threads", async () => {
+    const { readState, spaceDb } = freshDb();
+    await seedBasic(spaceDb);
+
+    const now = Date.now();
+    await upsertUserThreadActivity(readState, USER, THREAD_B, now - 60_000);
+
+    await refreshThreadActivityOnMessage(readState, THREAD_A, USER, now);
+
+    const b = await readState
+      .query(
+        "select last_active_at from user_thread_activity where user_did = ? and thread_id = ?",
+      )
+      .get<{ last_active_at: number }>(USER, THREAD_B);
+    expect(b?.last_active_at).toBe(now - 60_000);
+  });
+});
+
 describe("queryActiveThreads", () => {
   test("returns empty when no activity exists", async () => {
     const { readState, spaceDb } = freshDb();
@@ -148,7 +193,7 @@ describe("queryActiveThreads", () => {
     expect(result).toHaveLength(0);
   });
 
-  test("returns threads within the 72h window, ordered by most recent", async () => {
+  test("returns threads within the 120h window, ordered by most recent", async () => {
     const { readState, spaceDb } = freshDb();
     await seedBasic(spaceDb);
 
@@ -162,12 +207,12 @@ describe("queryActiveThreads", () => {
     expect(result[1]!.id).toBe(THREAD_A);
   });
 
-  test("excludes threads older than 72 hours", async () => {
+  test("excludes threads older than 120 hours", async () => {
     const { readState, spaceDb } = freshDb();
     await seedBasic(spaceDb);
 
     const now = Date.now();
-    await upsertUserThreadActivity(readState, USER, THREAD_A, now - 73 * 60 * 60 * 1000); // 73h ago
+    await upsertUserThreadActivity(readState, USER, THREAD_A, now - 121 * 60 * 60 * 1000); // 121h ago
 
     const result = await queryActiveThreads(readState, spaceDb, USER, SPACE);
     expect(result).toHaveLength(0);

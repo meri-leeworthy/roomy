@@ -13,8 +13,8 @@ import type { DbLike } from "../db/types.ts";
 import type { StreamDid, Ulid, UserDid } from "@roomy-space/sdk";
 import { hydrateProfiles } from "./profileStore.ts";
 
-/** How far back (in ms) to consider threads active. Default: 72 hours. */
-const ACTIVE_WINDOW_MS = 72 * 60 * 60 * 1000;
+/** How far back (in ms) to consider threads active. Default: 120 hours. */
+export const ACTIVE_WINDOW_MS = 120 * 60 * 60 * 1000;
 
 /** Maximum number of active threads to return per user+space. */
 const MAX_ACTIVE_THREADS = 8;
@@ -22,7 +22,7 @@ const MAX_ACTIVE_THREADS = 8;
 /**
  * Upsert a user's activity in a thread.
  *
- * Called when the user sends a message or adds a reaction in a thread.
+ * Called when the user sends a message, adds a reaction, or reads a thread.
  * This is a no-op if `threadId` is not actually a thread — the caller
  * is responsible for checking.
  */
@@ -40,6 +40,31 @@ export async function upsertUserThreadActivity(
        updated_at = excluded.updated_at`,
     userDid, threadId, timestamp, Date.now(),
   );
+}
+
+/**
+ * Refresh thread activity when a new message arrives.
+ *
+ * Re-surfaces the thread in the sidebar for every user who is already
+ * tracking it (has a `user_thread_activity` row — they wrote, reacted, or
+ * read it), so a thread you've been active in reappears when someone else
+ * posts — not only when you post. Also ensures the author is tracking it.
+ */
+export async function refreshThreadActivityOnMessage(
+  db: DbLike,
+  threadId: string,
+  authorDid: string,
+  timestamp: number,
+): Promise<void> {
+  const now = Date.now();
+  await db.run(
+    `update user_thread_activity
+        set last_active_at = ?, updated_at = ?
+      where thread_id = ?`,
+    timestamp, now, threadId,
+  );
+  // Ensure the author is tracking it too.
+  await upsertUserThreadActivity(db, authorDid, threadId, timestamp);
 }
 
 /**
@@ -166,13 +191,13 @@ export async function resolveThreadsByIds(
  * Query active threads for a user in a space, returning up to
  * `MAX_ACTIVE_THREADS` results.
  *
- * Step 1: Find candidate thread IDs from `user_thread_activity` (within 72h
- * window, not deleted, labeled as thread).
+ * Step 1: Find candidate thread IDs from `user_thread_activity` (within the
+ * activity window, not deleted, labeled as thread).
  * Step 2: Resolve metadata via `resolveThreadsByIds`.
  * Step 3 (caller): Filter by read access and distribute into channel objects.
  *
  * If the user has no rows for this space, runs a lazy backfill from messages
- * the user authored in threads within the 72h window.
+ * the user authored in threads within the activity window.
  */
 export async function queryActiveThreads(
   readStateDb: DbLike,
@@ -206,7 +231,7 @@ export async function queryActiveThreads(
     await backfillUserThreadActivity(readStateDb, spaceDb, userDid, spaceId, windowStart);
   }
 
-  // Query active threads within the 72h window. Two-step: fetch candidate
+  // Query active threads within the activity window. Two-step: fetch candidate
   // `user_thread_activity` rows from the read-state DB, then confirm each is a
   // non-deleted thread in this space via the per-space DB.
   const utaRows = await readStateDb

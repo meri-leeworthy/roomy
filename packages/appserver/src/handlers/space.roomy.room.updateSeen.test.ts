@@ -95,6 +95,41 @@ describe("updateSeen", () => {
     expect(row?.unread_count).toBe(1); // msgB is after the watermark
   });
 
+  test("reading a thread registers it as engagement (user_thread_activity)", async () => {
+    const space = openDb().forSpace!(SPACE);
+    const threadRoomId = newUlid();
+    await space.run("insert into entities (id, stream_id) values (?, ?)", [threadRoomId, SPACE]);
+    await space.run(
+      "insert into comp_room (entity, label) values (?, 'space.roomy.thread')",
+      [threadRoomId],
+    );
+    await openDb().global!().run(
+      "insert into entity_space (entity_id, space_did) values (?, ?)",
+      [threadRoomId, SPACE],
+    );
+
+    await updateSeenHandler({}, { did: USER }, { roomId: threadRoomId });
+
+    const row = await openReadStateDb()
+      .query(
+        "select last_active_at from user_thread_activity where user_did = ? and thread_id = ?",
+      )
+      .get<{ last_active_at: number }>(USER, threadRoomId);
+    expect(row).not.toBeNull();
+    expect(row?.last_active_at).toBeGreaterThan(0);
+  });
+
+  test("reading a channel does not register thread activity", async () => {
+    await updateSeenHandler({}, { did: USER }, { roomId });
+
+    const row = await openReadStateDb()
+      .query(
+        "select user_did from user_thread_activity where user_did = ? and thread_id = ?",
+      )
+      .get<{ user_did: string }>(USER, roomId);
+    expect(row).toBeNull();
+  });
+
   test("unknown room still 404s after the hydration fallback", async () => {
     await expect(
       updateSeenHandler({}, { did: USER }, { roomId: newUlid() }),
