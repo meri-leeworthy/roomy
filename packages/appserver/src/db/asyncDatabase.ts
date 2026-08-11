@@ -180,6 +180,8 @@ export class WorkerLink {
 export interface DbRoute {
   targetDb?: "space" | "global" | "readstate" | "events";
   spaceDid?: string;
+  /** Blue-green route for a "space" target: canonical vs temp rebuild DB. */
+  route?: "canonical" | "rebuild";
 }
 
 // ─── AsyncDatabase ────────────────────────────────────────────────────────
@@ -200,6 +202,52 @@ export class AsyncDatabase {
   /** A handle that routes requests to the per-space DB for `spaceDid`. */
   forSpace(spaceDid: string): AsyncDatabase {
     return new AsyncDatabase(this.#link, { targetDb: "space", spaceDid });
+  }
+
+  /** A handle pinned to the temp `.sqlite.new` rebuild DB for `spaceDid`.
+   *  First request creates the fresh new-schema rebuild DB and marks the
+   *  space as rebuilding (blue-green). */
+  forSpaceRebuild(spaceDid: string): AsyncDatabase {
+    return new AsyncDatabase(this.#link, {
+      targetDb: "space",
+      spaceDid,
+      route: "rebuild",
+    });
+  }
+
+  /** Start a rebuild for `spaceDid` (idempotent). */
+  async spaceRebuildBegin(spaceDid: string): Promise<{ ok: boolean }> {
+    return this.#link.send({ type: "spaceRebuildBegin", spaceDid }) as Promise<{
+      ok: boolean;
+    }>;
+  }
+
+  /** Atomically swap the rebuild DB over the canonical file. */
+  async spaceRebuildCommit(spaceDid: string): Promise<{ committed: boolean }> {
+    return this.#link.send({
+      type: "spaceRebuildCommit",
+      spaceDid,
+    }) as Promise<{ committed: boolean }>;
+  }
+
+  /** Abandon a rebuild; the old DB keeps serving. */
+  async spaceRebuildAbort(spaceDid: string): Promise<{ aborted: boolean }> {
+    return this.#link.send({
+      type: "spaceRebuildAbort",
+      spaceDid,
+    }) as Promise<{ aborted: boolean }>;
+  }
+
+  /** Whether `spaceDid` is currently rebuilding. */
+  async isSpaceRebuilding(spaceDid: string): Promise<boolean> {
+    return this.#link.send({ type: "isSpaceRebuilding", spaceDid }) as Promise<boolean>;
+  }
+
+  /** Whether the canonical per-space DB for `spaceDid` is on the current schema. */
+  async checkSpaceSchema(spaceDid: string): Promise<{ current: boolean }> {
+    return this.#link.send({ type: "checkSpaceSchema", spaceDid }) as Promise<{
+      current: boolean;
+    }>;
   }
 
   /** A handle that routes requests to the global DB. */

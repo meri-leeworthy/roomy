@@ -21,7 +21,7 @@
 
 import { Database, type Changes } from "bun:sqlite";
 import type { SQLQueryBindings } from "bun:sqlite";
-import { mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { WorkerRequest, WorkerResponse } from "./types.ts";
@@ -51,6 +51,16 @@ let closed = false;
 
 /** Per-space DBs, opened lazily and LRU-evicted. Keyed by spaceDid. */
 const spaceDbs = new Map<string, { db: Database; lastUsed: number }>();
+/**
+ * Blue-green rebuild state, keyed by spaceDid. While a rebuild is in flight the
+ * canonical (old-schema) DB keeps serving reads and the temp rebuild DB at
+ * `data/spaces/<spaceDid>.sqlite.new` is materialised in the background; commit
+ * atomically swaps them. Keyed per space so it lands on the owning worker.
+ */
+const spaceRebuilds = new Map<
+  string,
+  { rebuild: Database; canonical: Database }
+>();
 /** Global DB (joinedSpace/leftSpace edges + profiles + entity index), opened lazily. */
 let globalDb: Database | null = null;
 let spacesDir: string | null = null;
@@ -85,28 +95,50 @@ class SchemaVersionMismatchError extends Error {
   }
 }
 
-/** Schema-version tracking for a DB that keeps its own version table. */
+/**
+ * Schema-version tracking for a DB that keeps its own version table.
+ *
+ * Blue-green (P1): reads the on-disk version FIRST and only applies the schema
+ * DDL to a fresh/current DB. It must never exec the *new* schema onto a stale
+ * DB before deciding it is a mismatch — that would mutate the old data the
+ * rebuild is meant to keep serving unchanged. A stale DB is reported via
+ * `SchemaVersionMismatchError` with the file left byte-for-byte untouched.
+ */
 function initializeVersionedSchema(
   db: Database,
   schemaPath: string,
   versionTable: string,
   expectedVersion: string,
 ): void {
-  const schema = readFileSync(schemaPath, "utf-8");
-  db.exec(schema);
+  let row: { version: string } | null;
+  try {
+    row = db
+      .query<{ version: string }, []>(
+        `select version from ${versionTable} where id = 1`,
+      )
+      .get();
+  } catch {
+    // No version table yet — a fresh DB. Fall through to apply schema.
+    row = null;
+  }
 
-  const row = db
-    .query<{ version: string }, []>(
-      `select version from ${versionTable} where id = 1`,
-    )
-    .get();
   if (!row) {
+    const schema = readFileSync(schemaPath, "utf-8");
+    db.exec(schema);
     db.exec(
       `insert into ${versionTable} (id, version) values (1, '${expectedVersion}')`,
     );
-  } else if (row.version !== expectedVersion) {
+    return;
+  }
+
+  if (row.version !== expectedVersion) {
     throw new SchemaVersionMismatchError(expectedVersion, row.version);
   }
+
+  // Current version: ensure the schema DDL is present (idempotent) so a DB
+  // stamped as current but missing a table added in the same version heals.
+  const schema = readFileSync(schemaPath, "utf-8");
+  db.exec(schema);
 }
 
 interface Migration {
@@ -326,24 +358,18 @@ function openSpaceDb(spaceDid: string): Database {
     );
 
   } catch (err) {
-    // The space DB must never be left half-initialised: a partial file
-    // (schema applied but init failed, or worse) reads back as
-    // "database disk image is malformed" on every subsequent open.
-    // Close and delete it so the next open retries from scratch.
-    deleteSpaceDbFile(spaceDid, db);
-    // A schema-version mismatch means the on-disk schema is stale. Wipe and
-    // re-derive transparently so the caller never sees a failed request for
-    // a space that merely needs re-initialising (e.g. after a schema change
-    // bumps SPACE_SCHEMA_VERSION).
     if (err instanceof SchemaVersionMismatchError) {
-      db = openSpaceDbFile(spaceDid);
-      initializeVersionedSchema(
-        db,
-        SPACE_SCHEMA_PATH,
-        "space_schema_version",
-        spaceSchemaVersion ?? "",
-      );
+      // Blue-green (P1): the on-disk schema is stale. Do NOT wipe it — serve
+      // the OLD DB as-is so reads see pre-deploy data until an explicit
+      // rebuild (spaceRebuildBegin → replay → commit) swaps it. The rebuild
+      // is driven by reMaterializeFromLocalEvents, never by a read. The file
+      // is left untouched (initializeVersionedSchema checks version first).
     } else {
+      // The space DB must never be left half-initialised: a partial file
+      // (schema applied but init failed, or worse) reads back as
+      // "database disk image is malformed" on every subsequent open.
+      // Close and delete it so the next open retries from scratch.
+      deleteSpaceDbFile(spaceDid, db);
       throw err;
     }
   }
@@ -393,24 +419,184 @@ function deleteSpaceDbFile(spaceDid: string, db: Database): void {
   }
 }
 
+/** Apply the standard pragmas shared by every per-space SQLite connection. */
+function applySpacePragmas(db: Database): void {
+  db.exec("pragma journal_mode = wal");
+  db.exec("pragma synchronous = normal");
+  db.exec("pragma foreign_keys = on");
+}
+
 function openSpaceDbFile(spaceDid: string): Database {
   if (spacesDir === ":memory:") {
     // In-memory per-space DBs (tests): each connection is its own fresh
     // DB, cached per spaceDid in the worker LRU. Recreated on every worker
     // restart, so tests never leak files or cross-test state.
     const db = new Database(":memory:");
-    db.exec("pragma journal_mode = wal");
-    db.exec("pragma synchronous = normal");
-    db.exec("pragma foreign_keys = on");
+    applySpacePragmas(db);
     return db;
   }
   const path = join(spacesDir!, `${spaceDid}.sqlite`);
   mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path, { create: true });
-  db.exec("pragma journal_mode = wal");
-  db.exec("pragma synchronous = normal");
-  db.exec("pragma foreign_keys = on");
+  applySpacePragmas(db);
   return db;
+}
+
+// ─── Blue-green rebuild (L1 seam) ─────────────────────────────────────────
+
+/**
+ * Open (or return) the temp rebuild DB for `spaceDid` at
+ * `data/spaces/<spaceDid>.sqlite.new`, creating it with the CURRENT schema on
+ * first use and marking the space as rebuilding. The canonical (old-schema)
+ * DB keeps serving reads throughout. Idempotent per space.
+ */
+function openSpaceDbRebuild(spaceDid: string): Database {
+  if (!spacesDir) throw new Error("Per-space DBs not initialized (no init)");
+  const existing = spaceRebuilds.get(spaceDid);
+  if (existing) return existing.rebuild;
+
+  let rebuild: Database;
+  if (spacesDir === ":memory:") {
+    rebuild = new Database(":memory:");
+    applySpacePragmas(rebuild);
+  } else {
+    const tmpPath = join(spacesDir, `${spaceDid}.sqlite.new`);
+    mkdirSync(dirname(tmpPath), { recursive: true });
+    rebuild = new Database(tmpPath, { create: true });
+    applySpacePragmas(rebuild);
+  }
+  // Fresh new-schema DB (no version row → initializeVersionedSchema applies
+  // the current schema and stamps the version).
+  initializeVersionedSchema(
+    rebuild,
+    SPACE_SCHEMA_PATH,
+    "space_schema_version",
+    spaceSchemaVersion ?? "",
+  );
+
+  // Pin the canonical handle too so LRU can't evict it mid-rebuild.
+  const canonical = openSpaceDb(spaceDid);
+  spaceRebuilds.set(spaceDid, { rebuild, canonical });
+  return rebuild;
+}
+
+/** Start a rebuild for `spaceDid` (idempotent). */
+function handleSpaceRebuildBegin(spaceDid: string): { ok: boolean } {
+  openSpaceDbRebuild(spaceDid);
+  return { ok: true };
+}
+
+/**
+ * Atomically swap the rebuild DB over the canonical file and flip routing.
+ * Idempotent: returns `{ committed: false }` when nothing is rebuilding.
+ */
+function handleSpaceRebuildCommit(spaceDid: string): { committed: boolean } {
+  const rb = spaceRebuilds.get(spaceDid);
+  if (!rb) return { committed: false };
+
+  if (spacesDir === ":memory:") {
+    // No files to rename — swap the cached canonical in-memory handle.
+    const cached = spaceDbs.get(spaceDid);
+    if (cached) {
+      try {
+        cached.db.close();
+      } catch {
+        /* best-effort */
+      }
+    }
+    spaceDbs.set(spaceDid, { db: rb.rebuild, lastUsed: Date.now() });
+    spaceRebuilds.delete(spaceDid);
+    return { committed: true };
+  }
+
+  const canonicalPath = join(spacesDir!, `${spaceDid}.sqlite`);
+  const tmpPath = `${canonicalPath}.new`;
+
+  // Close the old canonical handle first so it checkpoints + drops its WAL
+  // before we overwrite the file (else it could re-create a stale -wal).
+  const cached = spaceDbs.get(spaceDid);
+  if (cached) {
+    try {
+      cached.db.close();
+    } catch {
+      /* best-effort */
+    }
+    spaceDbs.delete(spaceDid);
+  }
+  // Checkpoint the rebuild's WAL into the temp file, then atomically rename
+  // it over the canonical file (same filesystem ⇒ atomic, P3).
+  rb.rebuild.close();
+  renameSync(tmpPath, canonicalPath);
+  for (const suffix of ["-wal", "-shm"]) {
+    try {
+      unlinkSync(canonicalPath + suffix);
+    } catch {
+      /* already gone */
+    }
+  }
+  // Reopen the canonical file fresh (now new schema) and re-cache it.
+  const fresh = new Database(canonicalPath, { create: true });
+  applySpacePragmas(fresh);
+  spaceDbs.set(spaceDid, { db: fresh, lastUsed: Date.now() });
+  spaceRebuilds.delete(spaceDid);
+  return { committed: true };
+}
+
+/**
+ * Abandon a rebuild: delete the temp file and clear the rebuilding flag. The
+ * old DB keeps serving (P6). Returns `{ aborted: false }` when not rebuilding.
+ */
+function handleSpaceRebuildAbort(spaceDid: string): { aborted: boolean } {
+  const rb = spaceRebuilds.get(spaceDid);
+  if (!rb) return { aborted: false };
+  try {
+    rb.rebuild.close();
+  } catch {
+    /* best-effort */
+  }
+  if (spacesDir !== ":memory:" && spacesDir !== null) {
+    const tmpPath = join(spacesDir!, `${spaceDid}.sqlite.new`);
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        unlinkSync(tmpPath + suffix);
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+  spaceRebuilds.delete(spaceDid);
+  return { aborted: true };
+}
+
+/** Whether `spaceDid` is currently rebuilding. */
+function handleIsSpaceRebuilding(spaceDid: string): boolean {
+  return spaceRebuilds.has(spaceDid);
+}
+
+/**
+ * Whether the canonical per-space DB for `spaceDid` is on the current schema
+ * version. A missing file (fresh space) counts as current. Read-only.
+ */
+function handleCheckSpaceSchema(spaceDid: string): { current: boolean } {
+  if (spacesDir === ":memory:") return { current: true };
+  const path = join(spacesDir!, `${spaceDid}.sqlite`);
+  if (!existsSync(path)) return { current: true };
+  let db: Database | null = null;
+  try {
+    db = new Database(path, { readonly: true });
+    const row = db
+      .query<{ version: string }, []>(
+        "select version from space_schema_version where id = 1",
+      )
+      .get();
+    return { current: (row?.version ?? "") === (spaceSchemaVersion ?? "") };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* best-effort */
+    }
+  }
 }
 
 
@@ -480,6 +666,10 @@ function deleteGlobalDbFile(db: Database): void {
 function dbForRequest(req: WorkerRequest): Database {
   if (req.targetDb === "space") {
     if (!req.spaceDid) throw new Error("spaceDid required for space target");
+    // Blue-green route: a "rebuild" target is the temp new-schema DB being
+    // materialised; the default "canonical" target is the read-serving DB
+    // (which never wipes on schema mismatch).
+    if (req.route === "rebuild") return openSpaceDbRebuild(req.spaceDid);
     return openSpaceDb(req.spaceDid);
   }
   if (role === "space") {
@@ -530,6 +720,12 @@ self.onmessage = (event: MessageEvent) => {
   }
 };
 
+/** Require a spaceDid on a worker request, throwing a clear error if absent. */
+function requireSpaceDid(req: WorkerRequest): string {
+  if (!req.spaceDid) throw new Error("spaceDid required for this operation");
+  return req.spaceDid;
+}
+
 function handleRequest(req: WorkerRequest): unknown {
   switch (req.type) {
     case "init":
@@ -558,6 +754,16 @@ function handleRequest(req: WorkerRequest): unknown {
       return { ok: true };
     case "backfillEntitySpace":
       return handleBackfillEntitySpace(req);
+    case "spaceRebuildBegin":
+      return handleSpaceRebuildBegin(requireSpaceDid(req));
+    case "spaceRebuildCommit":
+      return handleSpaceRebuildCommit(requireSpaceDid(req));
+    case "spaceRebuildAbort":
+      return handleSpaceRebuildAbort(requireSpaceDid(req));
+    case "isSpaceRebuilding":
+      return handleIsSpaceRebuilding(requireSpaceDid(req));
+    case "checkSpaceSchema":
+      return handleCheckSpaceSchema(requireSpaceDid(req));
     default:
       throw new Error(`Unknown request type: ${req.type}`);
   }

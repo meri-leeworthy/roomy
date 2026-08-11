@@ -30,6 +30,43 @@ export interface DbLike {
    */
   forSpace?(spaceDid: string): DbLike;
   /**
+   * Optional (blue-green): a routed handle pinned to the temp `.sqlite.new`
+   * rebuild DB for `spaceDid` (a fresh, new-schema DB). `applyBatch` targets
+   * this during rematerialisation. Absent on sync adapters used in tests
+   * that don't exercise blue-green rebuilds.
+   */
+  forSpaceRebuild?(spaceDid: string): DbLike;
+  /**
+   * Optional (blue-green): whether `spaceDid` is currently rebuilding (has a
+   * temp `.sqlite.new` being materialised). Checked by the single write gate
+   * in `StreamManager.sendEvents()` before the event-log insert.
+   */
+  isSpaceRebuilding?(spaceDid: string): Promise<boolean>;
+  /**
+   * Optional (blue-green): start a rebuild for `spaceDid` — creates the temp
+   * `.sqlite.new` file with the current schema and marks it rebuilding.
+   * Idempotent: returns `{ ok: true }` even if already rebuilding.
+   */
+  spaceRebuildBegin?(spaceDid: string): Promise<{ ok: boolean }>;
+  /**
+   * Optional (blue-green): atomically swap the temp `.sqlite.new` over the
+   * canonical file, dropping the old DB, and flip routing. Idempotent:
+   * `{ committed: false }` when nothing is rebuilding.
+   */
+  spaceRebuildCommit?(spaceDid: string): Promise<{ committed: boolean }>;
+  /**
+   * Optional (blue-green): abandon a rebuild — delete the temp file and clear
+   * the rebuilding flag; the old DB keeps serving. `{ aborted: false }` when
+   * nothing is rebuilding.
+   */
+  spaceRebuildAbort?(spaceDid: string): Promise<{ aborted: boolean }>;
+  /**
+   * Optional (blue-green): whether the canonical per-space DB for `spaceDid`
+   * is on the current schema version. Used by rematerialisation to decide
+   * begin→replay→commit vs incremental catch-up.
+   */
+  checkSpaceSchema?(spaceDid: string): Promise<{ current: boolean }>;
+  /**
    * Optional (per-space split, Phase 1): a routed handle whose requests
    * target the global DB. Absent on sync adapters used in tests that don't
    * exercise dual-write.
@@ -63,7 +100,12 @@ export interface WorkerRequest {
     | "close"
     | "init"
     | "health"
-    | "backfillEntitySpace";
+    | "backfillEntitySpace"
+    | "spaceRebuildBegin"
+    | "spaceRebuildCommit"
+    | "spaceRebuildAbort"
+    | "isSpaceRebuilding"
+    | "checkSpaceSchema";
   /** SQL string (for query/run/exec/prepare). */
   sql?: string;
   /** Bind parameters (for query/run/prepareRun/prepareAll/prepareGet). */
@@ -72,6 +114,9 @@ export interface WorkerRequest {
   targetDb?: "main" | "space" | "global" | "readstate" | "events";
   /** Per-space DB selector (required when targetDb is "space"). */
   spaceDid?: string;
+  /** Blue-green route for a "space" target: canonical read-serving DB vs the
+   *  temp `.sqlite.new` rebuild DB. Defaults to "canonical" (never wipes). */
+  route?: "canonical" | "rebuild";
   /** Query mode: "all" (default) or "get" (single row). */
   mode?: "all" | "get";
   /** Prepared statement handle ID (for prepareRun/prepareAll/prepareGet/prepareFinalize). */
