@@ -211,6 +211,45 @@
     pointer-events: none;
   }
 
+  /*
+    WYSIWYG rendering for block nodes produced by markdown shortcuts
+    (`- `, `1. `, `# `, `> `) and the slash menu. StarterKit converts these
+    to bulletList/orderedList/heading/blockquote nodes, which render as plain
+    `<ul>`/`<ol>`/`<h1>`-`<h6>`/`<blockquote>` elements. Without styling they
+    look identical to plain text, so mirror the rendered-message styles
+    (BlocksRenderer) here so the composer shows what will actually be sent.
+  */
+  :global(.tiptap ul) {
+    list-style: disc;
+    padding-left: 1.25rem;
+    margin: 0.25rem 0;
+  }
+  :global(.tiptap ol) {
+    list-style: decimal;
+    padding-left: 1.25rem;
+    margin: 0.25rem 0;
+  }
+  :global(.tiptap li) {
+    margin: 0.125rem 0;
+  }
+  :global(.tiptap h1),
+  :global(.tiptap h2),
+  :global(.tiptap h3),
+  :global(.tiptap h4),
+  :global(.tiptap h5),
+  :global(.tiptap h6) {
+    font-weight: 600;
+    margin: 0.25rem 0;
+  }
+  :global(.tiptap blockquote) {
+    border-left: 2px solid var(--color-base-300);
+    padding-left: 0.75rem;
+    margin: 0.25rem 0;
+  }
+  :global(.dark .tiptap blockquote) {
+    border-left-color: var(--color-base-600);
+  }
+
   /* Mention chip rendered inline in the composer. Subtle accent rounded
      background + accent text; works in both themes because the bg is a
      translucent accent mix. Dark mode uses a lighter accent text color. */
