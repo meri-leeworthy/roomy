@@ -10,6 +10,16 @@
  * substring match against handle, name, or DID. This is what the chat-input
  * mention typeahead hits as the user types `@` + a prefix.
  *
+ * The search filter is applied **in JS after** profiles are hydrated from the
+ * global store, NOT in SQL. A member's profile entity lives in their own
+ * stream, not this space's stream, so the per-space `comp_user`/`comp_info`
+ * joins are null for cross-stream members (and are not written by the
+ * materialiser at all in Phase 3). Filtering in SQL against those columns
+ * would silently drop every member whose handle/name only exists in the
+ * global `profiles` table — the exact failure the mention typeahead hit
+ * (typing a handle or display name returned no results). The global store is
+ * authoritative; the per-space value (if any) acts as a fallback.
+ *
  * Stage 1 note: profile fields (handle/name/avatar) may be null when a user
  * hasn't been hydrated yet; that's expected and not an error. `stripNulls`
  * drops nulls so the wire shape matches the lexicon (absent-or-present).
@@ -42,24 +52,21 @@ export interface SelectMembersResult {
 }
 
 /**
- * Build the `(cu.handle | ci.name | tail) LIKE ?` clause + bindings used to
- * filter by `search`. Returns `{ clause, binds }` where `binds` is meant to be
- * appended after the query's own positional params.
+ * Case-insensitive substring match against handle, name, or DID. Used to
+ * filter the hydrated member/admin lists for the mention typeahead. Returns
+ * `true` for every item when `search` is empty/whitespace (no filter).
  */
-function searchFilter(
+export function memberMatchesSearch(
+  m: { did: string; handle?: string; name?: string },
   search: string | undefined,
-  tailColumn: string,
-): { clause: string; binds: string[] } {
+): boolean {
   const q = search?.trim().toLowerCase();
-  if (!q) return { clause: "", binds: [] };
-  const pattern = `%${q}%`;
-  return {
-    clause:
-      ` and (ifnull(cu.handle, '') like ?` +
-      ` or ifnull(ci.name, '') like ?` +
-      ` or ${tailColumn} like ?)`,
-    binds: [pattern, pattern, pattern],
-  };
+  if (!q) return true;
+  return (
+    (m.handle ?? "").toLowerCase().includes(q) ||
+    (m.name ?? "").toLowerCase().includes(q) ||
+    m.did.toLowerCase().includes(q)
+  );
 }
 
 /**
@@ -72,7 +79,9 @@ export async function selectMembers(
   spaceId: string,
   search?: string,
 ): Promise<SelectMembersResult> {
-  const memberFilter = searchFilter(search, "m.tail");
+  // Fetch ALL members (no SQL search filter — see module docstring). The
+  // per-space comp_user/comp_info joins are null for cross-stream members, so
+  // filtering in SQL would miss them; we filter in JS after hydration.
   const memberRows = await db
     .query(
       `select
@@ -91,9 +100,9 @@ export async function selectMembers(
          from edges m
          left join comp_user cu on cu.did = m.tail
          left join comp_info ci on ci.entity = m.tail
-        where m.head = ? and m.label = 'member'${memberFilter.clause}`,
+        where m.head = ? and m.label = 'member'`,
     )
-    .all<{ did: string; handle: string | null; name: string | null; avatar: string | null; is_admin: number; is_banned: number }>([spaceId, ...memberFilter.binds]);
+    .all<{ did: string; handle: string | null; name: string | null; avatar: string | null; is_admin: number; is_banned: number }>([spaceId]);
 
   // Role assignments per member, scoped to this space's stream.
   const roleStmt = await db.query(
@@ -113,7 +122,6 @@ export async function selectMembers(
     }) as MemberRow,
   ));
 
-  const extFilter = searchFilter(search, "a.tail");
   const externalAdminRows = await db
     .query(
       `select
@@ -129,9 +137,9 @@ export async function selectMembers(
           and not exists (
             select 1 from edges m
              where m.head = a.head and m.tail = a.tail and m.label = 'member'
-          )${extFilter.clause}`,
+          )`,
     )
-    .all<{ did: string; handle: string | null; name: string | null; avatar: string | null }>([spaceId, ...extFilter.binds]);
+    .all<{ did: string; handle: string | null; name: string | null; avatar: string | null }>([spaceId]);
 
   const externalAdmins: ExternalAdminRow[] = externalAdminRows.map((r) =>
     stripNulls({
@@ -166,8 +174,12 @@ export async function selectMembers(
     },
   );
 
+  // Apply the search filter AFTER hydration so cross-stream members (whose
+  // handle/name only live in the global store) are matchable.
   return {
-    members,
-    externalAdmins,
+    members: members.filter((m) => memberMatchesSearch(m, search)),
+    externalAdmins: externalAdmins.filter((m) =>
+      memberMatchesSearch(m, search),
+    ),
   };
 }

@@ -6,13 +6,15 @@
  * and the `search` substring filter used by the chat-input mention typeahead.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { toAsyncDb } from "../db/syncAdapter.ts";
 import type { DbLike } from "../db/types.ts";
+import { closeDb, openDb, openGlobalDb } from "../db/db.ts";
+import { _resetProfileStoreCache } from "./profileStore.ts";
 import { selectMembers } from "./members.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -270,5 +272,64 @@ describe("selectMembers", () => {
     const { members, externalAdmins } = await selectMembers(asyncDb, SPACE, "nobody");
     expect(members).toEqual([]);
     expect(externalAdmins).toEqual([]);
+  });
+});
+
+describe("selectMembers cross-stream search (global store)", () => {
+  beforeEach(() => {
+    closeDb();
+    openDb({ path: ":memory:" });
+    _resetProfileStoreCache();
+  });
+  afterEach(() => {
+    closeDb();
+  });
+
+  test("finds a cross-stream member by handle/name from the global store", async () => {
+    const { db, asyncDb } = freshDb();
+    // Member edge only — NO comp_user/comp_info in the per-space DB. This is
+    // the cross-stream case: the member's profile lives in their own stream,
+    // so the per-space join is null and only the global store has it.
+    seedEntity(db, SPACE);
+    seedEntity(db, "did:plc:carol");
+    seedEdge(db, SPACE, "did:plc:carol", "member");
+
+    // Seed the authoritative global profile (worker-backed global DB).
+    const global = openGlobalDb();
+    await global.run(
+      `insert into profiles (did, handle, name) values (?, ?, ?)`,
+      ["did:plc:carol", "carol.bsky.social", "Carol Cross"],
+    );
+
+    // Search by handle — must match even though comp_user is empty.
+    const byHandle = await selectMembers(asyncDb, SPACE, "carol.bsky");
+    expect(byHandle.members.map((m) => m.did)).toEqual(["did:plc:carol"]);
+    expect(byHandle.members[0]!.handle).toBe("carol.bsky.social");
+
+    // Search by display name — must match even though comp_info is empty.
+    const byName = await selectMembers(asyncDb, SPACE, "cross");
+    expect(byName.members.map((m) => m.did)).toEqual(["did:plc:carol"]);
+    expect(byName.members[0]!.name).toBe("Carol Cross");
+
+    // A non-matching query still returns nothing.
+    const none = await selectMembers(asyncDb, SPACE, "zzz");
+    expect(none.members).toEqual([]);
+  });
+
+  test("finds a cross-stream external admin by handle from the global store", async () => {
+    const { db, asyncDb } = freshDb();
+    seedEntity(db, SPACE);
+    seedEntity(db, "did:plc:rootadmin");
+    seedEdge(db, SPACE, "did:plc:rootadmin", "admin");
+
+    const global = openGlobalDb();
+    await global.run(
+      `insert into profiles (did, handle, name) values (?, ?, ?)`,
+      ["did:plc:rootadmin", "root.bsky.social", "Root Admin"],
+    );
+
+    const res = await selectMembers(asyncDb, SPACE, "root.bsky");
+    expect(res.members).toEqual([]);
+    expect(res.externalAdmins.map((a) => a.did)).toEqual(["did:plc:rootadmin"]);
   });
 });
