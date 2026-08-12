@@ -25,7 +25,14 @@ export interface InternalLinkTarget {
  */
 export function parseRichTextContent(content: string): Block[] | null {
   try {
-    const parsed: unknown = JSON.parse(atob(content));
+    // The wire document is UTF-8 JSON. atob() returns a binary (Latin-1)
+    // string where each byte is its own code point, so re-decode as UTF-8
+    // before JSON.parse — otherwise non-ASCII text (ae/oe/aa, curly
+    // apostrophes, emoji) comes back as mojibake (e.g. "Ã¦Ã¸Ã¥" for "æøå").
+    const binary = atob(content);
+    const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+    const json = new TextDecoder().decode(bytes);
+    const parsed: unknown = JSON.parse(json);
     if (isRichTextDocument(parsed)) return parsed.blocks;
     return null;
   } catch {
