@@ -440,6 +440,36 @@ describe("auth/writeAuth — space manage events", () => {
     expect(result).toBeDefined();
     expect(result!.status).toBe(403);
   });
+
+  test("admin can update sidebar", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedUser(db, ADMIN);
+    await addEdge(db, SPACE, ADMIN, "admin");
+
+    const result = await checkWriteAuth(db, SPACE, ADMIN, {
+      $type: "space.roomy.space.updateSidebar.v1",
+      id: newUlid(),
+      categories: [],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  test("member cannot update sidebar", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+
+    const result = await checkWriteAuth(db, SPACE, USER, {
+      $type: "space.roomy.space.updateSidebar.v1",
+      id: newUlid(),
+      categories: [],
+    });
+    expect(result).toBeDefined();
+    expect(result!.status).toBe(403);
+    expect(result!.message).toContain("admin");
+  });
 });
 
 describe("auth/writeAuth — space member events", () => {

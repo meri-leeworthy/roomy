@@ -101,7 +101,9 @@
   {#if sidebarOverride.content}
     {@render sidebarOverride.content?.()}
   {:else}
-    <SpaceSidebar {spaceId} />
+    {#key spaceId}
+      <SpaceSidebar {spaceId} />
+    {/key}
   {/if}
 {/snippet}
 
