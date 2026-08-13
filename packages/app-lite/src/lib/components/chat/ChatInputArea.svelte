@@ -95,22 +95,29 @@
   });
 
   // Fetch embed data for the composed URL and keep the preview in sync.
+  //
+  // Uses a NON-reactive `embedFetchUrl` guard rather than reading `linkEmbed`
+  // back here. If the effect read `linkEmbed` to decide whether to refetch,
+  // then writing `linkEmbed = { url, embed: null }` inside it would re-trigger
+  // the effect, whose cleanup would set `cancelled = true` and DISCARD the
+  // resolved embed (leaving an empty preview box even though the request
+  // succeeded). Tracking the in-flight URL in a plain variable avoids that
+  // self-cancel entirely.
+  let embedFetchUrl: string | null = null;
   $effect(() => {
     const url = composedUrl;
     if (!url) {
       linkEmbed = null;
+      embedFetchUrl = null;
       return;
     }
     if (dismissedUrl === url) return;
-    if (linkEmbed?.url === url) return;
+    if (embedFetchUrl === url) return;
+    embedFetchUrl = url;
     linkEmbed = { url, embed: null };
-    let cancelled = false;
     fetchEmbedData(url).then((embed) => {
-      if (!cancelled) linkEmbed = { url, embed };
+      if (embedFetchUrl === url) linkEmbed = { url, embed };
     });
-    return () => {
-      cancelled = true;
-    };
   });
 
   function dismissLinkEmbed() {
