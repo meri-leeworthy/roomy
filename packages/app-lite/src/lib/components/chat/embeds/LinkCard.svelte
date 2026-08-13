@@ -33,8 +33,23 @@
   const subtitle = $derived(
     [providerName, authorName].filter(Boolean).join(" — "),
   );
+
+  /** Whether any embed metadata is present to render a rich card. */
+  const hasEmbedData = $derived(
+    !!(title || description || imageUrl || videoUrl || subtitle || footerText),
+  );
+
+  /** Hostname shown as a plain link when there's no embed metadata. */
+  const hostname = $derived((() => {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return url;
+    }
+  })());
 </script>
 
+{#if hasEmbedData}
 <a
   href={url}
   target="_blank"
@@ -88,3 +103,13 @@
     {/if}
   </div>
 </a>
+{:else}
+<a
+  href={url}
+  target="_blank"
+  rel="noopener noreferrer"
+  class="not-prose max-w-[70ch] text-sm text-primary-600 dark:text-primary-400 hover:underline no-underline truncate"
+>
+  {hostname}
+</a>
+{/if}
