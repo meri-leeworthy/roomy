@@ -11,24 +11,21 @@ import {
   type EmbedSweeperOpts,
 } from "./sweeper.ts";
 import { openDb, openGlobalDb, openSpaceDb, closeDb } from "../db/db.ts";
-import type { Embed } from "./types.ts";
 import type {
   InvalidationEvent,
   InvalidationRouter,
 } from "../invalidation/types.ts";
 
-// Deterministic fake embed so the sweeper test doesn't depend on the
-// network or a live embed service. The sweeper only emits a #messageDiff
-// when enrichment SUCCEEDS (non-null embed), so the mock must return data.
-const FAKE_EMBED: Embed = {
-  v: "1",
-  ts: "2026-06-23T00:00:00Z",
-  ty: "link",
-  u: "https://example.com/article",
-  t: "Example Article",
-  d: "A test embed.",
-};
-const FAKE_RESPONSE = JSON.stringify(["2026-06-23T00:00:00Z", FAKE_EMBED]);
+// Deterministic fake page so the sweeper test doesn't depend on the network
+// or a live embed service. Enrichment now runs through the in-appserver
+// OG/oEmbed pipeline, which fetches the target URL directly — so the mock
+// must return HTML with OpenGraph meta tags. The sweeper only emits a
+// #messageDiff when enrichment SUCCEEDS (non-null embed).
+const FAKE_HTML =
+  "<html><head>" +
+  '<meta property="og:title" content="Example Article" />' +
+  '<meta property="og:description" content="A test embed." />' +
+  "</head></html>";
 const realFetch = globalThis.fetch;
 
 beforeAll(() => {
@@ -43,9 +40,9 @@ beforeAll(() => {
     _init?: RequestInit,
   ): Promise<Response> =>
     Promise.resolve(
-      new Response(FAKE_RESPONSE, {
+      new Response(FAKE_HTML, {
         status: 200,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "text/html" },
       }),
     )) as typeof globalThis.fetch;
 });

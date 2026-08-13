@@ -189,15 +189,17 @@ describe("global pending_links index (findPendingLinks / countPendingLinks)", ()
 });
 
 describe("fetchEmbedData status classification", () => {
-  // The embed service is reached at EMBED_SERVICE_URL (default
-  // embed.internal.weird.one); stub fetch so no real network call is made.
+  // Enrichment now runs through the in-appserver OG/oEmbed pipeline, which
+  // fetches the target URL directly. Stub global.fetch so no real network
+  // call is made.
   const realFetch = globalThis.fetch;
 
-  function stubStatus(status: number, statusText = "", body = ""): void {
+  function stub(status: number, body = "", reject = false): void {
     globalThis.fetch = ((_input: RequestInfo | URL, _init?: RequestInit) =>
-      Promise.resolve(
-        new Response(body, { status, statusText }),
-      )) as typeof globalThis.fetch;
+      reject
+        ? Promise.reject(new TypeError("fetch failed"))
+        : Promise.resolve(new Response(body, { status }))
+    ) as typeof globalThis.fetch;
   }
 
   function withStub<T>(fn: () => Promise<T>): Promise<T> {
@@ -206,12 +208,9 @@ describe("fetchEmbedData status classification", () => {
     });
   }
 
-  test("400/401/403 are definitive (no retry) — sites that block scrapers settle", async () => {
-    // Regression: these used to be `transient`, so bsky.app's permanent 400
-    // and eprint.iacr.org's permanent 403 were retried forever (backoff caps
-    // at 6h), keeping a permanent backlog and a permanent log flood.
+  test("stable 4xx are definitive (no retry) — bot-blocked/gone settle", async () => {
     for (const status of [400, 401, 403, 404, 410]) {
-      stubStatus(status, "blocked");
+      stub(status, "blocked");
       const result = await withStub(() => fetchEmbedData("https://x.example"));
       expect(result).toEqual({ status: "definitive" });
     }
@@ -219,37 +218,40 @@ describe("fetchEmbedData status classification", () => {
 
   test("429 and 5xx are transient (retry later)", async () => {
     for (const status of [429, 500, 502, 503]) {
-      stubStatus(status);
+      stub(status);
       const result = await withStub(() => fetchEmbedData("https://x.example"));
       expect(result).toEqual({ status: "transient" });
     }
   });
 
-  test("200 with a payload is ok", async () => {
-    const embed: Embed = { v: "1", ts: "x", ty: "link", t: "T" };
-    globalThis.fetch = ((_input: RequestInfo | URL, _init?: RequestInit) =>
-      Promise.resolve(
-        new Response(JSON.stringify(["x", embed]), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-      )) as typeof globalThis.fetch;
+  test("network error is transient (retry later)", async () => {
+    stub(0, "", true);
     const result = await withStub(() => fetchEmbedData("https://x.example"));
-    expect(result.status).toBe("ok");
-    if (result.status === "ok") expect(result.embed).toEqual(embed);
-    globalThis.fetch = realFetch;
+    expect(result).toEqual({ status: "transient" });
   });
 
-  test("200 with a null payload is definitive", async () => {
-    globalThis.fetch = ((_input: RequestInfo | URL, _init?: RequestInit) =>
-      Promise.resolve(
-        new Response(JSON.stringify(["x", null]), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-      )) as typeof globalThis.fetch;
+  test("200 with OpenGraph HTML is ok", async () => {
+    const html =
+      '<meta property="og:title" content="Roomy" />' +
+      '<meta property="og:description" content="Built on ATProto" />';
+    stub(200, `<html><head>${html}</head></html>`);
+    const result = await withStub(() => fetchEmbedData("https://x.example"));
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.embed.t).toBe("Roomy");
+      expect(result.embed.d).toBe("Built on ATProto");
+      expect(result.embed.ty).toBe("link");
+    }
+  });
+
+  test("200 with no metadata HTML is definitive", async () => {
+    stub(200, "<html><head></head></html>");
     const result = await withStub(() => fetchEmbedData("https://x.example"));
     expect(result).toEqual({ status: "definitive" });
-    globalThis.fetch = realFetch;
+  });
+
+  test("non-http URL is definitive (no network)", async () => {
+    const result = await fetchEmbedData("not-a-url");
+    expect(result).toEqual({ status: "definitive" });
   });
 });

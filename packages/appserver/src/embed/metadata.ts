@@ -46,15 +46,6 @@ const ACCEPT_HTML =
   "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
 
 // ─── Types ──────────────────────────────────────────────────────────────
-
-/** A fetched page. */
-export interface FetchedPage {
-  html: string;
-  /** Final URL after redirects (used to resolve relative og:image URLs). */
-  finalUrl: string;
-  status: number;
-}
-
 /**
  * Normalized link metadata, mirroring the SDK's `LinkEmbedData` shape so the
  * frontend's `LinkCard` can render it unchanged. All fields optional — a URL
@@ -73,15 +64,26 @@ export interface LinkEmbedMetadata {
 
 // ─── Page fetch ─────────────────────────────────────────────────────────
 
+/** A fetched page (HTML available only on 2xx). */
+export interface PageResult {
+  /** HTTP status; 0 signals a network/timeout failure (no response). */
+  status: number;
+  /** Response body as text. `null` when the status isn't 2xx or fetch failed. */
+  html: string | null;
+  /** Final URL after redirects (used to resolve relative og:image URLs). */
+  finalUrl: string;
+}
+
 /**
- * Fetch a page's HTML with a browser UA, redirect following, and a hard
- * timeout. Returns `null` on any non-OK status or network/timeout error
- * (including bot-protection 403s — a URL we can't fetch has no metadata).
+ * Fetch a page with a browser UA, redirect following, and a hard timeout.
+ * Unlike {@link fetchLinkMetadata}, this reports the HTTP status even on
+ * failure so callers can classify stable 4xx (definitive) vs transient
+ * (5xx/429/network) outcomes for retry scheduling.
  */
 export async function fetchPage(
   url: string,
   signal?: AbortSignal,
-): Promise<FetchedPage | null> {
+): Promise<PageResult> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   const onCallerAbort = () => controller.abort();
@@ -97,11 +99,11 @@ export async function fetchPage(
       },
       signal: controller.signal,
     });
-    if (!res.ok) return null;
+    if (!res.ok) return { status: res.status, html: null, finalUrl: res.url || url };
     const html = await res.text();
-    return { html, finalUrl: res.url || url, status: res.status };
+    return { status: res.status, html, finalUrl: res.url || url };
   } catch {
-    return null;
+    return { status: 0, html: null, finalUrl: url };
   } finally {
     clearTimeout(timeoutId);
     signal?.removeEventListener("abort", onCallerAbort);
@@ -314,32 +316,67 @@ function resolveUrl(href: string, base: string): string {
 // ─── Orchestrator ───────────────────────────────────────────────────────
 
 /**
+ * Outcome of enriching a URL, classified for retry scheduling:
+ *  - `ok`       — metadata was found.
+ *  - `no-data`  — definitive: the URL has no metadata (page loaded but no
+ *                 OG/oEmbed) or is stably unreachable (4xx). Not worth retrying.
+ *  - `transient` — failed in a way that may succeed later (network/timeout,
+ *                  5xx, 429). The caller should retry with backoff.
+ */
+export type ProbeResult =
+  | { status: "ok"; metadata: LinkEmbedMetadata }
+  | { status: "no-data" }
+  | { status: "transient" };
+
+/**
+ * Enrich a URL with link metadata (oEmbed discovery + OpenGraph fallback),
+ * returning a classified {@link ProbeResult} so the caller can schedule
+ * retries for transient failures while settling definitive no-data URLs.
+ */
+export async function probeLinkMetadata(
+  url: string,
+  signal?: AbortSignal,
+): Promise<ProbeResult> {
+  if (!/^https?:\/\//i.test(url)) return { status: "no-data" };
+
+  const page = await fetchPage(url, signal);
+  if (page.status === 0) return { status: "transient" }; // network/timeout
+
+  if (page.status >= 400) {
+    // Stable 4xx (bot-blocked, gone) settle; 429 & 5xx are transient.
+    if (page.status === 429 || page.status >= 500) return { status: "transient" };
+    return { status: "no-data" };
+  }
+
+  const html = page.html ?? "";
+  const og = ogToMetadata(html);
+
+  const endpoint = extractOEmbedEndpoint(html);
+  if (endpoint) {
+    const oembed = await fetchOEmbed(endpoint, page.finalUrl, signal);
+    if (oembed) {
+      // Prefer oEmbed data; fill gaps (e.g. description, og:image) from OG.
+      return { status: "ok", metadata: mergeMetadata(oEmbedToMetadata(oembed), og) };
+    }
+  }
+
+  return isEmpty(og) ? { status: "no-data" } : { status: "ok", metadata: og };
+}
+
+/**
  * Enrich a URL with link metadata (oEmbed discovery + OpenGraph fallback).
- * Returns `null` when the URL is not http(s), the page couldn't be fetched,
- * or no metadata was found.
+ * Returns `null` when the URL has no metadata or couldn't be fetched.
+ * Thin wrapper over {@link probeLinkMetadata} for callers that only need the
+ * metadata (e.g. the XRPC endpoint) and don't care about retry classification.
  */
 export async function fetchLinkMetadata(
   url: string,
   signal?: AbortSignal,
 ): Promise<LinkEmbedMetadata | null> {
-  if (!/^https?:\/\//i.test(url)) return null;
-
-  const page = await fetchPage(url, signal);
-  if (!page) return null;
-
-  const og = ogToMetadata(page.html);
-
-  const endpoint = extractOEmbedEndpoint(page.html);
-  if (endpoint) {
-    const oembed = await fetchOEmbed(endpoint, page.finalUrl, signal);
-    if (oembed) {
-      // Prefer oEmbed data; fill gaps (e.g. description, og:image) from OG.
-      return mergeMetadata(oEmbedToMetadata(oembed), og);
-    }
-  }
-
-  return isEmpty(og) ? null : og;
+  const result = await probeLinkMetadata(url, signal);
+  return result.status === "ok" ? result.metadata : null;
 }
+
 
 /** Merge `a` (preferred) over `b` (fallback), filling only absent fields. */
 export function mergeMetadata(

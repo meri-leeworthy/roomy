@@ -1,32 +1,16 @@
 /**
- * Embed enricher: detects URLs in message content, fetches embed metadata
- * from the external embed service, and caches results in `comp_embed_link_data`.
+ * Embed enricher: detects URLs in message content, enriches them with link
+ * metadata via the in-appserver OG + oEmbed pipeline, and caches results in
+ * `comp_embed_link_data`.
  *
- * The embed service (Lantern-chat embed-service) accepts a URL via POST and
- * returns OpenGraph/oEmbed metadata as a JSON array: `[timestamp, EmbedV1]`.
- *
- * Enrichment is best-effort and non-blocking — failures are logged but never
- * crash the materialization pipeline.
+ * Enrichment is best-effort and non-blocking — failures are settled (or
+ * scheduled for retry) but never crash the materialization pipeline.
  */
 
 import type { DbLike } from "../db/types.ts";
-import type { Embed, EmbedServiceResponse } from "./types.ts";
+import type { Embed } from "./types.ts";
 import { openSpaceDb } from "../db/db.ts";
-import { log } from "../log.ts";
-
-// ─── Configuration ──────────────────────────────────────────────────────
-
-const EMBED_SERVICE_URL =
-  process.env.EMBED_SERVICE_URL ?? "https://embed.internal.weird.one";
-
-/**
- * Hard timeout for a single embed-service request. The original
- * implementation threaded `signal` through but no caller ever constructed
- * one, so a slow or hung embed service left every link "pending" for the
- * full default-fetch window — long enough for every SpaceMaterializer to
- * re-fetch it on every batch. Tunable via env for ops.
- */
-const FETCH_TIMEOUT_MS = Number(process.env.EMBED_FETCH_TIMEOUT_MS ?? 10_000);
+import { probeLinkMetadata } from "./metadata.ts";
 
 /**
  * In-flight dedup: maps a URL to the enrichment promise currently fetching
@@ -94,88 +78,39 @@ export type FetchResult =
   | { status: "transient" };
 
 /**
- * Fetch embed data for a single URL from the embed service.
- *
- * Always enforces a `FETCH_TIMEOUT_MS` hard timeout, combined with any
- * caller-provided `signal`. Without this, a hung embed service keeps the
- * URL "pending" indefinitely and amplifies re-fetches.
+ * Fetch embed data for a single URL using the in-appserver OG + oEmbed
+ * pipeline (`probeLinkMetadata`). This replaces the previous call out to an
+ * external embed service — enrichment now runs in-process, so posted
+ * messages render the same link metadata the composer previews.
  *
  * Returns a {@link FetchResult} so the caller can distinguish a definitive
- * "no data" outcome (404 / empty) from a transient failure (timeout / 5xx /
- * network) — only the latter should be retried with backoff.
+ * "no data" outcome (page loaded but no OG/oEmbed, or a stable 4xx) from a
+ * transient failure (timeout / 5xx / 429 / network) — only the latter should
+ * be retried with backoff.
  */
 export async function fetchEmbedData(
   url: string,
   signal?: AbortSignal,
 ): Promise<FetchResult> {
-  const locale =
-    typeof navigator !== "undefined"
-      ? navigator.languages?.[0] || navigator.language || "en"
-      : "en";
-
-  // Timeout-scoped controller. We abort on either our own timeout or the
-  // caller's signal (whichever fires first).
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  const onCallerAbort = () => controller.abort();
-  signal?.addEventListener("abort", onCallerAbort, { once: true });
-
-  try {
-    const res = await fetch(`${EMBED_SERVICE_URL}?lang=${locale}`, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: url,
-      signal: controller.signal,
-    });
-
-    // Deterministic client errors: the URL has no embed data, or the
-    // service/upstream refused it in a way that won't change on retry.
-    // 400/401/403 are stable rejections (e.g. bsky.app 400s scrapers,
-    // eprint.iacr.org 403s); 404/410 are genuine no-data. Settle them so the
-    // pending set drains instead of retrying forever (capped at 6h backoff).
-    if (
-      res.status === 400 ||
-      res.status === 401 ||
-      res.status === 403 ||
-      res.status === 404 ||
-      res.status === 410
-    )
+  const result = await probeLinkMetadata(url, signal);
+  switch (result.status) {
+    case "ok":
+      // Wrap the LinkEmbedMetadata subset in the EmbedV1 envelope so the
+      // existing storage/read path (Embed + selectMessages) is unchanged.
+      return {
+        status: "ok",
+        embed: {
+          v: "1",
+          ts: new Date().toISOString(),
+          ty: "link",
+          ...result.metadata,
+        } as Embed,
+      };
+    case "no-data":
       return { status: "definitive" };
-
-    // Other non-OK (5xx, 429, …): the service erred transiently — retry later.
-    // Logged at debug (not warn) because a slow/blocking upstream can produce
-    // thousands of these across a backfill, which floods logs and trips
-    // platform rate limits. Set LOG_LEVEL=debug to investigate a specific URL.
-    if (!res.ok) {
-      log.debug(
-        `[embed] ${res.status} fetching data for ${url}: ${res.statusText}`,
-      );
+    case "transient":
       return { status: "transient" };
-    }
-
-    const data = (await res.json()) as EmbedServiceResponse;
-    const embed = data[1] as Embed | null;
-    // 200 with an empty/null payload: the service has no data for this URL.
-    if (!embed) return { status: "definitive" };
-    return { status: "ok", embed };
-  } catch (err) {
-    // Timeouts and network errors are transient — retry later.
-    if (isAbortError(err)) return { status: "transient" };
-    // debug, not warn: see the non-OK branch above for the volume rationale.
-    log.debug(`[embed] fetch failed for ${url}:`, err);
-    return { status: "transient" };
-  } finally {
-    clearTimeout(timeoutId);
-    signal?.removeEventListener("abort", onCallerAbort);
   }
-}
-
-/** True for any AbortError (DOMException in browsers, native Error in Bun/Node). */
-function isAbortError(err: unknown): boolean {
-  if (err && typeof err === "object" && "name" in err) {
-    return (err as { name: unknown }).name === "AbortError";
-  }
-  return false;
 }
 
 // ─── Database helpers ────────────────────────────────────────────────────
