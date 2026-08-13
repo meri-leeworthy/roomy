@@ -1,33 +1,23 @@
 /**
  * Client-side link-embed enrichment.
  *
- * The composer reaches out to the embed service directly (the same
- * Lantern-chat embed-service the appserver's sweeper uses) so a link preview
- * can be shown below the chat input *before* the message is sent — no round
- * trip through the appserver's enrichment backlog.
+ * The composer reaches out to the **appserver's** `space.roomy.embed.getLinkMetadata`
+ * XRPC query to enrich a URL into link metadata for a pre-send preview. This
+ * replaces the old path where the browser hit an external embed service
+ * directly — enrichment now lives in the appserver (OpenGraph + oEmbed
+ * discovery), so it's authenticated, CORS-free, and the seam where
+ * ATProto-native enrichment (DID resolution, HappyView, PDS fetches) will
+ * later be layered in.
  *
- * The embed service accepts a URL via POST and returns a 2-element JSON
- * array: `[timestamp, EmbedV1]`. We surface the EmbedV1 payload as the SDK's
- * `LinkEmbedData` shape (a structural subset) so it can be rendered by the
- * existing `LinkCard` component.
+ * The endpoint returns the SDK's `LinkEmbedData` shape, which the existing
+ * `LinkCard` component renders unchanged.
  */
 
-import { env as dynamicEnv } from "$env/dynamic/public";
 import type { schemas } from "@roomy-space/sdk";
+import { px } from "$lib/auth.svelte";
 
-type LinkEmbedData = typeof schemas.queries.getMessage.LinkEmbedData.infer;
-
-/**
- * Public embed-service origin. The appserver's default
- * (`https://embed.internal.weird.one`) is internal-only, so production must
- * set `PUBLIC_EMBED_SERVICE_URL` to a publicly reachable origin. Falls back
- * to the internal default for local dev where the browser can reach it.
- */
-const EMBED_SERVICE_URL =
-  dynamicEnv.PUBLIC_EMBED_SERVICE_URL || "https://embed.internal.weird.one";
-
-/** Hard timeout for a single embed-service request. */
-const FETCH_TIMEOUT_MS = 10_000;
+export type LinkEmbedData =
+  typeof schemas.queries.getLinkMetadata.LinkEmbedData.infer;
 
 /**
  * Regex to detect URLs in plain-text content (the legacy markdown path).
@@ -58,36 +48,20 @@ export function extractUrls(text: string): string[] {
 }
 
 /**
- * Fetch embed metadata for a single URL from the embed service.
+ * Fetch link metadata for a single URL from the appserver's
+ * `space.roomy.embed.getLinkMetadata` XRPC query.
  *
- * Best-effort: returns `null` on any failure (timeout, non-OK status, or a
- * 200 with an empty payload) so the composer can degrade gracefully to a
- * URL-only preview. Never throws.
+ * Best-effort: returns `null` on any failure (missing auth, network error,
+ * or an empty response for a URL with no metadata) so the composer degrades
+ * gracefully to a URL-only preview. Never throws.
  */
-export async function fetchEmbedData(
-  url: string,
-): Promise<LinkEmbedData | null> {
-  const locale =
-    typeof navigator !== "undefined"
-      ? navigator.languages?.[0] || navigator.language || "en"
-      : "en";
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
+export async function fetchEmbedData(url: string): Promise<LinkEmbedData | null> {
   try {
-    const res = await fetch(`${EMBED_SERVICE_URL}?lang=${locale}`, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: url,
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as [string, LinkEmbedData];
-    return data[1] ?? null;
+    const data = await px().query("space.roomy.embed.getLinkMetadata", { url });
+    // The endpoint returns an empty object when the URL has no metadata.
+    if (!data || Object.keys(data).length === 0) return null;
+    return data as LinkEmbedData;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }

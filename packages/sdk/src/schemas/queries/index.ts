@@ -24,3 +24,4 @@ export * as getPreferences from "./getPreferences";
 export * as getFlags from "./getFlags";
 export * as getProfile from "./getProfile";
 export * as getProfiles from "./getProfiles";
+export * as getLinkMetadata from "./getLinkMetadata";

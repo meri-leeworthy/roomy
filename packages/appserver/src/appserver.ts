@@ -51,6 +51,7 @@ import { getMessagesHandler } from "./handlers/space.roomy.room.getMessages.ts";
 import { getMessageHandler } from "./handlers/space.roomy.message.getMessage.ts";
 import { getReactionsHandler } from "./handlers/space.roomy.message.getReactions.ts";
 import { getProfileHandler } from "./handlers/space.roomy.user.getProfile.ts";
+import { getLinkMetadataHandler } from "./handlers/space.roomy.embed.getLinkMetadata.ts";
 import { updateSeenHandler } from "./handlers/space.roomy.room.updateSeen.ts";
 import { sendEventsHandler } from "./handlers/space.roomy.space.sendEvents.ts";
 import { createSpaceHandler } from "./handlers/space.roomy.space.createSpace.ts";
@@ -289,6 +290,11 @@ export function buildRouter(
       handler: getProfileHandler,
       paramsSchema: schemas.queries.getProfile.Params,
       outputSchema: schemas.queries.getProfile.Response,
+    })
+    .query("space.roomy.embed.getLinkMetadata", {
+      handler: getLinkMetadataHandler,
+      paramsSchema: schemas.queries.getLinkMetadata.Params,
+      outputSchema: schemas.queries.getLinkMetadata.Response,
     })
     // ── Web push ──────────────────────────────────────────────────────────
     .query("space.roomy.push.getVapidPublicKey", {

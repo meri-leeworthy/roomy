@@ -1,0 +1,68 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.embed.getLinkMetadata",
+  "defs": {
+    "embedMedia": {
+      "type": "object",
+      "required": ["u"],
+      "properties": {
+        "u": { "type": "string" },
+        "d": { "type": "string" },
+        "w": { "type": "integer" },
+        "h": { "type": "integer" },
+        "m": { "type": "string" }
+      }
+    },
+    "embedProvider": {
+      "type": "object",
+      "properties": {
+        "n": { "type": "string" },
+        "u": { "type": "string" }
+      }
+    },
+    "embedAuthor": {
+      "type": "object",
+      "properties": {
+        "n": { "type": "string" },
+        "u": { "type": "string" }
+      }
+    },
+    "linkEmbedData": {
+      "type": "object",
+      "properties": {
+        "t": { "type": "string" },
+        "d": { "type": "string" },
+        "p": { "type": "ref", "ref": "#embedProvider" },
+        "au": { "type": "ref", "ref": "#embedAuthor" },
+        "footer": {
+          "type": "object",
+          "properties": { "t": { "type": "string" } }
+        },
+        "imgs": {
+          "type": "array",
+          "items": { "type": "ref", "ref": "#embedMedia" }
+        },
+        "vid": { "type": "ref", "ref": "#embedMedia" },
+        "thumb": { "type": "ref", "ref": "#embedMedia" }
+      }
+    },
+    "main": {
+      "type": "query",
+      "description": "Enrich a URL with link metadata (OpenGraph + oEmbed discovery). Best-effort: returns an empty object when the URL has no metadata or cannot be fetched.",
+      "parameters": {
+        "type": "params",
+        "required": ["url"],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The http(s) URL to enrich."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "ref", "ref": "#linkEmbedData" }
+      }
+    }
+  }
+}
