@@ -5,7 +5,8 @@
     type ChatInputShellMode,
   } from "@roomy/design/components/content/thread/ChatInputShell.svelte";
   import { messagingState } from "./messaging-state.svelte";
-  import { newUlid, toBytes } from "@roomy-space/sdk";
+  import { newUlid, toBytes, cache, extractFacetUrls } from "@roomy-space/sdk";
+  import type { schemas, Block } from "@roomy-space/sdk";
   import ChatInput, {
     clearInput,
     setInputFocus,
@@ -17,13 +18,17 @@
   import MessageContext from "./MessageContext.svelte";
   import { px, auth } from "$lib/auth.svelte";
   import { queryClient } from "$lib/client";
-  import { cache } from "@roomy-space/sdk";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
-  import type { Block } from "@roomy-space/sdk";
   import type { Message } from "$lib/queries/messages";
   import type { Member, ExternalAdmin } from "$lib/queries/members";
   import type { TypeaheadUser } from "@roomy/design/components/ui/user-typeahead/UserTypeahead.svelte";
   import { resolveBlobUrl } from "$lib/utils";
+  import LinkCard from "./embeds/LinkCard.svelte";
+  import { extractUrls, fetchEmbedData } from "$lib/embed/embed-service";
+  import Button from "@roomy/design/components/ui/button/Button.svelte";
+  import { IconX } from "@roomy/design/icons";
+
+  type LinkEmbedData = typeof schemas.queries.getMessage.LinkEmbedData.infer;
 
   type Props = {
     spaceId: string;
@@ -60,6 +65,58 @@
   // used when the richtext flag is on; the markdown string binding remains
   // the source of truth for messaging-state.
   let blocks: Block[] | undefined = $state();
+
+  // ── Client-side link embeds ────────────────────────────────────────────
+  // The composer detects the URL being typed, fetches embed metadata directly
+  // from the embed service, and shows a preview below the input. The user can
+  // dismiss it with the 'x' button. This is composer UX only — the sent
+  // message's link card is still enriched server-side by the appserver's
+  // sweeper (the client doesn't attach a LinkAttachment, which would create a
+  // duplicate embed row).
+  let linkEmbed: { url: string; embed: LinkEmbedData | null } | null =
+    $state(null);
+  /** URL the user explicitly dismissed — don't re-fetch/re-show it. */
+  let dismissedUrl: string | null = $state(null);
+
+  // The first URL currently present in the composer (rich-text link facets
+  // when the new schema is active, else a regex scan of the markdown).
+  const composedUrl = $derived(
+    blocks && blocks.length > 0
+      ? extractFacetUrls(blocks)[0] ?? null
+      : extractUrls(messagingState.input)[0] ?? null,
+  );
+
+  // Reset the dismissal whenever the composed URL changes, so a fresh
+  // composition of the same URL can show the preview again.
+  $effect(() => {
+    if (dismissedUrl && dismissedUrl !== composedUrl) {
+      dismissedUrl = null;
+    }
+  });
+
+  // Fetch embed data for the composed URL and keep the preview in sync.
+  $effect(() => {
+    const url = composedUrl;
+    if (!url) {
+      linkEmbed = null;
+      return;
+    }
+    if (dismissedUrl === url) return;
+    if (linkEmbed?.url === url) return;
+    linkEmbed = { url, embed: null };
+    let cancelled = false;
+    fetchEmbedData(url).then((embed) => {
+      if (!cancelled) linkEmbed = { url, embed };
+    });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  function dismissLinkEmbed() {
+    dismissedUrl = linkEmbed?.url ?? null;
+    linkEmbed = null;
+  }
 
 
   let isSendingMessage = $state(false);
@@ -395,6 +452,22 @@
         processImageFile={disableUploads ? undefined : processImageFile}
         mentionSearch={mentionSearch}
       />
+    {/if}
+  {/snippet}
+  {#snippet linkEmbedPreview()}
+    {#if linkEmbed}
+      <div class="relative">
+        <LinkCard url={linkEmbed.url} embed={linkEmbed.embed} />
+        <Button
+          variant="ghost"
+          class="absolute p-0.5 top-1 right-1 bg-base-100 hover:bg-base-200 dark:bg-base-900 dark:hover:bg-base-800 rounded-full"
+          aria-label="Dismiss link preview"
+          title="Remove link preview"
+          onclick={dismissLinkEmbed}
+        >
+          <IconX class="size-4" />
+        </Button>
+      </div>
     {/if}
   {/snippet}
   {#snippet fullscreenDropper()}

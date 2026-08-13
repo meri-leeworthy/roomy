@@ -68,6 +68,8 @@
     contextPreview?: Snippet;
     /** Slot: the rich text input area (e.g. ChatInput). */
     input: Snippet;
+    /** Slot: optional link-embed preview shown below the input (client-side link embeds). */
+    linkEmbedPreview?: Snippet;
     /** Slot: optional fullscreen image dropper (or any extra overlay). */
     fullscreenDropper?: Snippet;
   };
@@ -95,6 +97,7 @@
     bindFileInput,
     contextPreview,
     input,
+    linkEmbedPreview,
     fullscreenDropper,
   }: Props = $props();
 
@@ -306,6 +309,11 @@
               </Button>
             {/if}
           {/if}
+        </div>
+      {/if}
+      {#if linkEmbedPreview}
+        <div class="px-2 pt-2">
+          {@render linkEmbedPreview()}
         </div>
       {/if}
       {@render fullscreenDropper?.()}
