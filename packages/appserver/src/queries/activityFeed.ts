@@ -444,7 +444,8 @@ async function batchFetchEmbeds(
               null as length, null as name
          from comp_embed_link el
          join entities e on e.id = el.entity
-        where e.room in (${idPh})`,
+        where e.room in (${idPh})
+          and el.show_preview = 1`,
     )
     // Each UNION branch has its own `where ... in (${idPh})` — bind ids
     // once per branch (4× total). bun:sqlite has no positional reuse here.

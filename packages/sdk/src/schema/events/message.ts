@@ -227,24 +227,68 @@ export const EditMessage = defineEvent(
       const attachmentsExt =
         event.extensions["space.roomy.extension.attachments.v0"];
 
-      // Delete existing attachment data for this message
-      // Pattern: entity ends with ?message=<messageId>
-      const messageIdSuffix = `%?message=${event.messageId}`;
-      statements.push(
-        sql`delete from comp_embed_image where entity like ${messageIdSuffix}`,
-        sql`delete from comp_embed_video where entity like ${messageIdSuffix}`,
-        sql`delete from comp_embed_file where entity like ${messageIdSuffix}`,
-        sql`delete from comp_embed_link where entity like ${messageIdSuffix}`,
-        sql`delete from comp_comment where entity = ${event.messageId}`,
-        sql`delete from edges where head = ${event.messageId} and label = 'reply'`,
-        // Clean up orphaned entities (media entities have room = messageId)
-        sql`delete from entities where room = ${event.messageId} and id != ${event.messageId}`,
+      // A link-only edit is an embed preview toggle (e.g. removing a link
+      // embed from one's own message). This must be non-destructive: it sets
+      // `show_preview` on the matching link row(s) without wiping other
+      // attachment types (images/videos/files/comments/replies).
+      const attachments = attachmentsExt?.attachments ?? [];
+      const linkAtts = attachments.filter(
+        (a) => a.$type === "space.roomy.attachment.link.v0",
+      );
+      const nonLinkAtts = attachments.filter(
+        (a) => a.$type !== "space.roomy.attachment.link.v0",
       );
 
-      // If new attachments provided (not null/undefined), insert them
-      if (attachmentsExt != null) {
-        for (const att of attachmentsExt.attachments || []) {
-          if (att.$type == "space.roomy.attachment.reply.v0") {
+      if (attachmentsExt != null && linkAtts.length > 0 && nonLinkAtts.length === 0) {
+        for (const att of linkAtts) {
+          const uriWithUlidQuery = att.uri + "?message=" + event.messageId;
+          statements.push(
+            ensureEntity(streamId, uriWithUlidQuery, event.messageId),
+            // Flip show_preview on any existing link row for this URL+message
+            // (both the bare-URL enricher encoding and the explicit
+            // `?message=` encoding are scoped to the message room).
+            sql`
+              update comp_embed_link set show_preview = ${att.showPreview ? 1 : 0}
+              where entity in (
+                select e.id from entities e
+                where e.room = ${event.messageId}
+                  and (e.id = ${att.uri} or e.id = ${uriWithUlidQuery})
+              )
+            `,
+            // Ensure a row exists so the toggle persists even if the link
+            // hasn't been enriched yet.
+            sql`
+              insert into comp_embed_link (entity, show_preview)
+              select ${uriWithUlidQuery}, ${att.showPreview ? 1 : 0}
+              where not exists (
+                select 1 from entities e
+                join comp_embed_link el on el.entity = e.id
+                where e.room = ${event.messageId}
+                  and (e.id = ${att.uri} or e.id = ${uriWithUlidQuery})
+              )
+            `,
+          );
+        }
+      } else {
+        // Replace/remove the whole attachment set.
+        // Delete existing attachment data for this message
+        // Pattern: entity ends with ?message=<messageId>
+        const messageIdSuffix = `%?message=${event.messageId}`;
+        statements.push(
+          sql`delete from comp_embed_image where entity like ${messageIdSuffix}`,
+          sql`delete from comp_embed_video where entity like ${messageIdSuffix}`,
+          sql`delete from comp_embed_file where entity like ${messageIdSuffix}`,
+          sql`delete from comp_embed_link where entity like ${messageIdSuffix}`,
+          sql`delete from comp_comment where entity = ${event.messageId}`,
+          sql`delete from edges where head = ${event.messageId} and label = 'reply'`,
+          // Clean up orphaned entities (media entities have room = messageId)
+          sql`delete from entities where room = ${event.messageId} and id != ${event.messageId}`,
+        );
+
+        // If new attachments provided (not null/undefined), insert them
+        if (attachmentsExt != null) {
+          for (const att of attachments) {
+            if (att.$type == "space.roomy.attachment.reply.v0") {
             statements.push(sql`
               insert or ignore into edges (head, tail, label)
               values (
@@ -329,6 +373,7 @@ export const EditMessage = defineEvent(
             );
           }
         }
+      }
       }
     }
 

@@ -317,6 +317,35 @@ describe("editMessage", () => {
       blocks,
     });
   });
+
+  it("carries a link attachment with showPreview:false to dismiss an embed", async () => {
+    await editMessage({
+      roomId: "01HXXXXXXXXXXXXXXXXXXXXXXXXXXXX" as any,
+      messageId: "01JXXXXXXXXXXXXXXXXXXXXXXXXXXXX" as any,
+      body: "unchanged",
+      attachments: [
+        {
+          $type: "space.roomy.attachment.link.v0",
+          uri: "https://example.com/article",
+          showPreview: false,
+        },
+      ],
+    }, mockSendEvent);
+
+    const event = mockSendEvent.mock.calls[0][0];
+    expect(event.extensions).toMatchObject({
+      "space.roomy.extension.attachments.v0": {
+        $type: "space.roomy.extension.attachments.v0",
+        attachments: [
+          {
+            $type: "space.roomy.attachment.link.v0",
+            uri: "https://example.com/article",
+            showPreview: false,
+          },
+        ],
+      },
+    });
+  });
 });
 
 describe("deleteMessage", () => {

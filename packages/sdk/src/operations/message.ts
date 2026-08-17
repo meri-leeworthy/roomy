@@ -158,6 +158,12 @@ export interface EditMessageOptions {
   blocks?: Block[];
   /** Unix timestamp for the edit (default: now) */
   timestamp?: number;
+  /**
+   * Attachments to set on the message (via the attachments extension). A
+   * link attachment carrying `showPreview: false` removes/dismisses that
+   * link embed on the message.
+   */
+  attachments?: Attachment[];
 }
 
 /**
@@ -204,6 +210,14 @@ export async function editMessage(
     extensions["space.roomy.extension.mentions.v0"] = {
       $type: "space.roomy.extension.mentions.v0",
       mentions: options.mentions,
+    };
+  }
+  // Attachments (e.g. a link attachment with showPreview:false to remove a
+  // link embed on the author's own message).
+  if (options.attachments && options.attachments.length > 0) {
+    extensions["space.roomy.extension.attachments.v0"] = {
+      $type: "space.roomy.extension.attachments.v0",
+      attachments: options.attachments,
     };
   }
 

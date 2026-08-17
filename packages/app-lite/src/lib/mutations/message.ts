@@ -74,6 +74,10 @@ export async function editMessage(
      *  wire body is `serializeBlocks(blocks)`; the mentions sidecar is
      *  dropped (mentions fold into `#didMention` facets). */
     blocks?: Block[];
+    /** Attachments to set on the message (via the attachments extension). A
+     *  link attachment carrying `showPreview: false` removes/dismisses that
+     *  link embed on the author's own message. */
+    attachments?: Record<string, unknown>[];
   } = {},
 ): Promise<string> {
   const id = newUlid();
@@ -84,6 +88,12 @@ export async function editMessage(
     extensions["space.roomy.extension.mentions.v0"] = {
       $type: "space.roomy.extension.mentions.v0",
       mentions: opts.mentions,
+    };
+  }
+  if (opts.attachments && opts.attachments.length > 0) {
+    extensions["space.roomy.extension.attachments.v0"] = {
+      $type: "space.roomy.extension.attachments.v0",
+      attachments: opts.attachments,
     };
   }
 
@@ -128,4 +138,38 @@ export async function deleteMessage(
 
   await sendEvents(spaceId, [event]);
   return id;
+}
+
+/**
+ * Remove (dismiss) a link embed from the author's own message. Sends an
+ * `editMessage` event carrying a link attachment with `showPreview: false` so
+ * the embed preview stops rendering for that URL, without altering the message
+ * body or other attachments.
+ *
+ * @param opts - Carries the message's current body so it can be re-sent
+ *   unchanged: `mimeType` + `body` for legacy markdown bodies, or `blocks`
+ *   for richtext bodies.
+ */
+export async function removeLinkEmbed(
+  spaceId: string,
+  roomId: string,
+  messageId: string,
+  url: string,
+  opts: {
+    body?: string;
+    mimeType?: string;
+    blocks?: Block[];
+  } = {},
+): Promise<string> {
+  return editMessage(spaceId, roomId, messageId, opts.body ?? "", {
+    mimeType: opts.mimeType,
+    blocks: opts.blocks,
+    attachments: [
+      {
+        $type: "space.roomy.attachment.link.v0",
+        uri: url,
+        showPreview: false,
+      },
+    ],
+  });
 }

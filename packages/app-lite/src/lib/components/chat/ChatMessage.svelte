@@ -12,7 +12,7 @@
   import LinkCard from "./embeds/LinkCard.svelte";
   import MessageContent from "./MessageContent.svelte";
   import ChatInput from "./ChatInput.svelte";
-  import { editMessage } from "$lib/mutations/message";
+  import { editMessage, removeLinkEmbed } from "$lib/mutations/message";
   import type { Message } from "$lib/queries/messages";
   import { resolveBlobUrl } from "$lib/utils";
   import { RICHTEXT_MIME } from "@roomy-space/sdk";
@@ -122,6 +122,18 @@
     );
     onCancelEdit();
   }
+
+  /** Remove (dismiss) a link embed preview on the author's own message. */
+  async function handleRemoveEmbed(url: string) {
+    await removeLinkEmbed(spaceId, roomId, message.id, url, {
+      body: message.content,
+      mimeType: message.mimeType,
+      blocks:
+        message.mimeType === RICHTEXT_MIME
+          ? (parseRichTextContent(message.content) ?? [])
+          : undefined,
+    });
+  }
 </script>
 
 {#snippet messageBox()}
@@ -210,7 +222,11 @@
           {#if withEmbed.length > 0}
             <div class="flex flex-col gap-2 mt-1">
               {#each withEmbed as link (link.url)}
-                <LinkCard url={link.url} embed={link.embed} />
+                <LinkCard
+                  url={link.url}
+                  embed={link.embed}
+                  onRemove={isAuthor ? () => handleRemoveEmbed(link.url) : undefined}
+                />
               {/each}
             </div>
           {/if}

@@ -752,3 +752,94 @@ describe("applyBatch concurrency", () => {
     expect(cursor?.materialized_to).toBe(4);
   });
 });
+
+describe("applyBatch — link embed dismissal via editMessage", () => {
+  test("a link-only editMessage sets show_preview=0 and hides the embed from selectMessages", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    const channelId = newUlid();
+    db.run("insert into entities (id, stream_id) values (?, ?)", [
+      channelId,
+      STREAM,
+    ]);
+    db.run(
+      "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', 'readwrite')",
+      [channelId],
+    );
+
+    const url = "https://example.com/dismiss";
+    const msgId = newUlid();
+    const createMsg = {
+      $type: "space.roomy.message.createMessage.v0",
+      id: msgId,
+      room: channelId,
+      body: {
+        mimeType: "text/markdown",
+        data: { buf: new TextEncoder().encode(`see ${url}`) },
+      },
+      extensions: {},
+    } as unknown as Event;
+
+    const createStats = await applyBatch(asyncDb, STREAM, [decoded(createMsg, 1)], {
+      isBackfill: true,
+    });
+    expect(createStats.applyErrors).toBe(0);
+
+    // The message starts with a visible link embed.
+    const before = await selectMessages(asyncDb, {
+      kind: "room",
+      roomId: channelId,
+      limit: 100,
+      cursor: null,
+    });
+    expect(before.messages[0]?.linkEmbeds.map((l) => l.url)).toContain(url);
+
+    // Author dismisses the embed: an editMessage carrying a link attachment
+    // with showPreview:false.
+    const editMsg = {
+      $type: "space.roomy.message.editMessage.v0",
+      id: newUlid(),
+      room: channelId,
+      messageId: msgId,
+      body: {
+        mimeType: "text/markdown",
+        data: { buf: new TextEncoder().encode(`see ${url}`) },
+      },
+      extensions: {
+        "space.roomy.extension.attachments.v0": {
+          $type: "space.roomy.extension.attachments.v0",
+          attachments: [
+            {
+              $type: "space.roomy.attachment.link.v0",
+              uri: url,
+              showPreview: false,
+            },
+          ],
+        },
+      },
+    } as unknown as Event;
+
+    const editStats = await applyBatch(asyncDb, STREAM, [decoded(editMsg, 2)], {
+      isBackfill: true,
+    });
+    expect(editStats.applyErrors).toBe(0);
+
+    // The link row's show_preview flag is cleared.
+    const link = await asyncDb
+      .query(
+        "select el.show_preview as sp from comp_embed_link el join entities e on e.id = el.entity where e.room = ? and el.entity = ?",
+      )
+      .get<{ sp: number }>(msgId, url);
+    expect(link?.sp).toBe(0);
+
+    // And the read path no longer surfaces the embed.
+    const after = await selectMessages(asyncDb, {
+      kind: "room",
+      roomId: channelId,
+      limit: 100,
+      cursor: null,
+    });
+    expect(after.messages[0]?.linkEmbeds.map((l) => l.url)).not.toContain(url);
+  });
+});
