@@ -64,6 +64,24 @@ explicitly opted in:
   (or `false`) on all subsequent deploys so a backup failure fails loudly
   rather than wiping data.
 
+### Schema version bumps (blue-green read serving)
+
+When `SPACE_SCHEMA_VERSION` (`src/db/db.ts`) is bumped, every on-disk per-space
+DB (`spaces/*.sqlite`) is on a stale schema. The appserver does **not** wipe
+them. Instead it serves reads from the old DB while a temp new-schema DB
+(`<spaceDid>.sqlite.new`) is rebuilt from the event log in the background, then
+atomically swaps it in (`spaceRebuildBegin` → replay → `spaceRebuildCommit`).
+
+- Reads keep serving pre-deploy data during the rebuild — a space never
+  appears empty after a schema bump.
+- Writes to a rebuilding space are rejected with a retryable `409`
+  (`SpaceRematerializing`) and do **not** land in the event log.
+- If a rebuild fails, it is aborted and the old DB keeps serving; the next boot
+  retries it.
+
+See `docs/plans/blue-green-read-serving.md` for the full design and the
+L1/L2/L3 test layers that prove the invariants.
+
 ### Setting up the Railway S3 bucket
 
 1. In Railway, create a **Storage** service and add an **S3** bucket.
