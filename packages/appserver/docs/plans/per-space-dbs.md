@@ -185,6 +185,11 @@ Everything else stays: `entities`, `edges`, `comp_space`, `comp_room`, `comp_con
 
 The schema version is tracked independently per space DB (a `space_schema_version` table). This lets us evolve per-space schemas without forcing a global re-materialization.
 
+> **Update (blue-green read serving):** a schema bump no longer wipes a stale
+> per-space DB. The worker serves reads from the old DB while a temp new-schema
+> DB is rebuilt from the event log and atomically swapped in. See
+> `docs/plans/blue-green-read-serving.md` for the current behavior.
+
 #### `src/db/schema-global.sql`
 
 ```sql

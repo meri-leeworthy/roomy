@@ -1,7 +1,7 @@
 # Blue-Green Read Serving Before Materialisation
 
 **Date:** 2026-07-29
-**Status:** Design (implementation pending — this document is the explicit plan for the design confirmed in the blue-green session).
+**Status:** Implemented (shipped in the `blue-green-read-serving` PR — L1/L2/L3 test layers + the live `reMaterializeFromLocalEvents` begin/replay/commit path). This document is the design record; the implementation status is tracked in §7.
 **Owner:** appserver
 
 ## 1. Problem
@@ -238,16 +238,29 @@ window open, then interleaves:
 
 ## 7. Rollout order
 
-1. **L1 first** — forces the routing seam (`forSpaceRebuild` + the five worker
-   ops) and is the fastest to make deterministic. Ship the worker/pool changes
-   with only L1 proving them; nothing in the live path changes behavior yet
-   (the never-wipe semantic is strictly safer than today's wipe).
-2. **L2** — prove the end-to-end window (P1/P2/P4/P5) through the real
-   `reMaterializeFromLocalEvents` branch.
-3. **L3** — prove the protocol boundary (P2/P8).
-4. **Live switch** — flip `reMaterializeFromLocalEvents` to the begin/replay/
-   commit path in `src/index.ts`. Because L1/L2/L3 all pass against the same
-   code, the boot path is already tested blue-green by then.
+All four steps are **shipped** in the `blue-green-read-serving` PR:
+
+1. **L1** — `src/db/blueGreen.test.ts` (worker seam: `forSpaceRebuild` + the five
+   worker ops). Proves P1/P3/P5/P6/P7/P8 at the DB layer. The never-wipe
+   semantic is strictly safer than the old wipe.
+2. **L2** — `src/streams/reMaterialize.blueGreen.test.ts` (end-to-end window
+   through the real `reMaterializeFromLocalEvents` branch). Proves P1/P2/P4/P5
+   and P6 (failed rebuild aborts, old DB keeps serving).
+3. **L3** — `src/handlers/space.roomy.space.sendEvents.test.ts` (protocol
+   boundary). Proves P2/P8: a write to a rebuilding space returns a retryable
+   `409` / `SpaceRematerializing` and does not land in the event log.
+4. **Live switch** — `reMaterializeFromLocalEvents` now takes the begin/replay/
+   commit path for stale-schema streams (see §5.2). Because L1/L2/L3 pass
+   against the same code, the boot path is tested blue-green.
+
+**Verification on real data:** a schema bump (added a `comp_room.pinned` column,
+`SPACE_SCHEMA_VERSION` 1→2) was replayed against a copy of the local appserver
+`data/` (4,153 streams, 435,986 events). All stale spaces rebuilt into temp
+`.sqlite.new` DBs and atomically swapped with no data loss (rebuilt
+`comp_content` counts matched originals), no `.new` files left behind, and the
+write gate rejected writes during the window. Full rematerialisation took
+~655 s at concurrency 4; the largest single space (~126k events) dominated at
+~185 s. See §6 for the invariant mapping.
 
 ## 8. Risks / open questions
 
