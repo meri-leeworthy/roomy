@@ -842,4 +842,166 @@ describe("applyBatch — link embed dismissal via editMessage", () => {
     });
     expect(after.messages[0]?.linkEmbeds.map((l) => l.url)).not.toContain(url);
   });
+
+  test("a link-only editMessage with showPreview:true re-adds a dismissed embed", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    const channelId = newUlid();
+    db.run("insert into entities (id, stream_id) values (?, ?)", [
+      channelId,
+      STREAM,
+    ]);
+    db.run(
+      "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', 'readwrite')",
+      [channelId],
+    );
+
+    const url = "https://example.com/readd";
+    const msgId = newUlid();
+    const createMsg = {
+      $type: "space.roomy.message.createMessage.v0",
+      id: msgId,
+      room: channelId,
+      body: {
+        mimeType: "text/markdown",
+        data: { buf: new TextEncoder().encode(`see ${url}`) },
+      },
+      extensions: {},
+    } as unknown as Event;
+    await applyBatch(asyncDb, STREAM, [decoded(createMsg, 1)], {
+      isBackfill: true,
+    });
+
+    const linkEdit = (showPreview: boolean) =>
+      ({
+        $type: "space.roomy.message.editMessage.v0",
+        id: newUlid(),
+        room: channelId,
+        messageId: msgId,
+        body: {
+          mimeType: "text/markdown",
+          data: { buf: new TextEncoder().encode(`see ${url}`) },
+        },
+        extensions: {
+          "space.roomy.extension.attachments.v0": {
+            $type: "space.roomy.extension.attachments.v0",
+            attachments: [
+              { $type: "space.roomy.attachment.link.v0", uri: url, showPreview },
+            ],
+          },
+        },
+      }) as unknown as Event;
+
+    // Dismiss, then re-add.
+    await applyBatch(asyncDb, STREAM, [decoded(linkEdit(false), 2)], {
+      isBackfill: true,
+    });
+    let after = await selectMessages(asyncDb, {
+      kind: "room",
+      roomId: channelId,
+      limit: 100,
+      cursor: null,
+    });
+    expect(after.messages[0]?.linkEmbeds.map((l) => l.url)).not.toContain(url);
+
+    await applyBatch(asyncDb, STREAM, [decoded(linkEdit(true), 3)], {
+      isBackfill: true,
+    });
+    after = await selectMessages(asyncDb, {
+      kind: "room",
+      roomId: channelId,
+      limit: 100,
+      cursor: null,
+    });
+    expect(after.messages[0]?.linkEmbeds.map((l) => l.url)).toContain(url);
+
+    // The link row's show_preview flag is back to 1.
+    const link = await asyncDb
+      .query(
+        "select el.show_preview as sp from comp_embed_link el join entities e on e.id = el.entity where e.room = ? and el.entity = ?",
+      )
+      .get<{ sp: number }>(msgId, url);
+    expect(link?.sp).toBe(1);
+  });
+
+  test("a link-only editMessage preserves the message's other attachments", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    const channelId = newUlid();
+    db.run("insert into entities (id, stream_id) values (?, ?)", [
+      channelId,
+      STREAM,
+    ]);
+    db.run(
+      "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', 'readwrite')",
+      [channelId],
+    );
+
+    const url = "https://example.com/keep-image";
+    const msgId = newUlid();
+    const imgUri = "at://img/abc";
+    const createMsg = {
+      $type: "space.roomy.message.createMessage.v0",
+      id: msgId,
+      room: channelId,
+      body: {
+        mimeType: "text/markdown",
+        data: { buf: new TextEncoder().encode(`see ${url}`) },
+      },
+      extensions: {
+        "space.roomy.extension.attachments.v0": {
+          $type: "space.roomy.extension.attachments.v0",
+          attachments: [
+            {
+              $type: "space.roomy.attachment.image.v0",
+              uri: imgUri,
+              mimeType: "image/png",
+              width: 100,
+              height: 50,
+            },
+          ],
+        },
+      },
+    } as unknown as Event;
+    await applyBatch(asyncDb, STREAM, [decoded(createMsg, 1)], {
+      isBackfill: true,
+    });
+
+    // Dismiss the link embed only.
+    const editMsg = {
+      $type: "space.roomy.message.editMessage.v0",
+      id: newUlid(),
+      room: channelId,
+      messageId: msgId,
+      body: {
+        mimeType: "text/markdown",
+        data: { buf: new TextEncoder().encode(`see ${url}`) },
+      },
+      extensions: {
+        "space.roomy.extension.attachments.v0": {
+          $type: "space.roomy.extension.attachments.v0",
+          attachments: [
+            { $type: "space.roomy.attachment.link.v0", uri: url, showPreview: false },
+          ],
+        },
+      },
+    } as unknown as Event;
+    await applyBatch(asyncDb, STREAM, [decoded(editMsg, 2)], {
+      isBackfill: true,
+    });
+
+    const after = await selectMessages(asyncDb, {
+      kind: "room",
+      roomId: channelId,
+      limit: 100,
+      cursor: null,
+    });
+    const msg = after.messages[0];
+    // The link embed is hidden…
+    expect(msg?.linkEmbeds.map((l) => l.url)).not.toContain(url);
+    // …but the image attachment is preserved.
+    expect(msg?.media.map((m) => m.url)).toContain(imgUri + "?message=" + msgId);
+  });
 });

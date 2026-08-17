@@ -15,9 +15,14 @@
   import { editMessage, removeLinkEmbed } from "$lib/mutations/message";
   import type { Message } from "$lib/queries/messages";
   import { resolveBlobUrl } from "$lib/utils";
-  import { RICHTEXT_MIME } from "@roomy-space/sdk";
-  import type { Block } from "@roomy-space/sdk";
+  import { RICHTEXT_MIME, extractFacetUrls } from "@roomy-space/sdk";
+  import type { schemas, Block } from "@roomy-space/sdk";
   import { parseRichTextContent } from "./enrich-internal-links";
+  import { extractUrls, fetchEmbedData } from "$lib/embed/embed-service";
+
+  type LinkEmbedData = typeof schemas.queries.getMessage.LinkEmbedData.infer;
+  /** A link preview being managed in the in-place editor. */
+  type EditLink = { url: string; embed: LinkEmbedData | null; showPreview: boolean };
 
   type Props = {
     spaceId: string;
@@ -66,6 +71,16 @@
   // markdown.
   let editBlocks: Block[] | undefined = $state();
   let prevEditing = false;
+  // ── Edit-mode link preview management ──────────────────────────────────
+  // While editing, the author can dismiss or re-add link previews the same
+  // way they can while composing. `editLinks` holds one entry per URL in the
+  // edited content with its current preview state; on save the states are
+  // synced to the message via link attachments (showPreview true/false).
+  let editLinks: EditLink[] = $state([]);
+  /** URLs that were already dismissed (show_preview=0) when editing began. */
+  let initialDismissed = new Set<string>();
+  /** Non-reactive guard so each URL's embed data is fetched at most once. */
+  const fetchedEmbeds = new Set<string>();
   $effect.pre(() => {
     const editing = isEditing;
     if (editing && !prevEditing) {
@@ -78,9 +93,73 @@
         editBlocks = undefined;
         editContent = message.content;
       }
+      // Seed the edit link previews from the message's current embeds. A URL
+      // present in the content but absent from `linkEmbeds` was dismissed
+      // (the read path filters show_preview=0), so it starts hidden.
+      const urls =
+        message.mimeType === RICHTEXT_MIME
+          ? extractFacetUrls(editBlocks ?? [])
+          : extractUrls(message.content);
+      const linkEmbeds = message.linkEmbeds ?? [];
+      const shown = new Set(linkEmbeds.map((l) => l.url));
+      // Seed each preview's embed from the message's cached data when
+      // available, so already-shown cards render immediately instead of
+      // waiting on a redundant refetch.
+      const embedByUrl = new Map(linkEmbeds.map((l) => [l.url, l.embed ?? null]));
+      initialDismissed = new Set(urls.filter((u) => !shown.has(u)));
+      editLinks = urls.map((url) => ({
+        url,
+        embed: embedByUrl.get(url) ?? null,
+        showPreview: !initialDismissed.has(url),
+      }));
+      fetchedEmbeds.clear();
     }
     prevEditing = editing;
   });
+  // URLs currently present in the edited content.
+  const editUrls = $derived(
+    message.mimeType === RICHTEXT_MIME
+      ? extractFacetUrls(editBlocks ?? [])
+      : extractUrls(editContent),
+  );
+  // Keep `editLinks` in sync with the content as the author types: drop URLs
+  // that were removed, and add new URLs (defaulting to shown unless they were
+  // dismissed before editing began).
+  $effect(() => {
+    const urls = editUrls;
+    editLinks = editLinks.filter((l) => urls.includes(l.url));
+    for (const url of urls) {
+      if (!editLinks.some((l) => l.url === url)) {
+        editLinks = [...editLinks, { url, embed: null, showPreview: !initialDismissed.has(url) }];
+      }
+    }
+  });
+  // Best-effort fetch of embed metadata for each preview (guarded so a URL is
+  // fetched once). Degrades to a URL-only card when the fetch fails.
+  $effect(() => {
+    for (const link of editLinks) {
+      if (link.embed === null && !fetchedEmbeds.has(link.url)) {
+        fetchedEmbeds.add(link.url);
+        fetchEmbedData(link.url).then((embed) => {
+          const i = editLinks.findIndex((l) => l.url === link.url);
+          const cur = editLinks[i];
+          if (cur) editLinks[i] = { ...cur, embed };
+        });
+      }
+    }
+  });
+  function toggleEditLink(url: string) {
+    const i = editLinks.findIndex((l) => l.url === url);
+    const cur = editLinks[i];
+    if (cur) editLinks[i] = { ...cur, showPreview: !cur.showPreview };
+  }
+  function hostname(url: string): string {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return url;
+    }
+  }
   let isThreading = $derived(messagingState.current.kind === "threading");
   let isSelected = $derived.by(() => {
     const cur = messagingState.current;
@@ -107,7 +186,20 @@
 
   async function handleEdit(newContent: string, _mentions: string[]) {
     const isRichText = message.mimeType === RICHTEXT_MIME;
-    if (!isRichText && newContent === message.content) {
+    // Sync the link preview states (dismissed / re-added) to the message via
+    // link attachments. The materializer treats a link-only edit as a
+    // non-destructive show_preview toggle, so other attachments are kept.
+    const linkAttachments = editLinks.map((l) => ({
+      $type: "space.roomy.attachment.link.v0",
+      uri: l.url,
+      showPreview: l.showPreview,
+    }));
+    // Save when the content changed OR any link preview state changed (e.g.
+    // the author dismissed/re-added a preview without touching the text).
+    const contentUnchanged = !isRichText && newContent === message.content;
+    const shownUrls = new Set((message.linkEmbeds ?? []).map((l) => l.url));
+    const linksChanged = linkAttachments.some((a) => a.showPreview !== shownUrls.has(a.uri));
+    if (contentUnchanged && !linksChanged) {
       onCancelEdit();
       return;
     }
@@ -116,9 +208,12 @@
       roomId,
       message.id,
       newContent,
-      // Rich-text messages stay rich-text: send the blocks (which ChatInput
-      // keeps in sync) rather than the base64-encoded wire body or markdown.
-      isRichText ? { blocks: editBlocks ?? [] } : {},
+      {
+        // Rich-text messages stay rich-text: send the blocks (which ChatInput
+        // keeps in sync) rather than the base64-encoded wire body or markdown.
+        ...(isRichText ? { blocks: editBlocks ?? [] } : {}),
+        ...(linkAttachments.length > 0 ? { attachments: linkAttachments } : {}),
+      },
     );
     onCancelEdit();
   }
@@ -185,6 +280,39 @@
               disabled={false}
               setFocus={true}
             />
+            {#if editLinks.length > 0}
+              <div class="flex flex-col gap-2 mt-2">
+                {#each editLinks as link (link.url)}
+                  {#if link.showPreview}
+                    <div class="relative">
+                      <LinkCard url={link.url} embed={link.embed} />
+                      <Button
+                        variant="ghost"
+                        class="absolute p-0.5 top-1 right-1 bg-base-100 hover:bg-base-200 dark:bg-base-900 dark:hover:bg-base-800 rounded-full"
+                        aria-label="Dismiss link preview"
+                        title="Remove link preview"
+                        onclick={() => toggleEditLink(link.url)}
+                      >
+                        <IconX class="size-4" />
+                      </Button>
+                    </div>
+                  {:else}
+                    <div class="flex items-center justify-between gap-2 rounded-lg border border-dashed border-base-400/60 dark:border-base-800 px-3 py-2">
+                      <span class="text-sm text-base-500 truncate">{hostname(link.url)}</span>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        aria-label="Add link preview"
+                        title="Show link preview"
+                        onclick={() => toggleEditLink(link.url)}
+                      >
+                        Add preview
+                      </Button>
+                    </div>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
           </div>
         {:else}
           <MessageContent content={message.content} mimeType={message.mimeType} />
