@@ -19,6 +19,7 @@ import {
   extractInternalLinkTargets,
   extractMentionDids,
   markdownToBlocks,
+  parseInternalLinkHref,
   proseMirrorDocToBlocks,
   serializeBlocks,
   type ProseMirrorDoc,
@@ -48,7 +49,7 @@ const mentionDoc: ProseMirrorDoc = {
           marks: [
             {
               type: "link",
-              attrs: { href: "https://roomy.space/did:plc:space/room1" },
+              attrs: { href: "https://roomy.space/did:plc:space/01KZBRQMEP2FTE079YRVDFKGTA" },
             },
           ],
         },
@@ -94,12 +95,12 @@ describe("proseMirrorDocToBlocks", () => {
     expect(linkFacet.index).toEqual({ byteStart: 17, byteEnd: 21 });
     expect(linkFacet.features).toContainEqual({
       $type: "space.roomy.richtext.facet#link",
-      uri: "https://roomy.space/did:plc:space/room1",
+      uri: "https://roomy.space/did:plc:space/01KZBRQMEP2FTE079YRVDFKGTA",
     });
     expect(linkFacet.features).toContainEqual({
       $type: "space.roomy.richtext.facet#roomRef",
       spaceId: "did:plc:space",
-      roomId: "room1",
+      roomId: "01KZBRQMEP2FTE079YRVDFKGTA",
     });
   });
 
@@ -221,15 +222,40 @@ describe("derivations", () => {
   test("extractFacetUrls collects link facet uris", () => {
     const blocks = proseMirrorDocToBlocks(mentionDoc);
     expect(extractFacetUrls(blocks)).toEqual([
-      "https://roomy.space/did:plc:space/room1",
+      "https://roomy.space/did:plc:space/01KZBRQMEP2FTE079YRVDFKGTA",
     ]);
   });
 
   test("extractInternalLinkTargets collects roomRef facets", () => {
     const blocks = proseMirrorDocToBlocks(mentionDoc);
     expect(extractInternalLinkTargets(blocks)).toEqual([
-      { spaceId: "did:plc:space", roomId: "room1" },
+      { spaceId: "did:plc:space", roomId: "01KZBRQMEP2FTE079YRVDFKGTA" },
     ]);
+  });
+
+  test("parseInternalLinkHref accepts DID space + ULID room", () => {
+    expect(
+      parseInternalLinkHref("/did:plc:space/01KZBRQMEP2FTE079YRVDFKGTA"),
+    ).toEqual({
+      spaceId: "did:plc:space",
+      roomId: "01KZBRQMEP2FTE079YRVDFKGTA",
+    });
+    expect(parseInternalLinkHref("/did:plc:space")).toEqual({
+      spaceId: "did:plc:space",
+    });
+  });
+
+  test("parseInternalLinkHref rejects non-space links", () => {
+    // App routes / handles / room names are not space references — they must
+    // not be treated as internal links (which would fire 404 summary queries).
+    expect(parseInternalLinkHref("/watch")).toBeNull();
+    expect(parseInternalLinkHref("/blog")).toBeNull();
+    expect(parseInternalLinkHref("/profile")).toBeNull();
+    expect(parseInternalLinkHref("/folkcomputer.bsky.social")).toBeNull();
+    expect(parseInternalLinkHref("/oauth-improvements")).toBeNull();
+    expect(parseInternalLinkHref("/user/did:plc:alice")).toBeNull();
+    // DID space but non-ULID room is not a valid room reference.
+    expect(parseInternalLinkHref("/did:plc:space/oauth-improvements")).toBeNull();
   });
 });
 
@@ -276,12 +302,12 @@ describe("markdownToBlocks", () => {
 
   test("emits link facets for markdown links and internal links", () => {
     const blocks = markdownToBlocks(
-      "[room](/did:plc:space/room1) and [web](https://example.com)",
+      "[room](/did:plc:space/01KZBRQMEP2FTE079YRVDFKGTA) and [web](https://example.com)",
     );
     const urls = extractFacetUrls(blocks);
-    expect(urls).toEqual(["/did:plc:space/room1", "https://example.com"]);
+    expect(urls).toEqual(["/did:plc:space/01KZBRQMEP2FTE079YRVDFKGTA", "https://example.com"]);
     const internal = extractInternalLinkTargets(blocks);
-    expect(internal).toEqual([{ spaceId: "did:plc:space", roomId: "room1" }]);
+    expect(internal).toEqual([{ spaceId: "did:plc:space", roomId: "01KZBRQMEP2FTE079YRVDFKGTA" }]);
   });
 
   test("parses lists, code fences, headings, blockquotes", () => {

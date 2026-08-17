@@ -1,6 +1,6 @@
 import { mount, unmount } from "svelte";
 import SpaceRoomBadge from "./embeds/SpaceRoomBadge.svelte";
-import { extractInternalLinkTargets, isRichTextDocument } from "@roomy-space/sdk";
+import { extractInternalLinkTargets, isRichTextDocument, Did, Ulid, type } from "@roomy-space/sdk";
 import type { Block } from "@roomy-space/sdk";
 
 // Known Roomy domains — bare links to these are treated as internal space/room
@@ -90,7 +90,13 @@ export function parseInternalLinkHref(
   const parts = path.slice(1).split("/");
   const spaceId = parts[0];
   if (!spaceId || spaceId === "user") return null;
+  // Space IDs are DIDs (did:plc:… / did:web:…); room IDs are ULIDs. Reject
+  // anything else so non-space links (app routes like /watch, /blog, /profile,
+  // user handles, room names) are never treated as space/room references —
+  // otherwise the internal-link prefetch fires 404 summary queries for them.
+  if (Did(spaceId) instanceof type.errors) return null;
   const roomId = parts[1];
+  if (roomId && Ulid(roomId) instanceof type.errors) return null;
   return roomId ? { spaceId, roomId } : { spaceId };
 }
 
