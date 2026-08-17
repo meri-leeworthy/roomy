@@ -69,11 +69,7 @@ export class Router implements IInvalidationRouter {
     const allSignals: InvalidationEvent[] = [];
     for (const event of events) {
       const signals = await inferSignals(event, undefined, messageSnapshots);
-      for (const signal of signals) {
-        if (signal.kind === "messageDiff" || signal.kind === "roomMetadataDiff") {
-          signal.signal.seq = ++this.#seq;
-        }
-      }
+      this.#stampSeq(signals);
       allSignals.push(...signals);
     }
     if (allSignals.length === 0) return;
@@ -136,11 +132,27 @@ export class Router implements IInvalidationRouter {
    */
   emit(signals: readonly InvalidationEvent[]): void {
     if (signals.length === 0 || this.#listeners.size === 0) return;
+    // Stamp a globally-monotonic seq on any diff signals, just like
+    // onEventsApplied does. Without this, signals emitted outside the event
+    // pipeline (e.g. the embed sweeper's enrichment diffs) carry seq 0,
+    // which the client reads as a server seq reset and triggers a spurious
+    // refetch on every card-enrichment diff. Assigning seq here keeps the
+    // counter coherent across ALL sources.
+    this.#stampSeq(signals);
     for (const listener of this.#listeners) {
       try {
         listener(signals);
       } catch (err) {
         console.error("[InvalidationRouter] listener threw:", err);
+      }
+    }
+  }
+
+  /** Stamp a monotonically-increasing seq on every messageDiff/roomMetadataDiff. */
+  #stampSeq(signals: readonly InvalidationEvent[]): void {
+    for (const signal of signals) {
+      if (signal.kind === "messageDiff" || signal.kind === "roomMetadataDiff") {
+        signal.signal.seq = ++this.#seq;
       }
     }
   }

@@ -203,7 +203,7 @@ export async function findPendingLinksForUrls(
  * persistently-dead URL is re-tried less and less often instead of every
  * sweep. Schedule: 1m, 5m, 30m, 2h, then capped at 6h. Tunable via env.
  */
-function backoffMs(attempts: number): number {
+export function backoffMs(attempts: number): number {
   const schedule = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
   const cap = Number(process.env.EMBED_RETRY_CAP_MS ?? 6 * 60 * 60_000);
   return attempts <= schedule.length ? schedule[attempts - 1]! : cap;

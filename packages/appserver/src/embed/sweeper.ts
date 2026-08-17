@@ -33,6 +33,7 @@ import {
   findPendingLinksForUrls,
   filterPendingUrls,
   inFlightCount,
+  backoffMs,
   type EnrichOutcome,
   type PendingLink,
 } from "./enricher.ts";
@@ -75,6 +76,13 @@ let loopPromise: Promise<void> | undefined;
 let statsEnrichedOk = 0;
 let statsEnrichedNull = 0;
 /**
+ * #messageDiff frames the sweeper actually emitted to clients (enrichment
+ * completed AND the enriched message was resolved to a real room). Lets
+ * operators confirm the invalidation path is firing, separate from whether
+ * enrichment itself succeeded.
+ */
+let statsEnrichmentDiffs = 0;
+/**
  * Resolved by {@link pokeEmbedSweeper} to wake an idle loop immediately.
  * Null when the loop is busy draining (so extra pokes are cheap no-ops).
  */
@@ -95,6 +103,19 @@ let dbBackoffUntil = 0;
  * links. Populated by {@link pokeEmbedSweeper} from createMessage batches.
  */
 const priorityLinks = new Set<string>();
+
+/**
+ * In-memory retry gate for TRANSIENT failures (timeout / 5xx / 429 / network).
+ * A URL that fails transiently is kept pending (so it is eventually retried)
+ * but is SKIPPED for an exponential backoff window, so the sweeper doesn't
+ * re-fetch the same dead links every cycle and burn its concurrency on links
+ * known to be down. `retryAt` is the epoch-ms before which the URL is skipped.
+ * `attempts` tracks consecutive transient failures to escalate the backoff.
+ * Mirrors the `retry_after`/`attempts` persisted in `comp_embed_link_data`,
+ * but lives in-memory here so the global pending scan doesn't have to join
+ * every per-space DB. Reset on ok/definitive outcomes and on stop.
+ */
+const transientRetry = new Map<string, { attempts: number; retryAt: number }>();
 
 export interface EmbedSweeperOpts {
   /** Global DB — the `pending_links` index lives here. */
@@ -130,6 +151,7 @@ export function embedSweeperStats(): {
   inFlight: number;
   enrichedOk: number;
   enrichedNull: number;
+  enrichmentDiffs: number;
   dbErrorCount: number;
   dbBackoffActive: boolean;
 } {
@@ -138,6 +160,7 @@ export function embedSweeperStats(): {
     inFlight: inFlightCount(),
     enrichedOk: statsEnrichedOk,
     enrichedNull: statsEnrichedNull,
+    enrichmentDiffs: statsEnrichmentDiffs,
     dbErrorCount,
     dbBackoffActive: Date.now() < dbBackoffUntil,
   };
@@ -276,6 +299,18 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
     }
   }
 
+  // Skip URLs currently in transient-retry backoff so the sweeper doesn't
+  // re-fetch links known to be down and starve real ones. This is what lets
+  // the backlog drain: a failing link is attempted once, then parked for its
+  // backoff window while live links get the concurrency.
+  if (pending.length > 0) {
+    const now = Date.now();
+    pending = pending.filter((p) => {
+      const retry = transientRetry.get(p.url);
+      return !retry || retry.retryAt <= now;
+    });
+  }
+
   if (pending.length > 0) {
     // Group pending rows by URL → the set of spaces it is pending in (a URL
     // can appear in multiple spaces). enrichLinkAcrossSpaces fetches ONCE per
@@ -321,6 +356,7 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
         statsEnrichedOk++;
         enrichedUrls.add(url);
         settledUrls.add(url);
+        transientRetry.delete(url);
         // Emit per-URL invalidation routed to each space's per-space DB.
         for (const spaceDid of spaces) {
           await emitEnrichmentInvalidation(openSpaceDb(spaceDid), [url]);
@@ -331,10 +367,15 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
         // the backlog pinned on dead links forever and starve real ones.
         statsEnrichedNull++;
         settledUrls.add(url);
+        transientRetry.delete(url);
       } else {
         // Transient (timeout / 5xx / 429 / network) — keep pending so it is
-        // retried on a later cycle.
+        // retried later, but skip it for an exponential backoff window so the
+        // sweeper doesn't re-fetch the same down links every cycle.
         statsEnrichedNull++;
+        const prev = transientRetry.get(url);
+        const attempts = (prev?.attempts ?? 0) + 1;
+        transientRetry.set(url, { attempts, retryAt: Date.now() + backoffMs(attempts) });
       }
     });
 
@@ -542,6 +583,7 @@ async function emitEnrichmentInvalidation(
     });
   }
 
+  statsEnrichmentDiffs += signals.length;
   sweeperRouter.emit(signals);
 }
 
@@ -557,10 +599,12 @@ export function _resetEmbedSweeper(): void {
   sweeperRouter = undefined;
   wake = null;
   priorityLinks.clear();
+  transientRetry.clear();
   dbErrorCount = 0;
   dbBackoffUntil = 0;
   statsEnrichedOk = 0;
   statsEnrichedNull = 0;
+  statsEnrichmentDiffs = 0;
 }
 
 /**
@@ -577,10 +621,12 @@ export function stopEmbedSweeper(): Promise<void> {
   wake = null;
   w?.(); // wake the loop so it sees `started = false` and exits
   priorityLinks.clear();
+  transientRetry.clear();
   dbErrorCount = 0;
   dbBackoffUntil = 0;
   statsEnrichedOk = 0;
   statsEnrichedNull = 0;
+  statsEnrichmentDiffs = 0;
   const timeout = Promise.withResolvers<void>();
   setTimeout(timeout.resolve, 50);
   return Promise.race([loopPromise ?? Promise.resolve(), timeout.promise]);
