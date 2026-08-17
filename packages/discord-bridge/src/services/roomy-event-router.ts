@@ -269,7 +269,7 @@ export class RoomyEventRouter {
 		const content = decodeBody(event.body);
 
 		// Extract reply + media attachments to carry into Discord.
-		const { replyToMessageId, files } = await this.#extractAttachments(
+		const { replyTargetDiscordId, files } = await this.#extractAttachments(
 			spaceDid,
 			event,
 		);
@@ -290,7 +290,18 @@ export class RoomyEventRouter {
 			);
 			return;
 		}
-		const sendContent = content ?? "";
+		let sendContent = content ?? "";
+
+		// Faux reply: Discord webhooks can't set message_reference, so a reply
+		// is rendered as a small grey "↪ <link>" prefix above the content. This
+		// keeps the webhook's custom username/avatar attribution.
+		if (replyTargetDiscordId) {
+			const replyPrefix = await this.#buildReplyPrefix(
+				discordChannelId,
+				replyTargetDiscordId,
+			);
+			if (replyPrefix) sendContent = `${replyPrefix}\n${sendContent}`;
+		}
 
 		// Resolve author profile.
 		// Prefer the authorOverride extension (set by Discord→Roomy ingestion
@@ -322,7 +333,7 @@ export class RoomyEventRouter {
 			const discordMessageId = await this.#discord.sendMessage(
 				discordChannelId,
 				sendContent,
-				{ username, avatarUrl, webhook, threadId, replyToMessageId, files },
+				{ username, avatarUrl, webhook, threadId, files },
 			);
 
 			// Register mapping so Discord→Roomy dedup catches the echo
@@ -360,7 +371,7 @@ export class RoomyEventRouter {
 		spaceDid: string,
 		event: Event & { $type: "space.roomy.message.createMessage.v0" },
 	): Promise<{
-		replyToMessageId?: string;
+		replyTargetDiscordId?: string;
 		files: {
 			filename: string;
 			contentType: string;
@@ -369,7 +380,7 @@ export class RoomyEventRouter {
 	}> {
 		const attExt = event.extensions?.["space.roomy.extension.attachments.v0"];
 		const attachments = attExt?.attachments ?? [];
-		let replyToMessageId: string | undefined;
+		let replyTargetDiscordId: string | undefined;
 		const files: {
 			filename: string;
 			contentType: string;
@@ -383,7 +394,7 @@ export class RoomyEventRouter {
 					"message",
 					att.target,
 				);
-				if (discordMessageId) replyToMessageId = discordMessageId;
+				if (discordMessageId) replyTargetDiscordId = discordMessageId;
 				continue;
 			}
 
@@ -410,7 +421,72 @@ export class RoomyEventRouter {
 			}
 		}
 
-		return { replyToMessageId, files };
+		return { replyTargetDiscordId, files };
+	}
+
+	/**
+	 * Build a faux reply prefix for a Roomy message that replies to another.
+	 *
+	 * Discord webhooks can't set `message_reference`, so a reply is rendered
+	 * as small grey text: `-# ↪ <message-link> <quote-snippet>`. The raw link
+	 * renders as a clickable button in Discord. Falls back to no prefix when
+	 * the target message or guild can't be resolved.
+	 */
+	async #buildReplyPrefix(
+		channelId: string,
+		targetDiscordId: string,
+	): Promise<string | undefined> {
+		const QUOTE_MAX_LENGTH = 50;
+		const guildId = await this.#discord.getGuildId(channelId);
+		if (!guildId) return undefined;
+
+		const link = `https://discord.com/channels/${guildId}/${channelId}/${targetDiscordId}`;
+
+		let snippet = "";
+		try {
+			const original = await this.#discord.getMessage(
+				channelId,
+				targetDiscordId,
+			);
+			if (original?.content) {
+				snippet =
+					original.content.length > QUOTE_MAX_LENGTH
+						? ` ${original.content.slice(0, QUOTE_MAX_LENGTH)}...`
+						: ` ${original.content}`;
+			}
+		} catch {
+			// Message may be deleted or inaccessible — link alone is fine.
+		}
+
+		return `-# ↪ ${link}${snippet}`;
+	}
+
+	/**
+	 * Build the content for a faux forward: a small grey "Forwarded from
+	 * <link>" prefix above the original message's content. Sent via webhook so
+	 * the forwarded message keeps the author's custom username/avatar.
+	 */
+	async #buildForwardContent(
+		targetChannelId: string,
+		sourceChannelId: string,
+		discordMessageId: string,
+	): Promise<string | undefined> {
+		const guildId = await this.#discord.getGuildId(targetChannelId);
+		if (!guildId) return undefined;
+
+		const link = `https://discord.com/channels/${guildId}/${sourceChannelId}/${discordMessageId}`;
+		let body = "";
+		try {
+			const original = await this.#discord.getMessage(
+				sourceChannelId,
+				discordMessageId,
+			);
+			body = original?.content ?? "";
+		} catch {
+			// Message may be deleted — forward the link alone.
+		}
+
+		return `-# ↪ Forwarded from ${link}\n${body}`;
 	}
 
 	async #handleEditMessage(
@@ -745,6 +821,23 @@ export class RoomyEventRouter {
 			return;
 		}
 
+		// Threads can't have their own webhooks — use the parent channel's
+		// webhook and pass threadId so the faux forward lands in the thread.
+		let webhookChannelId = targetChannelId;
+		let threadId: string | undefined;
+		if (this.#repo.getDiscordId(spaceDid, "thread", destRoomId)) {
+			const parentId = await this.#discord.getParentChannelId(targetChannelId);
+			if (!parentId) {
+				log.warn(
+					`Could not find parent channel for thread ${targetChannelId}; skipping ${action}`,
+				);
+				return;
+			}
+			webhookChannelId = parentId;
+			threadId = targetChannelId;
+		}
+		const webhook = await this.#webhooks.ensureWebhook(webhookChannelId);
+
 		let count = 0;
 		for (const messageId of event.messageIds) {
 			// Per-message dedup: use a composite key (event ID + message ID) so
@@ -769,10 +862,25 @@ export class RoomyEventRouter {
 			}
 
 			try {
-				const newDiscordMessageId = await this.#discord.forwardMessage(
+				// Faux forward: Discord webhooks can't create native forwards, so
+				// send the original content with a "Forwarded from <link>" prefix
+				// via the webhook (keeping the author's custom attribution).
+				const forwardContent = await this.#buildForwardContent(
 					targetChannelId,
-					discordMessageId,
 					sourceChannelId,
+					discordMessageId,
+				);
+				if (!forwardContent) {
+					log.debug(
+						`Skipping ${action} of message ${messageId}: could not build forward content`,
+					);
+					continue;
+				}
+
+				const newDiscordMessageId = await this.#discord.sendMessage(
+					targetChannelId,
+					forwardContent,
+					{ webhook, threadId },
 				);
 
 				// Register a mapping so the Discord→Roomy ingestion dedup

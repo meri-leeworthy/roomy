@@ -6,7 +6,7 @@
  * and bot helpers for edits, deletes, and reactions.
  */
 
-import { ChannelTypes, DiscordMessageReferenceType } from "@discordeno/bot";
+import { ChannelTypes } from "@discordeno/bot";
 import type { DiscordSender, SendMessageOptions } from "./sender.ts";
 import type { DiscordBot } from "./types.ts";
 
@@ -120,14 +120,6 @@ export class LiveDiscordSender implements DiscordSender {
 		if (options.avatarUrl) {
 			body.avatar_url = options.avatarUrl;
 		}
-		if (options.replyToMessageId) {
-			body.message_reference = {
-				message_id: options.replyToMessageId,
-				channel_id: channelId,
-				fail_if_not_exists: false,
-			};
-		}
-
 		// Optional multipart file upload. When files are present, Discordeno's
 		// createRequestBody serialises `body` into `payload_json` and appends
 		// the files as multipart parts (the standard webhook upload format).
@@ -228,24 +220,19 @@ export class LiveDiscordSender implements DiscordSender {
 		return result.id.toString();
 	}
 
-	async forwardMessage(
-		targetChannelId: string,
+	async getGuildId(channelId: string): Promise<string | undefined> {
+		const channel = await this.#bot.helpers.getChannel(BigInt(channelId));
+		return channel?.guildId?.toString();
+	}
+
+	async getMessage(
+		channelId: string,
 		messageId: string,
-		sourceChannelId?: string,
-	): Promise<string> {
-		// Discord forwards are created by sending a message with a Forward
-		// message reference. Both messages must be in the same guild.
-		const result = await this.#bot.helpers.sendMessage(
-			BigInt(targetChannelId),
-			{
-				messageReference: {
-					type: DiscordMessageReferenceType.Forward,
-					messageId: BigInt(messageId),
-					...(sourceChannelId ? { channelId: BigInt(sourceChannelId) } : {}),
-					failIfNotExists: false,
-				},
-			},
+	): Promise<{ content: string } | undefined> {
+		const msg = await this.#bot.helpers.getMessage(
+			BigInt(channelId),
+			BigInt(messageId),
 		);
-		return result.id.toString();
+		return msg ? { content: msg.content ?? "" } : undefined;
 	}
 }

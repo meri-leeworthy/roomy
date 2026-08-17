@@ -177,6 +177,13 @@ function setup(): {
 
 	const roomy = new MockRoomyGateway();
 	const discord = new FileDiscordSender();
+	// Faux reply/forward prefixes need the guild + original message content.
+	discord.setGuildId(DISCORD_CHANNEL_ID, GUILD);
+	discord.setMessage(
+		DISCORD_CHANNEL_ID,
+		DISCORD_MESSAGE_ID,
+		"original content",
+	);
 	const webhooks = new FileWebhookManager();
 	const profiles = new FileProfileResolver({
 		[DISCORD_USER_DID]: {
@@ -586,7 +593,7 @@ describe("RoomyEventRouter", () => {
 	 * RER14: forwardMessages forwards a mapped message to a bridged Discord
 	 * channel/thread.
 	 */
-	test("RER14: bridges forwardMessages to Discord", async () => {
+	test("RER14: bridges forwardMessages to Discord as a faux forward via webhook", async () => {
 		const { roomy, discord, router, repo } = setup();
 		repo.registerMapping(
 			SPACE_A,
@@ -599,13 +606,12 @@ describe("RoomyEventRouter", () => {
 		const forwardEvent = makeForwardMessagesEvent({});
 		await roomy.fireEvent(SPACE_A, forwardEvent);
 
-		expect(discord.forwarded).toHaveLength(1);
-		expect(discord.forwarded[0]).toEqual({
-			targetChannelId: DISCORD_CHANNEL_ID,
-			messageId: DISCORD_MESSAGE_ID,
-			sourceChannelId: DISCORD_CHANNEL_ID,
-			newMessageId: "1",
-		});
+		expect(discord.sent).toHaveLength(1);
+		const sent = discord.sent[0];
+		expect(sent?.channelId).toBe(DISCORD_CHANNEL_ID);
+		expect(sent?.content).toBe(
+			`-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID}\noriginal content`,
+		);
 
 		// Mapping registered so Discord→Roomy dedup catches the echo
 		const mappedDiscordId = repo.getDiscordId(
@@ -613,7 +619,7 @@ describe("RoomyEventRouter", () => {
 			"message",
 			`${forwardEvent.id}:${ROOMY_MESSAGE_ULID}`,
 		);
-		expect(mappedDiscordId).toBe(discord.forwarded[0]?.newMessageId);
+		expect(mappedDiscordId).toBe(sent?.messageId);
 	});
 
 	/**
@@ -634,7 +640,7 @@ describe("RoomyEventRouter", () => {
 			makeForwardMessagesEvent({ room: newUlid() }),
 		);
 
-		expect(discord.forwarded).toHaveLength(0);
+		expect(discord.sent).toHaveLength(0);
 	});
 
 	/**
@@ -655,7 +661,7 @@ describe("RoomyEventRouter", () => {
 			makeForwardMessagesEvent({ fromRoomId: newUlid() }),
 		);
 
-		expect(discord.forwarded).toHaveLength(0);
+		expect(discord.sent).toHaveLength(0);
 	});
 
 	/**
@@ -680,7 +686,7 @@ describe("RoomyEventRouter", () => {
 
 		await roomy.fireEvent(SPACE_A, makeForwardMessagesEvent({ id: forwardId }));
 
-		expect(discord.forwarded).toHaveLength(0);
+		expect(discord.sent).toHaveLength(0);
 	});
 
 	/**
@@ -698,6 +704,8 @@ describe("RoomyEventRouter", () => {
 			DISCORD_MESSAGE_ID,
 			ROOMY_MESSAGE_ULID,
 		);
+		discord.setParentChannelId(discordThreadId, DISCORD_CHANNEL_ID);
+		discord.setGuildId(discordThreadId, GUILD);
 		await router.subscribeToSpace(SPACE_A);
 
 		await roomy.fireEvent(
@@ -705,8 +713,9 @@ describe("RoomyEventRouter", () => {
 			makeForwardMessagesEvent({ room: roomyThreadId }),
 		);
 
-		expect(discord.forwarded).toHaveLength(1);
-		expect(discord.forwarded[0]?.targetChannelId).toBe(discordThreadId);
+		expect(discord.sent).toHaveLength(1);
+		expect(discord.sent[0]?.channelId).toBe(discordThreadId);
+		expect(discord.sent[0]?.options?.threadId).toBe(discordThreadId);
 	});
 
 	/**
@@ -735,7 +744,7 @@ describe("RoomyEventRouter", () => {
 
 		await roomy.fireEvent(SPACE_A, forwardEvent);
 
-		expect(discord.forwarded).toHaveLength(0);
+		expect(discord.sent).toHaveLength(0);
 	});
 
 	/**
@@ -788,18 +797,18 @@ describe("RoomyEventRouter", () => {
 			DISCORD_MESSAGE_ID,
 			ROOMY_MESSAGE_ULID,
 		);
+		discord.setGuildId(destChannelId, GUILD);
 		await router.subscribeToSpace(SPACE_A);
 
 		const moveEvent = makeMoveMessagesEvent({ toRoomId: destRoomId });
 		await roomy.fireEvent(SPACE_A, moveEvent);
 
-		expect(discord.forwarded).toHaveLength(1);
-		expect(discord.forwarded[0]).toEqual({
-			targetChannelId: destChannelId,
-			messageId: DISCORD_MESSAGE_ID,
-			sourceChannelId: DISCORD_CHANNEL_ID,
-			newMessageId: "1",
-		});
+		expect(discord.sent).toHaveLength(1);
+		const sent = discord.sent[0];
+		expect(sent?.channelId).toBe(destChannelId);
+		expect(sent?.content).toBe(
+			`-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID}\noriginal content`,
+		);
 
 		// Original Discord message is NOT deleted
 		expect(discord.deleted).toHaveLength(0);
@@ -810,7 +819,7 @@ describe("RoomyEventRouter", () => {
 			"message",
 			`${moveEvent.id}:${ROOMY_MESSAGE_ULID}`,
 		);
-		expect(mappedDiscordId).toBe(discord.forwarded[0]?.newMessageId);
+		expect(mappedDiscordId).toBe(sent?.messageId);
 	});
 
 	/**
@@ -835,7 +844,7 @@ describe("RoomyEventRouter", () => {
 			makeMoveMessagesEvent({ room: newUlid(), toRoomId: destRoomId }),
 		);
 
-		expect(discord.forwarded).toHaveLength(0);
+		expect(discord.sent).toHaveLength(0);
 		expect(discord.deleted).toHaveLength(0);
 	});
 
@@ -858,7 +867,7 @@ describe("RoomyEventRouter", () => {
 			makeMoveMessagesEvent({ toRoomId: newUlid() }),
 		);
 
-		expect(discord.forwarded).toHaveLength(0);
+		expect(discord.sent).toHaveLength(0);
 		expect(discord.deleted).toHaveLength(0);
 	});
 
@@ -890,7 +899,7 @@ describe("RoomyEventRouter", () => {
 			makeMoveMessagesEvent({ id: moveId, toRoomId: destRoomId }),
 		);
 
-		expect(discord.forwarded).toHaveLength(0);
+		expect(discord.sent).toHaveLength(0);
 		expect(discord.deleted).toHaveLength(0);
 	});
 
@@ -909,6 +918,8 @@ describe("RoomyEventRouter", () => {
 			DISCORD_MESSAGE_ID,
 			ROOMY_MESSAGE_ULID,
 		);
+		discord.setParentChannelId(destThreadId, DISCORD_CHANNEL_ID);
+		discord.setGuildId(destThreadId, GUILD);
 		await router.subscribeToSpace(SPACE_A);
 
 		await roomy.fireEvent(
@@ -916,8 +927,9 @@ describe("RoomyEventRouter", () => {
 			makeMoveMessagesEvent({ toRoomId: destRoomId }),
 		);
 
-		expect(discord.forwarded).toHaveLength(1);
-		expect(discord.forwarded[0]?.targetChannelId).toBe(destThreadId);
+		expect(discord.sent).toHaveLength(1);
+		expect(discord.sent[0]?.channelId).toBe(destThreadId);
+		expect(discord.sent[0]?.options?.threadId).toBe(destThreadId);
 		expect(discord.deleted).toHaveLength(0);
 	});
 
@@ -949,7 +961,7 @@ describe("RoomyEventRouter", () => {
 
 		await roomy.fireEvent(SPACE_A, moveEvent);
 
-		expect(discord.forwarded).toHaveLength(0);
+		expect(discord.sent).toHaveLength(0);
 		expect(discord.deleted).toHaveLength(0);
 	});
 
@@ -969,7 +981,7 @@ describe("RoomyEventRouter", () => {
 			makeMoveMessagesEvent({ toRoomId: destRoomId }),
 		);
 
-		expect(discord.forwarded).toHaveLength(0);
+		expect(discord.sent).toHaveLength(0);
 		expect(discord.deleted).toHaveLength(0);
 	});
 });
@@ -1006,7 +1018,14 @@ test("RER29: carries a Roomy reply through to Discord as a reply", async () => {
 	await roomy.fireEvent(SPACE_A, event);
 
 	expect(discord.sent).toHaveLength(1);
-	expect(discord.sent[0]?.options?.replyToMessageId).toBe(DISCORD_MESSAGE_ID);
+	const sent = discord.sent[0];
+	// Faux reply: a small grey "↪ <link> <snippet>" prefix above the content,
+	// sent via webhook (keeping the author's custom attribution).
+	expect(sent?.content).toBe(
+		`-# ↪ https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID} original content\nThis is a reply`,
+	);
+	// Sent via webhook (not the bot) so attribution is preserved.
+	expect(sent?.options?.webhook).toBeDefined();
 });
 
 /**
@@ -1103,6 +1122,7 @@ test("RER32: falls back to a plain message when reply target is not bridged", as
 	});
 	await roomy.fireEvent(SPACE_A, event);
 
+	// No bridged reply target → no faux reply prefix; plain message sent.
 	expect(discord.sent).toHaveLength(1);
-	expect(discord.sent[0]?.options?.replyToMessageId).toBeUndefined();
+	expect(discord.sent[0]?.content).toBe("Replying to nothing bridged");
 });

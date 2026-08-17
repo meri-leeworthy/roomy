@@ -44,13 +44,6 @@ export interface CreatedThread {
 	id: string;
 }
 
-export interface ForwardedMessage {
-	targetChannelId: string;
-	messageId: string;
-	sourceChannelId: string | undefined;
-	newMessageId: string;
-}
-
 export class FileDiscordSender implements DiscordSender {
 	#nextId = 1;
 	#sent: SentMessage[] = [];
@@ -59,8 +52,9 @@ export class FileDiscordSender implements DiscordSender {
 	#reactionsAdded: AddedReaction[] = [];
 	#reactionsRemoved: RemovedReaction[] = [];
 	#parents = new Map<string, string>();
+	#guilds = new Map<string, string>();
+	#messages = new Map<string, string>();
 	#threads: CreatedThread[] = [];
-	#forwarded: ForwardedMessage[] = [];
 
 	async sendMessage(
 		channelId: string,
@@ -105,6 +99,19 @@ export class FileDiscordSender implements DiscordSender {
 		return this.#parents.get(channelId);
 	}
 
+	async getGuildId(channelId: string): Promise<string | undefined> {
+		return this.#guilds.get(channelId);
+	}
+
+	async getMessage(
+		channelId: string,
+		messageId: string,
+	): Promise<{ content: string } | undefined> {
+		const key = `${channelId}:${messageId}`;
+		const content = this.#messages.get(key);
+		return content !== undefined ? { content } : undefined;
+	}
+
 	async createThread(
 		channelId: string,
 		name: string,
@@ -115,24 +122,19 @@ export class FileDiscordSender implements DiscordSender {
 		return id;
 	}
 
-	async forwardMessage(
-		targetChannelId: string,
-		messageId: string,
-		sourceChannelId?: string,
-	): Promise<string> {
-		const newMessageId = String(this.#nextId++);
-		this.#forwarded.push({
-			targetChannelId,
-			messageId,
-			sourceChannelId,
-			newMessageId,
-		});
-		return newMessageId;
-	}
-
 	/** Register a parent channel ID for a thread (for tests). */
 	setParentChannelId(threadId: string, parentId: string): void {
 		this.#parents.set(threadId, parentId);
+	}
+
+	/** Register a guild ID for a channel (for tests). */
+	setGuildId(channelId: string, guildId: string): void {
+		this.#guilds.set(channelId, guildId);
+	}
+
+	/** Register a message's content (for tests). */
+	setMessage(channelId: string, messageId: string, content: string): void {
+		this.#messages.set(`${channelId}:${messageId}`, content);
 	}
 
 	// ── Test helpers ────────────────────────────────────────────
@@ -161,10 +163,6 @@ export class FileDiscordSender implements DiscordSender {
 		return this.#threads;
 	}
 
-	get forwarded(): readonly ForwardedMessage[] {
-		return this.#forwarded;
-	}
-
 	reset(): void {
 		this.#nextId = 1;
 		this.#sent = [];
@@ -173,6 +171,5 @@ export class FileDiscordSender implements DiscordSender {
 		this.#reactionsAdded = [];
 		this.#reactionsRemoved = [];
 		this.#threads = [];
-		this.#forwarded = [];
 	}
 }

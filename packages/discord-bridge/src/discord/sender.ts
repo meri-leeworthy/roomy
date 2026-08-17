@@ -15,8 +15,6 @@ export interface SendMessageOptions {
 	webhook?: { id: string; token: string };
 	/** Thread ID — when set, the webhook message is sent to this thread. */
 	threadId?: string;
-	/** Discord message snowflake this message replies to (webhook message_reference). */
-	replyToMessageId?: string;
 	/** Files to attach to the message (multipart webhook upload). */
 	files?: Array<{
 		filename: string;
@@ -71,6 +69,20 @@ export interface DiscordSender {
 	getParentChannelId(channelId: string): Promise<string | undefined>;
 
 	/**
+	 * Get the guild ID a channel belongs to, or undefined if unknown.
+	 */
+	getGuildId(channelId: string): Promise<string | undefined>;
+
+	/**
+	 * Fetch a message's content (used to build faux reply/forward prefixes).
+	 * Returns undefined if the message can't be fetched.
+	 */
+	getMessage(
+		channelId: string,
+		messageId: string,
+	): Promise<{ content: string } | undefined>;
+
+	/**
 	 * Create a thread in a Discord channel.
 	 * Returns the Discord thread snowflake.
 	 */
@@ -78,18 +90,5 @@ export interface DiscordSender {
 		channelId: string,
 		name: string,
 		isPrivate: boolean,
-	): Promise<string>;
-
-	/**
-	 * Forward a message from one channel/thread to another using Discord's
-	 * forward feature. The message must be in the same guild as the target.
-	 * If `sourceChannelId` is provided it is included in the message reference
-	 * so Discord can resolve the source message faster and more reliably.
-	 * Returns the new Discord message snowflake.
-	 */
-	forwardMessage(
-		targetChannelId: string,
-		messageId: string,
-		sourceChannelId?: string,
 	): Promise<string>;
 }
