@@ -366,4 +366,69 @@ describe("embed sweeper invalidation room resolution", () => {
     }
     _resetEmbedSweeper();
   });
+
+  test("sweeper advances past a backoff link to enrich a newer one (doesn't stall)", async () => {
+    // Regression: the backlog query re-selected the same OLDEST links every
+    // cycle, so if the oldest links were all in transient backoff the sweeper
+    // filtered them out, got an empty batch, and stalled — never reaching the
+    // newer live links behind them. findPendingLinks now excludes backoff URLs
+    // in the query, so a newer link is enriched even while an older one is
+    // parked.
+    const { globalDb, spaceDb } = freshWorker();
+    const { router } = captureRouter();
+    const oldUrl = "https://example.com/old-flaky";
+    const newUrl = "https://example.com/new-live";
+    await seedLinkMessageRoom(spaceDb, globalDb, {
+      room: "01KVRRRRRRRRRRRRRRRRRRRRRR",
+      message: "01KVMMMMMMMMMMMMMMMMMMMMMM",
+      url: oldUrl,
+    });
+    await seedLinkMessageRoom(spaceDb, globalDb, {
+      room: "01KVRRRRRRRRRRRRRRRRRRRRR2",
+      message: "01KVNNNNNNNNNNNNNNNNNNNNNN",
+      url: newUrl,
+    });
+
+    const realFetch = globalThis.fetch;
+    // oldUrl → 503 (transient); newUrl → 200 with OG (success).
+    globalThis.fetch = ((
+      input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const u = String(input);
+      if (u.includes("old-flaky")) {
+        return Promise.resolve(new Response("Service Unavailable", { status: 503 }));
+      }
+      return Promise.resolve(
+        new Response(
+          '<html><head><meta property="og:title" content="New Live" /></head></html>',
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        ),
+      );
+    }) as typeof globalThis.fetch;
+
+    try {
+      await stopEmbedSweeper();
+      startEmbedSweeper({ globalDb, invalidationRouter: router });
+
+      // Cycle 1: oldUrl is transient → parked in backoff.
+      await sweepCycle(globalDb);
+      await new Promise((r) => setTimeout(r, 300));
+
+      // Cycle 2: oldUrl is in backoff; the sweeper must skip it and enrich
+      // newUrl instead (not stall on an empty batch).
+      await sweepCycle(globalDb);
+      await new Promise((r) => setTimeout(r, 300));
+
+      // newUrl was enriched successfully.
+      const newData = await spaceDb
+        .query("select embed_json from comp_embed_link_data where entity = ?")
+        .get<{ embed_json: string | null }>(newUrl);
+      expect(newData?.embed_json).toBeTruthy();
+    } finally {
+      globalThis.fetch = realFetch;
+      await stopEmbedSweeper();
+    }
+    _resetEmbedSweeper();
+  });
 });

@@ -284,10 +284,23 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
     }
   }
 
-  // 2. Backlog: fill the rest of the batch with the oldest pending links.
+  // 2. Backlog: fill the rest of the batch with the oldest pending links,
+  //    EXCLUDING URLs currently in transient-retry backoff. Excluding them in
+  //    the query (not just filtering the result) is what lets the sweeper
+  //    advance past a run of down links instead of re-selecting the same
+  //    oldest backoff links every cycle and stalling.
   if (pending.length < SWEEP_BATCH) {
     try {
-      const backlog = await findPendingLinks(globalDb, SWEEP_BATCH - pending.length);
+      const now = Date.now();
+      const backoffUrls = new Set<string>();
+      for (const [url, retry] of transientRetry) {
+        if (retry.retryAt > now) backoffUrls.add(url);
+      }
+      const backlog = await findPendingLinks(
+        globalDb,
+        SWEEP_BATCH - pending.length,
+        backoffUrls,
+      );
       // Dedupe in case a priority URL is also among the oldest pending
       // (rare — priority URLs are newest, backlog is oldest-first).
       pending = dedupePending([...pending, ...backlog]);
@@ -299,10 +312,8 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
     }
   }
 
-  // Skip URLs currently in transient-retry backoff so the sweeper doesn't
-  // re-fetch links known to be down and starve real ones. This is what lets
-  // the backlog drain: a failing link is attempted once, then parked for its
-  // backoff window while live links get the concurrency.
+  // Skip any priority URLs currently in transient-retry backoff (the priority
+  // path resolves spaces for freshly-poked URLs without a backoff filter).
   if (pending.length > 0) {
     const now = Date.now();
     pending = pending.filter((p) => {

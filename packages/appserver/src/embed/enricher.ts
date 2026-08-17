@@ -155,15 +155,30 @@ export interface PendingLink {
  * rows (URL + owning space + message) so the sweeper can group by space and
  * route enrichment/invalidation to the correct per-space DB.
  */
-export async function findPendingLinks(db: DbLike, limit = 50): Promise<PendingLink[]> {
+export async function findPendingLinks(
+  db: DbLike,
+  limit = 50,
+  skipUrls?: ReadonlySet<string>,
+): Promise<PendingLink[]> {
+  // Exclude URLs currently in transient-retry backoff so the sweeper doesn't
+  // keep pulling the same oldest down links and stall behind them. Without
+  // this, a backlog whose oldest entries are all failing transiently would be
+  // re-selected every cycle, filtered out, and never advance to newer links.
+  const skip = skipUrls && skipUrls.size > 0 ? [...skipUrls] : [];
+  const skipPh = skip.map(() => "?").join(",");
+  const where = skip.length > 0 ? `where url not in (${skipPh})` : "";
   const rows = await db
     .query(
       `select space_did, message_id, url
        from pending_links
+       ${where}
        order by created_at asc
        limit ?`,
     )
-    .all<{ space_did: string; message_id: string; url: string }>([limit]);
+    .all<{ space_did: string; message_id: string; url: string }>([
+      ...skip,
+      limit,
+    ]);
   return rows.map((r) => ({
     url: r.url,
     spaceDid: r.space_did,
