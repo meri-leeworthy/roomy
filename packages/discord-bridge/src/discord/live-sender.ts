@@ -62,6 +62,27 @@ export class LiveDiscordSender implements DiscordSender {
 		content: string,
 		options?: SendMessageOptions,
 	): Promise<string> {
+		// Replies cannot be sent via webhook — Discord's Execute Webhook
+		// endpoint does not support `message_reference`. Send as the bot with a
+		// message reference instead (the reply loses custom username/avatar
+		// attribution, but that's the only way to carry a reply through).
+		if (options?.replyToMessageId) {
+			const result = await withTimeout(
+				this.#bot.helpers.sendMessage(BigInt(channelId), {
+					content,
+					messageReference: {
+						type: DiscordMessageReferenceType.Default,
+						messageId: BigInt(options.replyToMessageId),
+						channelId: BigInt(channelId),
+						failIfNotExists: false,
+					},
+				}),
+				DISCORD_REQUEST_TIMEOUT_MS,
+				`bot reply to channel ${channelId}`,
+			);
+			return result.id.toString();
+		}
+
 		if (options?.webhook) {
 			return this.#sendViaWebhook(channelId, content, options);
 		}
@@ -120,14 +141,6 @@ export class LiveDiscordSender implements DiscordSender {
 		if (options.avatarUrl) {
 			body.avatar_url = options.avatarUrl;
 		}
-		if (options.replyToMessageId) {
-			body.message_reference = {
-				message_id: options.replyToMessageId,
-				channel_id: channelId,
-				fail_if_not_exists: false,
-			};
-		}
-
 		// Optional multipart file upload. When files are present, Discordeno's
 		// createRequestBody serialises `body` into `payload_json` and appends
 		// the files as multipart parts (the standard webhook upload format).
