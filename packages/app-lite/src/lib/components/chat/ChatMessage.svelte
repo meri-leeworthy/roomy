@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
+  import { MediaQuery } from "svelte/reactivity";
   import { Checkbox } from "bits-ui";
   import MessageBubble from "@roomy/design/components/content/thread/message/MessageBubble.svelte";
   import { messagingState } from "./messaging-state.svelte";
@@ -160,13 +161,14 @@
       return url;
     }
   }
+  let isMobile = new MediaQuery("(pointer: coarse)")
   let isThreading = $derived(messagingState.current.kind === "threading");
   let isSelected = $derived.by(() => {
     const cur = messagingState.current;
     return cur.kind === "threading" && cur.selectedMessages.some((m) => m.id === message.id);
   });
   let showToolbar = $derived(
-    (!isEditing && hovered && !isThreading) || keepToolbarOpen,
+    (!isEditing && hovered && !isThreading && !isMobile.current) || keepToolbarOpen,
   );
 
   let isBridged = $derived(message.authorDid.startsWith("did:discord:"));
@@ -177,14 +179,14 @@
 
   function handleContextAction(e: MouseEvent) {
     // On mobile (coarse pointer), long-press opens the drawer
-    if (matchMedia("(pointer: coarse)").matches) {
+    if (isMobile.current) {
       e.preventDefault();
       onOpenMobileMenu(message);
     }
   }
 
 
-  async function handleEdit(newContent: string, _mentions: string[]) {
+  async function handleEdit(newContent: string, _mentions: string[], submittedBlocks: Block[]) {
     const isRichText = message.mimeType === RICHTEXT_MIME;
     // Sync the link preview states (dismissed / re-added) to the message via
     // link attachments. The materializer treats a link-only edit as a
@@ -211,7 +213,7 @@
       {
         // Rich-text messages stay rich-text: send the blocks (which ChatInput
         // keeps in sync) rather than the base64-encoded wire body or markdown.
-        ...(isRichText ? { blocks: editBlocks ?? [] } : {}),
+        ...(isRichText ? { blocks: submittedBlocks } : {}),
         ...(linkAttachments.length > 0 ? { attachments: linkAttachments } : {}),
       },
     );
@@ -337,7 +339,7 @@
             class="shrink-0 rounded-full"
             aria-label="Save changes"
             title="Save (Enter)"
-            onclick={() => handleEdit(editContent, [])}
+            onclick={() => handleEdit(editContent, [], editBlocks ?? [])}
           >
             <IconCheck />
           </Button>

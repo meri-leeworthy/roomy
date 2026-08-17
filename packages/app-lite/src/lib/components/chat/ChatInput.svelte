@@ -46,7 +46,7 @@
     mentionSearch?: (query: string) => Promise<TypeaheadUser[]>;
     /** Rooms in space that can be mentioned with #room */
     context?: Item[];
-    onEnter: (content: string, mentions: string[]) => Promise<void>;
+    onEnter: (content: string, mentions: string[], blocks: Block[]) => Promise<void>;
     placeholder?: string;
     setFocus?: boolean;
     disabled?: boolean;
@@ -70,9 +70,25 @@
 
   let tiptap: Editor | undefined = $state();
 
+  function flushTrailingAutolink() {
+    if (!tiptap || !tiptap.state.selection.empty) return;
+
+    const from = tiptap.state.selection.$from;
+    if (from.parentOffset !== from.parent.content.size) return;
+
+    const boundary = tiptap.state.selection.from;
+    tiptap.view.dispatch(tiptap.state.tr.insertText(" "));
+    return boundary;
+  }
+
   async function wrappedOnEnter() {
+    const boundary = flushTrailingAutolink();
     const mentions = tiptap ? extractMentionDids(tiptap) : [];
-    await onEnter(content, mentions);
+    const currentBlocks = tiptap ? proseMirrorDocToBlocks(tiptap.getJSON()) : (blocks ?? []);
+    if (boundary !== undefined) {
+      tiptap?.commands.deleteRange({ from: boundary, to: boundary + 1 });
+    }
+    await onEnter(content, mentions, currentBlocks);
   }
 
   /**
@@ -101,7 +117,7 @@
       // Headings enabled so markdown shortcuts (`# `, `## `, …) convert to
       // header blocks as the user types. Bullet/ordered list shortcuts
       // (`- `, `1. `) come from StarterKit's input rules by default.
-      StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] } }),
+      StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] }, link: false }),
       Placeholder.configure({ placeholder }),
       RichTextLink.configure({
         openOnClick: false,
