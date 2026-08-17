@@ -289,8 +289,12 @@ async function filterMissing(db: DbLike, candidates: Set<UserDid>): Promise<User
  * per-space reads.
  *
  * Conflict strategy mirrors comp_info: a Roomy record is authoritative and
- * overwrites all fields; a Bluesky fallback is first-writer-wins for display
- * fields but always refreshes the handle.
+ * overwrites all fields *except the handle* — Roomy profile records
+ * (`space.roomy.user.profile/self`) don't carry a handle, so the handle is
+ * preserved from the existing row (populated by a prior Bluesky fetch /
+ * hydration) rather than being clobbered with an empty string. A Bluesky
+ * fallback is first-writer-wins for display fields but always refreshes the
+ * handle.
  */
 async function writeGlobalProfile(
   p: ProfileViewDetailed,
@@ -315,7 +319,7 @@ async function writeGlobalProfile(
       `insert into profiles (did, handle, name, avatar, description, banner, pronouns, website, updated_at)
        values (?, ?, ?, ?, ?, ?, ?, ?, unixepoch() * 1000)
        on conflict(did) do update set
-         handle = excluded.handle,
+         handle = coalesce(nullif(excluded.handle, ''), profiles.handle),
          name = excluded.name,
          avatar = excluded.avatar,
          description = excluded.description,

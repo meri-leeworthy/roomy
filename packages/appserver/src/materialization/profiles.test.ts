@@ -401,4 +401,36 @@ describe("global profile store (Phase 2)", () => {
     expect(row?.name).toBe("Bob");
     expect(row?.avatar).toBe("https://cdn.example/bob.png");
   });
+
+  test("Roomy record without a handle does not clobber an existing handle", async () => {
+    const { insertProfilesWithExtras } = await import("./profiles.ts");
+    const { globalDb } = freshGlobal();
+
+    // Seed a Bluesky-sourced profile with a real handle first.
+    await insertProfilesWithExtras(
+      openDb(),
+      [profileFor(ALICE, "alice.test")],
+      new Map(),
+    );
+
+    // Now a Roomy record arrives (extras present) but carries no handle —
+    // Roomy profile records don't store a handle. This must NOT wipe the
+    // previously-fetched handle.
+    const roomyProfile = {
+      did: ALICE,
+      handle: "", // happyViewToProfileView yields "" when the record has no handle
+      displayName: "Alice Roomy",
+    } as ProfileViewDetailed;
+    await insertProfilesWithExtras(
+      openDb(),
+      [roomyProfile],
+      new Map([[ALICE, { pronouns: "she/her" }]]),
+    );
+
+    const row = await globalDb
+      .query("select did, handle, name from profiles where did = ?")
+      .get(ALICE);
+    expect(row?.handle).toBe("alice.test");
+    expect(row?.name).toBe("Alice Roomy");
+  });
 });
