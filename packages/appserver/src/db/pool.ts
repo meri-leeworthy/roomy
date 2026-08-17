@@ -80,6 +80,42 @@ export class DatabasePool {
     });
   }
 
+  /** A handle pinned to the temp `.sqlite.new` rebuild DB for `spaceDid`
+   *  (blue-green). Same worker as `forSpace` so rebuild state stays local. */
+  forSpaceRebuild(spaceDid: string): AsyncDatabase {
+    const idx = hashSpace(spaceDid) % this.#size;
+    return new AsyncDatabase(this.#poolLinks[idx]!, {
+      targetDb: "space",
+      spaceDid,
+      route: "rebuild",
+    });
+  }
+
+  /** Start a rebuild for `spaceDid` (idempotent). */
+  async spaceRebuildBegin(spaceDid: string): Promise<{ ok: boolean }> {
+    return this.forSpace(spaceDid).spaceRebuildBegin(spaceDid);
+  }
+
+  /** Atomically swap the rebuild DB over the canonical file (idempotent). */
+  async spaceRebuildCommit(spaceDid: string): Promise<{ committed: boolean }> {
+    return this.forSpace(spaceDid).spaceRebuildCommit(spaceDid);
+  }
+
+  /** Abandon a rebuild; the old DB keeps serving. */
+  async spaceRebuildAbort(spaceDid: string): Promise<{ aborted: boolean }> {
+    return this.forSpace(spaceDid).spaceRebuildAbort(spaceDid);
+  }
+
+  /** Whether `spaceDid` is currently rebuilding. */
+  async isSpaceRebuilding(spaceDid: string): Promise<boolean> {
+    return this.forSpace(spaceDid).isSpaceRebuilding(spaceDid);
+  }
+
+  /** Whether the canonical per-space DB for `spaceDid` is on the current schema. */
+  async checkSpaceSchema(spaceDid: string): Promise<{ current: boolean }> {
+    return this.forSpace(spaceDid).checkSpaceSchema(spaceDid);
+  }
+
   /** A handle to the system worker's global DB. */
   global(): AsyncDatabase {
     return new AsyncDatabase(this.#systemLink, { targetDb: "global" });
@@ -194,6 +230,24 @@ export class PooledDatabase implements DbLike {
 
   forSpace(spaceDid: string): AsyncDatabase {
     return this.#pool.forSpace(spaceDid);
+  }
+  forSpaceRebuild(spaceDid: string): AsyncDatabase {
+    return this.#pool.forSpaceRebuild(spaceDid);
+  }
+  isSpaceRebuilding(spaceDid: string): Promise<boolean> {
+    return this.#pool.isSpaceRebuilding(spaceDid);
+  }
+  spaceRebuildBegin(spaceDid: string): Promise<{ ok: boolean }> {
+    return this.#pool.spaceRebuildBegin(spaceDid);
+  }
+  spaceRebuildCommit(spaceDid: string): Promise<{ committed: boolean }> {
+    return this.#pool.spaceRebuildCommit(spaceDid);
+  }
+  spaceRebuildAbort(spaceDid: string): Promise<{ aborted: boolean }> {
+    return this.#pool.spaceRebuildAbort(spaceDid);
+  }
+  checkSpaceSchema(spaceDid: string): Promise<{ current: boolean }> {
+    return this.#pool.checkSpaceSchema(spaceDid);
   }
   global(): AsyncDatabase {
     return this.#pool.global();
