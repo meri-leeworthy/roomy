@@ -274,4 +274,48 @@ describe("embed sweeper invalidation room resolution", () => {
 
     expect(signals.find((s) => s.kind === "messageDiff")).toBeUndefined();
   });
+
+  test("definitively-settled (no-data) links are dropped from pending_links so the backlog drains", async () => {
+    // Regression: the sweeper only removed SUCCESSFULLY-enriched URLs from the
+    // global `pending_links` index. Definitive no-data links (page loaded but
+    // no OG/oEmbed, or a stable 4xx) stayed pending forever and were re-fetched
+    // on every sweep, pinning the backlog on dead links and starving real ones
+    // (production showed enrichedOk: 0 with a 30k+ backlog that never drained).
+    const { globalDb, spaceDb } = freshWorker();
+    const { router } = captureRouter();
+    const url = "https://example.com/no-og";
+    await seedLinkMessageRoom(spaceDb, globalDb, {
+      room: "01KVRRRRRRRRRRRRRRRRRRRRRR",
+      message: "01KVMMMMMMMMMMMMMMMMMMMMMM",
+      url,
+    });
+
+    // Mock fetch to return a page with NO OpenGraph/oEmbed metadata → the
+    // probe classifies it as definitive "no-data" (settled, not retryable).
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> =>
+      Promise.resolve(
+        new Response("<html><head><title>No OG here</title></head></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        }),
+      )) as typeof globalThis.fetch;
+
+    try {
+      await flushSweeper({ globalDb, invalidationRouter: router });
+      await new Promise((r) => setTimeout(r, 300));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    _resetEmbedSweeper();
+
+    // The settled no-data link must be removed from the pending set.
+    const remaining = await globalDb
+      .query("select count(*) as n from pending_links where url = ?")
+      .get<{ n: number }>(url);
+    expect(remaining?.n ?? 0).toBe(0);
+  });
 });

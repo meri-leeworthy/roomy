@@ -33,10 +33,10 @@ import {
   findPendingLinksForUrls,
   filterPendingUrls,
   inFlightCount,
+  type EnrichOutcome,
   type PendingLink,
 } from "./enricher.ts";
 import { openSpaceDb } from "../db/db.ts";
-import type { Embed } from "./types.ts";
 import { selectMessages } from "../queries/selectMessages.ts";
 import type { MessageDto } from "../queries/selectMessages.ts";
 import { log } from "../log.ts";
@@ -297,11 +297,17 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
     // Failed (null) enrichments emit nothing. Per-URL error isolation keeps
     // one throwing enrichLinkAcrossSpaces from killing the whole loop.
     let cycleDbError: unknown = null;
+    // URLs whose enrichment SUCCEEDED — emit invalidations and drop from the
+    // pending set.
     const enrichedUrls = new Set<string>();
+    // URLs that are SETTLED (ok OR definitive no-data) — drop from the
+    // pending set so the backlog drains. Only transient failures stay pending
+    // for a later retry.
+    const settledUrls = new Set<string>();
     await mapWithConcurrency([...spacesByUrl.entries()], CONCURRENCY, async ([url, spaces]) => {
-      let embed: Embed | null = null;
+      let outcome: EnrichOutcome | null = null;
       try {
-        embed = await enrichLinkAcrossSpaces(url, spaces);
+        outcome = await enrichLinkAcrossSpaces(url, spaces);
       } catch (err) {
         // enrichLinkAcrossSpaces only throws for DB (storeEmbedData) errors —
         // fetch errors are handled inside fetchEmbedData (returns a
@@ -311,25 +317,36 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
         if (cycleDbError === null) cycleDbError = err;
         log.debug(`[embed-sweeper] enrichLinkAcrossSpaces threw for ${url}:`, err);
       }
-      if (embed) {
+      if (outcome?.status === "ok") {
         statsEnrichedOk++;
         enrichedUrls.add(url);
+        settledUrls.add(url);
         // Emit per-URL invalidation routed to each space's per-space DB.
         for (const spaceDid of spaces) {
           await emitEnrichmentInvalidation(openSpaceDb(spaceDid), [url]);
         }
+      } else if (outcome?.status === "definitive") {
+        // Settled no-data (page loaded but no OG/oEmbed, or a stable 4xx).
+        // Drop from the pending set — re-fetching it every sweep would keep
+        // the backlog pinned on dead links forever and starve real ones.
+        statsEnrichedNull++;
+        settledUrls.add(url);
       } else {
+        // Transient (timeout / 5xx / 429 / network) — keep pending so it is
+        // retried on a later cycle.
         statsEnrichedNull++;
       }
     });
 
-    // Delete the processed rows from the global `pending_links` index. Only
-    // rows for successfully-enriched URLs are removed; failed URLs stay
-    // pending so they are retried on a later cycle.
-    if (enrichedUrls.size > 0) {
+    // Delete the processed rows from the global `pending_links` index. Both
+    // successfully-enriched AND definitively-settled URLs are removed; only
+    // transient failures stay pending for a later retry. Without this, a
+    // backlog of dead/no-data links is re-fetched on every sweep and never
+    // drains, so the sweeper never reaches newer real links.
+    if (settledUrls.size > 0) {
       try {
         for (const p of pending) {
-          if (enrichedUrls.has(p.url)) {
+          if (settledUrls.has(p.url)) {
             await globalDb.run(
               `delete from pending_links where space_did = ? and url = ?`,
               [p.spaceDid, p.url],

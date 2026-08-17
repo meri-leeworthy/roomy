@@ -21,7 +21,7 @@ import { probeLinkMetadata } from "./metadata.ts";
  * SpaceMaterializer independently re-fetched the same global pending list
  * on every event batch, so one URL produced many concurrent fetches.
  */
-const inFlightLinks = new Map<string, Promise<Embed | null>>();
+const inFlightLinks = new Map<string, Promise<EnrichOutcome>>();
 
 // ─── URL detection ───────────────────────────────────────────────────────
 
@@ -286,7 +286,7 @@ export async function enrichLink(
   db: DbLike,
   url: string,
   signal?: AbortSignal,
-): Promise<Embed | null> {
+): Promise<EnrichOutcome> {
   const existing = inFlightLinks.get(url);
   if (existing) return existing;
 
@@ -294,7 +294,8 @@ export async function enrichLink(
     try {
       const result = await fetchEmbedData(url, signal);
       await storeEmbedData(db, url, result);
-      return result.status === "ok" ? result.embed : null;
+      if (result.status === "ok") return { status: "ok" as const, embed: result.embed };
+      return { status: result.status, embed: null };
     } catch (err) {
       // fetchEmbedData handles its own network errors (returns a
       // FetchResult), so a throw here is a DB write failure (e.g.
@@ -317,15 +318,24 @@ export async function enrichLink(
  * the {@link inFlightLinks} dedup pattern shared with {@link enrichLink}), then
  * calls {@link storeEmbedData} for each space's DB.
  *
- * Returns the embed that was stored — non-null on success, `null` on a
- * non-DB failure. A DB write failure (e.g. `storeEmbedData` throwing) is
- * RE-THROWN so the sweeper can detect a failing DB and back off.
+ * Returns the fetch outcome — `{ status, embed }` where `status` is
+ * `"ok"` (embed stored), `"definitive"` (settled: no data / stable 4xx — the
+ * caller should drop the link from the pending set), or `"transient"`
+ * (timeout / 5xx / 429 / network — the caller should keep it pending and
+ * retry later). `embed` is non-null only on `"ok"`. A DB write failure (e.g.
+ * `storeEmbedData` throwing) is RE-THROWN so the sweeper can detect a failing
+ * DB and back off.
  */
+export type EnrichOutcome =
+  | { status: "ok"; embed: Embed }
+  | { status: "definitive"; embed: null }
+  | { status: "transient"; embed: null };
+
 export async function enrichLinkAcrossSpaces(
   url: string,
   spaces: string[],
   signal?: AbortSignal,
-): Promise<Embed | null> {
+): Promise<EnrichOutcome> {
   const existing = inFlightLinks.get(url);
   if (existing) return existing;
 
@@ -335,7 +345,8 @@ export async function enrichLinkAcrossSpaces(
       for (const spaceDid of spaces) {
         await storeEmbedData(openSpaceDb(spaceDid), url, result);
       }
-      return result.status === "ok" ? result.embed : null;
+      if (result.status === "ok") return { status: "ok" as const, embed: result.embed };
+      return { status: result.status, embed: null };
     } finally {
       inFlightLinks.delete(url);
     }

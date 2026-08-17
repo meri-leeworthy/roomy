@@ -177,7 +177,7 @@ export class StreamManager {
       // truth (Phase 3); the global DB receives membership edges + the
       // entity→space index.
       const globalDb = this.#db.global?.();
-      await applyBatch(this.#db.forSpace!(streamDid), streamDid, decodedEvents, {
+      const batchStats = await applyBatch(this.#db.forSpace!(streamDid), streamDid, decodedEvents, {
         isBackfill: false,
       }, globalDb);
 
@@ -207,7 +207,12 @@ export class StreamManager {
           e.roomId !== undefined,
       );
       if (createMessageEvents.length > 0) {
-        pokeEmbedSweeper();
+        // Pass the freshly-detected link URLs so the sweeper prioritises them
+        // over the oldest-first backfill backlog. Without this, a newly posted
+        // link lands at the tail of `pending_links` and waits behind the entire
+        // backlog (which can be tens of thousands of historical links) before
+        // its card is enriched.
+        pokeEmbedSweeper(batchStats.detectedLinks);
         pokePushDispatcher(
           createMessageEvents.map((e) => ({
             spaceId: streamDid,
