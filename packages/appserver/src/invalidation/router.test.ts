@@ -341,6 +341,31 @@ describe("Router", () => {
 
     expect(events).toHaveLength(0);
   });
+
+  it("emit stamps a monotonic seq on messageDiff signals (embed sweeper path)", () => {
+    // Regression: signals emitted via `emit` (e.g. the embed sweeper's
+    // enrichment diffs) used to carry seq 0, which the client read as a server
+    // seq reset and triggered a spurious refetch on every card-enrichment diff.
+    const router = new Router();
+    const { events, listener } = collect();
+    router.subscribe(listener);
+
+    const diff = (): InvalidationEvent => ({
+      kind: "messageDiff",
+      signal: { roomId: "01ROOM" as Ulid, seq: 0, ops: [] },
+    });
+
+    router.emit([diff()]);
+    router.emit([diff()]);
+
+    expect(events).toHaveLength(2);
+    const seqs = events.map(
+      (e) => (e[0]!.kind === "messageDiff" ? e[0]!.signal.seq : -1),
+    );
+    // seq must be positive, strictly increasing, and shared across emits.
+    expect(seqs[0]).toBeGreaterThan(0);
+    expect(seqs[1]!).toBe(seqs[0]! + 1);
+  });
 });
 
 // ─── Singleton lifecycle ────────────────────────────────────────────────

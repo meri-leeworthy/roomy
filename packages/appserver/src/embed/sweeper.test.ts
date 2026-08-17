@@ -318,4 +318,52 @@ describe("embed sweeper invalidation room resolution", () => {
       .get<{ n: number }>(url);
     expect(remaining?.n ?? 0).toBe(0);
   });
+
+  test("transient failures are parked in backoff so the sweeper doesn't re-fetch them every cycle", async () => {
+    // Regression: a transient failure (timeout / 5xx / 429) kept the URL
+    // pending AND re-fetched it on every sweep, so a backlog of down links
+    // consumed all the concurrency and starved real ones. The sweeper now
+    // parks a transient URL for an exponential backoff window, so a second
+    // cycle immediately after should NOT re-fetch it.
+    const { globalDb, spaceDb } = freshWorker();
+    const { router } = captureRouter();
+    const url = "https://example.com/flaky";
+    await seedLinkMessageRoom(spaceDb, globalDb, {
+      room: "01KVRRRRRRRRRRRRRRRRRRRRRR",
+      message: "01KVMMMMMMMMMMMMMMMMMMMMMM",
+      url,
+    });
+
+    let fetchCalls = 0;
+    const realFetch = globalThis.fetch;
+    // 503 → transient failure.
+    globalThis.fetch = ((
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      fetchCalls++;
+      return Promise.resolve(new Response("Service Unavailable", { status: 503 }));
+    }) as typeof globalThis.fetch;
+
+    try {
+      // Start the sweeper ONCE and drive sweepCycle directly (flushSweeper
+      // stops/clears state between calls, which would wipe the backoff map).
+      await stopEmbedSweeper();
+      startEmbedSweeper({ globalDb, invalidationRouter: router });
+
+      // First cycle: URL is attempted once and classified transient → parked.
+      await sweepCycle(globalDb);
+      await new Promise((r) => setTimeout(r, 300));
+      const afterFirst = fetchCalls;
+
+      // Second cycle: URL is in backoff → must NOT be re-fetched.
+      await sweepCycle(globalDb);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(fetchCalls).toBe(afterFirst);
+    } finally {
+      globalThis.fetch = realFetch;
+      await stopEmbedSweeper();
+    }
+    _resetEmbedSweeper();
+  });
 });
