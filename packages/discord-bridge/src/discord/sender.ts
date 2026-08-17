@@ -15,6 +15,14 @@ export interface SendMessageOptions {
 	webhook?: { id: string; token: string };
 	/** Thread ID — when set, the webhook message is sent to this thread. */
 	threadId?: string;
+	/** Discord message snowflake this message replies to (webhook message_reference). */
+	replyToMessageId?: string;
+	/** Files to attach to the message (multipart webhook upload). */
+	files?: Array<{
+		filename: string;
+		contentType: string;
+		data: Uint8Array<ArrayBuffer>;
+	}>;
 }
 
 export interface DiscordSender {

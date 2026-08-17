@@ -185,4 +185,5 @@ export const MsgType = {
 	ChannelNameChange: 4,
 	ThreadCreated: 18,
 	ThreadStarterMessage: 21,
+	MessageForward: 26,
 } as const;

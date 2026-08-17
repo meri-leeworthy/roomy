@@ -112,6 +112,15 @@ export async function ingestDiscordMessage(
 		return handleThreadStarterMessage(message, repo, roomy);
 	}
 
+	// Forwarded message (type 26): forward the original message into the
+	// target channel's Roomy room. Forwards carry empty content and reference
+	// the original message via messageReference — they must not be treated as
+	// ordinary (empty) messages or as replies.
+	if (message.type === MsgType.MessageForward) {
+		writeSkipRecord("forward", message);
+		return handleForwardMessage(message, repo, roomy);
+	}
+
 	// Skip system messages
 	if (
 		message.type === MsgType.ThreadCreated ||
@@ -451,6 +460,135 @@ async function handleThreadStarterMessage(
 				err,
 			);
 			writeSkipRecord("thread_starter_send_failed", message, spaceDid);
+		}
+	}
+
+	return { synced, skipped: targetSpaces.length - synced };
+}
+
+/**
+ * Handle a Discord forwarded message (type 26): forward the original message
+ * into the target channel's Roomy room.
+ *
+ * Discord represents a forward as a message with empty content whose
+ * `messageReference` points at the original message (in the source channel).
+ * `message.channelId` is the channel the user forwarded into. We mirror this
+ * to Roomy with a `forwardMessages.v0` event targeting the destination room.
+ */
+async function handleForwardMessage(
+	message: DiscordMessageData,
+	repo: BridgeRepository,
+	roomy: RoomyGateway,
+): Promise<{ synced: number; skipped: number }> {
+	const targetChannelId = message.channelId;
+	const messageId = message.id;
+	const guildId = message.guildId;
+
+	if (
+		!guildId ||
+		!message.messageReference?.messageId ||
+		!message.messageReference?.channelId
+	) {
+		writeSkipRecord("forward_missing_ref", message);
+		return { synced: 0, skipped: 1 };
+	}
+
+	const originalMsgId = message.messageReference.messageId;
+	const sourceChannelId = message.messageReference.channelId;
+
+	const targetSpaces = repo.getTargetSpacesForChannel(guildId, targetChannelId);
+	if (targetSpaces.length === 0) {
+		log.debug(
+			`Skipping forward ${messageId}: channel ${targetChannelId} not bridged`,
+		);
+		writeSkipRecord(
+			"forward_not_bridged",
+			message,
+			`channel ${targetChannelId}`,
+		);
+		return { synced: 0, skipped: 1 };
+	}
+
+	let synced = 0;
+
+	for (const spaceDid of targetSpaces) {
+		const existing = repo.getRoomyId(spaceDid, "message", messageId);
+		if (existing) {
+			log.debug(`Skipping forward ${messageId}: already synced to ${spaceDid}`);
+			writeSkipRecord("forward_already_synced", message, spaceDid);
+			continue;
+		}
+
+		const targetRoomyRoom = repo.getRoomyRoomId(spaceDid, targetChannelId);
+		if (!targetRoomyRoom) {
+			log.debug(
+				`No Roomy room for target channel ${targetChannelId} in ${spaceDid}, skipping forward`,
+			);
+			writeSkipRecord(
+				"forward_no_target_room",
+				message,
+				`channel ${targetChannelId} in ${spaceDid}`,
+			);
+			continue;
+		}
+
+		const originalRoomyId = repo.getRoomyId(spaceDid, "message", originalMsgId);
+		if (!originalRoomyId) {
+			log.debug(
+				`Original message ${originalMsgId} not synced to ${spaceDid}, skipping forward`,
+			);
+			writeSkipRecord(
+				"forward_no_original",
+				message,
+				`original ${originalMsgId} in ${spaceDid}`,
+			);
+			continue;
+		}
+
+		const sourceRoomyRoom = repo.getRoomyRoomId(spaceDid, sourceChannelId);
+		if (!sourceRoomyRoom) {
+			log.debug(
+				`No Roomy room for source channel ${sourceChannelId} in ${spaceDid}, skipping forward`,
+			);
+			writeSkipRecord(
+				"forward_no_source_room",
+				message,
+				`source ${sourceChannelId} in ${spaceDid}`,
+			);
+			continue;
+		}
+
+		const forwardUlid = newUlid();
+		const forwardEvent: Event = {
+			id: forwardUlid,
+			room: Ulid.assert(targetRoomyRoom),
+			$type: "space.roomy.message.forwardMessages.v0",
+			messageIds: [Ulid.assert(originalRoomyId)],
+			fromRoomId: Ulid.assert(sourceRoomyRoom),
+		};
+
+		try {
+			await roomy.sendEvent(spaceDid, forwardEvent);
+
+			// Store with a composite key so the Roomy→Discord router can dedupe
+			// this forward event against its per-message forward key.
+			repo.registerMapping(
+				spaceDid,
+				"message",
+				messageId,
+				`${forwardUlid}:${originalRoomyId}`,
+			);
+
+			log.info(
+				`Forwarded original message ${originalMsgId} to channel ${targetChannelId} in ${spaceDid}`,
+			);
+			synced++;
+		} catch (err) {
+			log.error(
+				`Failed to forward message to channel ${targetChannelId} in ${spaceDid}`,
+				err,
+			);
+			writeSkipRecord("forward_send_failed", message, spaceDid);
 		}
 	}
 

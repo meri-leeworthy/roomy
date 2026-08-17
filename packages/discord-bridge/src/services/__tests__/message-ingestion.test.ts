@@ -6,16 +6,19 @@
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
-import { Did } from "@roomy-space/sdk";
+import { Did, newUlid } from "@roomy-space/sdk";
 import { BridgeRepository } from "../../db/repository.ts";
 import { MockRoomyGateway } from "../../roomy/mock-gateway.ts";
 import { ingestDiscordMessage } from "../message-ingestion.ts";
 import {
 	CHANNEL,
+	CHANNEL_2,
+	CHANNEL_3,
 	GUILD,
 	MESSAGE_WITH_FILE,
 	MESSAGE_WITH_IMAGE,
 	MESSAGE_WITH_VIDEO,
+	makeForwardMessage,
 	makeMessage,
 	makeReplyMessage,
 	makeThreadStarterMessage,
@@ -606,5 +609,87 @@ describe("ingestDiscordMessage — webhook echo prevention", () => {
 		);
 
 		expect(result).toEqual({ synced: 0, skipped: 1 });
+	});
+});
+
+describe("ingestDiscordMessage — forwarded messages (type 26)", () => {
+	let repo: BridgeRepository;
+	let roomy: MockRoomyGateway;
+
+	beforeEach(() => {
+		repo = setupRepo();
+		roomy = new MockRoomyGateway();
+		mapChannel(repo); // target channel (CHANNEL) → ROOMY_CHANNEL_ULID
+	});
+
+	// FW01: A Discord forward (type 26) forwards the original message into the
+	// target channel's Roomy room.
+	test("FW01: forwards original message when a Discord message is forwarded", async () => {
+		const originalId = "6666666666";
+		const sourceChannelId = CHANNEL_2;
+		const sourceRoomUlid = newUlid();
+		mapMessage(repo, originalId, ROOMY_MESSAGE_ULID);
+		repo.registerMapping(SPACE_A, "channel", sourceChannelId, sourceRoomUlid);
+
+		const msg = makeForwardMessage(originalId, CHANNEL, sourceChannelId);
+		const result = await ingestDiscordMessage(msg, repo, roomy);
+
+		expect(result).toEqual({ synced: 1, skipped: 0 });
+
+		const event = forwardMessageEvent(roomy, SPACE_A);
+		expectToBeDefined(event);
+		expectToBe(event.$type, "space.roomy.message.forwardMessages.v0");
+		expect(event.room).toBe(ROOMY_CHANNEL_ULID); // target room
+		expect(event.messageIds).toEqual([ROOMY_MESSAGE_ULID]);
+		expect(event.fromRoomId).toBe(sourceRoomUlid);
+
+		// Composite mapping so the Roomy→Discord router can dedupe the echo.
+		const mappedRoomyId = repo.getRoomyId(SPACE_A, "message", msg.id);
+		expect(mappedRoomyId).toBe(`${event.id}:${ROOMY_MESSAGE_ULID}`);
+	});
+
+	// FW02: Forward is skipped when the original message was never synced to
+	// the target space.
+	test("FW02: skips forward when original message not synced", async () => {
+		const originalId = "6666666666";
+		const sourceChannelId = CHANNEL_2;
+		const sourceRoomUlid = newUlid();
+		repo.registerMapping(SPACE_A, "channel", sourceChannelId, sourceRoomUlid);
+
+		const msg = makeForwardMessage(originalId, CHANNEL, sourceChannelId);
+		const result = await ingestDiscordMessage(msg, repo, roomy);
+
+		expect(result).toEqual({ synced: 0, skipped: 1 });
+		expect(forwardMessageEvent(roomy, SPACE_A)).toBeUndefined();
+		expect(createMessageEvent(roomy, SPACE_A)).toBeUndefined();
+	});
+
+	// FW03: Forward is skipped when the target channel's room is not mapped.
+	test("FW03: skips forward when target channel room not bridged", async () => {
+		const originalId = "6666666666";
+		const sourceChannelId = CHANNEL_2;
+		const sourceRoomUlid = newUlid();
+		mapMessage(repo, originalId, ROOMY_MESSAGE_ULID);
+		repo.registerMapping(SPACE_A, "channel", sourceChannelId, sourceRoomUlid);
+
+		// CHANNEL_3 has no room mapping.
+		const msg = makeForwardMessage(originalId, CHANNEL_3, sourceChannelId);
+		const result = await ingestDiscordMessage(msg, repo, roomy);
+
+		expect(result).toEqual({ synced: 0, skipped: 1 });
+		expect(forwardMessageEvent(roomy, SPACE_A)).toBeUndefined();
+	});
+
+	// FW04: Forward is skipped when the source channel's room is not mapped.
+	test("FW04: skips forward when source channel room not bridged", async () => {
+		const originalId = "6666666666";
+		const sourceChannelId = CHANNEL_2;
+		mapMessage(repo, originalId, ROOMY_MESSAGE_ULID);
+
+		const msg = makeForwardMessage(originalId, CHANNEL, sourceChannelId);
+		const result = await ingestDiscordMessage(msg, repo, roomy);
+
+		expect(result).toEqual({ synced: 0, skipped: 1 });
+		expect(forwardMessageEvent(roomy, SPACE_A)).toBeUndefined();
 	});
 });

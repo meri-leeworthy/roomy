@@ -200,6 +200,31 @@ export function makeThreadStarterMessage(
 	});
 }
 
+/**
+ * Pre-built Discord forward message (type 26, MessageForward).
+ *
+ * A forward carries empty content; the original message lives in
+ * `messageReference` and the message is delivered into `targetChannelSnowflake`.
+ */
+export function makeForwardMessage(
+	originalMsgSnowflake: string,
+	targetChannelSnowflake: string = CHANNEL,
+	sourceChannelSnowflake: string = CHANNEL_2,
+): DiscordMessageData {
+	return makeMessage({
+		id: "1111111117",
+		channelId: targetChannelSnowflake,
+		guildId: GUILD,
+		type: 26,
+		content: "",
+		messageReference: {
+			messageId: originalMsgSnowflake,
+			channelId: sourceChannelSnowflake,
+			guildId: GUILD,
+		},
+	});
+}
+
 /** Message with user and channel mentions. */
 export const MESSAGE_WITH_MENTIONS = makeMessage({
 	id: "1111111116",

@@ -53,6 +53,7 @@ function makeCreateMessageEvent(options: {
 	authorDid?: string;
 	origin?: { snowflake: string; channelId: string; guildId: string };
 	body?: { mimeType: string; data: ReturnType<typeof toBytes> };
+	extensions?: Record<string, unknown>;
 }): Event {
 	const id = options.id ? Ulid.assert(options.id) : newUlid();
 	const room = options.room ? Ulid.assert(options.room) : ROOMY_CHANNEL_ULID;
@@ -68,6 +69,9 @@ function makeCreateMessageEvent(options: {
 			$type: "space.roomy.extension.discordMessageOrigin.v0",
 			...options.origin,
 		};
+	}
+	if (options.extensions) {
+		Object.assign(extensions, options.extensions);
 	}
 	return {
 		id,
@@ -181,7 +185,17 @@ function setup(): {
 			avatarUrl: "https://example.com/avatar.png",
 		},
 	});
-	const router = new RoomyEventRouter(roomy, discord, webhooks, profiles, repo);
+	const router = new RoomyEventRouter(
+		roomy,
+		discord,
+		webhooks,
+		profiles,
+		repo,
+		{
+			fetchAttachment: async (uri) =>
+				new TextEncoder().encode(`bytes for ${uri}`),
+		},
+	);
 	return { repo, roomy, discord, webhooks, profiles, router };
 }
 
@@ -958,4 +972,137 @@ describe("RoomyEventRouter", () => {
 		expect(discord.forwarded).toHaveLength(0);
 		expect(discord.deleted).toHaveLength(0);
 	});
+});
+
+/**
+ * RER29: A Roomy message that carries a reply attachment is bridged to
+ * Discord as a reply (via webhook message_reference), not a fresh message.
+ */
+test("RER29: carries a Roomy reply through to Discord as a reply", async () => {
+	const { roomy, discord, router, repo } = setup();
+	// The message being replied to was bridged to Discord earlier.
+	repo.registerMapping(
+		SPACE_A,
+		"message",
+		DISCORD_MESSAGE_ID,
+		ROOMY_MESSAGE_ULID,
+	);
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "This is a reply",
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.reply.v0",
+						target: ROOMY_MESSAGE_ULID,
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	expect(discord.sent[0]?.options?.replyToMessageId).toBe(DISCORD_MESSAGE_ID);
+});
+
+/**
+ * RER30: A Roomy message with media attachments is bridged to Discord with
+ * the attachment bytes uploaded as files.
+ */
+test("RER30: bridges Roomy media attachments to Discord as files", async () => {
+	const { roomy, discord, router } = setup();
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "See these",
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.image.v0",
+						uri: "https://cdn.example.com/a.png",
+						mimeType: "image/png",
+					},
+					{
+						$type: "space.roomy.attachment.file.v0",
+						uri: "https://cdn.example.com/doc.pdf",
+						mimeType: "application/pdf",
+						name: "doc.pdf",
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	const files = discord.sent[0]?.options?.files;
+	expect(files).toBeDefined();
+	expect(files?.length).toBe(2);
+	expect(files?.[0]?.filename).toBe("a.png");
+	expect(files?.[0]?.contentType).toBe("image/png");
+	expect(files?.[1]?.filename).toBe("doc.pdf");
+	expect(files?.[1]?.contentType).toBe("application/pdf");
+});
+
+/**
+ * RER31: A media-only Roomy message (empty content, attachments present) is
+ * bridged to Discord rather than skipped as an empty message.
+ */
+test("RER31: bridges a media-only Roomy message to Discord", async () => {
+	const { roomy, discord, router } = setup();
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "",
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.image.v0",
+						uri: "https://cdn.example.com/b.png",
+						mimeType: "image/png",
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	expect(discord.sent[0]?.options?.files?.length).toBe(1);
+});
+
+/**
+ * RER32: A Roomy reply to a message that was never bridged to Discord falls
+ * back to a plain (non-reply) Discord message.
+ */
+test("RER32: falls back to a plain message when reply target is not bridged", async () => {
+	const { roomy, discord, router } = setup();
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "Replying to nothing bridged",
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.reply.v0",
+						target: newUlid(), // never bridged to Discord
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	expect(discord.sent[0]?.options?.replyToMessageId).toBeUndefined();
 });

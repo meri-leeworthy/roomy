@@ -28,14 +28,24 @@ const DISCORD_REQUEST_TIMEOUT_MS = 10_000;
  * underlying promise is not cancelled (Discordeno exposes no signal), but
  * the caller is unblocked; the in-flight request is left to settle.
  */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(
+	promise: Promise<T>,
+	ms: number,
+	label: string,
+): Promise<T> {
 	return new Promise<T>((resolve, reject) => {
 		const timer = setTimeout(() => {
 			reject(new Error(`${label} timed out after ${ms}ms`));
 		}, ms);
 		Promise.resolve(promise).then(
-			(v) => { clearTimeout(timer); resolve(v); },
-			(e) => { clearTimeout(timer); reject(e); },
+			(v) => {
+				clearTimeout(timer);
+				resolve(v);
+			},
+			(e) => {
+				clearTimeout(timer);
+				reject(e);
+			},
 		);
 	});
 }
@@ -110,11 +120,27 @@ export class LiveDiscordSender implements DiscordSender {
 		if (options.avatarUrl) {
 			body.avatar_url = options.avatarUrl;
 		}
+		if (options.replyToMessageId) {
+			body.message_reference = {
+				message_id: options.replyToMessageId,
+				channel_id: channelId,
+				fail_if_not_exists: false,
+			};
+		}
+
+		// Optional multipart file upload. When files are present, Discordeno's
+		// createRequestBody serialises `body` into `payload_json` and appends
+		// the files as multipart parts (the standard webhook upload format).
+		const files = options.files?.map((f) => ({
+			blob: new Blob([f.data], { type: f.contentType }),
+			name: f.filename,
+		}));
 
 		const result = await withTimeout(
 			this.#bot.rest.post<{ id: string }>(url, {
 				body,
 				unauthorized: true,
+				...(files && files.length > 0 ? { files } : {}),
 			}),
 			DISCORD_REQUEST_TIMEOUT_MS,
 			`webhook send to channel ${channelId}`,

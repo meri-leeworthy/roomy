@@ -40,6 +40,29 @@ import { blocksToDiscordMarkdown } from "./blocks-to-discord.ts";
 const log = createLogger("roomy-router");
 
 /**
+ * Default attachment fetcher: downloads bytes from the attachment URI over
+ * HTTP(S). Injectable in the constructor so tests can stub it.
+ */
+async function defaultFetchAttachment(
+	uri: string,
+): Promise<Uint8Array<ArrayBuffer>> {
+	const res = await fetch(uri);
+	if (!res.ok) {
+		throw new Error(`Failed to fetch attachment ${uri}: HTTP ${res.status}`);
+	}
+	const buf = await res.arrayBuffer();
+	return new Uint8Array(buf);
+}
+
+/** Derive a sensible Discord filename from an attachment URI + mime type. */
+function filenameFromUri(uri: string, mimeType: string): string {
+	const last = uri.split("/").filter(Boolean).pop() ?? "";
+	if (last?.includes(".")) return last;
+	const ext = mimeType.split("/")[1] ?? "bin";
+	return last ? `${last}.${ext}` : `attachment.${ext}`;
+}
+
+/**
  * Decode a message body from a Roomy event into a Discord-renderable string.
  *
  * - Rich text bodies (`application/vnd.roomy.richtext+json`) are parsed into
@@ -87,6 +110,7 @@ export class RoomyEventRouter {
 	#webhooks: WebhookManager;
 	#profiles: ProfileResolver;
 	#repo: BridgeRepository;
+	#fetchAttachment: (uri: string) => Promise<Uint8Array<ArrayBuffer>>;
 
 	constructor(
 		roomy: RoomyGateway,
@@ -94,12 +118,16 @@ export class RoomyEventRouter {
 		webhooks: WebhookManager,
 		profiles: ProfileResolver,
 		repo: BridgeRepository,
+		opts?: {
+			fetchAttachment?: (uri: string) => Promise<Uint8Array<ArrayBuffer>>;
+		},
 	) {
 		this.#roomy = roomy;
 		this.#discord = discord;
 		this.#webhooks = webhooks;
 		this.#profiles = profiles;
 		this.#repo = repo;
+		this.#fetchAttachment = opts?.fetchAttachment ?? defaultFetchAttachment;
 	}
 
 	/**
@@ -239,22 +267,30 @@ export class RoomyEventRouter {
 
 		// Decode the message body
 		const content = decodeBody(event.body);
-		if (content === undefined) {
+
+		// Extract reply + media attachments to carry into Discord.
+		const { replyToMessageId, files } = await this.#extractAttachments(
+			spaceDid,
+			event,
+		);
+
+		// Skip messages with nothing renderable: unsupported body and no files.
+		if (content === undefined && files.length === 0) {
 			log.debug(
 				`Skipping createMessage ${event.id}: unsupported MIME type ${event.body.mimeType}`,
 			);
 			return;
 		}
 
-		// Skip empty content (e.g. media-only messages where attachments
-		// aren't forwarded yet). Sending a blank Discord message is worse
-		// than sending nothing.
-		if (content === "") {
+		// Skip empty content with no files (e.g. media-less blank messages).
+		// Sending a blank Discord message is worse than sending nothing.
+		if (content === "" && files.length === 0) {
 			log.debug(
 				`Skipping createMessage ${event.id}: empty body (likely media-only)`,
 			);
 			return;
 		}
+		const sendContent = content ?? "";
 
 		// Resolve author profile.
 		// Prefer the authorOverride extension (set by Discord→Roomy ingestion
@@ -285,8 +321,8 @@ export class RoomyEventRouter {
 		try {
 			const discordMessageId = await this.#discord.sendMessage(
 				discordChannelId,
-				content,
-				{ username, avatarUrl, webhook, threadId },
+				sendContent,
+				{ username, avatarUrl, webhook, threadId, replyToMessageId, files },
 			);
 
 			// Register mapping so Discord→Roomy dedup catches the echo
@@ -307,6 +343,74 @@ export class RoomyEventRouter {
 			);
 			throw err;
 		}
+	}
+
+	/**
+	 * Resolve the Discord reply target and downloadable media files carried by a
+	 * createMessage's attachments extension.
+	 *
+	 * - `reply.v0` → the Discord snowflake of the Roomy message being replied to
+	 *   (undefined when the target was never bridged to Discord — the message
+	 *   then falls back to a plain Discord message).
+	 * - `image.v0` / `video.v0` / `file.v0` → bytes fetched from the attachment
+	 *   URI for a multipart webhook upload. Unfetchable attachments are skipped
+	 *   (with a warning) rather than failing the whole message.
+	 */
+	async #extractAttachments(
+		spaceDid: string,
+		event: Event & { $type: "space.roomy.message.createMessage.v0" },
+	): Promise<{
+		replyToMessageId?: string;
+		files: {
+			filename: string;
+			contentType: string;
+			data: Uint8Array<ArrayBuffer>;
+		}[];
+	}> {
+		const attExt = event.extensions?.["space.roomy.extension.attachments.v0"];
+		const attachments = attExt?.attachments ?? [];
+		let replyToMessageId: string | undefined;
+		const files: {
+			filename: string;
+			contentType: string;
+			data: Uint8Array<ArrayBuffer>;
+		}[] = [];
+
+		for (const att of attachments) {
+			if (att.$type === "space.roomy.attachment.reply.v0") {
+				const discordMessageId = this.#repo.getDiscordId(
+					spaceDid,
+					"message",
+					att.target,
+				);
+				if (discordMessageId) replyToMessageId = discordMessageId;
+				continue;
+			}
+
+			if (
+				att.$type !== "space.roomy.attachment.image.v0" &&
+				att.$type !== "space.roomy.attachment.video.v0" &&
+				att.$type !== "space.roomy.attachment.file.v0"
+			) {
+				continue;
+			}
+
+			const filename =
+				att.$type === "space.roomy.attachment.file.v0" && att.name
+					? att.name
+					: filenameFromUri(att.uri, att.mimeType);
+			try {
+				const data = await this.#fetchAttachment(att.uri);
+				files.push({ filename, contentType: att.mimeType, data });
+			} catch (err) {
+				log.warn(
+					`Failed to fetch attachment ${att.uri} for message ${event.id}; skipping file`,
+					err,
+				);
+			}
+		}
+
+		return { replyToMessageId, files };
 	}
 
 	async #handleEditMessage(
