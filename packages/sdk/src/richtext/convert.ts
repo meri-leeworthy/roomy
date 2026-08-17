@@ -199,10 +199,12 @@ function marksToFeatures(
               space?: string;
             };
             if (parsed.space) {
+              // Emit only the `#roomRef` facet. The renderer turns `#roomRef`
+              // into a clickable `class="mention"` anchor, so also emitting a
+              // `#link` facet over the same byte range would make any renderer
+              // emit nested `<a>` tags (invalid HTML that the browser splits
+              // into an empty mention + link).
               features.push(roomRefFeature(parsed.space, parsed.id));
-              if (parsed.id) {
-                features.push(linkFeature(`/${parsed.space}/${parsed.id}`));
-              }
             }
           } catch {
             // Malformed mention id — treat as plain text.

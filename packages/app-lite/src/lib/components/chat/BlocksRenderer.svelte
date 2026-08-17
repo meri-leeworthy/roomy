@@ -85,6 +85,14 @@
 
   function wrapFeatures(slice: string, features: FacetFeature[]): string {
     let inner = escapeText(slice);
+    // Anchor features (link / didMention / roomRef) must never nest — the
+    // converter can emit both a `#link` and a `#roomRef` facet over the same
+    // byte range (e.g. an internal room URL gets link + roomRef, a #channel
+    // mention gets roomRef + link). Nesting `<a>` tags is invalid HTML; when
+    // the browser parses it, it splits the outer anchor and leaves an empty
+    // `<a class="mention"></a>` before the real link. Apply at most one
+    // anchor per slice, letting the first one win.
+    let appliedAnchor = false;
     for (const feature of features) {
       switch (feature.$type) {
         case "space.roomy.richtext.facet#bold":
@@ -103,11 +111,15 @@
           inner = `<u>${inner}</u>`;
           break;
         case "space.roomy.richtext.facet#link": {
+          if (appliedAnchor) break;
+          appliedAnchor = true;
           const uri = (feature as { uri: string }).uri;
           inner = `<a href="${escapeAttr(uri)}" class="text-accent-600 dark:text-accent-400 no-underline hover:underline">${inner}</a>`;
           break;
         }
         case "space.roomy.richtext.facet#didMention": {
+          if (appliedAnchor) break;
+          appliedAnchor = true;
           // The slice already carries the `@` prefix (the converter folds the
           // mention node's label into the block text as `@label`).
           const did = (feature as { did: string }).did;
@@ -115,6 +127,8 @@
           break;
         }
         case "space.roomy.richtext.facet#roomRef": {
+          if (appliedAnchor) break;
+          appliedAnchor = true;
           const roomRef = feature as { spaceId: string; roomId?: string };
           inner = `<a href="/${escapeAttr(roomRef.spaceId)}${roomRef.roomId ? `/${escapeAttr(roomRef.roomId)}` : ""}" class="mention !no-underline">${inner}</a>`;
           break;

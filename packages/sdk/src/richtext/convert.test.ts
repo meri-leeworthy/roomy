@@ -66,4 +66,70 @@ describe("richtext convert — blocks ↔ ProseMirror round-trip", () => {
       "space.roomy.richtext.blocks#orderedList",
     ]);
   });
+
+  it("channelThreadMention emits only a #roomRef facet (no nested #link)", () => {
+    // A #channel mention must not also carry a `#link` facet over the same
+    // range: the renderer turns `#roomRef` into a clickable `class="mention"`
+    // anchor, so pairing it with `#link` would emit nested `<a>` tags.
+    const blocks = proseMirrorDocToBlocks({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "channelThreadMention",
+              attrs: {
+                label: "general",
+                id: JSON.stringify({ space: "did:plc:space", id: "room-1" }),
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const text = blocks[0] as { text: string; facets?: { features: { $type: string }[] }[] };
+    expect(text.text).toBe("#general");
+    const facetTypes = text.facets?.[0]?.features.map((f) => f.$type);
+    expect(facetTypes).toEqual(["space.roomy.richtext.facet#roomRef"]);
+  });
+
+  it("internal room link emits #link + #roomRef (renderer picks one anchor)", () => {
+    // A pasted/bare internal room URL keeps both facets — the client renderer
+    // applies at most one anchor per slice so they never nest.
+    const blocks = proseMirrorDocToBlocks({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "https://roomy.space/did:plc:space/room-1" },
+          ],
+        },
+      ],
+    });
+    const text = blocks[0] as { text: string; facets?: { features: { $type: string }[] }[] };
+    expect(text.text).toBe("https://roomy.space/did:plc:space/room-1");
+    // Plain text has no link mark here; build the mark explicitly to exercise
+    // marksToFeatures' link + roomRef path.
+    const withLink = proseMirrorDocToBlocks({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "text",
+              text: "https://roomy.space/did:plc:space/room-1",
+              marks: [{ type: "link", attrs: { href: "/did:plc:space/room-1" } }],
+            },
+          ],
+        },
+      ],
+    });
+    const lt = withLink[0] as { facets?: { features: { $type: string }[] }[] };
+    const types = lt.facets?.[0]?.features.map((f) => f.$type);
+    expect(types).toContain("space.roomy.richtext.facet#link");
+    expect(types).toContain("space.roomy.richtext.facet#roomRef");
+  });
 });
