@@ -239,3 +239,205 @@ describe("resolveMentionsToBlocks", () => {
 		});
 	});
 });
+
+// ─── Discord markdown → richtext facets ──────────────────────────────────
+
+/** Extract (text, features[]) pairs with byte ranges for a block's facets. */
+function inlineSummary(content: string, mentions?: UserMention[]) {
+	const blocks = resolveMentionsToBlocks(content, mentions, ctx(), SPACE);
+	const out: {
+		type: string;
+		text: string;
+		marks: { start: number; end: number; features: string[] }[];
+	}[] = [];
+	for (const block of blocks) {
+		const text = blockTextOf(block);
+		const marks: { start: number; end: number; features: string[] }[] = [];
+		if ("facets" in block && block.facets) {
+			for (const f of block.facets) {
+				marks.push({
+					start: f.index.byteStart,
+					end: f.index.byteEnd,
+					features: f.features.map((feat) => feat.$type),
+				});
+			}
+		}
+		out.push({ type: block.$type, text, marks });
+	}
+	return out;
+}
+
+describe("Discord markdown → richtext", () => {
+	test("parses bold **text** into a bold facet", () => {
+		const [b] = inlineSummary("hello **world**");
+		expect(b?.text).toBe("hello world");
+		expect(b?.marks).toEqual([
+			{
+				start: 6,
+				end: 11,
+				features: ["space.roomy.richtext.facet#bold"],
+			},
+		]);
+	});
+
+	test("parses italic *text* and _text_ into italic facets", () => {
+		const [a] = inlineSummary("a *b* c");
+		expect(a?.marks?.[0]).toMatchObject({
+			start: 2,
+			end: 3,
+			features: ["space.roomy.richtext.facet#italic"],
+		});
+		const [b] = inlineSummary("a _b_ c");
+		expect(b?.marks?.[0]).toMatchObject({
+			features: ["space.roomy.richtext.facet#italic"],
+		});
+	});
+
+	test("parses bold+italic ***both*** into two facets", () => {
+		const [b] = inlineSummary("***both***");
+		expect(b?.text).toBe("both");
+		expect(b?.marks?.[0]?.features).toEqual([
+			"space.roomy.richtext.facet#bold",
+			"space.roomy.richtext.facet#italic",
+		]);
+	});
+
+	test("parses strikethrough ~~text~~", () => {
+		const [b] = inlineSummary("a ~~gone~~ b");
+		expect(b?.text).toBe("a gone b");
+		expect(b?.marks?.[0]?.features).toEqual([
+			"space.roomy.richtext.facet#strikethrough",
+		]);
+	});
+
+	test("parses underline __text__", () => {
+		const [b] = inlineSummary("a __under__ b");
+		expect(b?.marks?.[0]?.features).toEqual([
+			"space.roomy.richtext.facet#underline",
+		]);
+	});
+
+	test("parses inline code `code` into a code facet", () => {
+		const [b] = inlineSummary("run `npm test` now");
+		expect(b?.text).toBe("run npm test now");
+		expect(b?.marks?.[0]).toMatchObject({
+			start: 4,
+			end: 12,
+			features: ["space.roomy.richtext.facet#code"],
+		});
+	});
+
+	test("parses a markdown link [text](url) into a link facet", () => {
+		const [b] = inlineSummary("see [docs](https://example.com)");
+		expect(b?.text).toBe("see docs");
+		expect(b?.marks?.[0]).toMatchObject({
+			start: 4,
+			end: 8,
+			features: ["space.roomy.richtext.facet#link"],
+		});
+		const linkBlock = resolveMentionsToBlocks(
+			"see [docs](https://example.com)",
+			[],
+			ctx(),
+			SPACE,
+		)[0];
+		const linkFeat =
+			linkBlock && "facets" in linkBlock
+				? linkBlock.facets?.[0]?.features?.[0]
+				: undefined;
+		expect(linkFeat).toMatchObject({ uri: "https://example.com" });
+	});
+
+	test("parses bold around a Discord mention", () => {
+		const mentions: UserMention[] = [
+			{ id: BigInt("12345"), username: "u", globalName: "Alice" },
+		];
+		const [b] = inlineSummary("**<@12345>**", mentions);
+		expect(b?.text).toBe("@Alice");
+		expect(b?.marks).toEqual([
+			{
+				start: 0,
+				end: 6,
+				features: [
+					"space.roomy.richtext.facet#bold",
+					"space.roomy.richtext.facet#didMention",
+				],
+			},
+		]);
+	});
+
+	test("parses a fenced code block into a code block", () => {
+		const blocks = resolveMentionsToBlocks(
+			"before\n```js\nconst x = 1;\n```\nafter",
+			[],
+			ctx(),
+			SPACE,
+		);
+		expect(blocks.map((b) => b.$type)).toEqual([
+			"space.roomy.richtext.blocks#text",
+			"space.roomy.richtext.blocks#code",
+			"space.roomy.richtext.blocks#text",
+		]);
+		const code = blocks[1];
+		expect(code && "text" in code ? code.text : undefined).toBe("const x = 1;");
+		expect(code && "language" in code ? code.language : undefined).toBe("js");
+	});
+
+	test("parses a heading into a header block", () => {
+		const blocks = resolveMentionsToBlocks("# Big News", [], ctx(), SPACE);
+		const header = blocks[0];
+		expect(header?.$type).toBe("space.roomy.richtext.blocks#header");
+		expect(header && "text" in header ? header.text : undefined).toBe(
+			"Big News",
+		);
+		expect(header && "level" in header ? header.level : undefined).toBe(1);
+	});
+
+	test("parses a blockquote", () => {
+		const blocks = resolveMentionsToBlocks("> quoted text", [], ctx(), SPACE);
+		expect(blocks[0]?.$type).toBe("space.roomy.richtext.blocks#blockquote");
+	});
+
+	test("parses bullet and ordered lists", () => {
+		const blocks = resolveMentionsToBlocks(
+			"- one\n- two\n\n1. first\n2. second",
+			[],
+			ctx(),
+			SPACE,
+		);
+		expect(blocks.map((b) => b.$type)).toEqual([
+			"space.roomy.richtext.blocks#unorderedList",
+			"space.roomy.richtext.blocks#orderedList",
+		]);
+		const ul = blocks[0];
+		const items = ul && "items" in ul ? ul.items : [];
+		expect(items.map((i) => i.text)).toEqual(["one", "two"]);
+	});
+
+	test("parses a horizontal rule", () => {
+		const blocks = resolveMentionsToBlocks("a\n\n---\n\nb", [], ctx(), SPACE);
+		expect(blocks.map((b) => b.$type)).toContain(
+			"space.roomy.richtext.blocks#horizontalRule",
+		);
+	});
+
+	test("plain text (no markdown) stays a single plain block", () => {
+		const blocks = resolveMentionsToBlocks("just text", [], ctx(), SPACE);
+		expect(blocks).toEqual([
+			{ $type: "space.roomy.richtext.blocks#text", text: "just text" },
+		]);
+	});
+
+	test("strips emoji alongside markdown", () => {
+		// Emoji contributes no text but surrounding spaces are preserved,
+		// matching the legacy mention-stripping behaviour.
+		const [b] = inlineSummary("**hi** <:blob:999> there");
+		expect(b?.text).toBe("hi  there");
+	});
+
+	test("unmatched markdown delimiters are kept as literal text", () => {
+		const [b] = inlineSummary("2 * 3 = 6");
+		expect(b?.text).toBe("2 * 3 = 6");
+		expect(b?.marks).toEqual([]);
+	});
+});
