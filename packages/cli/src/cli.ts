@@ -256,6 +256,7 @@ program
   .option("--omp-bin <path>", "Path to the omp binary (default: omp on PATH)")
   .option("--duration <ms>", "Stop after this many ms (0 = run forever)", "0")
   .option("--include-self", "Also react to the agent's own messages (testing)")
+  .option("--no-thinking", "Don't post the agent's thinking trace, just the answer")
   .action(async (options: {
     space?: string;
     room?: string;
@@ -266,6 +267,7 @@ program
     ompBin?: string;
     duration: string;
     includeSelf?: boolean;
+    thinking: boolean;
   }) => {
     try {
       const config = loadConfig();
@@ -280,6 +282,7 @@ program
         ompBin: options.ompBin,
         durationMs: Number(options.duration),
         includeSelf: options.includeSelf,
+        thinking: options.thinking,
       });
     } catch (error) {
       console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { sync, deserializeBody, blocksToPlaintext, extractMentionDids } from "@roomy-space/sdk";
+import type { Block } from "@roomy-space/sdk";
 import type { AuthState } from "./auth.js";
 import { sendMessage } from "./messages.js";
 import { listRooms } from "./rooms.js";
@@ -27,6 +28,8 @@ export interface ListenOptions {
   durationMs?: number;
   /** Also react to the agent's own messages (testing). Default false. */
   includeSelf?: boolean;
+  /** Post the agent's thinking trace alongside its answer. Default true. */
+  thinking?: boolean;
 }
 
 interface IncomingMessage {
@@ -205,17 +208,21 @@ async function handleMessage(
 
   try {
     const reply = await runOmp(prompt, opts);
-    if (!reply) {
+    if (!reply || !reply.answer.trim()) {
       console.error("[agent] empty reply — not posting");
       return;
     }
+    const thinking = reply.thinking?.trim();
+    const postThinking = (opts.thinking ?? true) && !!thinking;
+    const blocks = buildReplyBlocks(reply.answer, postThinking ? thinking : undefined);
     const { messageId } = await sendMessage(
       auth.xrpc,
       spaceId,
       roomId,
-      reply,
+      reply.answer,
+      blocks ? { blocks } : {},
     );
-    console.error(`[agent] replied ${messageId}`);
+    console.error(`[agent] replied ${messageId}${postThinking ? " (with thinking)" : ""}`);
   } catch (error) {
     console.error(
       `[agent] error: ${error instanceof Error ? error.message : String(error)}`,
@@ -313,14 +320,33 @@ function plaintext(msg: IncomingMessage): string {
   return msg.content ?? "";
 }
 
+interface OmpReply {
+  /** The model's thinking/reasoning trace, if the model produced one. */
+  thinking?: string;
+  /** The final answer text. */
+  answer: string;
+}
+
+interface OmpJsonEvent {
+  type?: string;
+  message?: {
+    role?: string;
+    content?: { type?: string; text?: string; thinking?: string }[];
+  };
+}
+
 /**
- * Run omp non-interactively (`omp -p`) and return its stdout text.
- * MVP uses the single-shot print mode; a future version can drive
- * `omp --mode rpc-ui` for streaming and tool UI.
+ * Run omp non-interactively (`omp -p`) in JSON mode and extract both the
+ * final answer and the model's thinking trace.
+ *
+ * omp emits NDJSON events on stdout (one JSON object per line); the assistant
+ * content is streamed as `text_delta`/`thinking_delta` updates and finalised in
+ * `message_end`. We keep the last assistant `message_end` and read its content
+ * blocks: `thinking` blocks carry the reasoning trace, `text` blocks the answer.
  */
-function runOmp(prompt: string, opts: ListenOptions): Promise<string> {
+function runOmp(prompt: string, opts: ListenOptions): Promise<OmpReply> {
   const bin = opts.ompBin ?? "omp";
-  const args = ["-p", prompt, "--cwd", opts.cwd ?? process.cwd()];
+  const args = ["-p", prompt, "--cwd", opts.cwd ?? process.cwd(), "--mode=json", "--print-thoughts"];
   if (opts.model) args.push("--model", opts.model);
 
   return new Promise((resolve, reject) => {
@@ -335,9 +361,68 @@ function runOmp(prompt: string, opts: ListenOptions): Promise<string> {
         reject(new Error(`omp exited ${code}: ${err.slice(-500)}`));
         return;
       }
-      resolve(out.trim());
+      const reply = parseOmpJson(out);
+      if (!reply.answer.trim()) {
+        // Nothing in the structured output; fall back to raw stdout (and stderr
+        // tail) so the user isn't left with a silent failure.
+        const fallback = (out.trim() || err.trim() || "").slice(-2000);
+        resolve({ answer: fallback });
+        return;
+      }
+      resolve(reply);
     });
   });
+}
+
+/** Parse omp's NDJSON output into { thinking, answer }. */
+export function parseOmpJson(raw: string): OmpReply {
+  const thinkingParts: string[] = [];
+  const answerParts: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let evt: OmpJsonEvent;
+    try {
+      evt = JSON.parse(line) as OmpJsonEvent;
+    } catch {
+      continue;
+    }
+    // Only the final assistant turn carries the full content; pick the last one
+    // seen. Content blocks are `thinking` and `text`.
+    if (evt.type === "message_end" && evt.message?.role === "assistant") {
+      const content = evt.message.content ?? [];
+      thinkingParts.length = 0;
+      answerParts.length = 0;
+      for (const block of content) {
+        if (block.type === "thinking") {
+          if (block.thinking) thinkingParts.push(block.thinking);
+        } else if (block.type === "text") {
+          if (block.text) answerParts.push(block.text);
+        }
+      }
+    }
+  }
+  return {
+    thinking: thinkingParts.length ? thinkingParts.join("\n\n") : undefined,
+    answer: answerParts.join("\n"),
+  };
+}
+
+/**
+ * Build the rich-text blocks for the agent's reply: an optional thinking
+ * blockquote followed by the answer as normal text.
+ */
+export function buildReplyBlocks(answer: string, thinking?: string): Block[] {
+  if (!thinking) return [];
+  return [
+    {
+      $type: "space.roomy.richtext.blocks#blockquote",
+      text: thinking,
+    },
+    {
+      $type: "space.roomy.richtext.blocks#text",
+      text: answer,
+    },
+  ];
 }
 
 /** The appserver base64-encodes non-text content blobs (e.g. richtext JSON)

@@ -136,11 +136,16 @@ Options:
 - `--omp-bin <path>` — path to the omp binary (default: `omp` on PATH).
 - `--duration <ms>` — stop after this many ms (0 = run forever).
 - `--include-self` — also react to the agent's own messages (testing).
+- `--no-thinking` — post only the agent's answer, not its thinking trace.
 
 Mention detection is **server-side and DID-authoritative**: the appserver emits
 a `#mention` frame for messages whose `#didMention` facets (or mentions
 extension) include the agent's DID. The agent ignores its own messages to avoid
 self-trigger loops.
+
+The agent's reply is posted as a rich message: the model's **thinking trace**
+(as a blockquote, when the model produced one) followed by the final answer.
+Use `--no-thinking` to suppress the thinking trace.
 
 See `docs/omp-bridge.md` for the full research and design notes.
 

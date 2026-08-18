@@ -95,6 +95,9 @@ Roomy room ──WS──▶ appserver (mention detection) ──#mention──�
   DID. The DID is the stable ID — never the handle or display name.
 - The bridge ignores the agent's own messages (prevents self-trigger loops).
 - Replies are posted back to the same room the mention came from.
+- **Thinking traces:** the bridge runs `omp -p --mode=json --print-thoughts` and
+  posts the model's thinking trace (as a blockquote) above the final answer in a
+  single rich message. `--no-thinking` suppresses the trace.
 - `--no-mention-only` responds to every message (falls back to per-room
   subscriptions; useful for a dedicated agent-only room).
 - **Scope:** with `--space`/`--room`, the bridge filters incoming mentions to
