@@ -79,10 +79,15 @@ function headerBlock(text: string, level: number, facets?: Facet[]): Block {
 	return facets && facets.length > 0 ? { ...base, facets } : base;
 }
 
-function blockquoteBlock(text: string, facets?: Facet[]): Block {
+function blockquoteBlock(
+	text: string,
+	facets?: Facet[],
+	level?: number,
+): Block {
 	const base = {
 		$type: "space.roomy.richtext.blocks#blockquote" as const,
 		text,
+		...(level && level > 1 ? { level } : {}),
 	};
 	return facets && facets.length > 0 ? { ...base, facets } : base;
 }
@@ -221,17 +226,51 @@ function parseBlocks(content: string, ctx: InlineCtx): Block[] {
 			continue;
 		}
 
-		// Blockquote (single level; nested quotes flattened).
+		// Blockquote. Discord supports `> ` (single-line), `>> ` (nested), and
+		// `>>> ` (multi-line: everything until a blank line is quoted).
 		if (trimmed.startsWith(">")) {
-			const quoteLines: string[] = [];
+			// Multi-line blockquote: `>>> text` quotes the rest of this line
+			// and every following line until a blank line.
+			if (/^>>>/.test(trimmed)) {
+				const quoteLines: string[] = [trimmed.replace(/^>>>\s?/, "")];
+				i++;
+				while (i < lines.length) {
+					const ln = lines[i];
+					if (ln === undefined || ln.trim() === "") break;
+					quoteLines.push(ln.trim());
+					i++;
+				}
+				const { text, facets } = inlineFacets(quoteLines.join(" "));
+				blocks.push(blockquoteBlock(text, facets));
+				continue;
+			}
+
+			// Single-line / nested: group consecutive `>`-prefixed lines by
+			// their nesting depth (number of leading `>`), emitting one
+			// blockquote block per level so nesting is preserved.
 			while (i < lines.length) {
 				const ln = lines[i];
 				if (ln === undefined || !ln.trim().startsWith(">")) break;
-				quoteLines.push(ln.trim().replace(/^>\s?/, ""));
+				const t = ln.trim();
+				const level = (t.match(/^>+/) ?? [""])[0]?.length ?? 1;
+				const quoteLines: string[] = [t.replace(/^>+\s?/, "")];
 				i++;
+				while (i < lines.length) {
+					const nxt = lines[i];
+					if (nxt === undefined) break;
+					const nt = nxt.trim();
+					if (
+						!nt.startsWith(">") ||
+						(nt.match(/^>+/) ?? [""])[0]?.length !== level
+					) {
+						break;
+					}
+					quoteLines.push(nt.replace(/^>+\s?/, ""));
+					i++;
+				}
+				const { text, facets } = inlineFacets(quoteLines.join(" "));
+				blocks.push(blockquoteBlock(text, facets, level));
 			}
-			const { text, facets } = inlineFacets(quoteLines.join(" "));
-			blocks.push(blockquoteBlock(text, facets));
 			continue;
 		}
 

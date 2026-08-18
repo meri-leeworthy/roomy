@@ -194,7 +194,10 @@
       <svelte:element this={"h" + blockLevel(block)} class="font-semibold break-words my-1">{@html renderText(blockText(block), blockFacets(block))}</svelte:element>
     {:else if block.$type === "space.roomy.richtext.blocks#blockquote"}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <blockquote class="border-l-2 border-base-300 dark:border-base-600 pl-3 my-1 break-words">{@html renderText(blockText(block), blockFacets(block))}</blockquote>
+      <blockquote
+        class="border-l-2 border-base-300 dark:border-base-600 pl-3 my-1 break-words"
+        style="margin-left: {(blockLevel(block) - 1) * 0.75}rem"
+      >{@html renderText(blockText(block), blockFacets(block))}</blockquote>
     {:else if block.$type === "space.roomy.richtext.blocks#small"}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <p class="my-0.5 break-words text-xs text-base-500 dark:text-base-400">{@html renderText(blockText(block), blockFacets(block))}</p>

@@ -46,14 +46,15 @@
     },
     "blockquote": {
       "type": "object",
-      "description": "A quoted block of text.",
+      "description": "A quoted block of text. `level` is the nesting depth (1 = top-level, 2 = nested inside another quote).",
       "required": ["text"],
       "properties": {
         "text": { "type": "string" },
         "facets": {
           "type": "array",
           "items": { "type": "ref", "ref": "space.roomy.richtext.facet#main" }
-        }
+        },
+        "level": { "type": "integer", "minimum": 1 }
       }
     },
     "small": {

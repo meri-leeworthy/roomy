@@ -304,9 +304,28 @@ export function proseMirrorDocToBlocks(doc: ProseMirrorDoc): Block[] {
         );
         break;
       }
-      case "blockquote":
-        blocks.push(textBlockFromInline(node, "space.roomy.richtext.blocks#blockquote"));
+      case "blockquote": {
+        // Recover the nesting depth from nested blockquote nodes.
+        let depth = 1;
+        let inner = node;
+        while (
+          inner.content?.length === 1 &&
+          inner.content[0]?.type === "blockquote"
+        ) {
+          depth++;
+          inner = inner.content[0];
+        }
+        const block = textBlockFromInline(
+          inner,
+          "space.roomy.richtext.blocks#blockquote",
+        );
+        blocks.push(
+          depth > 1
+            ? ({ ...block, level: depth } as Block)
+            : block,
+        );
         break;
+      }
       case "smallText":
         blocks.push(textBlockFromInline(node, "space.roomy.richtext.blocks#small"));
         break;
@@ -514,11 +533,17 @@ export function blocksToProseMirrorDoc(blocks: Block[]): ProseMirrorDoc {
         break;
       }
       case "space.roomy.richtext.blocks#blockquote": {
-        const quote = block as { $type: "space.roomy.richtext.blocks#blockquote"; text: string; facets?: Facet[] };
-        content.push({
+        const quote = block as { $type: "space.roomy.richtext.blocks#blockquote"; text: string; facets?: Facet[]; level?: number };
+        // Nest blockquote nodes by `level` so re-editing preserves the depth.
+        const level = Math.max(1, Math.floor(quote.level ?? 1));
+        let node: ProseMirrorNode = {
           type: "blockquote",
           content: [paragraphFromTextBlock(quote.text, quote.facets)],
-        });
+        };
+        for (let d = 1; d < level; d++) {
+          node = { type: "blockquote", content: [node] };
+        }
+        content.push(node);
         break;
       }
       case "space.roomy.richtext.blocks#small": {
@@ -821,16 +846,52 @@ export function markdownToBlocks(md: string): Block[] {
       continue;
     }
 
-    // Blockquote (single level; nested quotes are flattened).
+    // Blockquote. Discord supports `> ` (single-line), `>> ` (nested), and
+    // `>>> ` (multi-line: everything until a blank line is quoted).
     if (trimmed.startsWith(">")) {
-      const quoteLines: string[] = [];
-      while (i < lines.length && lines[i]!.trim().startsWith(">")) {
-        quoteLines.push(lines[i]!.trim().replace(/^>\s?/, ""));
+      // Multi-line blockquote: `>>> text` quotes the rest of this line and
+      // every following line until a blank line (or another block construct).
+      if (/^>>>/.test(trimmed)) {
+        const quoteLines: string[] = [trimmed.replace(/^>>>\s?/, "")];
         i++;
+        while (
+          i < lines.length &&
+          lines[i]!.trim() !== "" &&
+          !/^(#{1,6})\s+/.test(lines[i]!.trim()) &&
+          !/^```/.test(lines[i]!.trim()) &&
+          !/^[-*_]{3,}\s*$/.test(lines[i]!.trim())
+        ) {
+          quoteLines.push(lines[i]!.trim());
+          i++;
+        }
+        blocks.push(
+          inlineToBlock(quoteLines.join(" "), "space.roomy.richtext.blocks#blockquote"),
+        );
+        continue;
       }
-      blocks.push(
-        inlineToBlock(quoteLines.join(" "), "space.roomy.richtext.blocks#blockquote"),
-      );
+
+      // Single-line / nested: group consecutive `>`-prefixed lines by their
+      // nesting depth (number of leading `>`), emitting one blockquote block
+      // per level so nesting is preserved.
+      while (i < lines.length && lines[i]!.trim().startsWith(">")) {
+        const t = lines[i]!.trim();
+        const level = (t.match(/^>+/) ?? [""])[0]!.length;
+        const quoteLines: string[] = [t.replace(/^>+\s?/, "")];
+        i++;
+        while (
+          i < lines.length &&
+          lines[i]!.trim().startsWith(">") &&
+          (lines[i]!.trim().match(/^>+/) ?? [""])[0]!.length === level
+        ) {
+          quoteLines.push(lines[i]!.trim().replace(/^>+\s?/, ""));
+          i++;
+        }
+        blocks.push(
+          inlineToBlock(quoteLines.join(" "), "space.roomy.richtext.blocks#blockquote", {
+            ...(level > 1 ? { level } : {}),
+          }),
+        );
+      }
       continue;
     }
 

@@ -178,6 +178,18 @@ describe("blocksToDiscordMarkdown", () => {
 			).toBe("> quoted");
 		});
 
+		test("nested blockquote prefixed with >>", () => {
+			expect(
+				blocksToDiscordMarkdown([
+					{
+						$type: "space.roomy.richtext.blocks#blockquote",
+						text: "nested",
+						level: 2,
+					},
+				]),
+			).toBe(">> nested");
+		});
+
 		test("small text prefixed with -# (Discord small text)", () => {
 			expect(
 				blocksToDiscordMarkdown([

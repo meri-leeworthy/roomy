@@ -145,7 +145,11 @@ export function blocksToDiscordMarkdown(blocks: Block[]): string {
 			}
 			case "space.roomy.richtext.blocks#blockquote": {
 				const t = textOf(block);
-				if (t) parts.push(`> ${renderInline(t.text, t.facets)}`);
+				if (!t) break;
+				const level = "level" in block && typeof block.level === "number"
+					? Math.max(1, Math.floor(block.level))
+					: 1;
+				parts.push(`${">".repeat(level)} ${renderInline(t.text, t.facets)}`);
 				break;
 			}
 			case "space.roomy.richtext.blocks#small": {
