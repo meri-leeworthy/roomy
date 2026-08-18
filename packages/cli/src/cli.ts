@@ -4,7 +4,7 @@ import { loadConfig } from "./config.js";
 import { authenticate } from "./auth.js";
 import { createSpace, listSpaces } from "./spaces.js";
 import { listRooms, findLobbyRoom } from "./rooms.js";
-import { sendMessage, readMessages } from "./messages.js";
+import { sendMessage, readMessages, buildMentionBlocks } from "./messages.js";
 import { setProfile } from "./profile.js";
 import { listen } from "./listen.js";
 
@@ -118,7 +118,9 @@ program
   .requiredOption("--space <id>", "Space ID")
   .option("--room <id>", "Room ID (defaults to the lobby)")
   .option("--text <text>", "Message text")
-  .action(async (options: { space: string; room?: string; text?: string }) => {
+  .option("--mention <did>", "Mention a user via a Roomy-native #didMention facet")
+  .option("--mention-label <label>", "Display label for --mention (default: the mentioned DID)")
+  .action(async (options: { space: string; room?: string; text?: string; mention?: string; mentionLabel?: string }) => {
     try {
       const text = options.text ?? await readStdin();
       const config = loadConfig();
@@ -130,7 +132,10 @@ program
         roomId = lobby.id;
         console.error(`Using lobby room: ${lobby.name ?? "(unnamed)"} (${roomId})`);
       }
-      const { messageId } = await sendMessage(xrpc, options.space, roomId, text);
+      const blocks = options.mention
+        ? buildMentionBlocks(text, options.mention, options.mentionLabel ?? options.mention)
+        : undefined;
+      const { messageId } = await sendMessage(xrpc, options.space, roomId, text, { blocks });
       console.error(`Message sent: ${messageId}`);
     } catch (error) {
       console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);

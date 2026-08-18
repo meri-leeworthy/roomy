@@ -88,6 +88,14 @@ roomy-cli send --space <space-did> --text "Hello!"          # → lobby
 roomy-cli send --space <space-did> --room <room-id>          # text via stdin
 ```
 
+Send a **Roomy-native rich mention** (a `#didMention` facet, rendered as a
+mention chip — not plain `@handle` text):
+
+```bash
+roomy-cli send --space <space-did> --room <room-id> \
+  --mention <did> --mention-label <handle> --text "your message"
+```
+
 ### `read`
 
 Read recent messages from a room. If `--room` is omitted, reads the space's

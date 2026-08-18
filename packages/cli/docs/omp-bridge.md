@@ -100,6 +100,12 @@ The bridge detected the mention, ran `omp -p`, and posted `4` back to the room.
 Mention detection was also unit-verified for all four cases (plain @handle,
 plain no-mention, richtext agent-DID, richtext other-DID).
 
+A second live test used a **Roomy-native rich mention** — a `#didMention`
+facet (not plain `@handle` text). The CLI's `send` command now supports this
+via `--mention <did> --mention-label <handle>`, which builds a richtext block
+with a `#didMention` facet over the `@label` byte range (matching how the app
+UI serializes mentions). The bridge detected the facet and replied correctly.
+
 ## What the MVP does NOT do (and why)
 
 | omp-web feature | MVP status | Notes |
