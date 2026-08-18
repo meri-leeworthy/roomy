@@ -1,4 +1,4 @@
-import { AtpAgent, type Agent } from "@atproto/api";
+import { AtpAgent } from "@atproto/api";
 import { transport } from "@roomy-space/sdk";
 import type { Config } from "./config.js";
 
@@ -6,7 +6,7 @@ const { ServiceAuthClient, DirectXrpcClient: DirectXrpcClientClass } = transport
 type DirectXrpcClient = InstanceType<typeof DirectXrpcClientClass>;
 
 export interface AuthState {
-  agent: Agent;
+  agent: AtpAgent;
   xrpc: DirectXrpcClient;
 }
 

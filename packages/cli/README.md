@@ -98,6 +98,36 @@ roomy-cli read --room <room-id> [--limit 20]
 roomy-cli read --space <space-did> [--limit 20]   # → lobby
 ```
 
+
+### `listen`
+
+Listen to a space/room over the appserver WebSocket and route **mentioned**
+messages to the omp agent, posting the agent's reply back to the room. This is
+the MVP bridge for using Roomy as a web client for omp — no streaming, no tool
+UI, just "mention the agent, get an answer back".
+
+```bash
+roomy-cli listen --space <space-did> [--room <room-id>] [--cwd <dir>] [--model <model>]
+```
+
+Options:
+
+- `--room <id>` — listen to one room; defaults to **all** rooms in the space.
+- `--no-mention-only` — respond to every message, not just mentions (useful for
+  a dedicated agent-only room).
+- `--cwd <dir>` — working directory for the omp agent.
+- `--model <model>` — omp model override (fuzzy match).
+- `--prefix <text>` — extra context prepended to every prompt.
+- `--omp-bin <path>` — path to the omp binary (default: `omp` on PATH).
+- `--duration <ms>` — stop after this many ms (0 = run forever).
+- `--include-self` — also react to the agent's own messages (testing).
+
+Mention detection: rich-text `#didMention` facets matching the agent's DID, or
+a plain-text `@handle` / display-name match. The agent ignores its own messages
+to avoid self-trigger loops.
+
+See `docs/omp-bridge.md` for the full research and design notes.
+
 ## Agent Testing
 
 The CLI is designed for agent-driven workflows. Example with Claude Code:

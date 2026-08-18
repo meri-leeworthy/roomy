@@ -6,6 +6,7 @@ import { createSpace, listSpaces } from "./spaces.js";
 import { listRooms, findLobbyRoom } from "./rooms.js";
 import { sendMessage, readMessages } from "./messages.js";
 import { setProfile } from "./profile.js";
+import { listen } from "./listen.js";
 
 const program = new Command();
 export { program };
@@ -216,6 +217,51 @@ program
       const { agent } = await authenticate(config);
       await setProfile(agent, options);
       console.log("Profile updated");
+    } catch (error) {
+      console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+  });
+
+// ── listen ────────────────────────────────────────────────────────────────
+
+program
+  .command("listen")
+  .description("Listen to a space/room and route mentioned messages to the omp agent")
+  .requiredOption("--space <id>", "Space ID")
+  .option("--room <id>", "Room ID (defaults to all rooms in the space)")
+  .option("--no-mention-only", "Respond to every message, not just mentions")
+  .option("--cwd <dir>", "Working directory for the omp agent")
+  .option("--model <model>", "omp model override (fuzzy match)")
+  .option("--prefix <text>", "Extra context prepended to every prompt")
+  .option("--omp-bin <path>", "Path to the omp binary (default: omp on PATH)")
+  .option("--duration <ms>", "Stop after this many ms (0 = run forever)", "0")
+  .option("--include-self", "Also react to the agent's own messages (testing)")
+  .action(async (options: {
+    space: string;
+    room?: string;
+    mentionOnly: boolean;
+    cwd?: string;
+    model?: string;
+    prefix?: string;
+    ompBin?: string;
+    duration: string;
+    includeSelf?: boolean;
+  }) => {
+    try {
+      const config = loadConfig();
+      const auth = await authenticate(config);
+      await listen(auth, {
+        spaceId: options.space,
+        roomId: options.room,
+        mentionOnly: options.mentionOnly,
+        cwd: options.cwd,
+        model: options.model,
+        prefix: options.prefix,
+        ompBin: options.ompBin,
+        durationMs: Number(options.duration),
+        includeSelf: options.includeSelf,
+      });
     } catch (error) {
       console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
       process.exit(1);
