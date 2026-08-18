@@ -953,7 +953,9 @@ export function markdownToBlocks(md: string): Block[] {
       paraLines.push(lines[i]!.trim());
       i++;
     }
-    blocks.push(inlineToBlock(paraLines.join(" "), "space.roomy.richtext.blocks#text"));
+    // Join consecutive lines with a newline (not a space) so single-line
+    // breaks survive — multiple lines must not collapse into one.
+    blocks.push(inlineToBlock(paraLines.join("\n"), "space.roomy.richtext.blocks#text"));
   }
 
   return blocks;

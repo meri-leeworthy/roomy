@@ -81,6 +81,40 @@ describe("resolveMentionsToBlocks", () => {
 		expect(resolveMentionsToBlocks("", undefined, ctx(), SPACE)).toEqual([]);
 	});
 
+	test("preserves single newlines within a paragraph (Discord soft breaks)", () => {
+		const blocks = resolveMentionsToBlocks(
+			"line one\nline two\nline three",
+			[],
+			ctx(),
+			SPACE,
+		);
+		expect(blocks.map((b) => b.$type)).toEqual([
+			"space.roomy.richtext.blocks#text",
+		]);
+		expect(blocks[0] && "text" in blocks[0] ? blocks[0].text : undefined).toBe(
+			"line one\nline two\nline three",
+		);
+	});
+
+	test("splits paragraphs on a blank line but keeps single newlines", () => {
+		const blocks = resolveMentionsToBlocks(
+			"line one\nline two\n\npara two",
+			[],
+			ctx(),
+			SPACE,
+		);
+		expect(blocks.map((b) => b.$type)).toEqual([
+			"space.roomy.richtext.blocks#text",
+			"space.roomy.richtext.blocks#text",
+		]);
+		expect(blocks[0] && "text" in blocks[0] ? blocks[0].text : undefined).toBe(
+			"line one\nline two",
+		);
+		expect(blocks[1] && "text" in blocks[1] ? blocks[1].text : undefined).toBe(
+			"para two",
+		);
+	});
+
 	test("produces a plain text block without mentions", () => {
 		const blocks = resolveMentionsToBlocks("Hello, world!", [], ctx(), SPACE);
 		expect(blocks).toHaveLength(1);

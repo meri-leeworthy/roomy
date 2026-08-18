@@ -32,6 +32,12 @@ describe("blocksToDiscordMarkdown", () => {
 		);
 	});
 
+	test("preserves single newlines inside a text block", () => {
+		expect(blocksToDiscordMarkdown([textBlock("line one\nline two")])).toBe(
+			"line one\nline two",
+		);
+	});
+
 	describe("inline formatting facets", () => {
 		const facetAt = (byteStart: number, byteEnd: number, $type: string) => ({
 			index: { byteStart, byteEnd },

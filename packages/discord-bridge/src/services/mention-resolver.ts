@@ -347,7 +347,10 @@ function parseBlocks(content: string, ctx: InlineCtx): Block[] {
 			paraLines.push(t);
 			i++;
 		}
-		const { text, facets } = inlineFacets(paraLines.join(" "));
+		// Join consecutive lines with a newline (not a space) so Discord's
+		// single-line breaks survive the bridge — multiple lines must not
+		// collapse into one.
+		const { text, facets } = inlineFacets(paraLines.join("\n"));
 		blocks.push(textBlock(text, facets));
 	}
 

@@ -51,6 +51,13 @@ describe("richtext convert — blocks ↔ ProseMirror round-trip", () => {
     ]);
   });
 
+  it("preserves single newlines within a paragraph", () => {
+    const blocks = markdownToBlocks("line one\nline two\nline three");
+    expect(blocks).toEqual([
+      { $type: "space.roomy.richtext.blocks#text", text: "line one\nline two\nline three" },
+    ]);
+  });
+
   it("parses a Discord `>>>` multi-line blockquote", () => {
     const blocks = markdownToBlocks(">>> line one\nline two\n\nafter");
     expect(blocks).toEqual([
