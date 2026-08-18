@@ -15,7 +15,7 @@ import {
   DEFAULT_REMATERIALIZE_CONCURRENCY,
 } from "./streams/reMaterialize.ts";
 import { openDb, poolStats } from "./db/db.ts";
-import { runPendingReadStateMigrations } from "./db/userSpaceMembershipMigration.ts";
+import { runPendingReadStateMigrationsWithRetry } from "./db/userSpaceMembershipMigration.ts";
 import { getHappyView } from "./happyview.ts";
 
 // ─── Server construction ───────────────────────────────────────────────────
@@ -49,12 +49,12 @@ const db = openDb();
 // getSpaces would return empty during the boot window. Idempotent — on
 // subsequent boots the migration is already stamped complete and this is a
 // no-op.
-await runPendingReadStateMigrations(db).catch((err) => {
-  log.error(
-    "startup",
-    `read-state post-migration failed: ${err instanceof Error ? err.message : String(err)}`,
-  );
-});
+//
+// We retry a few times (a transient DB hiccup shouldn't take the server down),
+// then fail fast: serving with an empty `user_space_membership` would silently
+// hide every user's spaces, which is worse than a restart. The migration is
+// resumable, so the orchestrator's restart retries it from where it left off.
+await runPendingReadStateMigrationsWithRetry(db);
 
 const happyView = getHappyView();
 const poolSize = poolStats()?.size;

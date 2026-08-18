@@ -17,26 +17,8 @@
 
 import { decode } from "@atcute/cbor";
 import type { DbLike } from "./types.ts";
+import { classifyMembershipEvent, type MembershipIntent } from "../queries/userSpaceMembership.ts";
 import { log } from "../log.ts";
-
-/** Current space-side join/leave event types (space = stream_id). */
-const CURRENT_JOIN = "space.roomy.space.joinSpace.v0";
-const CURRENT_LEAVE = "space.roomy.space.leaveSpace.v0";
-
-/** Deprecated personal-stream join/leave event types (space = payload.spaceDid). */
-const PERSONAL_JOIN = "space.roomy.space.personal.joinSpace.v0";
-const PERSONAL_LEAVE = "space.roomy.space.personal.leaveSpace.v0";
-/** Even older personal-stream variants (space nested under `variant`). */
-const STREAM_PERSONAL_JOIN = "space.roomy.stream.personal.joinSpace.v0";
-const LEGACY_PERSONAL_JOIN = "space.roomy.personal.joinSpace.v0";
-
-interface MembershipEvent {
-  userDid: string;
-  spaceDid: string;
-  state: "joined" | "left";
-  eventId: string;
-  source: string;
-}
 
 interface RawEvent {
   rowid: number;
@@ -54,8 +36,8 @@ const SCAN_CHUNK = 50000;
  */
 export function reduceMembershipEvents(
   rows: RawEvent[],
-): Map<string, MembershipEvent> {
-  const out = new Map<string, MembershipEvent>();
+): Map<string, MembershipIntent> {
+  const out = new Map<string, MembershipIntent>();
   for (const r of rows) {
     let decoded: any;
     try {
@@ -63,7 +45,7 @@ export function reduceMembershipEvents(
     } catch {
       continue; // malformed payload — not a membership event
     }
-    const ev = classifyEvent(r, decoded);
+    const ev = classifyMembershipEvent(decoded, r.stream_id, r.user);
     if (!ev) continue;
     const key = `${ev.userDid}\u0000${ev.spaceDid}`;
     const existing = out.get(key);
@@ -72,41 +54,6 @@ export function reduceMembershipEvents(
     }
   }
   return out;
-}
-
-/** Classify a decoded event as a membership event, or null. */
-function classifyEvent(
-  r: RawEvent,
-  decoded: any,
-): MembershipEvent | null {
-  const $type = decoded?.$type;
-  const variant = decoded?.variant;
-
-  // Current space-side events: space is the stream the event lives in.
-  if ($type === CURRENT_JOIN) {
-    return { userDid: r.user, spaceDid: r.stream_id, state: "joined", eventId: decoded.id, source: "space.joinSpace" };
-  }
-  if ($type === CURRENT_LEAVE) {
-    return { userDid: r.user, spaceDid: r.stream_id, state: "left", eventId: decoded.id, source: "space.leaveSpace" };
-  }
-
-  // Deprecated personal-stream events: space is in the payload.
-  if ($type === PERSONAL_JOIN) {
-    return { userDid: r.user, spaceDid: decoded.spaceDid, state: "joined", eventId: decoded.id, source: "personal.joinSpace" };
-  }
-  if ($type === PERSONAL_LEAVE) {
-    return { userDid: r.user, spaceDid: decoded.spaceDid, state: "left", eventId: decoded.id, source: "personal.leaveSpace" };
-  }
-
-  // Even older variants nested under `variant`.
-  if (variant?.$type === STREAM_PERSONAL_JOIN) {
-    return { userDid: r.user, spaceDid: variant.spaceDid, state: "joined", eventId: decoded.id, source: "stream.personal.joinSpace" };
-  }
-  if (variant?.$type === LEGACY_PERSONAL_JOIN) {
-    return { userDid: r.user, spaceDid: variant.spaceId, state: "joined", eventId: decoded.id, source: "legacy.personal.joinSpace" };
-  }
-
-  return null;
 }
 
 /**
@@ -134,7 +81,7 @@ export async function recoverUserSpaceMembership(
   const readStateDb = db.readState?.() ?? db;
 
   // Scan the event log in rowid-keyset chunks (indexed, O(n) total).
-  const winners = new Map<string, MembershipEvent>();
+  const winners = new Map<string, MembershipIntent>();
   let lastRowid = 0;
   let scanned = 0;
   for (;;) {
@@ -233,4 +180,50 @@ export async function runPendingReadStateMigrations(
     );
     log.info("startup", `read-state post-migration v${version} complete`);
   }
+}
+
+const RETRY_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 1_000;
+
+export interface ReadStateMigrationRetryOpts {
+  /** Number of attempts before giving up (default 3). */
+  attempts?: number;
+  /** Delay between attempts in ms (default 1000). */
+  delayMs?: number;
+}
+
+/**
+ * Run pending read-state post-migrations with a few retries, then fail fast.
+ *
+ * The boot path must not serve reads with an empty `user_space_membership`
+ * (getSpaces would silently hide every user's spaces). A transient DB hiccup
+ * is retried; a persistent failure throws so the process exits and the
+ * orchestrator restarts, which retries the resumable migration from where it
+ * left off.
+ */
+export async function runPendingReadStateMigrationsWithRetry(
+  db: DbLike,
+  opts: ReadStateMigrationRetryOpts = {},
+): Promise<void> {
+  const attempts = opts.attempts ?? RETRY_ATTEMPTS;
+  const delayMs = opts.delayMs ?? RETRY_DELAY_MS;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await runPendingReadStateMigrations(db);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < attempts) {
+        log.warn(
+          "startup",
+          `read-state post-migration attempt ${attempt}/${attempts} failed, retrying: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw new Error(
+    `read-state post-migration failed after ${attempts} attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+  );
 }

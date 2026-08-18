@@ -16,6 +16,55 @@ import type { StreamDid, UserDid } from "@roomy-space/sdk";
 
 export type MembershipState = "joined" | "left";
 
+/** A join/leave event reduced to a durable membership intent. */
+export interface MembershipIntent {
+  userDid: string;
+  spaceDid: string;
+  state: MembershipState;
+  eventId: string;
+  source: string;
+}
+
+/**
+ * Classify a decoded join/leave event into a membership intent, or null for
+ * non-membership events. Shared by the boot recovery migration (which scans
+ * the raw event log) and the live materialisation path (applyBundle), so both
+ * agree on which events update `user_space_membership` and how the space DID
+ * is derived.
+ *
+ * Current space-side events carry the space as the stream the event lives in
+ * (`streamId`); deprecated personal-stream events carry it in the payload
+ * (`spaceDid`); the two legacy variants nest it under `variant`.
+ */
+export function classifyMembershipEvent(
+  event: any,
+  streamId: string,
+  user: string,
+): MembershipIntent | null {
+  const $type = event?.$type;
+  const variant = event?.variant;
+
+  if ($type === "space.roomy.space.joinSpace.v0") {
+    return { userDid: user, spaceDid: streamId, state: "joined", eventId: event.id, source: "space.joinSpace" };
+  }
+  if ($type === "space.roomy.space.leaveSpace.v0") {
+    return { userDid: user, spaceDid: streamId, state: "left", eventId: event.id, source: "space.leaveSpace" };
+  }
+  if ($type === "space.roomy.space.personal.joinSpace.v0") {
+    return { userDid: user, spaceDid: event.spaceDid, state: "joined", eventId: event.id, source: "personal.joinSpace" };
+  }
+  if ($type === "space.roomy.space.personal.leaveSpace.v0") {
+    return { userDid: user, spaceDid: event.spaceDid, state: "left", eventId: event.id, source: "personal.leaveSpace" };
+  }
+  if (variant?.$type === "space.roomy.stream.personal.joinSpace.v0") {
+    return { userDid: user, spaceDid: variant.spaceDid, state: "joined", eventId: event.id, source: "stream.personal.joinSpace" };
+  }
+  if (variant?.$type === "space.roomy.personal.joinSpace.v0") {
+    return { userDid: user, spaceDid: variant.spaceId, state: "joined", eventId: event.id, source: "legacy.personal.joinSpace" };
+  }
+  return null;
+}
+
 export interface UserSpaceMembershipRow {
   user_did: string;
   space_did: string;

@@ -6,6 +6,7 @@ import type { DbLike } from "./types.ts";
 import {
   recoverUserSpaceMembership,
   reduceMembershipEvents,
+  runPendingReadStateMigrationsWithRetry,
 } from "./userSpaceMembershipMigration.ts";
 
 const USER = UserDid.assert("did:plc:test-user");
@@ -125,5 +126,47 @@ describe("recoverUserSpaceMembership", () => {
     await recoverUserSpaceMembership(db);
     const m = await readMembership();
     expect(m.get(`${USER}\u0000${SPACE}`)?.state).toBe("joined");
+  });
+});
+
+describe("runPendingReadStateMigrationsWithRetry", () => {
+  test("retries then fails fast when a migration cannot complete", async () => {
+    // A pending version with no registered task makes runPendingReadStateMigrations
+    // throw. The retry helper must retry (attempts) times, then throw so the
+    // boot path fails fast instead of serving with empty membership.
+    const readState = openReadStateDb();
+    // Stamp v6 complete so only the unregistered '999' version is pending.
+    await readState.run(
+      "update readstate_schema_migrations set completed_at = ? where version = '6'",
+      Date.now(),
+    );
+    await readState.run(
+      "insert or ignore into readstate_schema_migrations (version, completed_at) values ('999', null)",
+    );
+
+    let threw: Error | null = null;
+    try {
+      await runPendingReadStateMigrationsWithRetry(db, { attempts: 2, delayMs: 1 });
+    } catch (err) {
+      threw = err as Error;
+    }
+    expect(threw?.message).toMatch(/failed after 2 attempts/);
+
+    // The pending row is still un-stamped (resumable — retried next boot).
+    const row = await readState
+      .query("select completed_at from readstate_schema_migrations where version = '999'")
+      .get<{ completed_at: number | null }>();
+    expect(row?.completed_at).toBeNull();
+  });
+
+  test("succeeds when the migration completes", async () => {
+    // v6 is the only registered task; on a fresh :memory: DB it runs the
+    // recovery (no events → no-op) and stamps completion.
+    await runPendingReadStateMigrationsWithRetry(db, { attempts: 2, delayMs: 1 });
+    const readState = openReadStateDb();
+    const row = await readState
+      .query("select completed_at from readstate_schema_migrations where version = '6'")
+      .get<{ completed_at: number | null }>();
+    expect(row?.completed_at).not.toBeNull();
   });
 });

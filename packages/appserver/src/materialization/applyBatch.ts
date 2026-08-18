@@ -22,6 +22,7 @@ import type {
   StreamDid,
   StreamIndex,
   Ulid,
+  UserDid,
 } from "@roomy-space/sdk";
 
 import { materialize } from "./materializer.ts";
@@ -37,6 +38,11 @@ import {
   detectAndStoreLinksFromUrls,
 } from "../embed/enricher.ts";
 import { openReadStateDb } from "../db/db.ts";
+import {
+  classifyMembershipEvent,
+  setUserSpaceMembership,
+  type MembershipIntent,
+} from "../queries/userSpaceMembership.ts";
 import { decodeContent, decodeRichTextBody } from "../db/content.ts";
 import { RICHTEXT_MIME, extractFacetUrls } from "@roomy-space/sdk";
 import { decodeTime, ulid } from "ulidx";
@@ -101,6 +107,10 @@ export async function applyBatch(
   for (let offset = 0; offset < events.length; offset += CHUNK_SIZE) {
     const chunk = events.slice(offset, offset + CHUNK_SIZE);
     const chunkSteps: ChunkStep[] = [];
+    // Live join/leave events → durable membership intent, keyed by the
+    // mangled savepoint id so the execution loop can write it after the
+    // event's per-space/global steps succeed.
+    const membershipIntents = new Map<string, MembershipIntent>();
 
     for (const e of chunk) {
       const bundle = materialize(e.event, { streamId, user: e.user }, e.idx);
@@ -129,6 +139,15 @@ export async function applyBatch(
 
       // Per-event savepoint for error isolation within the chunk
       const savepoint = `evt_${e.event.id.replace(/[^a-zA-Z0-9]/g, "")}`;
+      // Capture durable membership intent for live join/leave events (written
+      // to the read-state DB after this event's steps succeed). Backfill is
+      // skipped — the boot recovery migration already reduced the full
+      // historical log by ULID, and replay events aren't guaranteed to arrive
+      // in ULID order across streams.
+      if (!opts.isBackfill) {
+        const intent = classifyMembershipEvent(e.event, streamId, e.user);
+        if (intent) membershipIntents.set(savepoint, intent);
+      }
       chunkSteps.push({ type: "exec", sql: `savepoint ${savepoint}`, derived: "none" });
       for (const stmt of bundle.statements) {
         const params = stmt.params;
@@ -318,6 +337,43 @@ export async function applyBatch(
               console.error(
                 `[materialize] globalDb write failed for ${streamId} (per-space intact): ${message}`,
               );
+            }
+          }
+
+          // ── Read-state: durable membership intent ──────────────────────
+          // Live join/leave events update `user_space_membership` (the
+          // read-state source of truth) so intent stays durable regardless of
+          // which writer produced the event — not just the XRPC fast-path
+          // handlers. Backfill/replay is skipped: the boot recovery migration
+          // already reduced the full historical log by ULID, and replay events
+          // aren't guaranteed to arrive in ULID order across streams, so
+          // writing them could overwrite the correct recovered state with an
+          // older event. A read-state failure never rolls back the per-space
+          // application (the next event / recovery retries it).
+          const savepointName = step.sql.replace(/^savepoint /, "");
+          const intent = membershipIntents.get(savepointName);
+          if (intent) {
+            try {
+              await setUserSpaceMembership(
+                openReadStateDb(),
+                intent.userDid as UserDid,
+                intent.spaceDid as StreamDid,
+                intent.state,
+                intent.source,
+                intent.eventId,
+              );
+            } catch (readStateErr) {
+              const message =
+                readStateErr instanceof Error
+                  ? readStateErr.message
+                  : String(readStateErr);
+              stats.applyErrors++;
+              recordFailure(stats, {
+                eventId: intent.eventId as Ulid,
+                type: "read-state",
+                reason: "apply",
+                message: `[readState] ${message}`,
+              });
             }
           }
         }
