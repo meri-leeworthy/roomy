@@ -93,6 +93,10 @@ export const QUERY_SCHEMAS = {
     params: queries.getProfiles.Params,
     response: queries.getProfiles.Response,
   },
+  "space.roomy.mention.getMentions": {
+    params: queries.getMentions.Params,
+    response: queries.getMentions.Response,
+  },
   "space.roomy.embed.getLinkMetadata": {
     params: queries.getLinkMetadata.Params,
     response: queries.getLinkMetadata.Response,
