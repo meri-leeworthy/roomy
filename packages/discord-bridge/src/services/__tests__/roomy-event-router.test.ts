@@ -22,7 +22,7 @@ import { FileDiscordSender } from "../../discord/file-sender.ts";
 import { FileWebhookManager } from "../../discord/file-webhook-manager.ts";
 import { FileProfileResolver } from "../../roomy/file-profile-resolver.ts";
 import { MockRoomyGateway } from "../../roomy/mock-gateway.ts";
-import { RoomyEventRouter } from "../roomy-event-router.ts";
+import { resolveAttachmentUrl, RoomyEventRouter } from "../roomy-event-router.ts";
 import {
 	GUILD,
 	ROOMY_CHANNEL_ULID,
@@ -1125,4 +1125,21 @@ test("RER32: falls back to a plain message when reply target is not bridged", as
 	// No bridged reply target → no faux reply prefix; plain message sent.
 	expect(discord.sent).toHaveLength(1);
 	expect(discord.sent[0]?.content).toBe("Replying to nothing bridged");
+});
+
+describe("resolveAttachmentUrl", () => {
+	test("resolves an atblob:// ref to the appserver blob proxy", () => {
+		expect(
+			resolveAttachmentUrl(
+				"atblob://did:plc:abc/cid123",
+				"https://api.roomy.space",
+			),
+		).toBe("https://api.roomy.space/blob/did%3Aplc%3Aabc/cid123");
+	});
+
+	test("passes plain HTTP(S) URIs through unchanged", () => {
+		expect(
+			resolveAttachmentUrl("https://cdn.example.com/a.png", "https://api.roomy.space"),
+		).toBe("https://cdn.example.com/a.png");
+	});
 });

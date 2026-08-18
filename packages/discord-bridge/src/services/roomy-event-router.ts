@@ -40,13 +40,39 @@ import { blocksToDiscordMarkdown } from "./blocks-to-discord.ts";
 const log = createLogger("roomy-router");
 
 /**
+ * Resolve an attachment URI to a fetchable HTTP URL.
+ *
+ * Roomy media attachments carry `atblob://<did>/<cid>` refs (blobs stored on
+ * the author's PDS). These aren't directly fetchable, so they're resolved to
+ * the appserver's blob proxy (`/blob/<did>/<cid>`), which streams the bytes
+ * from the PDS. Plain HTTP(S) URIs pass through unchanged.
+ */
+export function resolveAttachmentUrl(
+	uri: string,
+	appserverUrl: string,
+): string {
+	if (uri.startsWith("atblob://")) {
+		const rest = uri.slice("atblob://".length);
+		const slash = rest.indexOf("/");
+		if (slash === -1) return uri;
+		const did = rest.slice(0, slash);
+		const cid = rest.slice(slash + 1);
+		return `${appserverUrl}/blob/${encodeURIComponent(did)}/${encodeURIComponent(cid)}`;
+	}
+	return uri;
+}
+
+/**
  * Default attachment fetcher: downloads bytes from the attachment URI over
- * HTTP(S). Injectable in the constructor so tests can stub it.
+ * HTTP(S), resolving `atblob://` refs via the appserver blob proxy.
+ * Injectable in the constructor so tests can stub it.
  */
 async function defaultFetchAttachment(
 	uri: string,
+	appserverUrl: string,
 ): Promise<Uint8Array<ArrayBuffer>> {
-	const res = await fetch(uri);
+	const url = resolveAttachmentUrl(uri, appserverUrl);
+	const res = await fetch(url);
 	if (!res.ok) {
 		throw new Error(`Failed to fetch attachment ${uri}: HTTP ${res.status}`);
 	}
@@ -119,6 +145,7 @@ export class RoomyEventRouter {
 		profiles: ProfileResolver,
 		repo: BridgeRepository,
 		opts?: {
+			appserverUrl?: string;
 			fetchAttachment?: (uri: string) => Promise<Uint8Array<ArrayBuffer>>;
 		},
 	) {
@@ -127,7 +154,10 @@ export class RoomyEventRouter {
 		this.#webhooks = webhooks;
 		this.#profiles = profiles;
 		this.#repo = repo;
-		this.#fetchAttachment = opts?.fetchAttachment ?? defaultFetchAttachment;
+		const appserverUrl = opts?.appserverUrl ?? "";
+		this.#fetchAttachment =
+			opts?.fetchAttachment ??
+			((uri) => defaultFetchAttachment(uri, appserverUrl));
 	}
 
 	/**
