@@ -233,7 +233,7 @@ program
 program
   .command("listen")
   .description("Listen to a space/room and route mentioned messages to the omp agent")
-  .requiredOption("--space <id>", "Space ID")
+  .option("--space <id>", "Space ID (defaults to every space the agent has joined)")
   .option("--room <id>", "Room ID (defaults to all rooms in the space)")
   .option("--no-mention-only", "Respond to every message, not just mentions")
   .option("--cwd <dir>", "Working directory for the omp agent")
@@ -243,7 +243,7 @@ program
   .option("--duration <ms>", "Stop after this many ms (0 = run forever)", "0")
   .option("--include-self", "Also react to the agent's own messages (testing)")
   .action(async (options: {
-    space: string;
+    space?: string;
     room?: string;
     mentionOnly: boolean;
     cwd?: string;

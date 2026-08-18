@@ -91,6 +91,14 @@ Roomy room ──WS──▶ CLI listen ──mention?──▶ omp -p "<message
 - Replies are posted back to the same room the mention came from.
 - `--no-mention-only` responds to every message (useful for a dedicated
   agent-only room).
+- **Scope:** with `--space`, it listens to every room in that space. With no
+  `--space`, it auto-discovers every space the agent is a member of (via
+  `space.roomy.space.getSpaces`) and subscribes to every room in each. Room
+  enumeration goes through `space.roomy.space.getMetadata`, which is gated on
+  membership — non-members get an empty sidebar — so the bridge only ever
+  listens to rooms in spaces the agent has actually joined. (The WS
+  subscription layer itself does not enforce access control; membership is
+  enforced at the HTTP query layer.)
 
 ### Verified end-to-end
 

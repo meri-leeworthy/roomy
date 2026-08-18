@@ -115,12 +115,14 @@ the MVP bridge for using Roomy as a web client for omp — no streaming, no tool
 UI, just "mention the agent, get an answer back".
 
 ```bash
-roomy-cli listen --space <space-did> [--room <room-id>] [--cwd <dir>] [--model <model>]
+roomy-cli listen [--space <space-did>] [--room <room-id>] [--cwd <dir>] [--model <model>]
 ```
 
 Options:
 
-- `--room <id>` — listen to one room; defaults to **all** rooms in the space.
+- `--space <id>` — listen to one space; **omitted, listens to every space the
+  agent has joined**.
+- `--room <id>` — listen to one room; defaults to **all** rooms in the space(s).
 - `--no-mention-only` — respond to every message, not just mentions (useful for
   a dedicated agent-only room).
 - `--cwd <dir>` — working directory for the omp agent.
