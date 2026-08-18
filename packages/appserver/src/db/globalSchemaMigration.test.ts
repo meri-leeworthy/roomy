@@ -63,10 +63,16 @@ describe("global schema migration", () => {
           "select name from sqlite_master where type = 'table' and name = 'mentions'",
         )
         .get<{ name: string }>();
+      const migration = await global
+        .query(
+          "select completed_at from global_schema_migrations where version = ?",
+        )
+        .get<{ completed_at: number | null }>(GLOBAL_SCHEMA_VERSION);
 
       expect(edge?.n).toBe(1);
       expect(version?.version).toBe(GLOBAL_SCHEMA_VERSION);
       expect(mentionsTable?.name).toBe("mentions");
+      expect(migration?.completed_at).toBeNull();
     } finally {
       await pool.close();
     }

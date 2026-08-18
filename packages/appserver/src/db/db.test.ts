@@ -123,7 +123,14 @@ describe("global schema", () => {
       )
       .all()
       .map((r) => r.name);
-    for (const expected of ["edges", "profiles", "entity_space", "pending_links"]) {
+    for (const expected of [
+      "edges",
+      "profiles",
+      "entity_space",
+      "pending_links",
+      "mentions",
+      "global_schema_migrations",
+    ]) {
       expect(tables).toContain(expected);
     }
   });

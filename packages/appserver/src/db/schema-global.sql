@@ -23,6 +23,15 @@ create table if not exists global_schema_version (
   version text not null
 ) strict;
 
+-- Tracks asynchronous/data post-migrations separately from structural DDL.
+-- A schema bump inserts its version with completed_at null; startup runs the
+-- registered idempotent task and stamps completion only after the whole task
+-- succeeds, so interrupted deployments retry safely.
+create table if not exists global_schema_migrations (
+  version text primary key,
+  completed_at integer
+) strict;
+
 create table if not exists edges (
   head text not null, -- user did
   tail text not null, -- space did

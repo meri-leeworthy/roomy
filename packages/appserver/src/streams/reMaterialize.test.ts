@@ -223,9 +223,13 @@ describe("reMaterializeFromLocalEvents", () => {
       member,
       streamDid,
     );
+    await globalDb.run(
+      "update global_schema_migrations set completed_at = null where version = '6'",
+    );
 
-    // The per-space cursor is current, so no events are replayed. Startup must
-    // still reconstruct global membership from the retained member edge.
+    // The per-space cursor is current, so no events are replayed. The pending
+    // global migration must still reconstruct membership from the retained
+    // member edge, then mark itself complete.
     await reMaterializeFromLocalEvents(db);
 
     const joined = await globalDb
@@ -238,8 +242,44 @@ describe("reMaterializeFromLocalEvents", () => {
         "select 1 as n from edges where head = ? and tail = ? and label = 'leftSpace'",
       )
       .get<{ n: number }>(member, streamDid);
+    const migration = await globalDb
+      .query(
+        "select completed_at from global_schema_migrations where version = '6'",
+      )
+      .get<{ completed_at: number | null }>();
     expect(joined?.n).toBe(1);
     expect(left).toBeNull();
+    expect(migration?.completed_at).not.toBeNull();
+  });
+
+  test("completed global migrations do not run again", async () => {
+    const streamDid = StreamDid.assert("did:web:global-migration-once.example");
+    const member = UserDid.assert("did:plc:global-migration-once-member");
+    const events = createDefaultSpaceEvents({ name: "Migration Once" });
+    await seedEvents(db, streamDid, events);
+    await seedEvents(
+      db,
+      streamDid,
+      [{ $type: "space.roomy.space.joinSpace.v0", id: newUlid() }],
+      member,
+      events.length,
+    );
+    await reMaterializeFromLocalEvents(db);
+
+    const globalDb = db.global!();
+    await globalDb.run(
+      "delete from edges where head = ? and tail = ? and label = 'joinedSpace'",
+      member,
+      streamDid,
+    );
+    await reMaterializeFromLocalEvents(db);
+
+    const joined = await globalDb
+      .query(
+        "select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'",
+      )
+      .get<{ n: number }>(member, streamDid);
+    expect(joined).toBeNull();
   });
 
   test("empty events DB", async () => {

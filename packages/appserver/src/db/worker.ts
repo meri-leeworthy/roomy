@@ -165,11 +165,17 @@ function initializeGlobalSchema(db: Database, expectedVersion: string): void {
     db.exec(
       `insert into global_schema_version (id, version) values (1, '${expectedVersion}')`,
     );
+    db.query(
+      "insert or ignore into global_schema_migrations (version, completed_at) values (?, null)",
+    ).run(expectedVersion);
     return;
   }
 
   if (row.version === expectedVersion) {
     db.exec(schema);
+    db.query(
+      "insert or ignore into global_schema_migrations (version, completed_at) values (?, null)",
+    ).run(expectedVersion);
     return;
   }
 
@@ -182,6 +188,9 @@ function initializeGlobalSchema(db: Database, expectedVersion: string): void {
   db.transaction(() => {
     db.exec(schema);
     db.query("update global_schema_version set version = ? where id = 1").run(expectedVersion);
+    db.query(
+      "insert or ignore into global_schema_migrations (version, completed_at) values (?, null)",
+    ).run(expectedVersion);
   })();
 }
 
