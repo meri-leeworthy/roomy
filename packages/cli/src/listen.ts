@@ -51,9 +51,7 @@ export async function listen(
   opts: ListenOptions,
 ): Promise<void> {
   const { agent, xrpc } = auth;
-  const agentDid = agent.did ?? "";
-  const agentHandle = agent.session?.handle ?? "";
-  const agentName = agentDid;
+  const identity = await resolveAgentIdentity(xrpc, agent);
 
   // Resolve the set of rooms to subscribe to.
   const roomIds = await resolveRooms(xrpc, opts.spaceId, opts.roomId);
@@ -85,8 +83,8 @@ export async function listen(
       if (op.op !== "add" || !op.message) continue;
       const msg = op.message;
       // Ignore our own messages (the agent replying to itself).
-      if (msg.authorDid === agentDid && !opts.includeSelf) continue;
-      void handleMessage(auth, opts, msg, body.roomId, { agentDid, agentHandle, agentName });
+      if (msg.authorDid === identity.agentDid && !opts.includeSelf) continue;
+      void handleMessage(auth, opts, msg, body.roomId, identity);
     }
   });
 
@@ -167,13 +165,39 @@ async function handleMessage(
 }
 
 /**
+ * Resolve the agent's stable identity for mention matching.
+ *
+ * The DID is the authoritative, stable ID — it's what `#didMention` facets
+ * carry, and it never changes (handles and display names do). We also fetch
+ * the agent's Roomy profile so the plain-text fallback can match on the real
+ * display name (e.g. "Redcurrant") rather than the handle or DID.
+ */
+async function resolveAgentIdentity(
+  xrpc: AuthState["xrpc"],
+  agent: AuthState["agent"],
+): Promise<AgentIdentity> {
+  const agentDid = agent.did ?? "";
+  const agentHandle = agent.session?.handle ?? "";
+  let agentName = agentDid;
+  try {
+    const profile = await xrpc.query("space.roomy.user.getProfile", {
+      actor: agentDid,
+    });
+    if (profile?.displayName) agentName = profile.displayName;
+  } catch {
+    // Profile fetch is best-effort; fall back to the DID.
+  }
+  return { agentDid, agentHandle, agentName };
+}
+
+/**
  * Decide whether a message mentions the agent.
  *
- * Two paths:
- *  - Rich text (`application/vnd.roomy.richtext+json`): parse the blocks and
- *    look for a `#didMention` facet whose `did` equals the agent's DID.
- *  - Plain text / markdown: substring match on `@handle`, the handle's local
- *    part (`@redcurrant`), or the display name.
+ * The DID is the authoritative signal: a `#didMention` facet whose `did`
+ * equals the agent's DID is a stable, unambiguous match (handles and display
+ * names can change). Plain-text matching is a best-effort fallback for
+ * messages that weren't authored with a rich mention — it matches the full
+ * handle and the display name, but is inherently less reliable.
  */
 export function isMentioned(msg: IncomingMessage, identity: AgentIdentity): boolean {
   const { agentDid, agentHandle, agentName } = identity;

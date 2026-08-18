@@ -63,13 +63,18 @@ up.
 
 ### Mention detection
 
-The agent should only act when it's actually addressed. Two paths:
+The agent should only act when it's actually addressed. **The DID is the
+authoritative, stable ID** — it's what `#didMention` facets carry, and it never
+changes (handles and display names do). Two paths:
 
 1. **Rich text** (`application/vnd.roomy.richtext+json`): parse the blocks and
    look for a `#didMention` facet whose `did` equals the agent's DID. This is
-   the authoritative signal — the app UI renders a real mention chip.
-2. **Plain text / markdown**: substring match on `@handle`, the handle's local
-   part (`@roomy-test-2`), or the display name.
+   the primary, unambiguous signal — the app UI renders a real mention chip.
+2. **Plain text / markdown** (best-effort fallback for messages authored
+   without a rich mention): substring match on the full handle and the agent's
+   **display name** (e.g. `Redcurrant`), resolved from their Roomy profile via
+   `space.roomy.user.getProfile`. This path is inherently less reliable than
+   the DID facet.
 
 The SDK already exports `deserializeBody`, `blocksToPlaintext`, and
 `extractMentionDids` — the bridge reuses them.
