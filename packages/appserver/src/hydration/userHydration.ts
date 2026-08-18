@@ -15,8 +15,8 @@
 
 import type { DbLike } from "../db/types.ts";
 import { type StreamDid, type UserDid } from "@roomy-space/sdk";
-import { openGlobalDb } from "../db/db.ts";
-import { JOINED_SPACE_LABEL } from "../queries/joinedSpaces.ts";
+import { openReadStateDb } from "../db/db.ts";
+import { selectJoinedSpaceDids } from "../queries/userSpaceMembership.ts";
 
 export interface HydrationFailure {
   streamDid: StreamDid;
@@ -54,7 +54,7 @@ async function run(
   userDid: UserDid,
   opts: HydrateOpts,
 ): Promise<UserHydrationResult> {
-  const db = opts.db ?? openGlobalDb();
+  const db = opts.db ?? openReadStateDb();
 
   // Materialization is handled by the subscription system. We read whatever
   // state is currently materialised and return it. If backfill is still in
@@ -69,25 +69,16 @@ async function run(
 }
 
 /**
- * Read the user's intended (joined-and-not-left) spaces. The `JoinSpace`
- * materialiser writes a `joinedSpace` edge (head = user DID, tail = space)
- * to the GLOBAL DB; `LeaveSpace` deletes it. Membership is per-user, so it
- * lives in `edges` rather than on the single global `comp_space` row a space
- * has.
+ * Read the user's intended (joined-and-not-left) spaces from the durable
+ * read-state `user_space_membership` table. This is the authoritative source
+ * during the transition to ATProto permission records; the global `joinedSpace`
+ * edges are no longer read for membership intent.
  */
 async function readIntendedSpaceDids(
   db: DbLike,
   userDid: UserDid,
 ): Promise<StreamDid[]> {
-  const rows = await db
-    .query(
-      `select tail as id
-         from edges
-        where head = ?
-          and label = ?`,
-    )
-    .all<{ id: string }>([userDid, JOINED_SPACE_LABEL]);
-  return rows.map((r) => r.id as StreamDid);
+  return selectJoinedSpaceDids(db, userDid);
 }
 
 /** Test helper. */

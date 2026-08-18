@@ -4,12 +4,13 @@ import {
   StreamDid,
   parseEvent,
 } from "@roomy-space/sdk";
-import { openGlobalDb } from "../db/db.ts";
+import { openGlobalDb, openReadStateDb } from "../db/db.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import {
   JOINED_SPACE_LABEL,
   recordGlobalMembership,
 } from "../queries/joinedSpaces.ts";
+import { setUserSpaceMembership } from "../queries/userSpaceMembership.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { Router as InvalidationRouter } from "../invalidation/index.ts";
@@ -125,6 +126,15 @@ export const createSpaceHandler: ProcedureHandler<
     spaceId,
     callerDid,
     JOINED_SPACE_LABEL,
+  );
+  // Durable membership intent (read-state source of truth).
+  await setUserSpaceMembership(
+    openReadStateDb(),
+    callerDid,
+    spaceId,
+    "joined",
+    "createSpace",
+    newUlid(),
   );
 
   // ── 5. Emit direct getSpaces + getMetadata invalidation signals ──────

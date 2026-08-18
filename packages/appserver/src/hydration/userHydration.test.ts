@@ -29,14 +29,27 @@ function freshDb(): { db: Database; asyncDb: DbLike } {
   const schemaSql = readFileSync(SCHEMA_PATH, "utf8");
   db.exec(schemaSql);
   db.run("insert into roomy_schema_version (id, version) values (1, ?)", [SCHEMA_VERSION]);
+  // The durable membership-intent table lives in the read-state schema, not
+  // the monolithic schema.sql. Create it here so hydration can be tested in
+  // isolation against the read-state source of truth.
+  db.exec(`
+    create table if not exists user_space_membership (
+      user_did        text not null,
+      space_did       text not null,
+      state           text not null check(state in ('joined', 'left')),
+      source          text not null,
+      source_event_id text not null,
+      updated_at      integer not null default (unixepoch() * 1000),
+      primary key (user_did, space_did)
+    ) strict
+  `);
   return { db, asyncDb: toAsyncDb(db) };
 }
 
 /**
- * Intent seeding: the production materializer writes `joinedSpace` edges
- * (head = userDid, tail = spaceId) from space.joinSpace events. We bypass
- * the materializer here and write the rows directly so hydration can be
- * tested in isolation. A left space has no such edge (LeaveSpace deletes it).
+ * Intent seeding: the production read-state table records durable membership
+ * intent (state = 'joined' | 'left'). We write the rows directly so hydration
+ * can be tested in isolation. A left space has state = 'left'.
  */
 function seedPersonalIntent(
   db: Database,
@@ -44,18 +57,20 @@ function seedPersonalIntent(
   joinedSpaces: StreamDid[],
   leftSpaces: StreamDid[] = [],
 ): void {
-  // Entity rows are the FK targets for the joinedSpace edges. Each entity is
-  // scoped to its own stream.
-  for (const did of [userDid, ...joinedSpaces, ...leftSpaces]) {
-    db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
-      did,
-      did,
-    ]);
-  }
   for (const did of joinedSpaces) {
     db.run(
-      "insert or ignore into edges (head, tail, label) values (?, ?, 'joinedSpace')",
-      [userDid, did],
+      `insert into user_space_membership
+         (user_did, space_did, state, source, source_event_id)
+       values (?, ?, 'joined', 'test', ?)`,
+      [userDid, did, `01TEST${did}`],
+    );
+  }
+  for (const did of leftSpaces) {
+    db.run(
+      `insert into user_space_membership
+         (user_did, space_did, state, source, source_event_id)
+       values (?, ?, 'left', 'test', ?)`,
+      [userDid, did, `01TEST${did}`],
     );
   }
 }

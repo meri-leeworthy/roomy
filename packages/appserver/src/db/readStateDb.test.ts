@@ -4,7 +4,7 @@ import { READSTATE_SCHEMA_VERSION } from "./readStateDb.ts";
 
 describe("read-state schema", () => {
   test("READSTATE_SCHEMA_VERSION is exported", () => {
-    expect(READSTATE_SCHEMA_VERSION).toBe("5");
+    expect(READSTATE_SCHEMA_VERSION).toBe("6");
   });
 
   test("schema applies cleanly on a fresh database", () => {
@@ -213,6 +213,32 @@ describe("read-state schema", () => {
                 "alter table read_positions add column space_did text not null default ''",
               );
             }
+          },
+        },
+        {
+          version: 6,
+          up(db: Database) {
+            db.exec(`
+              create table if not exists readstate_schema_migrations (
+                version text primary key,
+                completed_at integer
+              ) strict
+            `);
+            db.exec(`
+              create table if not exists user_space_membership (
+                user_did        text not null,
+                space_did       text not null,
+                state           text not null check(state in ('joined', 'left')),
+                source          text not null,
+                source_event_id text not null,
+                updated_at      integer not null default (unixepoch() * 1000),
+                primary key (user_did, space_did)
+              ) strict
+            `);
+            db.exec(`
+              create index if not exists idx_user_space_membership_user_state
+                on user_space_membership(user_did, state, updated_at desc)
+            `);
           },
         },
       ];

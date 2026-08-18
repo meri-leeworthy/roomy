@@ -175,10 +175,9 @@ export function seedSpace(
 }
 
 /**
- * Seed a joinedSpace edge from the user to the space.
- * This is what getSpaces reads to determine membership. In Phase 3 the
- * `joinedSpace` edge lives in the global DB (membership store), not the
- * per-space DB.
+ * Seed a joinedSpace edge from the user to the space (global DB, kept for
+ * backward-compat assertions) AND durable membership intent in the read-state
+ * DB (what getSpaces now reads).
  */
 export function seedJoinedSpace(
   db: Database,
@@ -189,6 +188,16 @@ export function seedJoinedSpace(
     `insert or ignore into edges (head, tail, label)
      values (?, ?, 'joinedSpace')`,
     [userDid, spaceId],
+  );
+  readStateDb(db).run(
+    `insert into user_space_membership
+       (user_did, space_did, state, source, source_event_id)
+     values (?, ?, 'joined', 'seed', ?)
+     on conflict(user_did, space_did) do update set
+       state = excluded.state,
+       source = excluded.source,
+       source_event_id = excluded.source_event_id`,
+    [userDid, spaceId, `01SEED${spaceId}`],
   );
 }
 

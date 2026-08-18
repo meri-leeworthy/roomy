@@ -13,6 +13,29 @@ create table if not exists readstate_schema_version (
   version text not null
 ) strict;
 
+-- Resumable asynchronous/data migrations. Structural DDL is applied by the
+-- worker first; startup stamps completed_at only after the registered recovery
+-- task succeeds, so interrupted migrations retry safely.
+create table if not exists readstate_schema_migrations (
+  version text primary key,
+  completed_at integer
+) strict;
+
+-- Durable user-owned intent to participate in a space. This is appserver
+-- source-of-truth state during the transition to ATProto permission records;
+-- actual space access remains derived from the space's member/admin/ban state.
+create table if not exists user_space_membership (
+  user_did       text not null,
+  space_did      text not null,
+  state          text not null check(state in ('joined', 'left')),
+  source         text not null,
+  source_event_id text not null,
+  updated_at     integer not null default (unixepoch() * 1000),
+  primary key (user_did, space_did)
+) strict;
+create index if not exists idx_user_space_membership_user_state
+  on user_space_membership(user_did, state, updated_at desc);
+
 create table if not exists read_positions (
   user_did    text not null,
   room_id     text not null,

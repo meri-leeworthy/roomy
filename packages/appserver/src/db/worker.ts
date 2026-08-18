@@ -324,11 +324,7 @@ const MIGRATIONS: Migration[] = [
       // Per-space split (§1f): read_positions gains a denormalized
       // `space_did` column so unread sums can be scoped per space without
       // joining entities (which moves to per-space DBs). Purely additive —
-      // no data loss. The row backfill is NOT done here: the read-state DB
-      // is not yet ATTACHed to the main DB when migrations run (the ATTACH
-      // happens after initializeReadStateSchema in handleInit), so the
-      // entities join would fail. handleInit runs the backfill after the
-      // ATTACH instead (see backfillReadPositionsSpaceDid).
+      // no data loss.
       const cols = db
         .query<{ name: string }, []>(
           "select name from pragma_table_info('read_positions')",
@@ -340,6 +336,35 @@ const MIGRATIONS: Migration[] = [
           "alter table read_positions add column space_did text not null default ''",
         );
       }
+    },
+  },
+  {
+    version: 6,
+    up(db: Database) {
+      db.exec(`
+        create table if not exists readstate_schema_migrations (
+          version text primary key,
+          completed_at integer
+        ) strict
+      `);
+      db.exec(`
+        create table if not exists user_space_membership (
+          user_did        text not null,
+          space_did       text not null,
+          state           text not null check(state in ('joined', 'left')),
+          source          text not null,
+          source_event_id text not null,
+          updated_at      integer not null default (unixepoch() * 1000),
+          primary key (user_did, space_did)
+        ) strict
+      `);
+      db.exec(`
+        create index if not exists idx_user_space_membership_user_state
+          on user_space_membership(user_did, state, updated_at desc)
+      `);
+      db.query(
+        "insert or ignore into readstate_schema_migrations (version, completed_at) values ('6', null)",
+      ).run();
     },
   },
 ];

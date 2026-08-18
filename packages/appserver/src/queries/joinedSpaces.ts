@@ -14,6 +14,7 @@ import type { DbLike } from "../db/types.ts";
 import type { StreamDid, UserDid } from "@roomy-space/sdk";
 import { openSpaceDb } from "../db/db.ts";
 import { getSpaceUnreadCount } from "./readPositions.ts";
+import { selectUserSpaces } from "./userSpaceMembership.ts";
 
 /**
  * Edge label for join intent: `head` is the user DID, `tail` is the joined
@@ -53,46 +54,37 @@ export interface SelectSpacesOptions {
 /**
  * Return the caller's joined spaces, optionally including left spaces.
  *
- * Phase 2 (read cutover): membership edges (`joinedSpace`/`leftSpace`) live in
- * the global DB, while the space's display fields and membership truth
- * (`member`/`admin` edges, `comp_bans`) live in the per-space DB. This
- * function reads the space DIDs from `globalDb`, then fans out to each space's
- * per-space DB for the details. `mainDb` is the monolithic handle, used only
- * for the read-state unread-count aggregate (read_positions / user_thread_activity
- * are not split and live on the main DB).
+ * Membership intent is read from the read-state DB's durable
+ * `user_space_membership` table (the authoritative source during the
+ * transition to ATProto permission records), then fans out to each space's
+ * per-space DB for display fields and membership truth (`member`/`admin`
+ * edges, `comp_bans`). `readStateDb` serves both the membership intent and
+ * the read-state unread-count aggregate.
  */
 export async function selectJoinedSpaces(
-  globalDb: DbLike,
-  mainDb: DbLike,
+  readStateDb: DbLike,
   userDid: UserDid,
   options: SelectSpacesOptions = {},
 ): Promise<SpaceRow[]> {
-  const labels = options.includeLeft
-    ? [JOINED_SPACE_LABEL, LEFT_SPACE_LABEL]
-    : [JOINED_SPACE_LABEL];
-  const ph = labels.map(() => "?").join(",");
-  const rows = await globalDb
-    .query(
-      `select tail as id, label from edges
-        where head = ? and label in (${ph})`,
-    )
-    .all<{ id: string; label: string }>([userDid, ...labels]);
+  const rows = await selectUserSpaces(readStateDb, userDid, options.includeLeft);
 
   const spaceRows = await Promise.all(
     rows.map(async (r) => {
-      const isLeft = r.label === LEFT_SPACE_LABEL;
-      const spaceDb = openSpaceDb(r.id);
-      const row = await querySpaceRow(spaceDb, r.id, userDid);
+      const isLeft = r.state === "left";
+      const spaceDb = openSpaceDb(r.space_did);
+      const row = await querySpaceRow(spaceDb, r.space_did, userDid);
       if (!row) return null;
       // Left spaces are always included (isMember/isAdmin false). Joined
       // spaces require a member/admin edge (real membership truth).
       if (!isLeft && !row.is_member && !row.is_admin) return null;
-      const unreadCount = await getSpaceUnreadCount(mainDb, spaceDb, userDid, r.id);
+      const unreadCount = await getSpaceUnreadCount(readStateDb, spaceDb, userDid, r.space_did);
       const space: SpaceRow = {
-        id: r.id,
+        id: r.space_did,
         unreadCount,
-        isMember: !!row.is_member,
-        isAdmin: !!row.is_admin,
+        // A left space is never a member/admin, regardless of any stale
+        // per-space member/admin edge (leaving persists those edges).
+        isMember: isLeft ? false : !!row.is_member,
+        isAdmin: isLeft ? false : !!row.is_admin,
         roleIds: [],
       };
       if (row.name !== null) space.name = row.name;

@@ -9,9 +9,11 @@
  */
 
 import type { DbLike } from "../db/types.ts";
+import type { UserDid } from "@roomy-space/sdk";
 import { decodeContent } from "../db/content.ts";
-import { openGlobalDb, openSpaceDb } from "../db/db.ts";
+import { openSpaceDb } from "../db/db.ts";
 import { hydrateProfiles } from "./profileStore.ts";
+import { selectJoinedSpaceDids } from "./userSpaceMembership.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -100,16 +102,12 @@ export async function selectActivityFeed(
   userDid: string,
   scope: ActivityFeedScope,
 ): Promise<{ feed: ActivityFeedItem[]; cursor: string | null }> {
-  // Step 0: determine the set of space DIDs.
+  // Step 0: determine the set of space DIDs from durable membership intent.
   let spaceDids: string[];
   if (scope.spaceId) {
     spaceDids = [scope.spaceId];
   } else {
-    const globalDb = openGlobalDb();
-    const joinedRows = await globalDb
-      .query("select tail as id from edges where head = ? and label = 'joinedSpace'")
-      .all<{ id: string }>([userDid]);
-    spaceDids = joinedRows.map((r) => r.id);
+    spaceDids = await selectJoinedSpaceDids(mainDb, userDid as UserDid);
   }
 
   if (spaceDids.length === 0) return { feed: [], cursor: null };

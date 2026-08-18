@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { StreamDid, UserDid } from "@roomy-space/sdk";
-import { closeDb, openDb, openGlobalDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
+import { closeDb, openDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
 import type { DbLike } from "../db/types.ts";
 import {
   JOINED_SPACE_LABEL,
   recordPersonalSpaceMembership,
   selectJoinedSpaces,
 } from "./joinedSpaces.ts";
+import { setUserSpaceMembership } from "./userSpaceMembership.ts";
 
 const USER = UserDid.assert("did:plc:test-user");
 const SPACE = StreamDid.assert("did:web:space-stream.example");
@@ -15,18 +16,16 @@ const SPACE = StreamDid.assert("did:web:space-stream.example");
  * Set up the worker-backed DBs for the Phase 3 fan-out read path:
  *   - space-scoped rows (entities, comp_info, member/admin edges) go into the
  *     per-space DB via `openSpaceDb`
- *   - `joinedSpace` edges go into the global DB via `openGlobalDb`
- *   - read-state (unread counts) goes into the read-state DB
+ *   - durable membership intent goes into the read-state DB via
+ *     `openReadStateDb` (the handle `selectJoinedSpaces` now takes)
  *
- * Returns `{ globalDb, mainDb }` where `globalDb` is the global handle and
- * `mainDb` is the read-state handle — the handles `selectJoinedSpaces` takes.
+ * Returns `{ mainDb }` where `mainDb` is the read-state handle.
  */
-function setup(): { globalDb: DbLike; mainDb: DbLike } {
+function setup(): { mainDb: DbLike } {
   closeDb();
   openDb({ path: ":memory:" });
-  const globalDb = openGlobalDb();
   const mainDb = openReadStateDb();
-  return { globalDb, mainDb };
+  return { mainDb };
 }
 
 /** Seed an entity row in the space's per-space DB. */
@@ -58,23 +57,25 @@ async function seedSpace(): Promise<void> {
   ]);
 }
 
-/** Seed a `joinedSpace` edge in the global DB: `user` has joined `space`. */
-async function joinEdge(user: string, space: string): Promise<void> {
-  const db = openGlobalDb();
-  await db.run("insert into edges (head, tail, label) values (?, ?, ?)", [
-    user,
-    space,
-    JOINED_SPACE_LABEL,
-  ]);
+/** Seed durable membership intent in the read-state DB: `user` joined `space`. */
+async function joinIntent(user: string, space: string): Promise<void> {
+  await setUserSpaceMembership(
+    openReadStateDb(),
+    user as UserDid,
+    space as StreamDid,
+    "joined",
+    "test",
+    "01TEST0000000000000000000000",
+  );
 }
 
 describe("selectJoinedSpaces", () => {
-  test("a space the user has a joinedSpace edge to is visible", async () => {
-    const { globalDb, mainDb } = setup();
+  test("a space the user has joined is visible", async () => {
+    const { mainDb } = setup();
     await seedSpace();
-    await joinEdge(USER, SPACE);
+    await joinIntent(USER, SPACE);
 
-    const spaces = await selectJoinedSpaces(globalDb, mainDb, USER);
+    const spaces = await selectJoinedSpaces(mainDb, USER);
     expect(spaces).toHaveLength(1);
     expect(spaces[0]).toMatchObject({
       id: SPACE,
@@ -84,42 +85,42 @@ describe("selectJoinedSpaces", () => {
     });
   });
 
-  test("a space with no joinedSpace edge is invisible even if it exists", async () => {
-    const { globalDb, mainDb } = setup();
+  test("a space with no membership intent is invisible even if it exists", async () => {
+    const { mainDb } = setup();
     // Space fully materialised (entity, info, member edge) but the user
-    // never joined it — no joinedSpace edge.
+    // never joined it — no membership intent.
     await seedSpace();
 
-    expect(await selectJoinedSpaces(globalDb, mainDb, USER)).toEqual([]);
+    expect(await selectJoinedSpaces(mainDb, USER)).toEqual([]);
   });
 
   test("a space joined by a different user is not visible (multi-user)", async () => {
-    const { globalDb, mainDb } = setup();
+    const { mainDb } = setup();
     await seedSpace();
     const OTHER_USER = UserDid.assert("did:plc:other-user");
     await seedEntity(SPACE, OTHER_USER);
-    // Another user joined the same space. Their edge must not leak into ours.
-    await joinEdge(OTHER_USER, SPACE);
+    // Another user joined the same space. Their intent must not leak into ours.
+    await joinIntent(OTHER_USER, SPACE);
 
-    expect(await selectJoinedSpaces(globalDb, mainDb, USER)).toEqual([]);
+    expect(await selectJoinedSpaces(mainDb, USER)).toEqual([]);
   });
 
   test("a joined space the caller is banned from is excluded", async () => {
-    const { globalDb, mainDb } = setup();
+    const { mainDb } = setup();
     await seedSpace();
-    await joinEdge(USER, SPACE);
+    await joinIntent(USER, SPACE);
     const db = openSpaceDb(SPACE);
     await db.run("insert into comp_bans (entity, user_did) values (?, ?)", [
       SPACE,
       USER,
     ]);
 
-    expect(await selectJoinedSpaces(globalDb, mainDb, USER)).toEqual([]);
+    expect(await selectJoinedSpaces(mainDb, USER)).toEqual([]);
   });
 
   test("a joined space with no member/admin edge for the caller is excluded", async () => {
-    const { globalDb, mainDb } = setup();
-    // joinedSpace intent exists, but the space stream never recorded the
+    const { mainDb } = setup();
+    // Membership intent exists, but the space stream never recorded the
     // member edge (e.g. join not yet accepted) — not a real membership.
     const db = openSpaceDb(SPACE);
     await seedEntity(SPACE, SPACE);
@@ -128,38 +129,50 @@ describe("selectJoinedSpaces", () => {
       SPACE,
       "Test Space",
     ]);
-    await joinEdge(USER, SPACE);
+    await joinIntent(USER, SPACE);
 
-    expect(await selectJoinedSpaces(globalDb, mainDb, USER)).toEqual([]);
+    expect(await selectJoinedSpaces(mainDb, USER)).toEqual([]);
+  });
+
+  test("a left space is included only with includeLeft", async () => {
+    const { mainDb } = setup();
+    await seedSpace();
+    await setUserSpaceMembership(
+      openReadStateDb(),
+      USER,
+      SPACE,
+      "left",
+      "test",
+      "01TEST0000000000000000000001",
+    );
+
+    expect(await selectJoinedSpaces(mainDb, USER)).toEqual([]);
+    const left = await selectJoinedSpaces(mainDb, USER, { includeLeft: true });
+    expect(left).toHaveLength(1);
+    expect(left[0]).toMatchObject({ id: SPACE, isMember: false, isAdmin: false });
   });
 });
 
 describe("recordPersonalSpaceMembership", () => {
   test("makes an already-materialised space visible to getSpaces", async () => {
-    const { globalDb, mainDb } = setup();
+    const { mainDb } = setup();
     await seedSpace();
-    expect(await selectJoinedSpaces(globalDb, mainDb, USER)).toEqual([]);
+    expect(await selectJoinedSpaces(mainDb, USER)).toEqual([]);
 
-    // `recordPersonalSpaceMembership` seeds the joinedSpace edge + entity rows.
-    // It targets the per-space DB (it writes `entities` rows, which only exist
-    // in the per-space schema). The membership edge the read path needs lives
-    // in the global DB, so — exactly as the handler fast-path does via
-    // `recordGlobalMembership` — we mirror the edge into the global DB.
+    // `recordPersonalSpaceMembership` seeds the joinedSpace edge + entity rows
+    // in the per-space DB. The read path now reads durable intent from the
+    // read-state DB, so we mirror the join there too (as the handler does).
     const spaceDb = openSpaceDb(SPACE);
     await recordPersonalSpaceMembership(spaceDb, SPACE, USER);
-    const g = openGlobalDb();
-    await g.run(
-      "insert or ignore into edges (head, tail, label) values (?, ?, ?)",
-      [USER, SPACE, JOINED_SPACE_LABEL],
-    );
+    await joinIntent(USER, SPACE);
 
-    const spaces = await selectJoinedSpaces(globalDb, mainDb, USER);
+    const spaces = await selectJoinedSpaces(mainDb, USER);
     expect(spaces).toHaveLength(1);
     expect(spaces[0]).toMatchObject({ id: SPACE, name: "Test Space" });
   });
 
   test("seeds the entity rows the joinedSpace edge depends on", async () => {
-    const { globalDb } = setup();
+    const { mainDb } = setup();
     // Neither the space nor the user entity exists yet. The write lands in
     // the per-space DB (which has the `entities` table).
     const spaceDb = openSpaceDb(SPACE);
@@ -182,19 +195,15 @@ describe("recordPersonalSpaceMembership", () => {
   });
 
   test("is idempotent", async () => {
-    const { globalDb, mainDb } = setup();
+    const { mainDb } = setup();
     await seedSpace();
 
     const spaceDb = openSpaceDb(SPACE);
     await recordPersonalSpaceMembership(spaceDb, SPACE, USER);
     await recordPersonalSpaceMembership(spaceDb, SPACE, USER);
-    const g = openGlobalDb();
-    await g.run(
-      "insert or ignore into edges (head, tail, label) values (?, ?, ?)",
-      [USER, SPACE, JOINED_SPACE_LABEL],
-    );
+    await joinIntent(USER, SPACE);
 
-    expect(await selectJoinedSpaces(globalDb, mainDb, USER)).toHaveLength(1);
+    expect(await selectJoinedSpaces(mainDb, USER)).toHaveLength(1);
   });
 });
 

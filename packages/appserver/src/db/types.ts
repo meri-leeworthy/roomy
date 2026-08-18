@@ -73,6 +73,18 @@ export interface DbLike {
    */
   global?(): DbLike;
   /**
+   * Optional (read-state): a routed handle whose requests target the
+   * read-state DB (durable user-owned state like membership intent). Absent
+   * on sync adapters used in tests that don't exercise dual-write.
+   */
+  readState?(): DbLike;
+  /**
+   * Optional (event log): a routed handle whose requests target the raw
+   * event-log DB. Absent on sync adapters used in tests that don't exercise
+   * the event log directly.
+   */
+  events?(): DbLike;
+  /**
    * Optional (Phase 3): backfill the global `entity_space` index from a
    * per-space DB's `entities` table. Absent on sync adapters used in tests
    * that don't exercise the entity→space index.
