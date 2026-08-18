@@ -213,15 +213,15 @@ async function handleMessage(
       return;
     }
     const thinking = reply.thinking?.trim();
-    const postThinking = (opts.thinking ?? true) && !!thinking;
-    const blocks = buildReplyBlocks(reply.answer, postThinking ? thinking : undefined);
-    const { messageId } = await sendMessage(
-      auth.xrpc,
-      spaceId,
-      roomId,
-      reply.answer,
-      blocks ? { blocks } : {},
-    );
+  const postThinking = (opts.thinking ?? true) && !!thinking;
+  const blocks = buildReplyBlocks(reply.answer, postThinking ? thinking : undefined);
+  const { messageId } = await sendMessage(
+    auth.xrpc,
+    spaceId,
+    roomId,
+    reply.answer,
+    blocks.length > 0 ? { blocks } : {},
+  );
     console.error(`[agent] replied ${messageId}${postThinking ? " (with thinking)" : ""}`);
   } catch (error) {
     console.error(
@@ -409,20 +409,22 @@ export function parseOmpJson(raw: string): OmpReply {
 
 /**
  * Build the rich-text blocks for the agent's reply: an optional thinking
- * blockquote followed by the answer as normal text.
+ * blockquote followed by the answer as normal text. Always includes the answer
+ * so the reply is never an empty document.
  */
 export function buildReplyBlocks(answer: string, thinking?: string): Block[] {
-  if (!thinking) return [];
-  return [
-    {
+  const blocks: Block[] = [];
+  if (thinking) {
+    blocks.push({
       $type: "space.roomy.richtext.blocks#blockquote",
       text: thinking,
-    },
-    {
-      $type: "space.roomy.richtext.blocks#text",
-      text: answer,
-    },
-  ];
+    });
+  }
+  blocks.push({
+    $type: "space.roomy.richtext.blocks#text",
+    text: answer,
+  });
+  return blocks;
 }
 
 /** The appserver base64-encodes non-text content blobs (e.g. richtext JSON)
