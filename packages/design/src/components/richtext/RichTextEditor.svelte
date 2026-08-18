@@ -31,6 +31,7 @@
   import "./code.css";
   import { cn } from "@foxui/core";
   import { ImageUploadNode } from "./image-upload/ImageUploadNode";
+  import { SmallText } from "./SmallText";
   import { Transaction } from "@tiptap/pm/state";
   import type { Comment as CommentType } from "./types";
 
@@ -256,6 +257,7 @@
           return "https://picsum.photos/200/300";
         },
       }),
+      SmallText,
     ];
 
     editor = new Editor({
@@ -456,6 +458,8 @@
       editor?.chain().focus().setNode("heading", { level: 3 }).run();
     } else if (value === "blockquote") {
       editor?.chain().focus().setBlockquote().run();
+    } else if (value === "small") {
+      editor?.chain().focus().setSmallText().run();
     } else if (value === "code") {
       editor?.chain().focus().setCodeBlock().run();
     } else if (value === "bullet-list") {

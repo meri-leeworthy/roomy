@@ -232,7 +232,7 @@ function marksToFeatures(
  */
 function textBlockFromInline(
   node: ProseMirrorNode,
-  blockType: "space.roomy.richtext.blocks#text" | "space.roomy.richtext.blocks#header" | "space.roomy.richtext.blocks#blockquote",
+  blockType: "space.roomy.richtext.blocks#text" | "space.roomy.richtext.blocks#header" | "space.roomy.richtext.blocks#blockquote" | "space.roomy.richtext.blocks#small",
   extra: Record<string, unknown> = {},
 ): Block {
   const runs = flattenInline(node);
@@ -306,6 +306,9 @@ export function proseMirrorDocToBlocks(doc: ProseMirrorDoc): Block[] {
       }
       case "blockquote":
         blocks.push(textBlockFromInline(node, "space.roomy.richtext.blocks#blockquote"));
+        break;
+      case "smallText":
+        blocks.push(textBlockFromInline(node, "space.roomy.richtext.blocks#small"));
         break;
       case "codeBlock": {
         const text = (node.content ?? [])
@@ -518,6 +521,14 @@ export function blocksToProseMirrorDoc(blocks: Block[]): ProseMirrorDoc {
         });
         break;
       }
+      case "space.roomy.richtext.blocks#small": {
+        const small = block as { $type: "space.roomy.richtext.blocks#small"; text: string; facets?: Facet[] };
+        content.push({
+          type: "smallText",
+          content: textNodesWithFacets(small.text, small.facets),
+        });
+        break;
+      }
       case "space.roomy.richtext.blocks#code": {
         const code = block as { $type: "space.roomy.richtext.blocks#code"; text: string; language?: string };
         content.push({
@@ -576,7 +587,8 @@ export function blocksToPlaintext(blocks: Block[]): string {
     switch (block.$type) {
       case "space.roomy.richtext.blocks#text":
       case "space.roomy.richtext.blocks#header":
-      case "space.roomy.richtext.blocks#blockquote": {
+      case "space.roomy.richtext.blocks#blockquote":
+      case "space.roomy.richtext.blocks#small": {
         const textBlock = block as { text: string };
         parts.push(textBlock.text);
         break;
@@ -615,7 +627,8 @@ export function extractFacetUrls(blocks: Block[]): string[] {
     switch (block.$type) {
       case "space.roomy.richtext.blocks#text":
       case "space.roomy.richtext.blocks#header":
-      case "space.roomy.richtext.blocks#blockquote": {
+      case "space.roomy.richtext.blocks#blockquote":
+      case "space.roomy.richtext.blocks#small": {
         const textBlock = block as { facets?: Facet[] };
         collect(textBlock.facets);
         break;
@@ -650,7 +663,8 @@ export function extractMentionDids(blocks: Block[]): string[] {
     switch (block.$type) {
       case "space.roomy.richtext.blocks#text":
       case "space.roomy.richtext.blocks#header":
-      case "space.roomy.richtext.blocks#blockquote": {
+      case "space.roomy.richtext.blocks#blockquote":
+      case "space.roomy.richtext.blocks#small": {
         const textBlock = block as { facets?: Facet[] };
         collect(textBlock.facets);
         break;
@@ -699,7 +713,8 @@ export function extractInternalLinkTargets(
     switch (block.$type) {
       case "space.roomy.richtext.blocks#text":
       case "space.roomy.richtext.blocks#header":
-      case "space.roomy.richtext.blocks#blockquote": {
+      case "space.roomy.richtext.blocks#blockquote":
+      case "space.roomy.richtext.blocks#small": {
         const textBlock = block as { facets?: Facet[] };
         collect(textBlock.facets);
         break;
@@ -738,7 +753,7 @@ export function markdownToBlocks(md: string): Block[] {
 
   const inlineToBlock = (
     text: string,
-    blockType: "space.roomy.richtext.blocks#text" | "space.roomy.richtext.blocks#header" | "space.roomy.richtext.blocks#blockquote",
+    blockType: "space.roomy.richtext.blocks#text" | "space.roomy.richtext.blocks#header" | "space.roomy.richtext.blocks#blockquote" | "space.roomy.richtext.blocks#small",
     extra: Record<string, unknown> = {},
   ): Block => {
     const { text: plain, facets } = parseInline(text);
@@ -791,6 +806,16 @@ export function markdownToBlocks(md: string): Block[] {
         inlineToBlock(heading[2]!, "space.roomy.richtext.blocks#header", {
           level: heading[1]!.length,
         }),
+      );
+      i++;
+      continue;
+    }
+
+    // Small text (Discord `-# small text`).
+    const small = /^-\#\s+(.*)$/.exec(trimmed);
+    if (small) {
+      blocks.push(
+        inlineToBlock(small[1]!, "space.roomy.richtext.blocks#small"),
       );
       i++;
       continue;
@@ -857,6 +882,7 @@ export function markdownToBlocks(md: string): Block[] {
       i < lines.length &&
       lines[i]!.trim() !== "" &&
       !/^(#{1,6})\s+/.test(lines[i]!.trim()) &&
+      !/^-\#\s+/.test(lines[i]!.trim()) &&
       !/^```/.test(lines[i]!.trim()) &&
       !/^>/.test(lines[i]!.trim()) &&
       !/^([-*+])\s+/.test(lines[i]!.trim()) &&

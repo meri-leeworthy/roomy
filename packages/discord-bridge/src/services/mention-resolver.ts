@@ -87,6 +87,14 @@ function blockquoteBlock(text: string, facets?: Facet[]): Block {
 	return facets && facets.length > 0 ? { ...base, facets } : base;
 }
 
+function smallBlock(text: string, facets?: Facet[]): Block {
+	const base = {
+		$type: "space.roomy.richtext.blocks#small" as const,
+		text,
+	};
+	return facets && facets.length > 0 ? { ...base, facets } : base;
+}
+
 function codeBlock(text: string, language?: string): Block {
 	return language
 		? { $type: "space.roomy.richtext.blocks#code" as const, text, language }
@@ -203,6 +211,16 @@ function parseBlocks(content: string, ctx: InlineCtx): Block[] {
 			continue;
 		}
 
+		// Small text (Discord `-# small text`).
+		const small = /^-#\s+(.*)$/.exec(trimmed);
+		if (small) {
+			const content = small[1] ?? "";
+			const { text, facets } = inlineFacets(content);
+			blocks.push(smallBlock(text, facets));
+			i++;
+			continue;
+		}
+
 		// Blockquote (single level; nested quotes flattened).
 		if (trimmed.startsWith(">")) {
 			const quoteLines: string[] = [];
@@ -278,6 +296,7 @@ function parseBlocks(content: string, ctx: InlineCtx): Block[] {
 			if (
 				t === "" ||
 				/^(#{1,6})\s+/.test(t) ||
+				/^-\#\s+/.test(t) ||
 				/^```/.test(t) ||
 				/^>/.test(t) ||
 				/^([-*+])\s+/.test(t) ||

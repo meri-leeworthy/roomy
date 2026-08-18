@@ -161,6 +161,17 @@ describe("blocksToDiscordMarkdown", () => {
 			).toBe("> quoted");
 		});
 
+		test("small text prefixed with -# (Discord small text)", () => {
+			expect(
+				blocksToDiscordMarkdown([
+					{
+						$type: "space.roomy.richtext.blocks#small",
+						text: "a small caption",
+					},
+				]),
+			).toBe("-# a small caption");
+		});
+
 		test("code block with language renders as a fenced code block", () => {
 			expect(
 				blocksToDiscordMarkdown([

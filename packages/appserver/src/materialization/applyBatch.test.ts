@@ -324,6 +324,40 @@ describe("applyBatch", () => {
     expect(count).toBe(1);
   })
 
+  // Regression: a createRoomLink's system message ("created [thread]") must
+  // never be empty. When the acting user has no profile yet (e.g. the Discord
+  // bridge bot, which creates threads without a comp_user row), SQLite's ||
+  // with a NULL handle operand yields NULL for the whole content expression,
+  // materialising an *empty* system message in the parent room. The
+  // materialiser must coalesce the author handle (to the DID) and the linked
+  // room name so the message is always non-empty and clickable.
+  test("createRoomLink system message is non-empty even when the author has no profile", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+    const channelId = newUlid();
+    const threadId = newUlid();
+    seedChannelAndThread(db, channelId, threadId);
+    db.run("insert into comp_info (entity, name) values (?, ?)", [
+      threadId,
+      "My Thread",
+    ]);
+
+    const link = createRoomLinkEvent(channelId, threadId);
+
+    await applyBatch(asyncDb, STREAM, [decoded(link, 1)], { isBackfill: true });
+
+    // The system message's markdown content must not be NULL. The author is
+    // USER (no profile/handle), so it falls back to the DID.
+    const row = await asyncDb
+      .query("select data, mime_type from comp_content where entity = ?")
+      .get<{ data: Uint8Array | null; mime_type: string }>(link.id as unknown as string);
+    expect(row?.data).not.toBeNull();
+    expect(row?.mime_type).toBe("text/markdown");
+    const text = new TextDecoder().decode(row?.data as Uint8Array);
+    expect(text).toContain("created [My Thread]");
+    expect(text).toContain(USER);
+  })
+
   // The space.joinSpace materialiser must write the `joinedSpace` edge with
   // the *user DID* as head and the space stream as tail — this is what
   // tracks membership. In Phase 3 the appserver routes these membership

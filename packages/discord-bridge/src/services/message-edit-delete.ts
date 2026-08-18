@@ -14,6 +14,7 @@ import {
 	type MentionContext,
 	resolveMentionsToBlocks,
 } from "./mention-resolver.ts";
+import { buildRoomyRoomIds } from "./message-ingestion.ts";
 import { syncUserProfile } from "./profile-sync.ts";
 
 const log = createLogger("edit-delete");
@@ -85,12 +86,14 @@ export async function handleMessageEdit(
 		const eventUlid = newUlid();
 
 		// Resolve Discord mention syntax into clean Markdown (per-space, so
-		// channel mentions resolve to the correct Roomy room ULID).
-		const roomyRoomIds = new Map<string, string>();
-		for (const [snowflake] of channelNames) {
-			const roomyId = repo.getRoomyRoomId(spaceDid, snowflake);
-			if (roomyId) roomyRoomIds.set(snowflake, roomyId);
-		}
+		// channel mentions resolve to the correct Roomy room ULID). Build the
+		// room map from the content's <#id> references so bridged thread/channel
+		// mentions always get a link even if the display name can't be resolved.
+		const roomyRoomIds = buildRoomyRoomIds(
+			message.content || "",
+			repo,
+			spaceDid,
+		);
 		const mentionCtx: MentionContext = { channelNames, roomyRoomIds };
 		const userMentions = (message.mentions ?? []).map((m) => ({
 			id: m.id,

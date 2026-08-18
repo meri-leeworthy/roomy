@@ -78,6 +78,7 @@
         { value: "heading-2", label: "Heading 2" },
         { value: "heading-3", label: "Heading 3" },
         { value: "blockquote", label: "Blockquote" },
+        { value: "small", label: "Small Text" },
         { value: "code", label: "Code Block" },
         { value: "bullet-list", label: "Bullet List" },
         { value: "ordered-list", label: "Ordered List" },

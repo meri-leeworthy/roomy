@@ -107,6 +107,14 @@ export function suggestion({
           },
         },
         {
+          value: "small",
+          label: "Small Text",
+          command: ({ editor, range }: { editor: Editor; range: Range }) => {
+            editor.chain().focus().deleteRange(range).run();
+            switchTo("small");
+          },
+        },
+        {
           value: "code",
           label: "Code Block",
           command: ({ editor, range }: { editor: Editor; range: Range }) => {

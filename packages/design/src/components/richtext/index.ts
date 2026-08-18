@@ -11,6 +11,7 @@ export type RichTextTypes =
   | "heading-2"
   | "heading-3"
   | "blockquote"
+  | "small"
   | "code"
   | "bullet-list"
   | "ordered-list";

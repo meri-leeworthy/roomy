@@ -387,6 +387,42 @@ describe("ingestDiscordMessage — mention resolution", () => {
 		const rich = decodeRichText(event.body);
 		expectToBe(rich.text, "This is  amazing!");
 	});
+
+	// MI14c: A bridged channel/thread referenced via <#id> in the content gets
+	// a roomRef/link facet even when it's absent from mentionChannelIds and its
+	// display name can't be resolved (Discord omits threads from mention
+	// channels, and name resolution may fail). Previously this rendered as
+	// plaintext "#snowflake" with no link to the bridged Roomy room.
+	test("MI14c: bridges a thread/channel <#id> mention as a link even without mentionChannelIds", async () => {
+		// Mention a THREAD that IS bridged, but is not in mentionChannelIds (Discord
+		// omits threads from that field). Its display name comes from a content
+		// scan + resolver, and it must get a roomRef/link to the bridged Roomy room.
+		const threadId = "222222222222222222";
+		mapThread(repo, threadId, "01HXBRIDGEDTHREADULID");
+		const msg = makeMessage({
+			id: "1111111120",
+			content: `look at <#${threadId}>`,
+			// no mentionChannelIds
+		});
+		const resolveChannelName = async (_id: string) => "announcements";
+
+		await ingestDiscordMessage(
+			msg,
+			repo,
+			roomy,
+			undefined,
+			undefined,
+			resolveChannelName,
+		);
+
+		const event = createMessageEvent(roomy, SPACE_A);
+		expectToBeDefined(event);
+		const rich = decodeRichText(event.body);
+		expect(rich.text).toContain("#announcements");
+		expect(rich.roomRefs).toEqual([
+			{ spaceId: SPACE_A, roomId: "01HXBRIDGEDTHREADULID" },
+		]);
+	});
 });
 
 describe("ingestDiscordMessage — threadStarterMessage", () => {

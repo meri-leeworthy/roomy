@@ -11,6 +11,7 @@
         "space.roomy.richtext.blocks#text",
         "space.roomy.richtext.blocks#header",
         "space.roomy.richtext.blocks#blockquote",
+        "space.roomy.richtext.blocks#small",
         "space.roomy.richtext.blocks#code",
         "space.roomy.richtext.blocks#orderedList",
         "space.roomy.richtext.blocks#unorderedList",
@@ -46,6 +47,18 @@
     "blockquote": {
       "type": "object",
       "description": "A quoted block of text.",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string" },
+        "facets": {
+          "type": "array",
+          "items": { "type": "ref", "ref": "space.roomy.richtext.facet#main" }
+        }
+      }
+    },
+    "small": {
+      "type": "object",
+      "description": "Small text (Discord `-# small text`), rendered smaller than body text.",
       "required": ["text"],
       "properties": {
         "text": { "type": "string" },

@@ -143,6 +143,13 @@ export const BlockquoteBlock = type({
 });
 export type BlockquoteBlock = typeof BlockquoteBlock.infer;
 
+export const SmallTextBlock = type({
+  $type: "'space.roomy.richtext.blocks#small'",
+  text: "string",
+  "facets?": Facet.array(),
+}).describe("Small text (Discord `-# small text`), rendered smaller than body text.");
+export type SmallTextBlock = typeof SmallTextBlock.infer;
+
 export const CodeBlock = type({
   $type: "'space.roomy.richtext.blocks#code'",
   text: "string",
@@ -201,6 +208,7 @@ export const Block = type.or(
   TextBlock,
   HeaderBlock,
   BlockquoteBlock,
+  SmallTextBlock,
   CodeBlock,
   OrderedListBlock,
   UnorderedListBlock,

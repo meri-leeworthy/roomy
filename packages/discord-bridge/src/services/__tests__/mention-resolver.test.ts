@@ -398,6 +398,31 @@ describe("Discord markdown → richtext", () => {
 		expect(blocks[0]?.$type).toBe("space.roomy.richtext.blocks#blockquote");
 	});
 
+	test("parses Discord `-# small text` into a small block", () => {
+		const blocks = resolveMentionsToBlocks("-# a small caption", [], ctx(), SPACE);
+		expect(blocks[0]?.$type).toBe("space.roomy.richtext.blocks#small");
+		expect(blocks[0] && "text" in blocks[0] ? blocks[0].text : undefined).toBe(
+			"a small caption",
+		);
+	});
+
+	test("keeps a `-# small text` line as its own block after a paragraph", () => {
+		const blocks = resolveMentionsToBlocks(
+			"body text\n-# a small caption\nmore body",
+			[],
+			ctx(),
+			SPACE,
+		);
+		expect(blocks.map((b) => b.$type)).toEqual([
+			"space.roomy.richtext.blocks#text",
+			"space.roomy.richtext.blocks#small",
+			"space.roomy.richtext.blocks#text",
+		]);
+		expect(blocks[1] && "text" in blocks[1] ? blocks[1].text : undefined).toBe(
+			"a small caption",
+		);
+	});
+
 	test("parses bullet and ordered lists", () => {
 		const blocks = resolveMentionsToBlocks(
 			"- one\n- two\n\n1. first\n2. second",

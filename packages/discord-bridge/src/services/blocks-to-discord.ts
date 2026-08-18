@@ -144,6 +144,12 @@ export function blocksToDiscordMarkdown(blocks: Block[]): string {
 				if (t) parts.push(`> ${renderInline(t.text, t.facets)}`);
 				break;
 			}
+			case "space.roomy.richtext.blocks#small": {
+				const t = textOf(block);
+				// Discord's `-# small text` renders smaller than body text.
+				if (t) parts.push(`-# ${renderInline(t.text, t.facets)}`);
+				break;
+			}
 			case "space.roomy.richtext.blocks#code": {
 				const t = textOf(block);
 				if (!t) break;

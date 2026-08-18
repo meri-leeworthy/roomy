@@ -35,6 +35,22 @@ describe("richtext convert — blocks ↔ ProseMirror round-trip", () => {
     expect(proseMirrorDocToBlocks(doc)).toEqual(blocks);
   });
 
+  it("round-trips a small-text block through the editor", () => {
+    const blocks: Block[] = [
+      { $type: "space.roomy.richtext.blocks#small", text: "a small caption" },
+    ];
+    const doc = blocksToProseMirrorDoc(blocks);
+    expect(doc.content?.map((n) => n.type)).toEqual(["smallText"]);
+    expect(proseMirrorDocToBlocks(doc)).toEqual(blocks);
+  });
+
+  it("parses Discord `-# small text` into a small block", () => {
+    const blocks = markdownToBlocks("-# a small caption");
+    expect(blocks).toEqual([
+      { $type: "space.roomy.richtext.blocks#small", text: "a small caption" },
+    ]);
+  });
+
   it("preserves newlines as hard breaks when re-parsing a soft break", () => {
     // A single newline (soft break) must survive the editor round-trip as a
     // hard break, not collapse to a space.

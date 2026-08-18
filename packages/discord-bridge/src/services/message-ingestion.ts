@@ -47,6 +47,34 @@ function writeSkipRecord(
 	appendFile(SKIP_LOG_PATH, `${JSON.stringify(record)}\n`).catch(() => {});
 }
 
+/**
+ * Build the snowflake → Roomy room ULID map for channel/thread mentions.
+ *
+ * Scans the raw content for every `<#id>` reference rather than relying on
+ * `message.mentionChannelIds` alone: Discord doesn't always include threads
+ * in that field, and it's still empty when name resolution fails. Scanning
+ * the content directly guarantees a bridged channel/thread mention always
+ * becomes a link to its Roomy room (the parser emits a `#roomRef`/`#link`
+ * facet whenever the ULID is present).
+ */
+export function buildRoomyRoomIds(
+	content: string,
+	repo: BridgeRepository,
+	spaceDid: string,
+): Map<string, string> {
+	const roomyRoomIds = new Map<string, string>();
+	const refs = new Set<string>();
+	for (const m of content.matchAll(/<#(\d+)>/g)) {
+		const id = m[1];
+		if (id) refs.add(id);
+	}
+	for (const snowflake of refs) {
+		const roomyId = repo.getRoomyRoomId(spaceDid, snowflake);
+		if (roomyId) roomyRoomIds.set(snowflake, roomyId);
+	}
+	return roomyRoomIds;
+}
+
 export async function ingestDiscordMessage(
 	message: DiscordMessageData,
 	repo: BridgeRepository,
@@ -133,11 +161,19 @@ export async function ingestDiscordMessage(
 		return { synced: 0, skipped: 1 };
 	}
 
-	// Pre-resolve channel names from mentionedChannelIds (before per-space loop).
+	// Pre-resolve channel/thread names (before per-space loop). Collect every
+	// channel/thread referenced in the content via <#id>, plus Discord's
+	// mentionChannelIds (some overlap). Discord omits threads from
+	// mentionChannelIds, so scanning the content guarantees a thread mention
+	// gets both its display name and its Roomy link.
 	const channelNames = new Map<string, string>();
-	if (resolveChannelName && message.mentionChannelIds) {
+	if (resolveChannelName) {
+		const refs = new Set<string>(message.mentionChannelIds ?? []);
+		for (const m of (message.content ?? "").matchAll(/<#(\d+)>/g)) {
+			if (m[1]) refs.add(m[1]);
+		}
 		const results = await Promise.all(
-			message.mentionChannelIds.map(async (idStr) => {
+			[...refs].map(async (idStr) => {
 				const name = await resolveChannelName(idStr);
 				return { idStr, name } as const;
 			}),
@@ -188,11 +224,14 @@ export async function ingestDiscordMessage(
 		}
 
 		// Resolve Discord mention syntax into clean Markdown (per-space).
-		const roomyRoomIds = new Map<string, string>();
-		for (const [snowflake] of channelNames) {
-			const roomyId = repo.getRoomyRoomId(spaceDid, snowflake);
-			if (roomyId) roomyRoomIds.set(snowflake, roomyId);
-		}
+		// Build the room map from the content's <#id> references so bridged
+		// thread/channel mentions always get a link, even if the display name
+		// couldn't be resolved (falls back to the snowflake text).
+		const roomyRoomIds = buildRoomyRoomIds(
+			message.content || "",
+			repo,
+			spaceDid,
+		);
 		const mentionCtx: MentionContext = {
 			channelNames,
 			roomyRoomIds,
