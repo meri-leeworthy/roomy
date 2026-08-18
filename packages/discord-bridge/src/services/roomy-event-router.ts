@@ -137,6 +137,11 @@ export class RoomyEventRouter {
 	#profiles: ProfileResolver;
 	#repo: BridgeRepository;
 	#fetchAttachment: (uri: string) => Promise<Uint8Array<ArrayBuffer>>;
+	#queryMessage: (
+		messageId: string,
+	) => Promise<
+		{ authorDid: string; authorName: string; authorHandle?: string } | undefined
+	>;
 
 	constructor(
 		roomy: RoomyGateway,
@@ -147,6 +152,12 @@ export class RoomyEventRouter {
 		opts?: {
 			appserverUrl?: string;
 			fetchAttachment?: (uri: string) => Promise<Uint8Array<ArrayBuffer>>;
+			queryMessage?: (
+				messageId: string,
+			) => Promise<
+				| { authorDid: string; authorName: string; authorHandle?: string }
+				| undefined
+			>;
 		},
 	) {
 		this.#roomy = roomy;
@@ -158,6 +169,7 @@ export class RoomyEventRouter {
 		this.#fetchAttachment =
 			opts?.fetchAttachment ??
 			((uri) => defaultFetchAttachment(uri, appserverUrl));
+		this.#queryMessage = opts?.queryMessage ?? (async () => undefined);
 	}
 
 	/**
@@ -238,10 +250,10 @@ export class RoomyEventRouter {
 				await this.#handleCreateRoomLink(spaceDid, event);
 				break;
 			case "space.roomy.message.forwardMessages.v0":
-				await this.#handleForwardMessages(spaceDid, event);
+				await this.#handleForwardMessages(spaceDid, event, meta);
 				break;
 			case "space.roomy.message.moveMessages.v0":
-				await this.#handleMoveMessages(spaceDid, event);
+				await this.#handleMoveMessages(spaceDid, event, meta);
 				break;
 			// Ignore other event types (room lifecycle, space events, etc.)
 		}
@@ -500,6 +512,7 @@ export class RoomyEventRouter {
 		targetChannelId: string,
 		sourceChannelId: string,
 		discordMessageId: string,
+		originalAuthorName: string,
 	): Promise<string | undefined> {
 		const guildId = await this.#discord.getGuildId(targetChannelId);
 		if (!guildId) return undefined;
@@ -516,7 +529,7 @@ export class RoomyEventRouter {
 			// Message may be deleted — forward the link alone.
 		}
 
-		return `-# ↪ Forwarded from ${link}\n${body}`;
+		return `-# ↪ Forwarded from ${link} by ${originalAuthorName}\n${body}`;
 	}
 
 	async #handleEditMessage(
@@ -764,6 +777,7 @@ export class RoomyEventRouter {
 	async #handleForwardMessages(
 		spaceDid: string,
 		event: Event & { $type: "space.roomy.message.forwardMessages.v0" },
+		meta: { userDid: string },
 	): Promise<void> {
 		if (!event.room) {
 			log.debug("forwardMessages event has no room; skipping");
@@ -785,12 +799,14 @@ export class RoomyEventRouter {
 			event.room,
 			sourceChannelId,
 			"forward",
+			meta.userDid,
 		);
 	}
 
 	async #handleMoveMessages(
 		spaceDid: string,
 		event: Event & { $type: "space.roomy.message.moveMessages.v0" },
+		meta: { userDid: string },
 	): Promise<void> {
 		if (!event.room) {
 			log.debug("moveMessages event has no room; skipping");
@@ -814,6 +830,7 @@ export class RoomyEventRouter {
 			destRoomId,
 			sourceChannelId,
 			"move",
+			meta.userDid,
 		);
 	}
 
@@ -832,6 +849,7 @@ export class RoomyEventRouter {
 		destRoomId: string,
 		sourceChannelId: string | undefined,
 		action: "forward" | "move",
+		forwarderDid: string,
 	): Promise<void> {
 		if (!sourceChannelId) {
 			log.debug(
@@ -868,6 +886,21 @@ export class RoomyEventRouter {
 		}
 		const webhook = await this.#webhooks.ensureWebhook(webhookChannelId);
 
+		// The webhook user is the person who did the forward, so the forwarded
+		// message is attributed to them (not the bridge bot).
+		let username = "Roomy";
+		let avatarUrl: string | undefined;
+		const forwarderProfile = await this.#profiles.getProfile(forwarderDid);
+		if (forwarderProfile) {
+			username =
+				forwarderProfile.name &&
+				forwarderProfile.handle &&
+				forwarderProfile.name !== forwarderProfile.handle
+					? `${forwarderProfile.name} - @${forwarderProfile.handle}`
+					: forwarderProfile.name;
+			avatarUrl = forwarderProfile.avatarUrl ?? undefined;
+		}
+
 		let count = 0;
 		for (const messageId of event.messageIds) {
 			// Per-message dedup: use a composite key (event ID + message ID) so
@@ -893,12 +926,19 @@ export class RoomyEventRouter {
 
 			try {
 				// Faux forward: Discord webhooks can't create native forwards, so
-				// send the original content with a "Forwarded from <link>" prefix
-				// via the webhook (keeping the author's custom attribution).
+				// send the original content with a "Forwarded from <link> by
+				// <original author>" prefix via the webhook, attributed to the
+				// user who did the forward.
+				const original = await this.#queryMessage(messageId);
+				const originalAuthorName = original
+					? original.authorName ||
+						(original.authorHandle ? `@${original.authorHandle}` : "someone")
+					: "someone";
 				const forwardContent = await this.#buildForwardContent(
 					targetChannelId,
 					sourceChannelId,
 					discordMessageId,
+					originalAuthorName,
 				);
 				if (!forwardContent) {
 					log.debug(
@@ -910,7 +950,7 @@ export class RoomyEventRouter {
 				const newDiscordMessageId = await this.#discord.sendMessage(
 					targetChannelId,
 					forwardContent,
-					{ webhook, threadId },
+					{ username, avatarUrl, webhook, threadId },
 				);
 
 				// Register a mapping so the Discord→Roomy ingestion dedup

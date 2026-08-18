@@ -22,7 +22,10 @@ import { FileDiscordSender } from "../../discord/file-sender.ts";
 import { FileWebhookManager } from "../../discord/file-webhook-manager.ts";
 import { FileProfileResolver } from "../../roomy/file-profile-resolver.ts";
 import { MockRoomyGateway } from "../../roomy/mock-gateway.ts";
-import { resolveAttachmentUrl, RoomyEventRouter } from "../roomy-event-router.ts";
+import {
+	RoomyEventRouter,
+	resolveAttachmentUrl,
+} from "../roomy-event-router.ts";
 import {
 	GUILD,
 	ROOMY_CHANNEL_ULID,
@@ -201,6 +204,11 @@ function setup(): {
 		{
 			fetchAttachment: async (uri) =>
 				new TextEncoder().encode(`bytes for ${uri}`),
+			queryMessage: async (messageId) => ({
+				authorDid: "did:plc:original-author",
+				authorName: "Original Author",
+				authorHandle: "original.bsky.social",
+			}),
 		},
 	);
 	return { repo, roomy, discord, webhooks, profiles, router };
@@ -604,14 +612,17 @@ describe("RoomyEventRouter", () => {
 		await router.subscribeToSpace(SPACE_A);
 
 		const forwardEvent = makeForwardMessagesEvent({});
-		await roomy.fireEvent(SPACE_A, forwardEvent);
+		await roomy.fireEvent(SPACE_A, forwardEvent, false, DISCORD_USER_DID);
 
 		expect(discord.sent).toHaveLength(1);
 		const sent = discord.sent[0];
 		expect(sent?.channelId).toBe(DISCORD_CHANNEL_ID);
 		expect(sent?.content).toBe(
-			`-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID}\noriginal content`,
+			`-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID} by Original Author\noriginal content`,
 		);
+		// The webhook is attributed to the user who did the forward.
+		expect(sent?.options?.username).toBe("Bridged User - @bridged.bsky.social");
+		expect(sent?.options?.avatarUrl).toBe("https://example.com/avatar.png");
 
 		// Mapping registered so Discord→Roomy dedup catches the echo
 		const mappedDiscordId = repo.getDiscordId(
@@ -801,14 +812,15 @@ describe("RoomyEventRouter", () => {
 		await router.subscribeToSpace(SPACE_A);
 
 		const moveEvent = makeMoveMessagesEvent({ toRoomId: destRoomId });
-		await roomy.fireEvent(SPACE_A, moveEvent);
+		await roomy.fireEvent(SPACE_A, moveEvent, false, DISCORD_USER_DID);
 
 		expect(discord.sent).toHaveLength(1);
 		const sent = discord.sent[0];
 		expect(sent?.channelId).toBe(destChannelId);
 		expect(sent?.content).toBe(
-			`-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID}\noriginal content`,
+			`-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID} by Original Author\noriginal content`,
 		);
+		expect(sent?.options?.username).toBe("Bridged User - @bridged.bsky.social");
 
 		// Original Discord message is NOT deleted
 		expect(discord.deleted).toHaveLength(0);
@@ -1139,7 +1151,10 @@ describe("resolveAttachmentUrl", () => {
 
 	test("passes plain HTTP(S) URIs through unchanged", () => {
 		expect(
-			resolveAttachmentUrl("https://cdn.example.com/a.png", "https://api.roomy.space"),
+			resolveAttachmentUrl(
+				"https://cdn.example.com/a.png",
+				"https://api.roomy.space",
+			),
 		).toBe("https://cdn.example.com/a.png");
 	});
 });

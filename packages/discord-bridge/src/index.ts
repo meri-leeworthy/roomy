@@ -138,7 +138,22 @@ async function main() {
 						webhookManager,
 						profileResolver,
 						repo,
-						{ appserverUrl: APPSERVER_URL() },
+						{
+							appserverUrl: APPSERVER_URL(),
+							queryMessage: async (messageId) => {
+								const msg = await spaceManager.xrpc.query(
+									"space.roomy.message.getMessage",
+									{ messageId },
+								);
+								return msg
+									? {
+											authorDid: msg.authorDid,
+											authorName: msg.authorName,
+											authorHandle: msg.authorHandle,
+										}
+									: undefined;
+							},
+						},
 					);
 					router
 						.start()
