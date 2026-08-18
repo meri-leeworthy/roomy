@@ -85,8 +85,17 @@ async function main() {
 
 	// Initialize Roomy client
 	const roomyClient = await initRoomyClient();
-	const spaceManager = new SpaceManager(roomyClient, APPSERVER_URL(), APPSERVER_DID());
-	const roomy = new LiveRoomyGateway(spaceManager, repo, spaceManager.xrpc, APPSERVER_WS_URL());
+	const spaceManager = new SpaceManager(
+		roomyClient,
+		APPSERVER_URL(),
+		APPSERVER_DID(),
+	);
+	const roomy = new LiveRoomyGateway(
+		spaceManager,
+		repo,
+		spaceManager.xrpc,
+		APPSERVER_WS_URL(),
+	);
 
 	// Start Discord gateway
 	// bot is assigned immediately after createBot; event handlers fire
@@ -129,6 +138,7 @@ async function main() {
 						webhookManager,
 						profileResolver,
 						repo,
+						{ appserverUrl: APPSERVER_URL() },
 					);
 					router
 						.start()
@@ -228,14 +238,14 @@ async function main() {
 					await handleRoomDelete(normalizeChannel(channel), repo, roomy);
 				},
 
-			async threadCreate(channel: ChannelProperties) {
-				await handleThreadCreate(
-					normalizeChannel(channel),
-					repo,
-					roomy,
-					appId,
-				);
-			},
+				async threadCreate(channel: ChannelProperties) {
+					await handleThreadCreate(
+						normalizeChannel(channel),
+						repo,
+						roomy,
+						appId,
+					);
+				},
 
 				async threadUpdate(channel: ChannelProperties) {
 					await handleRoomUpdate(normalizeChannel(channel), repo, roomy);
