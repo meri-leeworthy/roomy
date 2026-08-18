@@ -625,7 +625,15 @@ export class RoomyEventRouter {
 		if (!discordChannelId) return;
 
 		try {
-			await this.#discord.deleteMessage(discordChannelId, discordMessageId);
+			// Bridged messages are sent via the channel's webhook, so delete
+			// them via the webhook's own endpoint — the bot can't delete
+			// webhook-authored messages without the Manage Messages permission.
+			const webhook = await this.#webhooks.ensureWebhook(discordChannelId);
+			await this.#discord.deleteMessage(
+				discordChannelId,
+				discordMessageId,
+				webhook,
+			);
 			this.#repo.unregisterMapping(spaceDid, "message", discordMessageId);
 		} catch (err) {
 			log.error(

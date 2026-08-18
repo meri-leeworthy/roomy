@@ -45,8 +45,16 @@ export interface DiscordSender {
 		webhook?: { id: string; token: string },
 	): Promise<void>;
 
-	/** Delete a message from Discord. */
-	deleteMessage(channelId: string, messageId: string): Promise<void>;
+	/**
+	 * Delete a message from Discord. If a webhook is provided, uses the
+	 * webhook's own delete endpoint (required for webhook-authored messages,
+	 * which the bot can't delete without the Manage Messages permission).
+	 */
+	deleteMessage(
+		channelId: string,
+		messageId: string,
+		webhook?: { id: string; token: string },
+	): Promise<void>;
 
 	/** Add a reaction to a Discord message. */
 	addReaction(

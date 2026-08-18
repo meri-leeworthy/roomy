@@ -348,6 +348,29 @@ describe("Discord markdown → richtext", () => {
 		expect(linkFeat).toMatchObject({ uri: "https://example.com" });
 	});
 
+	test("turns a bare URL into a link facet", () => {
+		const [b] = inlineSummary("see https://example.com/x now");
+		expect(b?.text).toBe("see https://example.com/x now");
+		expect(b?.marks).toEqual([
+			{
+				start: 4,
+				end: 25,
+				features: ["space.roomy.richtext.facet#link"],
+			},
+		]);
+		const linkBlock = resolveMentionsToBlocks(
+			"see https://example.com/x now",
+			[],
+			ctx(),
+			SPACE,
+		)[0];
+		const linkFeat =
+			linkBlock && "facets" in linkBlock
+				? linkBlock.facets?.[0]?.features?.[0]
+				: undefined;
+		expect(linkFeat).toMatchObject({ uri: "https://example.com/x" });
+	});
+
 	test("parses bold around a Discord mention", () => {
 		const mentions: UserMention[] = [
 			{ id: BigInt("12345"), username: "u", globalName: "Alice" },

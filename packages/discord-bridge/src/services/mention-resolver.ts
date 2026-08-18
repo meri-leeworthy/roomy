@@ -418,6 +418,23 @@ function parseInline(
 			continue;
 		}
 
+		// Bare URL (Discord auto-links these). Turn it into a link facet so the
+		// URL is clickable on the Roomy side too.
+		const bareUrl = /^https?:\/\/[^\s<>()]+/.exec(rest);
+		if (bareUrl) {
+			flush();
+			const url = bareUrl[0] ?? "";
+			segments.push({
+				text: url,
+				features: [
+					...inherited,
+					{ $type: "space.roomy.richtext.facet#link" as const, uri: url },
+				],
+			});
+			i += url.length;
+			continue;
+		}
+
 		// Inline code `code`.
 		const code = /^`([^`]+)`/.exec(rest);
 		if (code) {

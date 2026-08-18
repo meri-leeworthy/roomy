@@ -336,6 +336,10 @@ describe("RoomyEventRouter", () => {
 		expect(discord.deleted[0]).toEqual({
 			channelId: DISCORD_CHANNEL_ID,
 			messageId: DISCORD_MESSAGE_ID,
+			webhook: {
+				id: `wh_${DISCORD_CHANNEL_ID}`,
+				token: `tok_${DISCORD_CHANNEL_ID}`,
+			},
 		});
 		expect(
 			repo.getDiscordId(SPACE_A, "message", ROOMY_MESSAGE_ULID),

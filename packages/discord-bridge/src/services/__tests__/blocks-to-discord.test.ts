@@ -93,6 +93,23 @@ describe("blocksToDiscordMarkdown", () => {
 			);
 		});
 
+		test("link facet whose text is already the URI is not duplicated", () => {
+			const linkFacet = {
+				index: { byteStart: 0, byteEnd: 22 },
+				features: [
+					{
+						$type: "space.roomy.richtext.facet#link",
+						uri: "https://example.com/x",
+					},
+				],
+			};
+			expect(
+				blocksToDiscordMarkdown([
+					textBlock("https://example.com/x", [linkFacet]),
+				]),
+			).toBe("https://example.com/x");
+		});
+
 		test("didMention facet for a bridged Discord user renders <@snowflake>", () => {
 			const mention = {
 				index: { byteStart: 0, byteEnd: 6 },

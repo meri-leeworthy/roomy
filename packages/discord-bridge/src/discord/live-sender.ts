@@ -169,7 +169,20 @@ export class LiveDiscordSender implements DiscordSender {
 		});
 	}
 
-	async deleteMessage(channelId: string, messageId: string): Promise<void> {
+	async deleteMessage(
+		channelId: string,
+		messageId: string,
+		webhook?: { id: string; token: string },
+	): Promise<void> {
+		if (webhook?.token) {
+			// Messages sent via webhook are authored by the webhook, not the bot.
+			// Use the webhook's own delete endpoint, which doesn't require the
+			// bot to have the Manage Messages permission.
+			const url = `/webhooks/${webhook.id}/${webhook.token}/messages/${messageId}`;
+			await this.#bot.rest.delete(url, { unauthorized: true });
+			return;
+		}
+
 		await this.#bot.helpers.deleteMessage(BigInt(channelId), BigInt(messageId));
 	}
 

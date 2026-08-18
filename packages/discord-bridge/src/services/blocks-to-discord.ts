@@ -53,8 +53,12 @@ function applyFeatures(segment: string, features: FacetFeature[]): string {
 				out = `\`${out}\``;
 				break;
 			case "space.roomy.richtext.facet#link":
-				// Discord auto-links bare URLs; emit the URI so it becomes clickable.
-				if ("uri" in f) out = `${out} (${f.uri})`;
+				// Discord auto-links bare URLs. If the link text is already the
+				// URI, emit it as-is (Discord auto-links it); otherwise append
+				// the URI so the link target is visible.
+				if ("uri" in f) {
+					out = out.trim() === f.uri ? out : `${out} (${f.uri})`;
+				}
 				break;
 			case "space.roomy.richtext.facet#didMention":
 				// Bridged Discord users carry `did:discord:<snowflake>`; render a

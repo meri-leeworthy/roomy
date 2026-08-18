@@ -120,9 +120,12 @@ program
   .option("--text <text>", "Message text")
   .option("--mention <did>", "Mention a user via a Roomy-native #didMention facet")
   .option("--mention-label <label>", "Display label for --mention (default: the mentioned DID)")
-  .action(async (options: { space: string; room?: string; text?: string; mention?: string; mentionLabel?: string }) => {
+  .option(
+    "--json <json>",
+    "Send a JSON richtext document (blocks array) instead of plain text",
+  )
+  .action(async (options: { space: string; room?: string; text?: string; mention?: string; mentionLabel?: string; json?: string }) => {
     try {
-      const text = options.text ?? await readStdin();
       const config = loadConfig();
       const { xrpc } = await authenticate(config);
       let roomId = options.room;
@@ -132,10 +135,21 @@ program
         roomId = lobby.id;
         console.error(`Using lobby room: ${lobby.name ?? "(unnamed)"} (${roomId})`);
       }
-      const blocks = options.mention
-        ? buildMentionBlocks(text, options.mention, options.mentionLabel ?? options.mention)
-        : undefined;
-      const { messageId } = await sendMessage(xrpc, options.space, roomId, text, { blocks });
+      let messageId: string;
+      if (options.json) {
+        const parsed = JSON.parse(options.json);
+        const blocks = Array.isArray(parsed) ? parsed : parsed?.blocks;
+        if (!Array.isArray(blocks)) {
+          throw new Error("--json must be a blocks array or a { blocks: [...] } document");
+        }
+        ({ messageId } = await sendMessage(xrpc, options.space, roomId, "", { blocks }));
+      } else {
+        const text = options.text ?? await readStdin();
+        const blocks = options.mention
+          ? buildMentionBlocks(text, options.mention, options.mentionLabel ?? options.mention)
+          : undefined;
+        ({ messageId } = await sendMessage(xrpc, options.space, roomId, text, { blocks }));
+      }
       console.error(`Message sent: ${messageId}`);
     } catch (error) {
       console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);

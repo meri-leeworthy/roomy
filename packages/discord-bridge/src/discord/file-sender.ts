@@ -23,6 +23,7 @@ export interface EditedMessage {
 export interface DeletedMessage {
 	channelId: string;
 	messageId: string;
+	webhook?: { id: string; token: string };
 }
 
 export interface AddedReaction {
@@ -75,8 +76,12 @@ export class FileDiscordSender implements DiscordSender {
 		this.#edited.push({ channelId, messageId, content });
 	}
 
-	async deleteMessage(channelId: string, messageId: string): Promise<void> {
-		this.#deleted.push({ channelId, messageId });
+	async deleteMessage(
+		channelId: string,
+		messageId: string,
+		webhook?: { id: string; token: string },
+	): Promise<void> {
+		this.#deleted.push({ channelId, messageId, webhook });
 	}
 
 	async addReaction(
