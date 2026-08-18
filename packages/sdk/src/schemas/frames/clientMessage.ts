@@ -7,13 +7,13 @@ import { type } from "arktype";
 
 export const Sub = type({
   type: "'sub'",
-  topic: "'space' | 'room'",
+  topic: "'space' | 'room' | 'mentions'",
   id: "string",
 });
 
 export const Unsub = type({
   type: "'unsub'",
-  topic: "'space' | 'room'",
+  topic: "'space' | 'room' | 'mentions'",
   id: "string",
 });
 

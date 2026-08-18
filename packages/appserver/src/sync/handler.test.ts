@@ -149,6 +149,35 @@ function messageDiff(roomId: Ulid, seq: number): InvalidationEvent {
   };
 }
 
+function mentionDiff(did: UserDid, seq: number): InvalidationEvent {
+  return {
+    kind: "mentionDiff",
+    signal: {
+      did,
+      spaceId: SPACE_ID,
+      roomId: ROOM_ID,
+      seq,
+      ops: [
+        {
+          op: "add",
+          key: "01KR32FDQCCCEB8FEK76SQST9Z" as Ulid,
+          message: {
+            id: "01KR32FDQCCCEB8FEK76SQST9Z" as Ulid,
+            sort_idx: "01KR32FDQCCCEB8FEK76SQST9Z",
+            content: "hello @user-b",
+            authorDid: USER_A,
+            authorName: "User A",
+            timestamp: new Date().toISOString(),
+            reactions: [],
+            media: [],
+            linkEmbeds: [],
+          },
+        },
+      ],
+    },
+  };
+}
+
 /** Extract body from a CBOR-encoded frame (we know the structure). */
 function decodeFrameBody(frame: Frame): Record<string, unknown> {
   return frame.body;
@@ -183,6 +212,69 @@ describe("SyncManager", () => {
       ops: expect.any(Array),
     });
     expect(socket.sentFrames[0]!.header.t).toBe("#messageDiff");
+
+    manager.destroy();
+  });
+
+
+  test("mention diff is sent to connections subscribed to mentions:<did>", () => {
+    const router = new MockRouter();
+    const manager = new SyncManager(router as unknown as InvalidationRouter, mockStreamManager);
+
+    const socket = new MockSocket(USER_B);
+    manager.register(socket as unknown as SyncSocket);
+
+    socket.receive({ type: "sub", topic: "mentions", id: USER_B });
+    socket.sentFrames.length = 0;
+
+    router.emitSignals([mentionDiff(USER_B, 1)]);
+
+    expect(socket.sentFrames.length).toBe(1);
+    const body = decodeFrameBody(socket.sentFrames[0]!);
+    expect(body).toEqual({
+      did: USER_B,
+      spaceId: SPACE_ID,
+      roomId: ROOM_ID,
+      seq: 1,
+      ops: expect.any(Array),
+    });
+    expect(socket.sentFrames[0]!.header.t).toBe("#mention");
+
+    manager.destroy();
+  });
+
+  test("mention diff is NOT sent to connections not subscribed to that DID's mentions", () => {
+    const router = new MockRouter();
+    const manager = new SyncManager(router as unknown as InvalidationRouter, mockStreamManager);
+
+    const socket = new MockSocket(USER_B);
+    manager.register(socket as unknown as SyncSocket);
+
+    // Subscribed to USER_B's mentions, but the signal is for USER_A.
+    socket.receive({ type: "sub", topic: "mentions", id: USER_B });
+    socket.sentFrames.length = 0;
+
+    router.emitSignals([mentionDiff(USER_A, 1)]);
+
+    expect(socket.sentFrames.length).toBe(0);
+
+    manager.destroy();
+  });
+
+  test("a connection cannot subscribe to another user's mentions", () => {
+    const router = new MockRouter();
+    const manager = new SyncManager(router as unknown as InvalidationRouter, mockStreamManager);
+
+    const socket = new MockSocket(USER_B);
+    manager.register(socket as unknown as SyncSocket);
+
+    // USER_B tries to subscribe to USER_A's mentions — must be ignored.
+    socket.receive({ type: "sub", topic: "mentions", id: USER_A });
+    socket.sentFrames.length = 0;
+
+    router.emitSignals([mentionDiff(USER_A, 1)]);
+
+    expect(socket.sentFrames.length).toBe(0);
 
     manager.destroy();
   });

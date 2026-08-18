@@ -11,6 +11,7 @@
  *   - clientMessage (sub / unsub / cursor)
  */
 export * as messageDiff from "./messageDiff";
+export * as mention from "./mention";
 export * as roomMetadataDiff from "./roomMetadataDiff";
 export * as invalidate from "./invalidate";
 export * as errorFrame from "./error";

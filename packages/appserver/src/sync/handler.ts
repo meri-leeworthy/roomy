@@ -29,7 +29,7 @@ import { messageFrame } from "../xrpc/frame.ts";
 // ─── Topic helpers ───────────────────────────────────────────────────────
 
 /** Topic kinds supported by the multiplexed sync connection. */
-type TopicKind = "space" | "room" | "stream";
+type TopicKind = "space" | "room" | "stream" | "mentions";
 
 /** Canonical topic string: "space:<id>" / "room:<id>" / "stream:<id>" */
 type Topic = string;
@@ -184,6 +184,12 @@ export class SyncManager {
         return;
       }
       if (msg.type === "sub") {
+        // A connection may only subscribe to its own mentions — the DID is
+        // the stable ID, and eavesdropping on another user's mentions is not
+        // allowed. Ignore (don't subscribe) otherwise.
+        if (msg.topic === "mentions" && msg.id !== state.did) {
+          return;
+        }
         const topic = topicKey(msg.topic, msg.id);
         state.topics.add(topic);
 
@@ -250,6 +256,8 @@ export class SyncManager {
     for (const event of events) {
       if (event.kind === "messageDiff") {
         this.#routeMessageDiff(event.signal);
+      } else if (event.kind === "mentionDiff") {
+        this.#routeMentionDiff(event.signal);
       } else if (event.kind === "roomMetadataDiff") {
         this.#routeRoomMetadataDiff(event.signal);
       } else if (event.kind === "queryInvalidation") {
@@ -270,6 +278,35 @@ export class SyncManager {
     if (!connIds) return;
 
     const frame = messageFrame("#messageDiff", {
+      roomId: signal.roomId,
+      seq: signal.seq,
+      ops: signal.ops,
+    });
+
+    for (const connId of connIds) {
+      const conn = this.#connections.get(connId);
+      if (conn?.isOpen) {
+        conn.send(frame);
+      }
+    }
+  }
+
+  #routeMentionDiff(
+    signal: InvalidationEvent["signal"] & {
+      did: string;
+      spaceId: string;
+      roomId: string;
+      seq: number;
+      ops: unknown[];
+    },
+  ): void {
+    const topic = topicKey("mentions", signal.did);
+    const connIds = this.#topicIndex.get(topic);
+    if (!connIds) return;
+
+    const frame = messageFrame("#mention", {
+      did: signal.did,
+      spaceId: signal.spaceId,
       roomId: signal.roomId,
       seq: signal.seq,
       ops: signal.ops,

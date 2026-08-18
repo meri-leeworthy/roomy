@@ -43,8 +43,13 @@ export const SPACE_SCHEMA_VERSION = "1";
  * `.4`: added the global `pending_links` embed-sweeper index (Phase 3),
  * dual-written during materialization so the sweeper can find pending
  * embed links across all per-space DBs with one query.
+ *
+ * `.5`: added the global `mentions` index (mentions subscription) — one row
+ * per (mentioned DID, message), dual-written during materialization so the
+ * `mentions:<did>` sync topic can backfill via getMentions and deleteMessage
+ * can resolve a deleted message's mentioned DIDs.
  */
-export const GLOBAL_SCHEMA_VERSION = "4";
+export const GLOBAL_SCHEMA_VERSION = "5";
 
 /** Default pool size (per-space workers). Override via `APPSERVER_DB_POOL_SIZE`. */
 const DEFAULT_POOL_SIZE = 4;

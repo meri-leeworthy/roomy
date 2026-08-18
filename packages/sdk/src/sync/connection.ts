@@ -28,7 +28,7 @@ import { decodeFirst } from "@atcute/cbor";
 
 // ─── Public types ─────────────────────────────────────────────────────────
 
-export type TopicKind = "space" | "room" | "stream";
+export type TopicKind = "space" | "room" | "stream" | "mentions";
 
 export interface Topic {
   kind: TopicKind;

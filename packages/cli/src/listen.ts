@@ -53,16 +53,14 @@ export async function listen(
 ): Promise<void> {
   const { agent, xrpc } = auth;
   const identity = await resolveAgentIdentity(xrpc, agent);
+  const mentionOnly = opts.mentionOnly ?? true;
 
-  // Resolve the set of rooms to subscribe to (roomId → spaceId).
-  const rooms = await resolveRooms(xrpc, opts.spaceId, opts.roomId);
-  if (rooms.size === 0) {
-    throw new Error(
-      opts.spaceId
-        ? `No rooms found in space ${opts.spaceId}`
-        : "No rooms found in any space the agent has joined",
-    );
-  }
+  // When scoping to specific rooms, resolve them so we can filter incoming
+  // mentions to just those rooms. (For the default all-spaces mentions
+  // subscription this is empty — every mention is in scope.)
+  const scopedRooms = opts.spaceId || opts.roomId
+    ? await resolveRooms(xrpc, opts.spaceId, opts.roomId)
+    : new Map<string, string>();
 
   const wsOrigin = xrpc.appserverUrl.replace(/^http/, "ws");
   const wsUrl = `${wsOrigin.replace(/\/+$/, "")}/xrpc/space.roomy.sync.subscribe`;
@@ -78,27 +76,57 @@ export async function listen(
 
   conn.onFrame((frame) => {
     const t = frame.header["t"];
+    if (t === "#mention") {
+      // Server-side mentions subscription: the appserver already filtered to
+      // messages that mention the agent's DID. Route each `add` op to omp.
+      const body = frame.body as {
+        spaceId?: string;
+        roomId?: string;
+        ops?: { op?: string; message?: IncomingMessage }[];
+      };
+      if (!body.roomId || !body.spaceId) return;
+      if (scopedRooms.size > 0 && !scopedRooms.has(body.roomId)) return;
+      for (const op of body.ops ?? []) {
+        if (op.op !== "add" || !op.message) continue;
+        const msg = op.message;
+        if (msg.authorDid === identity.agentDid && !opts.includeSelf) continue;
+        void handleMessage(auth, opts, msg, body.roomId, body.spaceId, identity);
+      }
+      return;
+    }
     if (t !== "#messageDiff") return;
+    // Room subscription path (only used with --no-mention-only): respond to
+    // every message in the scoped rooms.
     const body = frame.body as {
       roomId?: string;
       ops?: { op?: string; message?: IncomingMessage }[];
     };
     if (!body.roomId) return;
-    const spaceId = rooms.get(body.roomId);
-    if (!spaceId) return; // not one of the rooms we're listening to
+    const spaceId = scopedRooms.get(body.roomId);
+    if (!spaceId) return;
     for (const op of body.ops ?? []) {
       if (op.op !== "add" || !op.message) continue;
       const msg = op.message;
-      // Ignore our own messages (the agent replying to itself).
       if (msg.authorDid === identity.agentDid && !opts.includeSelf) continue;
       void handleMessage(auth, opts, msg, body.roomId, spaceId, identity);
     }
   });
 
   await conn.connect();
-  for (const roomId of rooms.keys()) {
-    conn.subscribe({ kind: "room", id: roomId });
-    console.error(`Listening on room ${roomId}`);
+  if (mentionOnly) {
+    // One subscription for all mentions across every space the agent is in.
+    conn.subscribe({ kind: "mentions", id: identity.agentDid });
+    console.error(`Listening for mentions of ${identity.agentName || identity.agentDid}`);
+  } else {
+    // --no-mention-only: subscribe to every room and respond to everything.
+    const rooms = await resolveRooms(xrpc, opts.spaceId, opts.roomId);
+    if (rooms.size === 0) {
+      throw new Error("No rooms found to listen to");
+    }
+    for (const roomId of rooms.keys()) {
+      conn.subscribe({ kind: "room", id: roomId });
+      console.error(`Listening on room ${roomId}`);
+    }
   }
 
   if (opts.durationMs && opts.durationMs > 0) {

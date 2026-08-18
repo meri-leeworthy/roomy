@@ -114,17 +114,22 @@ messages to the omp agent, posting the agent's reply back to the room. This is
 the MVP bridge for using Roomy as a web client for omp — no streaming, no tool
 UI, just "mention the agent, get an answer back".
 
+By default the bridge subscribes to the appserver's **server-side mentions
+subscription** (`mentions:<agentDid>`), so it receives every message that
+mentions the agent across all spaces it has joined — one subscription, no
+per-room bookkeeping.
+
 ```bash
 roomy-cli listen [--space <space-did>] [--room <room-id>] [--cwd <dir>] [--model <model>]
 ```
 
 Options:
 
-- `--space <id>` — listen to one space; **omitted, listens to every space the
+- `--space <id>` — scope to one space; **omitted, listens to every space the
   agent has joined**.
-- `--room <id>` — listen to one room; defaults to **all** rooms in the space(s).
-- `--no-mention-only` — respond to every message, not just mentions (useful for
-  a dedicated agent-only room).
+- `--room <id>` — scope to one room.
+- `--no-mention-only` — respond to every message, not just mentions (falls back
+  to per-room subscriptions; useful for a dedicated agent-only room).
 - `--cwd <dir>` — working directory for the omp agent.
 - `--model <model>` — omp model override (fuzzy match).
 - `--prefix <text>` — extra context prepended to every prompt.
@@ -132,9 +137,10 @@ Options:
 - `--duration <ms>` — stop after this many ms (0 = run forever).
 - `--include-self` — also react to the agent's own messages (testing).
 
-Mention detection: rich-text `#didMention` facets matching the agent's DID, or
-a plain-text `@handle` / display-name match. The agent ignores its own messages
-to avoid self-trigger loops.
+Mention detection is **server-side and DID-authoritative**: the appserver emits
+a `#mention` frame for messages whose `#didMention` facets (or mentions
+extension) include the agent's DID. The agent ignores its own messages to avoid
+self-trigger loops.
 
 See `docs/omp-bridge.md` for the full research and design notes.
 

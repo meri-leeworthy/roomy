@@ -24,6 +24,7 @@ import type { DbLike } from "../db/types.ts";
 import type { StreamDid, Ulid } from "@roomy-space/sdk";
 import { inferSignals } from "./inferSignals.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
+import { syncMentionsIndex } from "../queries/mentions.ts";
 import { openSpaceDb } from "../db/db.ts";
 
 export class Router implements IInvalidationRouter {
@@ -65,6 +66,13 @@ export class Router implements IInvalidationRouter {
     // Without batching, `inferSignals` would issue 5 queries per message
     // event (5N for a batch of N); this collapses them to 5 queries total.
     const messageSnapshots = await this.#fetchMessageSnapshots(streamDid, events);
+
+    // Dual-write the global mentions index so the `mentions:<did>` sync topic
+    // can backfill and deleteMessage can resolve a deleted message's DIDs.
+    const globalDb = (db as { global?: () => DbLike } | undefined)?.global?.();
+    if (globalDb) {
+      await syncMentionsIndex(globalDb, events);
+    }
 
     const allSignals: InvalidationEvent[] = [];
     for (const event of events) {
@@ -151,7 +159,11 @@ export class Router implements IInvalidationRouter {
   /** Stamp a monotonically-increasing seq on every messageDiff/roomMetadataDiff. */
   #stampSeq(signals: readonly InvalidationEvent[]): void {
     for (const signal of signals) {
-      if (signal.kind === "messageDiff" || signal.kind === "roomMetadataDiff") {
+      if (
+        signal.kind === "messageDiff" ||
+        signal.kind === "roomMetadataDiff" ||
+        signal.kind === "mentionDiff"
+      ) {
         signal.signal.seq = ++this.#seq;
       }
     }

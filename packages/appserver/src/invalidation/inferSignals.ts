@@ -20,11 +20,12 @@
  */
 
 import type { StreamDid, Ulid, UserDid } from "@roomy-space/sdk";
-import type { AppliedEvent, InvalidationEvent, QueryNsid } from "./types.ts";
+import type { AppliedEvent, InvalidationEvent, MessageDiffOp, QueryNsid } from "./types.ts";
 import type { DbLike } from "../db/types.ts";
 import { openReadStateDb, openSpaceDb } from "../db/db.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
 import { getRoomReadPositionUsers } from "../queries/readPositions.ts";
+import { getMentionedDidsForMessage } from "../queries/mentions.ts";
 
 // ─── Public API ─────────────────────────────────────────────────────────
 
@@ -93,6 +94,39 @@ function invalidateRoom(roomId: Ulid, spaceId: StreamDid): InvalidationEvent[] {
 
 // ─── Message events ─────────────────────────────────────────────────────
 
+
+/**
+ * Build `mentionDiff` signals for a message that mentions users.
+ *
+ * Emits one `MentionDiff` per mentioned DID (excluding the author's own DID —
+ * self-mentions don't notify the author). The DID is the stable ID carried by
+ * `#didMention` facets / the mentions extension; it never changes, unlike
+ * handles or display names.
+ */
+function mentionDiffs(
+  event: AppliedEvent,
+  roomId: Ulid,
+  mentionedDids: readonly string[] | undefined,
+  op: MessageDiffOp,
+): InvalidationEvent[] {
+  if (!mentionedDids || mentionedDids.length === 0) return [];
+  const signals: InvalidationEvent[] = [];
+  for (const did of mentionedDids) {
+    if (did === event.user) continue; // self-mention
+    signals.push({
+      kind: "mentionDiff",
+      signal: {
+        did: did as UserDid,
+        spaceId: event.streamDid,
+        roomId,
+        seq: 0,
+        ops: [op],
+      },
+    });
+  }
+  return signals;
+}
+
 async function handleCreateMessage(
   event: AppliedEvent,
   db?: DbLike,
@@ -128,6 +162,14 @@ async function handleCreateMessage(
         ops: [{ op: "add", key: event.id, message }],
       },
     });
+    // Mentions — route to connections subscribed to `mentions:<did>`.
+    signals.push(
+      ...mentionDiffs(event, roomId, details.mentions as string[] | undefined, {
+        op: "add",
+        key: event.id,
+        message,
+      }),
+    );
   }
 
   // Per-user unread-count diff. The materializer already bumped
@@ -202,6 +244,14 @@ async function handleEditMessage(
         ops: [{ op: "update", key: messageId, message }],
       },
     });
+    // Mentions may have changed on edit — re-route to `mentions:<did>`.
+    signals.push(
+      ...mentionDiffs(event, roomId, details.mentions as string[] | undefined, {
+        op: "update",
+        key: messageId,
+        message,
+      }),
+    );
   }
   // Edit doesn't change unread count, but room metadata's recentThreads
   // might reference this message's activity.
@@ -210,7 +260,10 @@ async function handleEditMessage(
   return signals;
 }
 
-function handleDeleteMessage(event: AppliedEvent): InvalidationEvent[] {
+async function handleDeleteMessage(
+  event: AppliedEvent,
+  db?: DbLike,
+): Promise<InvalidationEvent[]> {
   const roomId = event.roomId;
   if (!roomId) return [];
 
@@ -220,7 +273,7 @@ function handleDeleteMessage(event: AppliedEvent): InvalidationEvent[] {
   // message id so the client can match and drop the right cache entry.
   const messageId = (details.messageId as Ulid | undefined) ?? event.id;
 
-  return [
+  const signals: InvalidationEvent[] = [
     {
       kind: "messageDiff",
       signal: {
@@ -231,6 +284,30 @@ function handleDeleteMessage(event: AppliedEvent): InvalidationEvent[] {
     },
     ...invalidateRoom(roomId, event.streamDid),
   ];
+
+  // Emit `remove` mention ops for every DID the deleted message mentioned,
+  // so connections subscribed to `mentions:<did>` drop it too. Resolve the
+  // DIDs from the global mentions index (the message's rows are removed by
+  // syncMentionsIndex in the router before inferSignals runs).
+  const globalDb = (db as { global?: () => DbLike } | undefined)?.global?.();
+  if (globalDb) {
+    const dids = await getMentionedDidsForMessage(globalDb, messageId);
+    for (const did of dids) {
+      if (did === event.user) continue;
+      signals.push({
+        kind: "mentionDiff",
+        signal: {
+          did,
+          spaceId: event.streamDid,
+          roomId,
+          seq: 0,
+          ops: [{ op: "remove", key: messageId }],
+        },
+      });
+    }
+  }
+
+  return signals;
 }
 
 // ─── Reaction events ────────────────────────────────────────────────────

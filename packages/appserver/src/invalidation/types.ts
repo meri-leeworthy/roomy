@@ -108,11 +108,34 @@ export interface RoomMetadataDiff {
   users: ReadonlyArray<UserDid>;
 }
 
+
+/**
+ * A message that mentions a user, routed to connections subscribed to the
+ * `mentions:<did>` sync topic. Emitted from `inferSignals` when a message
+ * create/edit/delete changes who a message mentions.
+ *
+ * The `did` is the mentioned user (the stable ID — never the handle or
+ * display name). The author's own DID is excluded (self-mentions don't
+ * notify the author).
+ */
+export interface MentionDiff {
+  /** The mentioned user's DID. */
+  did: UserDid;
+  spaceId: StreamDid;
+  roomId: Ulid;
+  /** Monotonically increasing sequence number for cursor replay. */
+  seq: number;
+  /** Reuse the message snapshot shape from MessageDiff. */
+  ops: MessageDiffOp[];
+}
+
 /** The union of what the invalidation system can emit. */
 export type InvalidationEvent =
   | { kind: "queryInvalidation"; signal: QueryInvalidation }
   | { kind: "messageDiff"; signal: MessageDiff }
-  | { kind: "roomMetadataDiff"; signal: RoomMetadataDiff };
+  | { kind: "roomMetadataDiff"; signal: RoomMetadataDiff }
+  | { kind: "mentionDiff"; signal: MentionDiff };
+
 
 // ─── Router ─────────────────────────────────────────────────────────────
 

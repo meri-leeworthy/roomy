@@ -65,6 +65,10 @@ function findMessageDiff(signals: InvalidationEvent[]) {
 function findRoomMetadataDiff(signals: InvalidationEvent[]) {
   return signals.find((s) => s.kind === "roomMetadataDiff");
 }
+
+function findMentionDiffs(signals: InvalidationEvent[]) {
+  return signals.filter((s) => s.kind === "mentionDiff");
+}
 /**
  * Materialize a message into a fresh in-memory DB and return a DbLike
  * so `inferSignals` can read the materialized row.
@@ -407,6 +411,118 @@ describe("inferSignals: message events", () => {
 });
 
 // ─── Reaction events ────────────────────────────────────────────────────
+
+
+describe("inferSignals: mentions", () => {
+  const MENTIONED = "did:plc:bob" as UserDid;
+
+  it("createMessage emits a mentionDiff per mentioned DID (excluding the author)", async () => {
+    const { asyncDb } = seedMessageDb({
+      id: EVENT_ID,
+      roomId: ROOM_ID,
+      authorDid: USER_DID,
+      authorName: "Alice",
+      content: "hello @bob",
+    });
+    const signals = await inferSignals(
+      makeEvent({
+        type: "space.roomy.message.createMessage.v0",
+        roomId: ROOM_ID,
+        details: { mentions: [MENTIONED, USER_DID] }, // self-mention excluded
+      }),
+      asyncDb,
+    );
+    const mentionDiffs = findMentionDiffs(signals);
+    expect(mentionDiffs).toHaveLength(1);
+    const md = mentionDiffs[0]!;
+    if (md.kind === "mentionDiff") {
+      expect(md.signal.did).toBe(MENTIONED);
+      expect(md.signal.spaceId).toBe(STREAM_DID);
+      expect(md.signal.roomId).toBe(ROOM_ID);
+      expect(md.signal.ops).toHaveLength(1);
+      expect(md.signal.ops[0]!.op).toBe("add");
+      expect(md.signal.ops[0]!.key).toBe(EVENT_ID);
+    }
+  });
+
+  it("createMessage with no mentions emits no mentionDiff", async () => {
+    const { asyncDb } = seedMessageDb({
+      id: EVENT_ID,
+      roomId: ROOM_ID,
+      authorDid: USER_DID,
+      authorName: "Alice",
+      content: "hello",
+    });
+    const signals = await inferSignals(
+      makeEvent({
+        type: "space.roomy.message.createMessage.v0",
+        roomId: ROOM_ID,
+        details: {},
+      }),
+      asyncDb,
+    );
+    expect(findMentionDiffs(signals)).toHaveLength(0);
+  });
+
+  it("editMessage emits a mentionDiff update for the new mentions", async () => {
+    const { asyncDb } = seedMessageDb({
+      id: EVENT_ID,
+      roomId: ROOM_ID,
+      authorDid: USER_DID,
+      authorName: "Alice",
+      content: "edited @bob",
+    });
+    const signals = await inferSignals(
+      makeEvent({
+        type: "space.roomy.message.editMessage.v0",
+        roomId: ROOM_ID,
+        details: { messageId: EVENT_ID, mentions: [MENTIONED] },
+      }),
+      asyncDb,
+    );
+    const mentionDiffs = findMentionDiffs(signals);
+    expect(mentionDiffs).toHaveLength(1);
+    const md = mentionDiffs[0]!;
+    if (md.kind === "mentionDiff") {
+      expect(md.signal.did).toBe(MENTIONED);
+      expect(md.signal.ops[0]!.op).toBe("update");
+      expect(md.signal.ops[0]!.key).toBe(EVENT_ID);
+    }
+  });
+
+  it("deleteMessage emits a mentionDiff remove for the deleted message's DIDs", async () => {
+    // Seed a global DB with a mentions row for the message being deleted.
+    const globalDb = new Database(":memory:");
+    globalDb.exec(
+      "create table if not exists mentions (did text not null, message_id text not null, space_did text not null, room_id text not null, created_at integer not null default (unixepoch() * 1000), primary key (did, message_id)) strict",
+    );
+    globalDb.run(
+      "insert into mentions (did, message_id, space_did, room_id) values (?, ?, ?, ?)",
+      [MENTIONED, EVENT_ID, STREAM_DID, ROOM_ID],
+    );
+    const asyncGlobal = toAsyncDb(globalDb);
+    const db = {
+      global: () => asyncGlobal,
+    } as unknown as DbLike;
+
+    const signals = await inferSignals(
+      makeEvent({
+        type: "space.roomy.message.deleteMessage.v0",
+        roomId: ROOM_ID,
+        details: { messageId: EVENT_ID },
+      }),
+      db,
+    );
+    const mentionDiffs = findMentionDiffs(signals);
+    expect(mentionDiffs).toHaveLength(1);
+    const md = mentionDiffs[0]!;
+    if (md.kind === "mentionDiff") {
+      expect(md.signal.did).toBe(MENTIONED);
+      expect(md.signal.ops[0]!.op).toBe("remove");
+      expect(md.signal.ops[0]!.key).toBe(EVENT_ID);
+    }
+  });
+});
 
 describe("inferSignals: reaction events", () => {
   it("addReaction invalidates room messages and the specific message", async () => {

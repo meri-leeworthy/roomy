@@ -82,23 +82,23 @@ The SDK already exports `deserializeBody`, `blocksToPlaintext`, and
 ### The loop
 
 ```
-Roomy room ──WS──▶ CLI listen ──mention?──▶ omp -p "<message>" ──▶ reply
-     ▲                                                              │
-     └────────────────── sendMessage(reply) ◀──────────────────────┘
+Roomy room ──WS──▶ appserver (mention detection) ──#mention──▶ CLI listen ──▶ omp -p ──▶ reply
+     ▲                                                                                    │
+     └────────────────────────────── sendMessage(reply) ◀────────────────────────────────┘
 ```
 
+- The bridge subscribes to the appserver's **server-side mentions subscription**
+  (`mentions:<agentDid>`), so it receives every message that mentions the agent
+  across all spaces it has joined — one subscription, no per-room bookkeeping.
+- The appserver detects mentions at materialization time (from `#didMention`
+  facets / the mentions extension) and emits a `#mention` frame per mentioned
+  DID. The DID is the stable ID — never the handle or display name.
 - The bridge ignores the agent's own messages (prevents self-trigger loops).
 - Replies are posted back to the same room the mention came from.
-- `--no-mention-only` responds to every message (useful for a dedicated
-  agent-only room).
-- **Scope:** with `--space`, it listens to every room in that space. With no
-  `--space`, it auto-discovers every space the agent is a member of (via
-  `space.roomy.space.getSpaces`) and subscribes to every room in each. Room
-  enumeration goes through `space.roomy.space.getMetadata`, which is gated on
-  membership — non-members get an empty sidebar — so the bridge only ever
-  listens to rooms in spaces the agent has actually joined. (The WS
-  subscription layer itself does not enforce access control; membership is
-  enforced at the HTTP query layer.)
+- `--no-mention-only` responds to every message (falls back to per-room
+  subscriptions; useful for a dedicated agent-only room).
+- **Scope:** with `--space`/`--room`, the bridge filters incoming mentions to
+  those rooms. Without them, every mention in every joined space is in scope.
 
 ### Verified end-to-end
 

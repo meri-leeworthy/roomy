@@ -1,6 +1,6 @@
 # Server-side Mentions Subscription Plan
 
-**Status:** Proposed (design)
+**Status:** Implemented
 **Date:** 2026-08-18
 **Related:** `mentions-plan.md` (mentions extension for web push — implemented)
 
@@ -87,19 +87,33 @@ invalidate → HTTP refetch).
 - **Server-side detection is authoritative** — `#didMention` facets carry the
   stable DID, and the appserver already computes it.
 
-## Open questions / decision points
+## Decisions (implemented)
 
-1. **Frame shape:** dedicated `#mention` frame vs. reuse `#messageDiff` with a
-   mention context? Dedicated is cleaner for the client (it knows it's a mention
-   without re-deriving it).
-2. **Backfill:** dedicated `getMentions` query + cursor, or reuse the existing
-   `space.roomy.sync.getEvents` stream mechanism?
-3. **Edit/delete:** handle `update`/`remove` mention ops (a message edited to
-   remove a mention should stop being a mention).
-4. **Room context:** the `#mention` frame should carry `spaceId`/`roomId` so the
-   client can navigate to the message and reply in the right room.
-5. **Self-mentions:** exclude the author's own DID (a user mentioning themselves
-   shouldn't get a mention frame) — mirror the bridge's self-filter.
+1. **Frame shape:** dedicated `#mention` frame (header `{op:1, t:"#mention"}`),
+   body `{ did, spaceId, roomId, seq, ops }` reusing the SDK `Message` schema.
+2. **Backfill:** dedicated `space.roomy.mention.getMentions` query backed by a
+   global `mentions` index table (cross-space), dual-written during
+   materialization.
+3. **Edit/delete:** `editMessage` emits `update` ops (and replaces the index
+   rows); `deleteMessage` emits `remove` ops (resolved from the index).
+4. **Room context:** the `#mention` frame carries `spaceId`/`roomId` so the
+   client can navigate and reply in the right room.
+5. **Self-mentions:** the author's own DID is excluded from mention signals and
+   index rows.
+
+## Implementation notes
+
+- **Mention detection** was already server-side (`toAppliedEvent.ts` populates
+  `AppliedEvent.details.mentions` from the mentions extension or `#didMention`
+  facets) — the subscription just surfaces it.
+- **Global `mentions` table** (`schema-global.sql`, `GLOBAL_SCHEMA_VERSION` → 5):
+  `(did, message_id, space_did, room_id, created_at)`, PK `(did, message_id)`.
+  Dual-written by `syncMentionsIndex` in the router's `onEventsApplied`.
+- **Access control:** a connection may only subscribe to `mentions:<ownDid>`;
+  `getMentions` only returns the caller's own mentions.
+- **CLI bridge** (`roomy-cli listen`) now subscribes to `mentions:<agentDid>`
+  instead of every room. `--no-mention-only` falls back to room subscriptions.
+- **Tests:** inferSignals (4), sync handler (3), mentions index (5).
 
 ## Files to touch (when implemented)
 
