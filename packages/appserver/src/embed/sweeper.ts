@@ -601,6 +601,22 @@ async function emitEnrichmentInvalidation(
 // ─── Test helpers ───────────────────────────────────────────────────────
 
 /**
+ * Mark the sweeper as started WITHOUT launching the background loop. Tests
+ * only: tests that drive `sweepCycle` directly (instead of the real loop)
+ * still need `started === true` for the cycle to run, but must NOT spawn a
+ * concurrent background loop — otherwise the loop's `waitForWake` and the
+ * shared `wake` singleton race the manual `sweepCycle` calls and the test
+ * hangs under parallel-suite CPU contention (a 30s idle poll stretches well
+ * beyond the 5s default timeout). Use this instead of `startEmbedSweeper`
+ * in tests that call `sweepCycle` themselves.
+ */
+export function _startSweeperNoLoop(opts: EmbedSweeperOpts): void {
+  started = true;
+  sweeperGlobalDb = opts.globalDb;
+  sweeperRouter = opts.invalidationRouter;
+}
+
+/**
  * Reset the sweeper singleton (does not cancel an already-running loop).
  * Tests only — clears state so a fresh `startEmbedSweeper` can be issued.
  */
