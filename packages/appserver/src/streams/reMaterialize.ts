@@ -35,6 +35,50 @@ interface RawEvent {
 export const DEFAULT_REMATERIALIZE_CONCURRENCY = 4;
 
 /**
+ * Reconstruct active joinedSpace edges from per-space membership truth.
+ *
+ * The global DB is derived, while each space DB retains its member edges and
+ * cursor across deploys. Running this on every boot is cheap and idempotent,
+ * and repairs a global DB that was previously wiped without forcing a full
+ * replay of already-current space databases. Admins who have left retain an
+ * admin edge, so only the `member` edge is authoritative for active joins.
+ */
+async function backfillGlobalMembershipForSpace(
+  db: DbLike,
+  streamDid: StreamDid,
+): Promise<number> {
+  const globalDb = db.global?.();
+  const spaceDb = db.forSpace?.(streamDid);
+  if (!globalDb || !spaceDb) return 0;
+
+  const members = await spaceDb
+    .query(
+      `select distinct tail as user_did
+         from edges
+        where head = ? and label = 'member'`,
+    )
+    .all<{ user_did: string }>(streamDid);
+  if (members.length === 0) return 0;
+
+  await globalDb.transaction(
+    members.flatMap(({ user_did }) => [
+      {
+        type: "run" as const,
+        sql: "insert or ignore into edges (head, tail, label) values (?, ?, 'joinedSpace')",
+        params: [user_did, streamDid],
+      },
+      {
+        type: "run" as const,
+        sql: "delete from edges where head = ? and tail = ? and label = 'leftSpace'",
+        params: [user_did, streamDid],
+      },
+    ]),
+  );
+
+  return members.length;
+}
+
+/**
  * Re-materialize streams that have un-materialized events in the local events DB.
  *
  * Streams are processed with bounded concurrency (up to `concurrency` at
@@ -83,6 +127,7 @@ export async function reMaterializeFromLocalEvents(
   // incremental catch-up path unchanged (skip if caught up, else replay the
   // un-materialized gap from cursor + 1).
   let skipped = 0;
+  let activeMembershipEdgesEnsured = 0;
   const toReplay: Array<{
     streamId: string;
     fromIdx: number;
@@ -91,6 +136,23 @@ export async function reMaterializeFromLocalEvents(
   }> = [];
 
   for (const { stream_id } of streams) {
+    // Repair active membership intent from the per-space source of truth.
+    // This is deliberately independent of the materialization cursor: a
+    // global DB schema upgrade used to wipe global.sqlite while leaving all
+    // per-space cursors current, so normal startup replay skipped every stream
+    // and getSpaces returned empty indefinitely.
+    try {
+      activeMembershipEdgesEnsured += await backfillGlobalMembershipForSpace(
+        db,
+        stream_id as StreamDid,
+      );
+    } catch (err) {
+      log.warn(
+        "startup",
+        `membership backfill failed for ${stream_id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     // Blue-green decision point: is the canonical per-space DB on the current
     // schema? When `checkSpaceSchema` is absent (sync adapters in tests that
     // don't exercise the rebuild), default to current so behavior is unchanged.
@@ -150,6 +212,13 @@ export async function reMaterializeFromLocalEvents(
       fromIdx: materializedTo + 1,
       rebuild: false,
     });
+  }
+
+  if (activeMembershipEdgesEnsured > 0) {
+    log.info(
+      "startup",
+      `global membership backfill ensured ${activeMembershipEdgesEnsured} active joined-space edges`,
+    );
   }
 
   if (toReplay.length === 0) {

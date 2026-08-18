@@ -142,6 +142,49 @@ function initializeVersionedSchema(
   db.exec(schema);
 }
 
+/**
+ * Global DB upgrades are additive. Apply the idempotent current schema and
+ * advance an older numeric version in place so cross-space derived state
+ * (especially membership edges) is never discarded by a table addition.
+ */
+function initializeGlobalSchema(db: Database, expectedVersion: string): void {
+  let row: { version: string } | null;
+  try {
+    row = db
+      .query<{ version: string }, []>(
+        "select version from global_schema_version where id = 1",
+      )
+      .get();
+  } catch {
+    row = null;
+  }
+
+  const schema = readFileSync(GLOBAL_SCHEMA_PATH, "utf-8");
+  if (!row) {
+    db.exec(schema);
+    db.exec(
+      `insert into global_schema_version (id, version) values (1, '${expectedVersion}')`,
+    );
+    return;
+  }
+
+  if (row.version === expectedVersion) {
+    db.exec(schema);
+    return;
+  }
+
+  const actual = Number.parseInt(row.version, 10);
+  const expected = Number.parseInt(expectedVersion, 10);
+  if (!Number.isFinite(actual) || !Number.isFinite(expected) || actual >= expected) {
+    throw new SchemaVersionMismatchError(expectedVersion, row.version);
+  }
+
+  db.transaction(() => {
+    db.exec(schema);
+    db.query("update global_schema_version set version = ? where id = 1").run(expectedVersion);
+  })();
+}
+
 interface Migration {
   version: number;
   up: (db: Database) => void;
@@ -617,52 +660,9 @@ function openGlobalDbInternal(): Database {
   globalDb.exec("pragma synchronous = normal");
   globalDb.exec("pragma foreign_keys = on");
   globalDb.exec("pragma busy_timeout = 5000");
-  try {
-    initializeVersionedSchema(
-      globalDb,
-      GLOBAL_SCHEMA_PATH,
-      "global_schema_version",
-      globalSchemaVersion ?? "",
-    );
-  } catch (err) {
-    // The global DB is derived data (regenerable from the event log), so a
-    // schema-version mismatch means the on-disk schema is stale. Wipe and
-    // re-derive transparently rather than failing every request — the
-    // membership edges / profiles / entity index are rebuilt by
-    // re-materialization. Mirrors the per-space DB handling.
-    deleteGlobalDbFile(globalDb);
-    globalDb = new Database(globalDbPath, { create: true });
-    globalDb.exec("pragma journal_mode = wal");
-    globalDb.exec("pragma synchronous = normal");
-    globalDb.exec("pragma foreign_keys = on");
-    globalDb.exec("pragma busy_timeout = 5000");
-    initializeVersionedSchema(
-      globalDb,
-      GLOBAL_SCHEMA_PATH,
-      "global_schema_version",
-      globalSchemaVersion ?? "",
-    );
-  }
+  initializeGlobalSchema(globalDb, globalSchemaVersion ?? "");
 
   return globalDb;
-}
-
-/** Close and delete the global DB file (best-effort). */
-function deleteGlobalDbFile(db: Database): void {
-  try {
-    db.close();
-  } catch {
-    /* best-effort */
-  }
-  if (globalDbPath !== ":memory:" && globalDbPath !== null) {
-    for (const suffix of ["", "-wal", "-shm"]) {
-      try {
-        unlinkSync(globalDbPath + suffix);
-      } catch {
-        /* already gone */
-      }
-    }
-  }
 }
 
 

@@ -192,6 +192,56 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(infoRow2!.name).toBe(infoRow1!.name);
   });
 
+  test("repairs global membership when space cursors are already current", async () => {
+    const streamDid = StreamDid.assert("did:web:global-membership-repair.example");
+    const member = UserDid.assert("did:plc:global-membership-member");
+    const events = createDefaultSpaceEvents({ name: "Membership Repair" });
+    await seedEvents(db, streamDid, events);
+    await seedEvents(
+      db,
+      streamDid,
+      [
+        {
+          $type: "space.roomy.space.joinSpace.v0",
+          id: newUlid(),
+        },
+      ],
+      member,
+      events.length,
+    );
+
+    await reMaterializeFromLocalEvents(db);
+
+    const globalDb = db.global!();
+    await globalDb.run(
+      "delete from edges where head = ? and tail = ? and label = 'joinedSpace'",
+      member,
+      streamDid,
+    );
+    await globalDb.run(
+      "insert into edges (head, tail, label) values (?, ?, 'leftSpace')",
+      member,
+      streamDid,
+    );
+
+    // The per-space cursor is current, so no events are replayed. Startup must
+    // still reconstruct global membership from the retained member edge.
+    await reMaterializeFromLocalEvents(db);
+
+    const joined = await globalDb
+      .query(
+        "select 1 as n from edges where head = ? and tail = ? and label = 'joinedSpace'",
+      )
+      .get<{ n: number }>(member, streamDid);
+    const left = await globalDb
+      .query(
+        "select 1 as n from edges where head = ? and tail = ? and label = 'leftSpace'",
+      )
+      .get<{ n: number }>(member, streamDid);
+    expect(joined?.n).toBe(1);
+    expect(left).toBeNull();
+  });
+
   test("empty events DB", async () => {
     // No events seeded — should be a no-op
     await reMaterializeFromLocalEvents(db);

@@ -32,7 +32,9 @@ export const SPACE_SCHEMA_VERSION = "1";
 
 /**
  * Global DB schema version (`data/global.sqlite`). Bump whenever
- * schema-global.sql changes.
+ * schema-global.sql changes. Global changes are additive and migrate in place;
+ * never wipe this DB on a version bump because per-space cursors do not track
+ * whether its cross-space indexes were rebuilt.
  *
  * `.2`: added the global `profiles` table (authoritative per-user Roomy
  * profile).
