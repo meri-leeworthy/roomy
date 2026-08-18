@@ -147,6 +147,10 @@ The agent's reply is posted as a rich message: the model's **thinking trace**
 (as a blockquote, when the model produced one) followed by the final answer.
 Use `--no-thinking` to suppress the thinking trace.
 
+> The bridge itself now lives in the standalone **`@roomy/omp-bridge`** package
+> (`packages/omp-bridge`); `listen` is a thin wrapper that wires it up with CLI
+> auth and flags. See that package's README for the bridge internals.
+
 See `docs/omp-bridge.md` for the full research and design notes.
 
 ## Agent Testing

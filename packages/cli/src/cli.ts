@@ -6,7 +6,7 @@ import { createSpace, listSpaces } from "./spaces.js";
 import { listRooms, findLobbyRoom } from "./rooms.js";
 import { sendMessage, readMessages, buildMentionBlocks } from "./messages.js";
 import { setProfile } from "./profile.js";
-import { listen } from "./listen.js";
+import { listen as bridgeListen } from "@roomy/omp-bridge";
 
 const program = new Command();
 export { program };
@@ -272,7 +272,7 @@ program
     try {
       const config = loadConfig();
       const auth = await authenticate(config);
-      await listen(auth, {
+      await bridgeListen(auth, {
         spaceId: options.space,
         roomId: options.room,
         mentionOnly: options.mentionOnly,

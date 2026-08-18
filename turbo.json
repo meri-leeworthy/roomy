@@ -8,37 +8,78 @@
   ],
   "tasks": {
     "build-api-docs": {
-      "dependsOn": ["^build-api-docs", "build-lib"],
-      "outputs": ["./dist/**"]
+      "dependsOn": [
+        "^build-api-docs",
+        "build-lib"
+      ],
+      "outputs": [
+        "./dist/**"
+      ]
     },
     "lint-staged": {
-      "dependsOn": ["^lint-staged"],
+      "dependsOn": [
+        "^lint-staged"
+      ],
       "cache": false
     },
     "build-discord-bridge": {
-      "dependsOn": ["^build-discord-bridge", "build-lib"],
-      "outputs": ["./dist/**"]
+      "dependsOn": [
+        "^build-discord-bridge",
+        "build-lib"
+      ],
+      "outputs": [
+        "./dist/**"
+      ]
     },
     "build-appserver-admin": {
-      "dependsOn": ["^build-appserver-admin", "build-lib"],
-      "outputs": ["./build/**"]
+      "dependsOn": [
+        "^build-appserver-admin",
+        "build-lib"
+      ],
+      "outputs": [
+        "./build/**"
+      ]
     },
     "build-cli": {
-      "dependsOn": ["^build-lib", "build-lib"],
-      "outputs": ["./dist/**"]
+      "dependsOn": [
+        "^build-lib",
+        "build-lib"
+      ],
+      "outputs": [
+        "./dist/**"
+      ]
     },
     "build-docs": {
-      "dependsOn": ["^build-docs"],
-      "outputs": ["./build/**"]
+      "dependsOn": [
+        "^build-docs"
+      ],
+      "outputs": [
+        "./build/**"
+      ]
     },
     "build-lib": {
-      "dependsOn": ["^build-lib"],
-      "outputs": ["./dist/**"]
+      "dependsOn": [
+        "^build-lib"
+      ],
+      "outputs": [
+        "./dist/**"
+      ]
     },
     "dev": {
-      "dependsOn": ["build-lib"],
+      "dependsOn": [
+        "build-lib"
+      ],
       "persistent": true,
       "cache": false
+    },
+    "build-omp-bridge": {
+      "dependsOn": [
+        "^build-lib",
+        "build-lib"
+      ],
+      "outputs": [
+        "./dist/**"
+      ]
     }
   }
 }
