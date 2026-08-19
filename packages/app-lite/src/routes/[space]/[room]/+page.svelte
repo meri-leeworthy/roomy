@@ -7,7 +7,7 @@
   import { setNavbar } from "$lib/components/layout/navbar.svelte";
   import { setCurrentRoom } from "$lib/components/layout/current-room.svelte";
   import { spaceNavigation } from "$lib/components/layout/last-room.svelte";
-  import { messagingState } from "$lib/components/chat/messaging-state.svelte";
+  import { messagingState, closeToolbar } from "$lib/components/chat/messaging-state.svelte";
   import ToggleTabs from "@roomy/design/components/layout/ToggleTabs.svelte";
   import { createRoomMetadataQuery } from "$lib/queries/room-metadata";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
@@ -32,6 +32,7 @@
     // reactive cascades (effect_update_depth_exceeded).
     untrack(() => {
       messagingState.setNormal();
+      closeToolbar();
       sync_.setActiveRoom(roomId);
     });
     updateSeen(roomId).catch(() => {});

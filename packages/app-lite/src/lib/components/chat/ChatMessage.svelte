@@ -3,7 +3,7 @@
   import { MediaQuery } from "svelte/reactivity";
   import { Checkbox } from "bits-ui";
   import MessageBubble from "@roomy/design/components/content/thread/message/MessageBubble.svelte";
-  import { messagingState } from "./messaging-state.svelte";
+  import { messagingState, toggleToolbar, toolbarOpenState } from "./messaging-state.svelte";
   import Button from "@roomy/design/components/ui/button/Button.svelte";
   import { IconCheck, IconX } from "@roomy/design/icons";
   import MessageContext from "./MessageContext.svelte";
@@ -171,8 +171,15 @@
     const cur = messagingState.current;
     return cur.kind === "threading" && cur.selectedMessages.some((m) => m.id === message.id);
   });
+  // On touch devices there is no hover, so the toolbar is shown by tapping the
+  // message (see the onclick on the message box below). Only one message's
+  // toolbar is open at a time (shared `toolbarOpenState`).
+  let isToolbarOpen = $derived(toolbarOpenState.id === message.id);
   let showToolbar = $derived(
-    (!isEditing && hovered && !isThreading && !isMobile.current) || keepToolbarOpen,
+    (!isEditing &&
+      !isThreading &&
+      ((!isMobile.current && hovered) || (isMobile.current && isToolbarOpen))) ||
+      keepToolbarOpen,
   );
 
   let isBridged = $derived(message.authorDid.startsWith("did:discord:"));
@@ -243,6 +250,14 @@
     onmouseenter={() => (hovered = true)}
     onmouseleave={() => (hovered = false)}
     oncontextmenu={handleContextAction}
+    onclick={(e) => {
+      // On touch devices, tapping a message toggles its inline toolbar.
+      // Skip when the tap lands on a link (the user is navigating, not
+      // summoning the toolbar).
+      if (isMobile.current && !isThreading && !isEditing && !(e.target as Element)?.closest?.("a")) {
+        toggleToolbar(message.id);
+      }
+    }}
   >
     <MessageBubble
       authorDid={message.authorDid}

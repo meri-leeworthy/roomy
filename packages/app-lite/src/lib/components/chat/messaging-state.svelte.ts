@@ -138,3 +138,24 @@ class MessagingStateManager {
 }
 
 export const messagingState = new MessagingStateManager();
+
+// ── Mobile inline message toolbar ────────────────────────────────────────
+// On touch devices there is no hover, so tapping a message toggles its inline
+// toolbar. Only one message's toolbar can be open at a time: tapping another
+// message moves it, tapping the same message closes it. Keyed by message id so
+// a stale id from a previous room simply matches nothing.
+let toolbarOpenMessageId = $state<string | null>(null);
+
+export function toggleToolbar(messageId: string) {
+  toolbarOpenMessageId = toolbarOpenMessageId === messageId ? null : messageId;
+}
+
+export function closeToolbar() {
+  toolbarOpenMessageId = null;
+}
+
+export const toolbarOpenState = {
+  get id(): string | null {
+    return toolbarOpenMessageId;
+  },
+};
