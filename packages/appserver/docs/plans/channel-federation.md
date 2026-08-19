@@ -225,6 +225,22 @@ federatedRoomAccess(A_channel, did, homeSpace=B):
 
 `createAccessMemo` should gain federation caches (per `(roomId, did)` federated decisions) so the sidebar/thread loops don't fan out cross-space queries. This is a natural extension of the existing memo.
 
+### 5.5 Threads inherit federation from their parent channel (explicit)
+
+In Roomy, a thread's permissions are derived from its parent channel, not set on the thread itself. `access.ts` already does this in two ways:
+
+- **Effective `default_access`**: `resolveRoom` follows the canonical `link` edge and sets a thread's `defaultAccess = minAccess(parent.defaultAccess, own)` — a thread can never grant more than its parent.
+- **Grants attach to the channel**: `computeRoomAccess` uses `permRoom = parentChannelId ?? roomId` when resolving role grants, so a role's permission on a channel applies to all of that channel's threads.
+
+Federation must mirror this exactly — **it does so with no extra per-thread state**, provided the federated access path follows the same rule:
+
+- **Federation grants are channel-scoped.** The origin grant (`federation_room_permissions[A, B, channel]`) and the receiver grant (`federation_receiver_permissions[A, B, channel, grantee]`) are both keyed on the **parent channel**, never the thread. This matches the plan's UI (Space A admins pick channels, not threads).
+- **`federatedRoomAccess` resolves grants against the parent channel.** For any room, first call the existing `resolveRoom` to get `parentChannelId`; then look up origin/receiver grants using `parentChannelId` (mirroring `permRoom = parentChannelId ?? roomId`). The thread's own `default_access` only ever *restricts* via `minAccess`, never grants.
+- **Consequence:** federating a channel automatically federates its threads — reads (room/getMetadata, getMessages, threads) and writes (message create/edit/delete) for a B member resolve grants on the parent channel, exactly as role grants do today. No per-thread federation flags, no per-thread grants.
+- **Sidebar:** federated channels are injected into B's sidebar; their threads already flow through the existing active-threads logic (threads are distributed into their parent channel's `activeThreads`), so they appear under the federated channel for B. The access check for each such thread routes through the federation-aware `roomAccess`/`federatedRoomAccess`.
+
+**Concrete change for Phase 2/3:** `federatedRoomAccess` must (a) resolve the canonical parent channel for threads, (b) check origin+receiver grants against that channel, and (c) apply the thread's own `defaultAccess` only as a downward `minAccess` cap. A regression test should cover: origin grant on a channel ⇒ a B member can read/write that channel's threads; removing the channel's origin grant removes thread access.
+
 ---
 
 ## 6. Phasing
