@@ -18,6 +18,7 @@ export { LinkEventVariant } from "./link";
 export { CalendarEventVariant } from "./calendar";
 export { InviteEventVariant } from "./invite";
 export { StateEventVariant } from "./state";
+export { FederationEventVariant } from "./federation";
 
 // Export synthetic events
 export {
@@ -58,6 +59,11 @@ export { SetUserProfile } from "./user";
 export { CreateRoomLink, RemoveRoomLink } from "./link";
 export { SetCalendarLink } from "./calendar";
 export { CreateInvite, RevokeInvite } from "./invite";
+export {
+  FederationRequest,
+  FederationRespond,
+  FederationRemove,
+} from "./federation";
 export { MarkRead } from "./state";
 export {
   CreateRole,

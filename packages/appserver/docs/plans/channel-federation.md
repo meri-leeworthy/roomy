@@ -2,8 +2,16 @@
 
 **Date:** 2026-08-19
 **Commit (baseline):** `dc29633f`
-**Status:** Planning / research. Not implemented.
-**Gated by:** frontend feature flag `channel-federation` (and a matching backend guard).
+**Status:** Phase 1 (relationship lifecycle) **implemented**. Read/write federation + frontend UI are later phases.
+**Gated by:** frontend feature flag `channel-federation` (registered; no Phase-1 UI to gate yet).
+
+## 0. Implementation status
+
+- **Phase 1 backend shipped** (`4555cfb5` + follow-ups): SDK events `space.roomy.federation.{request,respond,remove}.v0`, global `space_federations` table (routed to the global DB via `statementRouting.ts`), write-auth for the three events (incl. the cross-space admin-of-B check for `request`), and queries `space.roomy.federation.getRequests` / `getIncoming` / `getOutgoing`. Unit tests: `src/auth/writeAuth.federation.test.ts`, `src/materialization/federation.test.ts`.
+- **Roles → Permissions hard rename shipped**: settings route moved `settings/roles` → `settings/permissions`; `settings/roles` redirects (307) to `settings/permissions`.
+- **Decisions confirmed:** mutual A↔B federation is in scope and trivial (independent relationships); transitive re-federation is out of scope. Storage is the **global-DB registry** (chosen over the virtual-role-in-`roles` alternative).
+- **Global schema version is NOT bumped**: `initializeVersionedSchema` re-applies the DDL idempotently when the version matches, so adding `space_federations` heals existing DBs without wiping the global DB (which would also discard externally-fetched `profiles`).
+- **Feature flag registered**: `channel-federation` added to `FEATURE_FLAGS` (`featureFlags.ts`); returned by `space.roomy.getFlags`. Server-side write gate for the events is deferred to a later phase (the backend events are functional; only frontend UI is gated).
 
 ## 1. Goal
 
@@ -103,7 +111,7 @@ Ship in **phases**, gated behind a **frontend feature flag**.
 
 Federation is cross-space by nature, so **the relationship and per-channel grants live in the shared global DB** (consistent with the existing "global DB holds cross-space data" mandate and the materializer's `derived: "global"` dual-write support). Per-space DBs stay the source of truth for their own space data; federation adds a small cross-space layer.
 
-New tables in `packages/appserver/src/db/schema-global.sql` (bump `GLOBAL_SCHEMA_VERSION`):
+New tables in `packages/appserver/src/db/schema-global.sql` (added idempotently — see §0, the global schema version is NOT bumped):
 
 ```sql
 -- One row per accepted (or pending) federation SpaceB -> SpaceA.
@@ -172,7 +180,7 @@ Add to `packages/sdk/src/schemas/lexicons/` (+ `queries/` wrappers), and registe
 
 ### 4.4 Schema/version bumps
 
-- `schema-global.sql` + `GLOBAL_SCHEMA_VERSION` bump (global DB is regenerable from the event log — the docs note re-derivation, so no destructive migration risk; re-materialisation recreates these tables).
+- `schema-global.sql` adds the `space_federations` table. No `GLOBAL_SCHEMA_VERSION` bump: `initializeVersionedSchema` re-applies the DDL idempotently on a matching version, so the new table heals existing DBs without wiping the global DB (a wipe would also drop externally-fetched `profiles`). `statementRouting.ts` routes `space_federations` statements to the global DB.
 - No per-space schema change required if federation lives entirely in the global DB.
 
 ---

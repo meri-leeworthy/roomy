@@ -86,6 +86,10 @@ const ALLOWED_TYPES: Set<string> = new Set([
   // Bridged
   "space.roomy.reaction.addBridgedReaction.v0",
   "space.roomy.reaction.removeBridgedReaction.v0",
+  // Channel federation (relationship lifecycle)
+  "space.roomy.federation.request.v0",
+  "space.roomy.federation.respond.v0",
+  "space.roomy.federation.remove.v0",
 ]);
 
 // ── Auth category dispatch ───────────────────────────────────────────────
@@ -168,6 +172,21 @@ const SPACE_MEMBER_TYPES = new Set([
 const BRIDGED_TYPES = new Set([
   "space.roomy.reaction.addBridgedReaction.v0",
   "space.roomy.reaction.removeBridgedReaction.v0",
+]);
+
+/**
+ * Channel-federation relationship events.
+ *
+ * `respond`/`remove` target the origin space (A) and require an A admin.
+ * `request` is sent on A's stream but originates from space B: the caller
+ * must be an admin of B AND a member of A (the federation precondition).
+ * Resolving admin-of-B requires the *other* space's DB handle, supplied via
+ * the optional `dbResolver` so this module stays pure and testable.
+ */
+const FEDERATION_TYPES = new Set([
+  "space.roomy.federation.request.v0",
+  "space.roomy.federation.respond.v0",
+  "space.roomy.federation.remove.v0",
 ]);
 
 // ── Helper: denial constructors ──────────────────────────────────────────
@@ -275,10 +294,72 @@ async function checkMessageAuthorOrAdmin(
   return undefined;
 }
 
+/**
+ * Authorize a federation request sent on space A's stream by an admin of
+ * space B. Requires: caller is a member (or admin) of the origin space A,
+ * AND caller is an admin of the requesting space B (resolved via the
+ * cross-space `dbResolver`). The member-of-A precondition is the documented
+ * federation rule; admin-of-B ensures only B's admins can initiate.
+ */
+async function checkFederationRequest(
+  db: DbLike,
+  spaceId: string,
+  callerDid: string,
+  event: { $type: string; [k: string]: unknown },
+  access?: SpaceAccess,
+  dbResolver?: (spaceDid: string) => DbLike,
+): Promise<WriteAuthResult> {
+  const federatingSpaceDid = event.federatingSpaceDid;
+  if (typeof federatingSpaceDid !== "string" || federatingSpaceDid === "") {
+    return denied(
+      400,
+      "InvalidRequest",
+      `Event is missing required 'federatingSpaceDid' field`,
+    );
+  }
+
+  // Caller must be a member (or admin) of the origin space A.
+  const a = access ?? (await spaceAccess(db, spaceId, callerDid));
+  if (a.isBanned) {
+    return denied(403, "Forbidden", "Caller is banned from this space");
+  }
+  if (!a.isMember && !a.isAdmin) {
+    return denied(
+      403,
+      "Forbidden",
+      "Caller is not a member of the target space",
+    );
+  }
+
+  // Caller must be an admin of the requesting space B (cross-space).
+  if (!dbResolver) {
+    // Unreachable via sendEvents (which always passes openSpaceDb); defensive
+    // fallback for callers that don't provide a cross-space resolver.
+    return denied(
+      403,
+      "Forbidden",
+      "Federation request requires a cross-space access check that is not configured",
+    );
+  }
+  const bDb = dbResolver(federatingSpaceDid);
+  const b = await spaceAccess(bDb, federatingSpaceDid, callerDid);
+  if (!b.isAdmin) {
+    return denied(
+      403,
+      "Forbidden",
+      "Caller is not an admin of the requesting space",
+    );
+  }
+  return undefined;
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────
 
 /**
  * Check whether the caller is authorized to send a single event.
+ *
+ * `dbResolver`, when provided, returns the DB handle for another space by
+ * DID — used only for the federation-request cross-space admin-of-B check.
  *
  * @returns `undefined` if allowed, or a denial object.
  */
@@ -288,6 +369,7 @@ export async function checkWriteAuth(
   callerDid: string,
   event: { $type: string; [k: string]: unknown },
   access?: SpaceAccess,
+  dbResolver?: (spaceDid: string) => DbLike,
 ): Promise<WriteAuthResult> {
   const { $type } = event;
 
@@ -370,6 +452,15 @@ export async function checkWriteAuth(
 
   // ── Bridged ──
   if (BRIDGED_TYPES.has($type)) {
+    return await requireSpaceAdminCheck(db, spaceId, callerDid, access);
+  }
+
+  // ── Channel federation ──
+  if (FEDERATION_TYPES.has($type)) {
+    if ($type === "space.roomy.federation.request.v0") {
+      return await checkFederationRequest(db, spaceId, callerDid, event, access, dbResolver);
+    }
+    // respond / remove target the origin space (A) and require an A admin.
     return await requireSpaceAdminCheck(db, spaceId, callerDid, access);
   }
 

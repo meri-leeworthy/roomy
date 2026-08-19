@@ -96,3 +96,30 @@ create table if not exists mentions (
   primary key (did, message_id)
 ) strict;
 create index if not exists idx_mentions_did_created on mentions(did, created_at desc);
+
+-- Channel-federation registry. Cross-space by nature, so it lives in the
+-- global DB. `space_id` is the origin space (A) whose channels are exposed;
+-- `federating_space_did` is the receiving space (B). One row per (A, B).
+--
+-- Status transitions:
+--   request   -> pending
+--   respond   -> active | rejected
+--   remove    -> removed   (pending/active/rejected -> removed)
+--   re-request after removed -> pending
+--
+-- Written by the SDK federation materialisers (space.roomy.federation.*),
+-- routed here by statementRouting.ts (matches `space_federations`).
+create table if not exists space_federations (
+  space_id text not null,            -- origin space A
+  federating_space_did text not null, -- receiving space B
+  status text not null check(status in ('pending','active','rejected','removed')),
+  requested_by_did text not null,    -- admin of B who asked
+  requested_at integer not null default (unixepoch() * 1000),
+  message text,                      -- request note (A-admin visible)
+  decided_by_did text,               -- admin of A who decided
+  decided_at integer,
+  decision_message text,             -- decision note
+  primary key (space_id, federating_space_did)
+) strict;
+create index if not exists idx_space_fed_recv on space_federations(federating_space_did, status);
+create index if not exists idx_space_fed_origin_status on space_federations(space_id, status);

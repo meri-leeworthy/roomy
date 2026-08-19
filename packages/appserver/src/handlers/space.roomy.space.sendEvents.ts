@@ -84,7 +84,14 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
       );
     }
     const event = parsed.data;
-    const denial = await checkWriteAuth(db, spaceId, callerDid, event, access);
+    const denial = await checkWriteAuth(
+      db,
+      spaceId,
+      callerDid,
+      event,
+      access,
+      openSpaceDb,
+    );
     if (denial) {
       throw new XrpcError(
         denial.status,

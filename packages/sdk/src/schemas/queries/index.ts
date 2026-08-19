@@ -26,3 +26,6 @@ export * as getProfile from "./getProfile";
 export * as getMentions from "./getMentions";
 export * as getProfiles from "./getProfiles";
 export * as getLinkMetadata from "./getLinkMetadata";
+export * as getFederationRequests from "./getFederationRequests";
+export * as getFederationIncoming from "./getFederationIncoming";
+export * as getFederationOutgoing from "./getFederationOutgoing";
