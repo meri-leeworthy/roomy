@@ -156,7 +156,7 @@ import RoomyMark from "$lib/components/RoomyMark.svelte";
   const settingsTabs = $derived(
     [
       { slug: "", label: "General" },
-      { slug: "roles", label: "Roles" },
+      { slug: "permissions", label: "Permissions" },
       { slug: "members", label: "Members" },
       ...(pushFeatureEnabled ? [{ slug: "notifications", label: "Notifications" }] : []),
       ...(showInvitesTab ? [{ slug: "invites", label: "Invites" }] : []),
