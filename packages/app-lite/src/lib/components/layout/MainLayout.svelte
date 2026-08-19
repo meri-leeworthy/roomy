@@ -76,7 +76,7 @@ let {
 <!-- Main panel: navbar + page content, offset to clear the fixed sidebar -->
 <div
   class={[
-    "h-screen flex flex-col overflow-hidden main-panel bg-white dark:bg-base-950",
+    "flex flex-col overflow-hidden main-panel bg-white dark:bg-base-950",
     "sm:ml-64",
   ]}
   ontouchstart={handleTouchStart}
@@ -192,6 +192,15 @@ let {
 <style>
   /* ── Main panel margin transition ────────────────────────────── */
   .main-panel {
+    /* Fill the visible viewport below the status bar so the panel (and thus
+       the body document) never overflows it. The body pads the top by
+       env(safe-area-inset-top), so subtract that inset to match the original
+       `h-full` sizing (100% of the padded body) — an overflow here made the
+       page scrollable on iOS, letting the navbar scroll off-screen. Dynamic
+       viewport height (dvh) tracks the toolbar and is immune to vaul-svelte
+       setting the body height to auto. On desktop the inset is 0, so this is
+       just 100dvh (== 100vh). */
+    height: calc(100dvh - env(safe-area-inset-top));
     transition: margin-left 400ms cubic-bezier(0.33, 1, 0.68, 1);
     will-change: margin-left;
   }
