@@ -51,6 +51,13 @@
     setFocus?: boolean;
     disabled?: boolean;
     processImageFile?: (file: File) => void;
+    /**
+     * Whether this is the main composer. Only the composer registers itself
+     * as the module-level `editor` that `clearInput()`/`setInputFocus()`
+     * target. Inline editors (e.g. the edit-message editor) must leave this
+     * false so they don't hijack the composer's clear/focus.
+     */
+    composer?: boolean;
   };
 
   let {
@@ -64,6 +71,7 @@
     setFocus = false,
     disabled = false,
     processImageFile,
+    composer = false,
   }: Props = $props();
 
   let element: HTMLDivElement | undefined = $state();
@@ -171,7 +179,11 @@
       content = tiptap.storage.markdown.getMarkdown();
       blocks = proseMirrorDocToBlocks(tiptap.getJSON());
     }
-    editor = tiptap;
+    // Only the composer registers as the module-level editor that
+    // clearInput()/setInputFocus() target. Inline editors (edit-message)
+    // must not overwrite it, or sending a message would clear the wrong
+    // editor (or none) and the composer would stop clearing.
+    if (composer) editor = tiptap;
     if (setFocus) {
       // focus at the end of the content
       tiptap?.commands.focus("end");
@@ -180,15 +192,19 @@
 
   $effect(() => {
     tiptap?.setEditable(!disabled);
-    if (setFocus && !disabled) setInputFocus();
+    // Focus this editor (not the module-level composer editor) when the
+    // `setFocus` prop is set — e.g. the edit-message editor must focus itself,
+    // not the composer.
+    if (setFocus && !disabled) tiptap?.commands.focus();
   });
 
   onDestroy(() => {
     tiptap?.destroy();
     // Reset the shared module-level binding so deferred setInputFocus/clearInput
     // calls (e.g. from messagingState.setNormal() in a route $effect) don't
-    // land on a destroyed editor whose commandManager is null.
-    editor = undefined;
+    // land on a destroyed editor whose commandManager is null. Only the
+    // composer owns this binding, and only if it's still the current editor.
+    if (composer && editor === tiptap) editor = undefined;
   });
 
   const handlePaste = (event: ClipboardEvent) => {

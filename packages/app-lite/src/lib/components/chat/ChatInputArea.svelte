@@ -443,6 +443,7 @@
   {#snippet input()}
     {#if messagingState.current.kind !== "threading"}
       <ChatInput
+        composer
         bind:content={
           () =>
             "input" in messagingState.current ? messagingState.current.input : "",
