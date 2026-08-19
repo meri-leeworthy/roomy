@@ -254,7 +254,7 @@ All frontend work gated on the `channel-federation` feature flag (returned by `s
 
 ### Phase 5 — Hardening
 - Revoke (A removes federation → clean up grants + remove from B sidebar).
-- B-side rejection/removal; banning a federated B member; edge cases (origin channel deleted/renamed, origin space deleted, circular federation A↔B, B member leaves B).
+- B-side rejection/removal; banning a federated B member; edge cases (origin channel deleted/renamed, origin space deleted, B member leaves B). **Mutual federation A↔B is explicitly supported and trivially modeled** — the two directions are independent `space_federations` rows and grant lookups are anchored by the channel's owning space, so they cannot cycle. Guard only against accidental double-request (one pending request per `(A,B)` pair).
 - Invalidation signals so both spaces' sync caches update on grant changes.
 - E2E tests (app-password auth mode, local appserver) covering the full request→approve→grant→read/write chain.
 
@@ -268,7 +268,7 @@ All frontend work gated on the `channel-federation` feature flag (returned by `s
 4. **Storage choice** (global registry vs virtual role in `roles`). Global registry is cleaner but adds a new access layer; virtual role reuses UI at the cost of semantic conflation. Decide before Phase 2.
 5. **Sidebar/sync visibility** — federated channels cross a DB boundary; unread counts / active threads currently key on `(user, room)` in the read-state DB and work regardless of origin, but `getMetadata`'s thread injection is A-only and must learn to include federated channels for B.
 6. **Naming** — `Roles` → `Permissions` touches URLs, tests, and docs; keep a redirect to avoid breaking existing links.
-7. **Multi-hop / circular** federation is out of scope for v1; document as not supported.
+7. **Transitive re-federation is out of scope (a structural non-feature, not a hard constraint).** v1 grants are authored only by a channel's *owning* space, so a federated channel is never re-hosted or re-forwarded by the receiving space. Consequently the grant graph is strictly a star per channel (owner → receivers) and cannot form cycles. **Mutual (bidirectional) federation A↔B is fully supported** — it is just two independent relationships whose grant lookups are anchored by each channel's owning space, so they never interfere. If a later phase adds transitive re-federation (B re-exposing A's channel to C), a cycle-guard and bounded access-resolution depth become required; note this explicitly before that work.
 
 ---
 
