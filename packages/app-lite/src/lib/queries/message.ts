@@ -16,11 +16,13 @@ type MessageList = typeof schemas.queries.getMessages.Message.infer[];
 export function createMessageQuery(
   messageId: () => string,
   roomId: () => string | undefined,
+  options?: { enabled?: boolean },
 ) {
   return createQuery<Message>(() => ({
     queryKey: queryKey("space.roomy.message.getMessage", {
       messageId: messageId(),
     }),
+    enabled: options?.enabled ?? true,
     queryFn: () =>
       px().query("space.roomy.message.getMessage", {
         messageId: messageId(),

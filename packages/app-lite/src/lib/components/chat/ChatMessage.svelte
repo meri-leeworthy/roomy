@@ -11,7 +11,8 @@
   import MessageToolbar from "./MessageToolbar.svelte";
   import MediaEmbed from "./embeds/MediaEmbed.svelte";
   import LinkCard from "./embeds/LinkCard.svelte";
-  import ForwardEmbed from "./embeds/ForwardEmbed.svelte";
+  import ForwardContext from "./ForwardContext.svelte";
+  import { createMessageQuery } from "$lib/queries/message";
   import MessageContent from "./MessageContent.svelte";
   import ChatInput from "./ChatInput.svelte";
   import { editMessage, removeLinkEmbed } from "$lib/mutations/message";
@@ -187,8 +188,29 @@
 
   let isBridged = $derived(message.authorDid.startsWith("did:discord:"));
   let isAuthor = $derived(message.authorDid === currentUserDid);
+
+  // ── Forwards ──────────────────────────────────────────────────────────
+  // A forward is a real message (authored by the forwarder) carrying a
+  // forward attachment. The bubble renders as a normal message by the
+  // ORIGINAL author; the forwarder is surfaced only in the forward context
+  // line above the author line. Fetch the original so we can render it.
+  const forwardedFrom = $derived(message.forwardedFrom);
+  const isForward = $derived(!!forwardedFrom);
+  const originalQuery = createMessageQuery(
+    () => forwardedFrom?.messageId ?? "",
+    () => forwardedFrom?.roomId ?? "",
+    { enabled: isForward },
+  );
+  const original = $derived(originalQuery.data);
+  /** The bubble's effective author: the original author when forwarding. */
+  const eff = $derived(isForward && original ? original : null);
+  const effBridged = $derived(
+    eff ? eff.authorDid.startsWith("did:discord:") : isBridged,
+  );
+
   // Edit stays author-only; space admins may delete anyone's message.
-  let canEdit = $derived(isAuthor);
+  // Forwards aren't editable (the visible content belongs to the original).
+  let canEdit = $derived(isAuthor && !isForward);
   let canDelete = $derived(isAuthor || isAdmin);
 
   function handleContextAction(e: MouseEvent) {
@@ -263,22 +285,30 @@
     }}
   >
     <MessageBubble
-      authorDid={message.authorDid}
-      authorName={message.authorName ?? undefined}
-      authorHandle={message.authorHandle ?? undefined}
-      authorAvatarUrl={message.authorAvatar ?? undefined}
-      avatarSrc={resolveBlobUrl(message.authorAvatar)}
-      profileUrl={isBridged ? undefined : `/user/${message.authorDid}`}
-      onAvatarClick={isBridged ? undefined : () => goto(`/user/${message.authorDid}`)}
-      timestamp={new Date(message.timestamp)}
-      {isBridged}
+      authorDid={eff ? eff.authorDid : message.authorDid}
+      authorName={eff ? (eff.authorName ?? undefined) : (message.authorName ?? undefined)}
+      authorHandle={eff ? (eff.authorHandle ?? undefined) : (message.authorHandle ?? undefined)}
+      authorAvatarUrl={eff ? (eff.authorAvatar ?? undefined) : (message.authorAvatar ?? undefined)}
+      avatarSrc={eff ? resolveBlobUrl(eff.authorAvatar) : resolveBlobUrl(message.authorAvatar)}
+      profileUrl={effBridged ? undefined : `/user/${eff ? eff.authorDid : message.authorDid}`}
+      onAvatarClick={effBridged ? undefined : () => goto(`/user/${eff ? eff.authorDid : message.authorDid}`)}
+      timestamp={new Date(eff ? eff.timestamp : message.timestamp)}
+      isBridged={effBridged}
       {mergeWithPrevious}
       {isSelected}
       {isEditing}
       {showToolbar}
     >
       {#snippet replyContext()}
-        {#if message.replyTo}
+        {#if message.forwardedFrom}
+          <ForwardContext
+            name={message.authorName}
+            handle={message.authorHandle}
+            avatar={message.authorAvatar}
+            did={message.authorDid}
+            timestamp={new Date(message.timestamp)}
+          />
+        {:else if message.replyTo}
           <MessageContext context={{ kind: "replying", replyTo: { id: message.replyTo } }} roomId={roomId} />
         {/if}
       {/snippet}
@@ -338,6 +368,14 @@
               </div>
             {/if}
           </div>
+        {:else if isForward}
+          {#if original}
+            <MessageContent content={original.content} mimeType={original.mimeType} />
+          {:else if originalQuery.isPending}
+            <div class="h-5"></div>
+          {:else}
+            <span class="italic text-base-400 text-sm">Original message unavailable</span>
+          {/if}
         {:else}
           <MessageContent content={message.content} mimeType={message.mimeType} />
         {/if}
@@ -382,14 +420,6 @@
               {/each}
             </div>
           {/if}
-        {/if}
-      {/snippet}
-
-      {#snippet forwardEmbed()}
-        {#if message.forwardedFrom}
-          <div class="mt-1">
-            <ForwardEmbed forwardedFrom={message.forwardedFrom} />
-          </div>
         {/if}
       {/snippet}
 
