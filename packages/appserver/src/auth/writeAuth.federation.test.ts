@@ -12,6 +12,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const SCHEMA_PATH = join(__dirname, "..", "db", "schema.sql");
+const GLOBAL_SCHEMA_PATH = join(__dirname, "..", "db", "schema-global.sql");
 const SCHEMA_VERSION = "10-appserver.4";
 
 function freshDb(): { db: Database; asyncDb: DbLike } {
@@ -27,8 +28,16 @@ function freshDb(): { db: Database; asyncDb: DbLike } {
   return { db, asyncDb: toAsyncDb(db) };
 }
 
+function freshGlobalDb(): DbLike {
+  const db = new Database(":memory:");
+  db.exec("pragma foreign_keys = on");
+  db.exec(readFileSync(GLOBAL_SCHEMA_PATH, "utf8"));
+  return toAsyncDb(db);
+}
+
 const A = "did:web:space-a.example"; // origin space A
 const B = "did:web:space-b.example"; // federating space B
+const USER = "did:plc:bob";
 const ADMIN_A = "did:plc:adminA";
 const ADMIN_B = "did:plc:adminB";
 const MEMBER_A = "did:plc:memberA";
@@ -55,6 +64,18 @@ async function addEdge(
     label,
   ]);
 }
+async function seedChannel(
+  db: DbLike,
+  channelId: string,
+  spaceId: string,
+  defaultAccess: "readwrite" | "read" | "none" = "none",
+): Promise<void> {
+  await db.run("insert into entities (id, stream_id) values (?, ?)", [channelId, spaceId]);
+  await db.run(
+    "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', ?)",
+    [channelId, defaultAccess],
+  );
+}
 
 function requestEvent(spaceB: string) {
   return { $type: "space.roomy.federation.request.v0", id: newUlid(), federatingSpaceDid: spaceB };
@@ -64,6 +85,9 @@ function respondEvent(spaceB: string, approve: boolean) {
 }
 function removeEvent(spaceB: string) {
   return { $type: "space.roomy.federation.remove.v0", id: newUlid(), federatingSpaceDid: spaceB };
+}
+function createMessageEvent(roomId: string) {
+  return { $type: "space.roomy.message.createMessage.v0", id: newUlid(), room: roomId };
 }
 function setRoomPermEvent(spaceB: string, roomId: string, permission: string | null) {
   return { $type: "space.roomy.federation.setRoomPermission.v0", id: newUlid(), federatingSpaceDid: spaceB, roomId, permission };
@@ -160,6 +184,78 @@ describe("auth/writeAuth — federation respond/remove", () => {
     await seedUser(aDb, MEMBER_A);
     await addEdge(aDb, A, MEMBER_A, "member");
     const result = await checkWriteAuth(aDb, A, MEMBER_A, setRoomPermEvent(B, "01CHANNEL00000000000000000", "read"));
+    expect(result?.status).toBe(403);
+  });
+});
+
+describe("auth/writeAuth — federation setReceiverPermission", () => {
+  function setReceiverEvent(origin: string, roomId: string, grantee: string, kind: string, permission: string | null) {
+    return { $type: "space.roomy.federation.setReceiverPermission.v0", id: newUlid(), originSpaceId: origin, roomId, grantee, kind, permission };
+  }
+
+  test("admin of B can set a receiver grant (targets B's stream)", async () => {
+    const { asyncDb: bDb } = freshDb();
+    await seedSpace(bDb, B);
+    await seedUser(bDb, ADMIN_B);
+    await addEdge(bDb, B, ADMIN_B, "admin");
+    const result = await checkWriteAuth(bDb, B, ADMIN_B, setReceiverEvent(A, "01CHANNEL00000000000000000", "did:plc:bob", "user", "read"));
+    expect(result).toBeUndefined();
+  });
+
+  test("non-admin of B cannot set a receiver grant", async () => {
+    const { asyncDb: bDb } = freshDb();
+    await seedSpace(bDb, B);
+    await seedUser(bDb, MEMBER_A);
+    await addEdge(bDb, B, MEMBER_A, "member");
+    const result = await checkWriteAuth(bDb, B, MEMBER_A, setReceiverEvent(A, "01CHANNEL00000000000000000", "did:plc:bob", "user", "read"));
+    expect(result?.status).toBe(403);
+  });
+});
+
+describe("auth/writeAuth — federated writes (Phase 3)", () => {
+  const CHANNEL = "01CHANNEL00000000000000000";
+
+  async function seedFederatedWriteContext(receiverPermission: string) {
+    const { asyncDb: aDb } = freshDb();
+    const { asyncDb: bDb } = freshDb();
+    const globalDb = freshGlobalDb();
+    await seedSpace(aDb, A);
+    await seedChannel(aDb, CHANNEL, A, "none"); // native access denies for a non-member
+    await seedSpace(bDb, B);
+    await seedUser(bDb, USER);
+    await addEdge(bDb, B, USER, "member");
+    await globalDb.run("insert into edges (head, tail, label) values (?, ?, 'joinedSpace')", [USER, B]);
+    await globalDb.run(
+      "insert into space_federations (space_id, federating_space_did, status, requested_by_did) values (?, ?, 'active', ?)",
+      [A, B, USER],
+    );
+    await globalDb.run(
+      "insert into federation_room_permissions (space_id, federating_space_did, room_id, permission) values (?, ?, ?, 'readwrite')",
+      [A, B, CHANNEL],
+    );
+    await globalDb.run(
+      "insert into federation_receiver_permissions (space_id, federating_space_did, room_id, grantee, kind, permission) values (?, ?, ?, ?, 'user', ?)",
+      [A, B, CHANNEL, USER, receiverPermission],
+    );
+    return { aDb, bDb, globalDb };
+  }
+
+  test("B member with readwrite origin + receiver grants can write to a federated channel", async () => {
+    const { aDb, bDb, globalDb } = await seedFederatedWriteContext("readwrite");
+    const result = await checkWriteAuth(aDb, A, USER, createMessageEvent(CHANNEL), undefined, () => bDb, globalDb);
+    expect(result).toBeUndefined();
+  });
+
+  test("B member with only a read receiver grant cannot write", async () => {
+    const { aDb, bDb, globalDb } = await seedFederatedWriteContext("read");
+    const result = await checkWriteAuth(aDb, A, USER, createMessageEvent(CHANNEL), undefined, () => bDb, globalDb);
+    expect(result?.status).toBe(403);
+  });
+
+  test("B member with no receiver grant cannot write", async () => {
+    const { aDb, bDb, globalDb } = await seedFederatedWriteContext("read");
+    await globalDb.run("delete from federation_receiver_permissions where room_id = ?", [CHANNEL]);
+    const result = await checkWriteAuth(aDb, A, USER, createMessageEvent(CHANNEL), undefined, () => bDb, globalDb);
     expect(result?.status).toBe(403);
   });
 });

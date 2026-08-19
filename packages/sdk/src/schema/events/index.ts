@@ -64,6 +64,7 @@ export {
   FederationRespond,
   FederationRemove,
   SetRoomPermission,
+  SetReceiverPermission,
 } from "./federation";
 export { MarkRead } from "./state";
 export {

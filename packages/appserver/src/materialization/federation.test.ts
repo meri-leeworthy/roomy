@@ -48,6 +48,15 @@ function removeEvent(b: StreamDid) {
 function setRoomPermEvent(b: StreamDid, roomId: string, permission: string | null) {
   return { $type: "space.roomy.federation.setRoomPermission.v0", id: newUlid(), federatingSpaceDid: b, roomId, permission } as unknown as Event;
 }
+function setReceiverPermEvent(origin: StreamDid, roomId: string, grantee: string, kind: string, permission: string | null) {
+  return { $type: "space.roomy.federation.setReceiverPermission.v0", id: newUlid(), originSpaceId: origin, roomId, grantee, kind, permission } as unknown as Event;
+}
+
+async function receiverPermissionOf(globalDb: DbLike, a: string, b: string, roomId: string, grantee: string, kind: string): Promise<string | undefined> {
+  return (await globalDb
+    .query("select permission from federation_receiver_permissions where space_id = ? and federating_space_did = ? and room_id = ? and grantee = ? and kind = ?")
+    .get<{ permission: string }>(a, b, roomId, grantee, kind))?.permission;
+}
 
 async function permissionOf(globalDb: DbLike, a: string, b: string, roomId: string): Promise<string | undefined> {
   return (await globalDb
@@ -120,5 +129,19 @@ describe("federation materialization (global DB)", () => {
     // Clearing with null removes the grant.
     await applyBatch(asyncDb, A, [decoded(setRoomPermEvent(B, CHANNEL, null), 3)], { isBackfill: true }, globalDb);
     expect(await permissionOf(globalDb, A, B, CHANNEL)).toBeUndefined();
+  });
+
+  test("setReceiverPermission upserts a receiver grant in the global DB", async () => {
+    const CHANNEL = "01CHANNEL00000000000000000";
+    const { db, asyncDb } = freshDb();
+    const { asyncDb: globalDb } = freshGlobalDb();
+    seedSpace(db);
+    // Receiver grants target B's stream (B admins configure them).
+    await applyBatch(asyncDb, B, [decoded(setReceiverPermEvent(A, CHANNEL, "did:plc:bob", "user", "read"), 0)], { isBackfill: true }, globalDb);
+    expect(await receiverPermissionOf(globalDb, A, B, CHANNEL, "did:plc:bob", "user")).toBe("read");
+
+    // Clearing with null removes the grant.
+    await applyBatch(asyncDb, B, [decoded(setReceiverPermEvent(A, CHANNEL, "did:plc:bob", "user", null), 1)], { isBackfill: true }, globalDb);
+    expect(await receiverPermissionOf(globalDb, A, B, CHANNEL, "did:plc:bob", "user")).toBeUndefined();
   });
 });

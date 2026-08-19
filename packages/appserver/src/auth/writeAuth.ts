@@ -18,6 +18,7 @@ import {
   isBanned,
   type SpaceAccess,
 } from "./access.ts";
+import { federatedRoomAccess } from "./federation.ts";
 
 // ── Result type ──────────────────────────────────────────────────────────
 
@@ -91,6 +92,7 @@ const ALLOWED_TYPES: Set<string> = new Set([
   "space.roomy.federation.respond.v0",
   "space.roomy.federation.remove.v0",
   "space.roomy.federation.setRoomPermission.v0",
+  "space.roomy.federation.setReceiverPermission.v0",
 ]);
 
 // ── Auth category dispatch ───────────────────────────────────────────────
@@ -189,6 +191,7 @@ const FEDERATION_TYPES = new Set([
   "space.roomy.federation.respond.v0",
   "space.roomy.federation.remove.v0",
   "space.roomy.federation.setRoomPermission.v0",
+  "space.roomy.federation.setReceiverPermission.v0",
 ]);
 
 // ── Helper: denial constructors ──────────────────────────────────────────
@@ -253,6 +256,8 @@ async function requireRoomWriteCheck(
   db: DbLike,
   roomId: string,
   did: string,
+  globalDb?: DbLike,
+  dbResolver?: (spaceDid: string) => DbLike,
 ): Promise<WriteAuthResult> {
   const access = await roomAccess(db, roomId, did);
   if (!access.exists) {
@@ -261,14 +266,21 @@ async function requireRoomWriteCheck(
   if (access.isBanned) {
     return denied(403, "Forbidden", "Caller is banned from this space");
   }
-  if (!access.canWrite) {
-    return denied(
-      403,
-      "Forbidden",
-      "Caller does not have write access to this room",
-    );
+  if (access.canWrite) return undefined;
+
+  // Federation fallback (Phase 3): a member of a federated receiving space
+  // may write when both the origin and receiver grants allow it.
+  if (globalDb && dbResolver) {
+    const fed = await federatedRoomAccess(db, globalDb, roomId, did, {
+      spaceDbResolver: dbResolver,
+    });
+    if (fed && fed.canWrite) return undefined;
   }
-  return undefined;
+  return denied(
+    403,
+    "Forbidden",
+    "Caller does not have write access to this room",
+  );
 }
 
 /**
@@ -372,6 +384,7 @@ export async function checkWriteAuth(
   event: { $type: string; [k: string]: unknown },
   access?: SpaceAccess,
   dbResolver?: (spaceDid: string) => DbLike,
+  globalDb?: DbLike,
 ): Promise<WriteAuthResult> {
   const { $type } = event;
 
@@ -399,7 +412,7 @@ export async function checkWriteAuth(
     if (typeof roomId !== "string") {
       return denied(400, "InvalidRequest", `Event is missing required 'room' field`);
     }
-    return await requireRoomWriteCheck(db, roomId, callerDid);
+    return await requireRoomWriteCheck(db, roomId, callerDid, globalDb, dbResolver);
   }
 
   // ── Room write + author check (edit/delete) ──
@@ -408,7 +421,7 @@ export async function checkWriteAuth(
     if (typeof roomId !== "string") {
       return denied(400, "InvalidRequest", `Event is missing required 'room' field`);
     }
-    const roomResult = await requireRoomWriteCheck(db, roomId, callerDid);
+    const roomResult = await requireRoomWriteCheck(db, roomId, callerDid, globalDb, dbResolver);
     if (roomResult) return roomResult;
 
     // Additional author-or-admin check

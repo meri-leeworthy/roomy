@@ -10,7 +10,7 @@
 
 import { parseEvent, type Event, StreamDid } from "@roomy-space/sdk";
 import { log } from "../log.ts";
-import { openSpaceDb } from "../db/db.ts";
+import { openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { checkWriteAuth } from "../auth/writeAuth.ts";
 import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -91,6 +91,7 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
       event,
       access,
       openSpaceDb,
+      openGlobalDb(),
     );
     if (denial) {
       throw new XrpcError(

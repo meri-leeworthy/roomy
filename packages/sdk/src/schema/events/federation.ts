@@ -146,9 +146,63 @@ export const SetRoomPermission = defineEvent(
   ],
 );
 
+const SetReceiverPermissionSchema = type({
+  $type: "'space.roomy.federation.setReceiverPermission.v0'",
+  originSpaceId: StreamDid.describe(
+    "The origin space (A) that owns the federated channel.",
+  ),
+  roomId: Ulid.describe(
+    "The federated channel (in A) whose receiver access is being set.",
+  ),
+  grantee: type("string").describe(
+    "A B user DID (kind='user') or a B role id (kind='role').",
+  ),
+  kind: type("'user' | 'role'").describe(
+    "Whether the grantee is a B user or a B role.",
+  ),
+  permission: type("'read' | 'readwrite'")
+    .or(type.null)
+    .describe(
+      "The receiver grant level for this grantee on the channel. null removes it.",
+    ),
+}).describe(
+  "Set (or clear) a receiver grant: what access a specific B member or role " +
+    "has to a federated channel, capped by the origin grant. Sent on B's " +
+    "stream by an admin of B.",
+);
+
+export const SetReceiverPermission = defineEvent(
+  SetReceiverPermissionSchema,
+  ({ streamId, event }) => [
+    // Remove any existing grant unconditionally, then re-insert if non-null.
+    sql`
+      delete from federation_receiver_permissions
+       where space_id = ${event.originSpaceId}
+         and federating_space_did = ${streamId}
+         and room_id = ${event.roomId}
+         and grantee = ${event.grantee}
+         and kind = ${event.kind}
+    `,
+    ...(event.permission !== null
+      ? [
+          sql`
+            insert into federation_receiver_permissions (
+              space_id, federating_space_did, room_id, grantee, kind, permission
+            )
+            values (
+              ${event.originSpaceId}, ${streamId}, ${event.roomId},
+              ${event.grantee}, ${event.kind}, ${event.permission}
+            )
+          `,
+        ]
+      : []),
+  ],
+);
+
 export const FederationEventVariant = type.or(
   FederationRequestSchema,
   FederationRespondSchema,
   FederationRemoveSchema,
   SetRoomPermissionSchema,
+  SetReceiverPermissionSchema,
 );

@@ -18,7 +18,7 @@ import {
   spaceAccess,
 } from "../auth/access.ts";
 import { federatedRoomAccess } from "../auth/federation.ts";
-import { openGlobalDb } from "../db/db.ts";
+import { openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { XrpcError } from "./errors.ts";
 import type { AuthCtx } from "./types.ts";
 
@@ -127,12 +127,14 @@ export async function requireRoomRead(
   // space but may have federated read access via another space they belong
   // to. Only consulted when native access denies.
   if (did !== null) {
-    const fed = await federatedRoomAccess(db, openGlobalDb(), roomId, did);
+    const fed = await federatedRoomAccess(db, openGlobalDb(), roomId, did, {
+      spaceDbResolver: openSpaceDb,
+    });
     if (fed && fed.canRead) {
       return {
         ...access,
         canRead: true,
-        canWrite: fed.canWrite, // write arrives in Phase 3
+        canWrite: fed.canWrite,
       };
     }
   }
@@ -163,12 +165,25 @@ export async function requireRoomWrite(
   if (access.isBanned) {
     throw new XrpcError(403, "Forbidden", "Caller is banned from this space");
   }
-  if (!access.canWrite) {
-    throw new XrpcError(
-      403,
-      "Forbidden",
-      "Caller does not have write access to this room",
-    );
+  if (access.canWrite) return access;
+
+  // Federation fallback (Phase 3): a member of a federated receiving space
+  // may write when both the origin and receiver grants allow it.
+  if (did !== null) {
+    const fed = await federatedRoomAccess(db, openGlobalDb(), roomId, did, {
+      spaceDbResolver: openSpaceDb,
+    });
+    if (fed && fed.canWrite) {
+      return {
+        ...access,
+        canRead: true,
+        canWrite: true,
+      };
+    }
   }
-  return access;
+  throw new XrpcError(
+    403,
+    "Forbidden",
+    "Caller does not have write access to this room",
+  );
 }
