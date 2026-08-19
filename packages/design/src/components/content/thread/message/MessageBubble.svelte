@@ -39,6 +39,7 @@
     content,
     media,
     linkEmbeds,
+    forwardEmbed,
     toolbar,
     reactions,
     actions,
@@ -62,6 +63,8 @@
     content?: Snippet;
     media?: Snippet;
     linkEmbeds?: Snippet;
+    /** Renders a forward embed (a quoted copy of the original message). */
+    forwardEmbed?: Snippet;
     toolbar?: Snippet;
     reactions?: Snippet;
     /** Action buttons rendered at the end of the message row, vertically
@@ -174,6 +177,9 @@
       >
         {#if content}
           {@render content()}
+        {/if}
+        {#if forwardEmbed}
+          {@render forwardEmbed()}
         {/if}
         {#if linkEmbeds}
           {@render linkEmbeds()}

@@ -25,8 +25,12 @@ export const Media = type({
 });
 
 export const ForwardedFrom = type({
-  name: "string",
+  /** The ID of the original message that was forwarded. */
+  messageId: "string",
+  /** The room the original message lives in. */
   roomId: "string",
+  /** The name of the source room. */
+  name: "string",
 });
 
 /**

@@ -640,6 +640,74 @@ describe("forwardMessages sort order", () => {
   });
 })
 
+describe("forward-as-embed (createMessage + forward attachment)", () => {
+  // The modern representation of a forward: a `createMessage` event carrying
+  // a `space.roomy.attachment.forward.v0` attachment creates a real message in
+  // the destination room (with the forwarder's own body) plus a `forward`
+  // edge to the original. selectMessages keeps the forwarder's own content
+  // and surfaces `forwardedFrom` for the embed.
+  test("creates a real message with its own content and a forward edge", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    const channelId = newUlid();
+    const threadId = newUlid();
+    seedChannelAndThread(db, channelId, threadId);
+
+    const originalId = ulid(1_700_000_000_000);
+    const original = createMessageEvent(channelId, originalId, "original text");
+
+    const fwdId = ulid(1_700_000_100_000);
+    const fwd: Event = {
+      $type: "space.roomy.message.createMessage.v0",
+      id: fwdId,
+      room: threadId,
+      body: {
+        mimeType: "text/markdown",
+        data: { buf: new TextEncoder().encode("my take on this") },
+      },
+      extensions: {
+        "space.roomy.extension.attachments.v0": {
+          $type: "space.roomy.extension.attachments.v0",
+          attachments: [
+            {
+              $type: "space.roomy.attachment.forward.v0",
+              target: originalId,
+              fromRoomId: channelId,
+            },
+          ],
+        },
+      },
+    } as unknown as Event;
+
+    await applyBatch(
+      asyncDb,
+      STREAM,
+      [decoded(original, 1), decoded(fwd, 2)],
+      { isBackfill: true },
+    );
+
+    // The forward message keeps its own content and author, and carries a
+    // forward edge to the original.
+    const edge = await asyncDb
+      .query("select tail from edges where head = ? and label = 'forward'")
+      .get<{ tail: string }>(fwdId);
+    expect(edge?.tail).toBe(originalId);
+
+    const { messages } = await selectMessages(asyncDb, {
+      kind: "room",
+      roomId: threadId,
+      limit: 100,
+      cursor: null,
+    });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.id).toBe(fwdId);
+    expect(messages[0]?.content).toBe("my take on this");
+    expect(messages[0]?.forwardedFrom?.messageId).toBe(originalId);
+    expect(messages[0]?.forwardedFrom?.roomId).toBe(channelId);
+  });
+})
+
 // ─── Concurrency: applyBundle savepoint serialization ────────────────────
 
 /**

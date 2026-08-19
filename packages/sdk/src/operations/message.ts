@@ -371,6 +371,12 @@ export interface ForwardMessagesResult {
 /**
  * Forward messages from one room to another (e.g., for threads).
  *
+ * @deprecated Prefer {@link forwardMessage}, which represents a forward as a
+ * `createMessage` event carrying a `space.roomy.attachment.forward.v0`
+ * attachment (a real message that embeds the original). This legacy event is
+ * kept for backwards compatibility with older producers and already-
+ * materialised forward-reference entities.
+ *
  * @param options - Message forward options
  * @param sendEvent - Function to send the event
  * @returns The ID of the forward event
@@ -401,4 +407,84 @@ export async function forwardMessages(
   await sendEvent(event);
 
   return { id: forwardId };
+}
+
+/**
+ * Options for forwarding a single message as an embed.
+ */
+export interface ForwardMessageOptions {
+  /** The destination room ID */
+  roomId: Ulid;
+  /** The room the original message currently lives in. */
+  fromRoomId: Ulid;
+  /** The ID of the original message to forward. */
+  messageId: Ulid;
+  /** Optional body the forwarder wants to add alongside the embed. */
+  body?: string;
+  /** The MIME type of the body (default: text/markdown). */
+  mimeType?: string;
+}
+
+/**
+ * Result of forwarding a message.
+ */
+export interface ForwardMessageResult {
+  /** The ID of the created forward message. */
+  id: Ulid;
+}
+
+/**
+ * Forward a message to another room as an embed. Sends a `createMessage`
+ * event carrying a `space.roomy.attachment.forward.v0` attachment, so the
+ * destination gets a real message (with the forwarder's optional body) that
+ * embeds the original. This is the modern replacement for the deprecated
+ * `forwardMessages` event.
+ *
+ * @param options - Message forward options
+ * @param sendEvent - Function to send the event
+ * @returns The ID of the created forward message
+ *
+ * @example
+ * ```ts
+ * const result = await forwardMessage({
+ *   roomId: "01H...",
+ *   fromRoomId: "01J...",
+ *   messageId: "01K...",
+ *   body: "Worth a read",
+ * }, sendEvent);
+ * ```
+ */
+export async function forwardMessage(
+  options: ForwardMessageOptions,
+  sendEvent: (event: Event) => Promise<void>,
+): Promise<ForwardMessageResult> {
+  const messageId = newUlid();
+
+  const extensions: Record<string, unknown> = {
+    "space.roomy.extension.attachments.v0": {
+      $type: "space.roomy.extension.attachments.v0",
+      attachments: [
+        {
+          $type: "space.roomy.attachment.forward.v0",
+          target: options.messageId,
+          fromRoomId: options.fromRoomId,
+        },
+      ],
+    },
+  };
+
+  const event: Event = {
+    id: messageId,
+    room: options.roomId,
+    $type: "space.roomy.message.createMessage.v0",
+    body: {
+      mimeType: options.mimeType || "text/markdown",
+      data: toBytes(new TextEncoder().encode(options.body ?? "")),
+    },
+    extensions,
+  };
+
+  await sendEvent(event);
+
+  return { id: messageId };
 }

@@ -158,6 +158,21 @@ export const CreateMessage = defineEvent(
           )
         `,
         );
+      } else if (att.$type == "space.roomy.attachment.forward.v0") {
+        // A forward is a real message (with its own body, if any) that embeds
+        // the original via a `forward` edge. Guard with `where exists` so a
+        // missing original (deleted before the forward, not-yet-materialised,
+        // or cross-space) does not trip the `edges.tail` foreign key and fail
+        // the entire event — the forward message is still created, just
+        // without the edge. This mirrors the legacy forwardMessages event.
+        statements.push(sql`
+          insert or ignore into edges (head, tail, label)
+          select
+            ${event.id},
+            ${att.target},
+            'forward'
+          where exists (select 1 from entities where id = ${att.target})
+        `);
       }
     }
 
@@ -468,6 +483,13 @@ const ForwardMessagesSchema = type({
   "Forward one or more messages to a different room. Unlike move, the original messages remain in place.",
 );
 
+/**
+ * @deprecated Prefer representing a forward as a `createMessage` event
+ * carrying a `space.roomy.attachment.forward.v0` attachment (a real message
+ * that embeds the original). This event is kept for backwards compatibility
+ * with already-materialised forward-reference entities and older producers;
+ * new producers should use the forward attachment instead.
+ */
 export const ForwardMessages = defineEvent(
   ForwardMessagesSchema,
   ({ streamId, event }) => {

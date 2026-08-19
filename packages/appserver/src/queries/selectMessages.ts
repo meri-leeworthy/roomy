@@ -61,7 +61,7 @@ export interface MessageDto {
   authorAvatar?: string;
   timestamp: string;
   replyTo?: string;
-  forwardedFrom?: { name: string; roomId: string };
+  forwardedFrom?: { messageId: string; name: string; roomId: string };
   reactions: Array<ReactionDto>;
   media: Array<MediaDto>;
   /** Link embeds with enriched metadata from the embed service. */
@@ -467,6 +467,7 @@ export async function selectMessages(
       forwardedFrom:
         r.forward_target != null
           ? {
+              messageId: r.forward_target,
               name: r.forward_target_room_name ?? "",
               roomId: r.forward_target_room ?? "",
             }

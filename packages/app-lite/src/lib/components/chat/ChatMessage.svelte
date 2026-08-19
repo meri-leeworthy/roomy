@@ -11,6 +11,7 @@
   import MessageToolbar from "./MessageToolbar.svelte";
   import MediaEmbed from "./embeds/MediaEmbed.svelte";
   import LinkCard from "./embeds/LinkCard.svelte";
+  import ForwardEmbed from "./embeds/ForwardEmbed.svelte";
   import MessageContent from "./MessageContent.svelte";
   import ChatInput from "./ChatInput.svelte";
   import { editMessage, removeLinkEmbed } from "$lib/mutations/message";
@@ -381,6 +382,14 @@
               {/each}
             </div>
           {/if}
+        {/if}
+      {/snippet}
+
+      {#snippet forwardEmbed()}
+        {#if message.forwardedFrom}
+          <div class="mt-1">
+            <ForwardEmbed forwardedFrom={message.forwardedFrom} />
+          </div>
         {/if}
       {/snippet}
 

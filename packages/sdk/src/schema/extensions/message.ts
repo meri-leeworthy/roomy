@@ -73,6 +73,23 @@ export const LinkAttachment = type({
   showPreview: "boolean",
 }).describe("Link with optional preview");
 
+// Forward attachment: a message that quotes/embeds another message. This is
+// the modern representation of a message forward — a `createMessage` event
+// carrying a forward attachment creates a real message in the destination
+// room (with the forwarder's own body, if any) plus a `forward` edge to the
+// original. The client renders the original as an embed inside the new
+// message. Supersedes the legacy `space.roomy.message.forwardMessages.v0`
+// event (kept for backwards compatibility).
+export const Forward = type({
+  $type: "'space.roomy.attachment.forward.v0'",
+  target: Ulid.describe("The ID of the original message being forwarded."),
+  fromRoomId: Ulid.describe(
+    "The room the original message currently lives in.",
+  ),
+}).describe(
+  "Marks the message as a forward of the target message, rendered as an embed.",
+);
+
 export const DiscordMessageOrigin = type({
   $type: "'space.roomy.extension.discordMessageOrigin.v0'",
   snowflake: DiscordSnowflake.describe("The Discord message snowflake ID."),
@@ -92,6 +109,7 @@ export const Attachment = type.or(
   VideoAttachment,
   FileAttachment,
   LinkAttachment,
+  Forward,
 );
 export type Attachment = typeof Attachment.infer;
 

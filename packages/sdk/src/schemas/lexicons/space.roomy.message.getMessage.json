@@ -211,10 +211,14 @@
     "forwardedFrom": {
       "type": "object",
       "required": [
+        "messageId",
         "name",
         "roomId"
       ],
       "properties": {
+        "messageId": {
+          "type": "string"
+        },
         "name": {
           "type": "string"
         },

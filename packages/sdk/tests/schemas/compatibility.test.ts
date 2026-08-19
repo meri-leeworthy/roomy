@@ -196,7 +196,7 @@ describe("schemas/queries", () => {
       authorDid: "did:plc:abcdef",
       authorName: "alice",
       timestamp: "2026-05-17T00:00:00.000Z",
-      forwardedFrom: { name: "other-room", roomId: "01CH0000000000000000000000" },
+      forwardedFrom: { messageId: "01M000000000000000000000XX", name: "other-room", roomId: "01CH0000000000000000000000" },
       reactions: [],
       media: [],
       tags: [],
