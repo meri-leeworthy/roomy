@@ -123,3 +123,17 @@ create table if not exists space_federations (
 ) strict;
 create index if not exists idx_space_fed_recv on space_federations(federating_space_did, status);
 create index if not exists idx_space_fed_origin_status on space_federations(space_id, status);
+
+-- Origin grant: A-admin-set access for a receiving space B on a channel of A.
+-- Mirrors role_rooms. permission null == removed / not exposed. Grants are
+-- channel-scoped: threads inherit from their parent channel (see plan §5.5),
+-- so lookups for a thread use its parent channel id as the room_id.
+create table if not exists federation_room_permissions (
+  space_id             text not null,   -- origin space A
+  federating_space_did text not null,   -- receiving space B
+  room_id              text not null,   -- channel id in A
+  permission           text not null check(permission in ('read','readwrite')),
+  primary key (space_id, federating_space_did, room_id)
+) strict;
+create index if not exists idx_frp_recv on federation_room_permissions(federating_space_did, permission);
+create index if not exists idx_frp_room on federation_room_permissions(room_id);

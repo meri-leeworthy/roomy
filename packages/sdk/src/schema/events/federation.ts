@@ -12,7 +12,7 @@
  * routes to the global DB.
  */
 
-import { StreamDid, type } from "../primitives";
+import { StreamDid, Ulid, type } from "../primitives";
 import { defineEvent } from "./utils";
 import { sql } from "../../utils";
 
@@ -104,8 +104,51 @@ export const FederationRemove = defineEvent(
   ],
 );
 
+const SetRoomPermissionSchema = type({
+  $type: "'space.roomy.federation.setRoomPermission.v0'",
+  federatingSpaceDid: StreamDid.describe(
+    "The receiving space (B) whose access to this channel is being set.",
+  ),
+  roomId: Ulid.describe(
+    "The channel in this space (A) to grant access to. Threads inherit from " +
+      "their parent channel, so grants are channel-scoped.",
+  ),
+  permission: type("'read' | 'readwrite'")
+    .or(type.null)
+    .describe(
+      "The origin grant level for B on this channel. null removes B's access.",
+    ),
+}).describe(
+  "Set (or clear) the origin grant: what access the receiving space B has to " +
+    "a channel of this space (A). Sent on A's stream by an admin of A.",
+);
+
+export const SetRoomPermission = defineEvent(
+  SetRoomPermissionSchema,
+  ({ streamId, event }) => [
+    // Remove any existing grant unconditionally, then re-insert if non-null.
+    sql`
+      delete from federation_room_permissions
+       where space_id = ${streamId}
+         and federating_space_did = ${event.federatingSpaceDid}
+         and room_id = ${event.roomId}
+    `,
+    ...(event.permission !== null
+      ? [
+          sql`
+            insert into federation_room_permissions (
+              space_id, federating_space_did, room_id, permission
+            )
+            values (${streamId}, ${event.federatingSpaceDid}, ${event.roomId}, ${event.permission})
+          `,
+        ]
+      : []),
+  ],
+);
+
 export const FederationEventVariant = type.or(
   FederationRequestSchema,
   FederationRespondSchema,
   FederationRemoveSchema,
+  SetRoomPermissionSchema,
 );

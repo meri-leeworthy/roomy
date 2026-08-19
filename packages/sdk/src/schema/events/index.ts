@@ -63,6 +63,7 @@ export {
   FederationRequest,
   FederationRespond,
   FederationRemove,
+  SetRoomPermission,
 } from "./federation";
 export { MarkRead } from "./state";
 export {

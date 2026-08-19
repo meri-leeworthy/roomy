@@ -65,6 +65,9 @@ function respondEvent(spaceB: string, approve: boolean) {
 function removeEvent(spaceB: string) {
   return { $type: "space.roomy.federation.remove.v0", id: newUlid(), federatingSpaceDid: spaceB };
 }
+function setRoomPermEvent(spaceB: string, roomId: string, permission: string | null) {
+  return { $type: "space.roomy.federation.setRoomPermission.v0", id: newUlid(), federatingSpaceDid: spaceB, roomId, permission };
+}
 
 async function seedRequestContext(opts: { memberA: string; adminA?: boolean; adminB?: boolean }) {
   const { asyncDb: aDb } = freshDb();
@@ -140,5 +143,23 @@ describe("auth/writeAuth — federation respond/remove", () => {
     await addEdge(aDb, A, ADMIN_A, "admin");
     const result = await checkWriteAuth(aDb, A, ADMIN_A, removeEvent(B));
     expect(result).toBeUndefined();
+  });
+
+  test("admin of A can set an origin grant", async () => {
+    const { asyncDb: aDb } = freshDb();
+    await seedSpace(aDb, A);
+    await seedUser(aDb, ADMIN_A);
+    await addEdge(aDb, A, ADMIN_A, "admin");
+    const result = await checkWriteAuth(aDb, A, ADMIN_A, setRoomPermEvent(B, "01CHANNEL00000000000000000", "read"));
+    expect(result).toBeUndefined();
+  });
+
+  test("non-admin of A cannot set an origin permission", async () => {
+    const { asyncDb: aDb } = freshDb();
+    await seedSpace(aDb, A);
+    await seedUser(aDb, MEMBER_A);
+    await addEdge(aDb, A, MEMBER_A, "member");
+    const result = await checkWriteAuth(aDb, A, MEMBER_A, setRoomPermEvent(B, "01CHANNEL00000000000000000", "read"));
+    expect(result?.status).toBe(403);
   });
 });

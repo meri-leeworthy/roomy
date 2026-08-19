@@ -10,9 +10,10 @@
  *   per-user membership edges written by the `JoinSpace`/`LeaveSpace`
  *   materialisers (space.roomy.space.joinSpace/leaveSpace). They
  *   live in the global DB only.
- * - `space_federations` statements (written by the federation
- *   materialisers, space.roomy.federation.*) are the cross-space
- *   channel-federation registry. They live in the global DB only.
+ * - `space_federations` / `federation_room_permissions` statements (written
+ *   by the federation materialisers, space.roomy.federation.*) are the
+ *   cross-space channel-federation registry + grants. They live in the
+ *   global DB only.
  * - Everything else — `entities`, `comp_*`, `roles`, `activity_item`,
  *   `materialization_cursor`, and all other `edges` labels (member, admin,
  *   author, link, reply, forward, ...) — lives in the per-space DB.
@@ -23,7 +24,12 @@
 
 /** True when the statement writes the global membership edges or registry. */
 export function isGlobalDbStatement(sql: string): boolean {
-  if (sql.includes("space_federations")) return true;
+  if (
+    sql.includes("space_federations") ||
+    sql.includes("federation_room_permissions")
+  ) {
+    return true;
+  }
   if (!sql.includes("edges")) return false;
   return sql.includes("'joinedSpace'") || sql.includes("'leftSpace'");
 }

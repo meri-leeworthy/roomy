@@ -34,6 +34,11 @@ export const ActiveSidebarThread = type({
   "lastRead?": "string | null",
 });
 
+export const FederatedChannel = type({
+  originSpaceId: "string",
+  permission: "'read' | 'readwrite'",
+});
+
 export const SidebarChannel = type({
   id: "string",
   "name?": "string",
@@ -43,6 +48,7 @@ export const SidebarChannel = type({
   unreadCount: "number",
   "lastRead?": "string",
   "activeThreads?": ActiveSidebarThread.array(),
+  "federated?": FederatedChannel,
 });
 
 export const SidebarCategory = type({

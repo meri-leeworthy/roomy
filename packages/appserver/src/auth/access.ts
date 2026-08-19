@@ -200,7 +200,7 @@ export async function allowsPublicJoin(
 
 // ── Room access ───────────────────────────────────────────────────────────
 
-interface RoomRow {
+export interface RoomRow {
   spaceId: string | null;
   defaultAccess: DefaultAccess;
 }
@@ -214,7 +214,7 @@ interface RoomRow {
  * Returns the resolved row plus the canonical parent channel ID (null when the
  * room is a channel itself, or has no canonical parent link).
  */
-async function resolveRoom(
+export async function resolveRoom(
   db: DbLike,
   roomId: string,
 ): Promise<{ row: RoomRow | null; parentChannelId: string | null }> {

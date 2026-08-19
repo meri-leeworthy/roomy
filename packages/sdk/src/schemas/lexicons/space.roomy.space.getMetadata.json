@@ -96,6 +96,25 @@
         }
       }
     },
+    "federated": {
+      "type": "object",
+      "required": [
+        "originSpaceId",
+        "permission"
+      ],
+      "properties": {
+        "originSpaceId": {
+          "type": "string"
+        },
+        "permission": {
+          "type": "string",
+          "knownValues": [
+            "read",
+            "readwrite"
+          ]
+        }
+      }
+    },
     "channels": {
       "type": "object",
       "required": [
@@ -132,6 +151,10 @@
             "type": "ref",
             "ref": "#activeThreads"
           }
+        },
+        "federated": {
+          "type": "ref",
+          "ref": "#federated"
         },
         "lastRead": {
           "type": "string"
@@ -246,6 +269,25 @@
         }
       }
     },
+    "federated2": {
+      "type": "object",
+      "required": [
+        "originSpaceId",
+        "permission"
+      ],
+      "properties": {
+        "originSpaceId": {
+          "type": "string"
+        },
+        "permission": {
+          "type": "string",
+          "knownValues": [
+            "read",
+            "readwrite"
+          ]
+        }
+      }
+    },
     "orphans": {
       "type": "object",
       "required": [
@@ -282,6 +324,10 @@
             "type": "ref",
             "ref": "#activeThreads2"
           }
+        },
+        "federated": {
+          "type": "ref",
+          "ref": "#federated2"
         },
         "lastRead": {
           "type": "string"

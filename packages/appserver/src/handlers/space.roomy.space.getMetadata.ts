@@ -7,7 +7,7 @@
  */
 
 import { createAccessMemo, roomAccess, spaceAccess } from "../auth/access.ts";
-import { openReadStateDb, openSpaceDb } from "../db/db.ts";
+import { openReadStateDb, openSpaceDb, openGlobalDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { getReadPositions } from "../queries/readPositions.ts";
 import { queryActiveThreads, resolveThreadsByIds } from "../queries/userActiveThreads.ts";
@@ -39,6 +39,11 @@ interface SidebarChannel {
   unreadCount: number;
   lastRead?: string;
   activeThreads?: ActiveSidebarThread[];
+  /** Set for channels federated INTO this space from another (origin) space. */
+  federated?: {
+    originSpaceId: string;
+    permission: "read" | "readwrite";
+  };
 }
 
 interface SidebarCategory {
@@ -216,6 +221,15 @@ export const getMetadataHandler: QueryHandler<
       if (ch) orphans.push(ch);
     }
 
+    // ── Federated channels (Phase 2) ─────────────────────────────────
+    // Channels of OTHER spaces (origins) that are federated INTO this space
+    // with an origin grant. They appear in B's sidebar, decorated with their
+    // origin space. B members can read them at the origin-grant level (B
+    // admins configure member-level access in a later phase). Threads under
+    // these channels inherit the federation (see plan §5.5).
+    const federatedChannels = await buildFederatedSidebarChannels(spaceId);
+    if (federatedChannels.length > 0) orphans.push(...federatedChannels);
+
     // ── Active threads ────────────────────────────────────────────────
     // Fetch up to 8 threads the user has recently interacted with and
     // distribute them into their parent channels for the sidebar.
@@ -315,3 +329,66 @@ export const getMetadataHandler: QueryHandler<
     ...(deletedRooms !== undefined ? { deletedRooms } : {}),
   }) as GetMetadataResult;
 };
+
+/**
+ * Build the federated-channel entries for a space's sidebar: channels owned
+ * by OTHER spaces (origins) that are federated into this space (B) with an
+ * active origin grant. Each is decorated with its origin space + the grant
+ * level. B members can read them at the origin-grant level; member-level
+ * (receiver) configuration arrives in a later phase.
+ */
+async function buildFederatedSidebarChannels(
+  spaceId: string,
+): Promise<SidebarChannel[]> {
+  const globalDb = openGlobalDb();
+  const rows = await globalDb
+    .query(
+      `select frp.space_id as origin, frp.room_id as room_id, frp.permission as permission
+         from federation_room_permissions frp
+         join space_federations sf
+           on sf.space_id = frp.space_id
+          and sf.federating_space_did = frp.federating_space_did
+        where frp.federating_space_did = ?
+          and sf.status = 'active'`,
+    )
+    .all<{ origin: string; room_id: string; permission: string }>(spaceId);
+
+  if (rows.length === 0) return [];
+
+  // Group grants by origin space so we fetch channel metadata once per origin.
+  const byOrigin = new Map<string, Array<{ roomId: string; permission: string }>>();
+  for (const r of rows) {
+    const list = byOrigin.get(r.origin) ?? [];
+    list.push({ roomId: r.room_id, permission: r.permission });
+    byOrigin.set(r.origin, list);
+  }
+
+  const out: SidebarChannel[] = [];
+  for (const [origin, grants] of byOrigin) {
+    const originDb = openSpaceDb(origin);
+    const ids = grants.map((g) => g.roomId);
+    const placeholders = ids.map(() => "?").join(", ");
+    const infoRows = await originDb
+      .query(
+        `select e.id as id, ci.name as name
+           from entities e
+           left join comp_info ci on ci.entity = e.id
+          where e.id in (${placeholders})`,
+      )
+      .all<{ id: string; name: string | null }>(...ids);
+    const nameById = new Map(infoRows.map((r) => [r.id, r.name]));
+
+    for (const g of grants) {
+      out.push(stripNulls({
+        id: g.roomId,
+        name: nameById.get(g.roomId) ?? undefined,
+        defaultAccess: g.permission === "readwrite" ? "readwrite" : "read",
+        canRead: true,
+        canWrite: g.permission === "readwrite",
+        unreadCount: 0,
+        federated: { originSpaceId: origin, permission: g.permission },
+      }) as SidebarChannel);
+    }
+  }
+  return out;
+}

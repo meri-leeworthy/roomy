@@ -17,6 +17,8 @@ import {
   roomAccess,
   spaceAccess,
 } from "../auth/access.ts";
+import { federatedRoomAccess } from "../auth/federation.ts";
+import { openGlobalDb } from "../db/db.ts";
 import { XrpcError } from "./errors.ts";
 import type { AuthCtx } from "./types.ts";
 
@@ -116,14 +118,29 @@ export async function requireRoomRead(
   if (!access.exists) {
     throw new XrpcError(404, "NotFound", `Room not found: ${roomId}`);
   }
-  if (!access.canRead) {
-    throw new XrpcError(
-      403,
-      "Forbidden",
-      "Caller has no read access to this room",
-    );
+  if (access.isBanned) {
+    throw new XrpcError(403, "Forbidden", "Caller is banned from this space");
   }
-  return access;
+  if (access.canRead) return access;
+
+  // Federation fallback (Phase 2): the caller may not be a member of this
+  // space but may have federated read access via another space they belong
+  // to. Only consulted when native access denies.
+  if (did !== null) {
+    const fed = await federatedRoomAccess(db, openGlobalDb(), roomId, did);
+    if (fed && fed.canRead) {
+      return {
+        ...access,
+        canRead: true,
+        canWrite: fed.canWrite, // write arrives in Phase 3
+      };
+    }
+  }
+  throw new XrpcError(
+    403,
+    "Forbidden",
+    "Caller has no read access to this room",
+  );
 }
 
 /**

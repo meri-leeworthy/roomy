@@ -90,6 +90,7 @@ const ALLOWED_TYPES: Set<string> = new Set([
   "space.roomy.federation.request.v0",
   "space.roomy.federation.respond.v0",
   "space.roomy.federation.remove.v0",
+  "space.roomy.federation.setRoomPermission.v0",
 ]);
 
 // ── Auth category dispatch ───────────────────────────────────────────────
@@ -187,6 +188,7 @@ const FEDERATION_TYPES = new Set([
   "space.roomy.federation.request.v0",
   "space.roomy.federation.respond.v0",
   "space.roomy.federation.remove.v0",
+  "space.roomy.federation.setRoomPermission.v0",
 ]);
 
 // ── Helper: denial constructors ──────────────────────────────────────────

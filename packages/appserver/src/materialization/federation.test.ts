@@ -45,6 +45,15 @@ function respondEvent(b: StreamDid, approve: boolean) {
 function removeEvent(b: StreamDid) {
   return { $type: "space.roomy.federation.remove.v0", id: newUlid(), federatingSpaceDid: b } as unknown as Event;
 }
+function setRoomPermEvent(b: StreamDid, roomId: string, permission: string | null) {
+  return { $type: "space.roomy.federation.setRoomPermission.v0", id: newUlid(), federatingSpaceDid: b, roomId, permission } as unknown as Event;
+}
+
+async function permissionOf(globalDb: DbLike, a: string, b: string, roomId: string): Promise<string | undefined> {
+  return (await globalDb
+    .query("select permission from federation_room_permissions where space_id = ? and federating_space_did = ? and room_id = ?")
+    .get<{ permission: string }>(a, b, roomId))?.permission;
+}
 
 async function statusOf(globalDb: DbLike, a: string, b: string): Promise<string | undefined> {
   return (await globalDb
@@ -96,5 +105,20 @@ describe("federation materialization (global DB)", () => {
     await applyBatch(asyncDb, A, [decoded(respondEvent(B, true), 1)], { isBackfill: true }, globalDb);
     await applyBatch(asyncDb, A, [decoded(removeEvent(B), 2)], { isBackfill: true }, globalDb);
     expect(await statusOf(globalDb, A, B)).toBe("removed");
+  });
+
+  test("setRoomPermission upserts an origin grant in the global DB", async () => {
+    const CHANNEL = "01CHANNEL00000000000000000";
+    const { db, asyncDb } = freshDb();
+    const { asyncDb: globalDb } = freshGlobalDb();
+    seedSpace(db);
+    await applyBatch(asyncDb, A, [decoded(requestEvent(B), 0)], { isBackfill: true }, globalDb);
+    await applyBatch(asyncDb, A, [decoded(respondEvent(B, true), 1)], { isBackfill: true }, globalDb);
+    await applyBatch(asyncDb, A, [decoded(setRoomPermEvent(B, CHANNEL, "read"), 2)], { isBackfill: true }, globalDb);
+    expect(await permissionOf(globalDb, A, B, CHANNEL)).toBe("read");
+
+    // Clearing with null removes the grant.
+    await applyBatch(asyncDb, A, [decoded(setRoomPermEvent(B, CHANNEL, null), 3)], { isBackfill: true }, globalDb);
+    expect(await permissionOf(globalDb, A, B, CHANNEL)).toBeUndefined();
   });
 });
