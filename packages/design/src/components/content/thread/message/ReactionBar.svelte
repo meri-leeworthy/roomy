@@ -15,6 +15,7 @@
 </script>
 
 <script lang="ts">
+  import { MediaQuery } from "svelte/reactivity";
   import { PopoverEmojiPicker } from "@foxui/social";
   import { Toggle } from "@foxui/core";
   import { Tooltip } from "bits-ui";
@@ -42,6 +43,34 @@
 
   let isEmojiRowPickerOpen = $state(false);
 
+  // ── Mobile long-press to reveal the reactor list ────────────────────────
+  // Touch devices have no hover, so a long-press on a reaction emoji opens the
+  // same reactor-list tooltip that desktop hover shows. A short tap still
+  // toggles the reaction. We use a touch timer (the reliable cross-browser
+  // long-press signal) and also intercept `contextmenu` (which iOS/Android
+  // fire on long-press) so it doesn't bubble up to the message's own
+  // long-press handler (the mobile message menu).
+  let isCoarse = new MediaQuery("(pointer: coarse)");
+  let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  let longPressTriggered = false;
+
+  function onTouchStart(emoji: string) {
+    longPressTriggered = false;
+    if (longPressTimer) clearTimeout(longPressTimer);
+    longPressTimer = setTimeout(() => {
+      longPressTriggered = true;
+      onHover?.(emoji);
+    }, 500);
+  }
+  function onTouchEnd() {
+    if (longPressTimer) clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
+  function onTouchMove() {
+    if (longPressTimer) clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
+
   function handlePick(emoji: string) {
     onToggleReaction(emoji);
     isEmojiRowPickerOpen = false;
@@ -51,17 +80,37 @@
 {#if reactions.length > 0}
   <div class="flex gap-2 items-center flex-wrap pl-12 z-10">
     {#each reactions as { emoji, count, pressed } (emoji)}
-      <Tooltip.Root open={tooltipOpenByEmoji[emoji] ?? false}>
-        <div
-          onmouseover={() => onHover?.(emoji)}
-          class="inline-flex"
-        >
+      <Tooltip.Root bind:open={tooltipOpenByEmoji[emoji]}>
+        <div class="inline-flex" role="presentation">
           <Tooltip.Trigger>
             {#snippet child({ props })}
               <Toggle
                 pressed={pressed}
                 {...props}
-                onclick={() => onToggleReaction(emoji)}
+                onmouseover={() => onHover?.(emoji)}
+                ontouchstart={() => onTouchStart(emoji)}
+                ontouchend={onTouchEnd}
+                ontouchmove={onTouchMove}
+                oncontextmenu={(e) => {
+                  // On touch devices, long-press reveals the reactor list
+                  // instead of bubbling up to the message's long-press handler
+                  // (mobile menu).
+                  if (isCoarse.current) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    longPressTriggered = true;
+                    onHover?.(emoji);
+                  }
+                }}
+                onclick={() => {
+                  // A long-press (which already opened the reactor list) also
+                  // fires a click on release — don't toggle the reaction then.
+                  if (longPressTriggered) {
+                    longPressTriggered = false;
+                    return;
+                  }
+                  onToggleReaction(emoji);
+                }}
                 class={`h-7 data-[state=on]:bg-accent-400/20 dark:data-[state=on]:bg-accent-500/15 min-w-4 p-1.5 rounded-full ${count > 1 ? "px-2" : ""}`}
               >
                 <span>{emoji}</span>
@@ -99,7 +148,7 @@
                         class="size-5 rounded-full object-cover flex-shrink-0"
                       />
                     {:else}
-                      <div class="size-5 rounded-full bg-base-200 dark:bg-base-700 flex-shrink-0" />
+                      <div class="size-5 rounded-full bg-base-200 dark:bg-base-700 flex-shrink-0"></div>
                     {/if}
                     <span class="text-sm truncate">{reactor.name}</span>
                     {#if reactor.handle}

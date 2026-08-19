@@ -51,11 +51,24 @@
   /** Track which emoji we've already fetched to avoid redundant calls. */
   let fetchedEmojis = $state<Set<string>>(new Set());
 
+  // Ensure every reaction group has an explicit (false) open entry so the
+  // ReactionBar can `bind:open` to it cleanly.
+  $effect(() => {
+    for (const r of reactions) {
+      if (tooltipOpenByEmoji[r.emoji] === undefined) {
+        tooltipOpenByEmoji[r.emoji] = false;
+      }
+    }
+  });
+
   async function onHover(emoji: string) {
+    // Always open the tooltip (desktop hover or mobile long-press), even if
+    // the reactor data was already fetched — otherwise a second hover/long-
+    // press of the same emoji would do nothing.
+    tooltipOpenByEmoji[emoji] = true;
     if (fetchedEmojis.has(emoji)) return;
     fetchedEmojis.add(emoji);
     // Open tooltip immediately with loading state.
-    tooltipOpenByEmoji[emoji] = true;
     tooltipReactorsByEmoji[emoji] = [];
     try {
       const res = await px().query("space.roomy.message.getReactions", {
