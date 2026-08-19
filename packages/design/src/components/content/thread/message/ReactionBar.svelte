@@ -80,7 +80,12 @@
 {#if reactions.length > 0}
   <div class="flex gap-2 items-center flex-wrap pl-12 z-10">
     {#each reactions as { emoji, count, pressed } (emoji)}
-      <Tooltip.Root bind:open={tooltipOpenByEmoji[emoji]}>
+      <Tooltip.Root
+        open={tooltipOpenByEmoji[emoji] ?? false}
+        onOpenChange={(o) => {
+          tooltipOpenByEmoji[emoji] = o;
+        }}
+      >
         <div class="inline-flex" role="presentation">
           <Tooltip.Trigger>
             {#snippet child({ props })}
