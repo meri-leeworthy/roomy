@@ -23,16 +23,18 @@
   }: {
     open: boolean;
     fetchState: ForwardFetchState;
-    onForward: (roomId: string) => void | Promise<void>;
+    onForward: (roomId: string, body: string) => void | Promise<void>;
   } = $props();
 
   let query = $state("");
+  let body = $state("");
   let forwarding = $state(false);
   let errorMessage = $state<string | null>(null);
 
   $effect(() => {
     if (!open) {
       query = "";
+      body = "";
       forwarding = false;
       errorMessage = null;
     }
@@ -52,7 +54,7 @@
     forwarding = true;
     errorMessage = null;
     try {
-      await onForward(target.id);
+      await onForward(target.id, body);
       open = false;
     } catch (e) {
       errorMessage = e instanceof Error ? e.message : "Failed to forward message";
@@ -70,6 +72,22 @@
       <p class="text-sm text-base-500 dark:text-base-400">
         Choose a room to forward this message to.
       </p>
+    </div>
+
+    <div>
+      <label
+        for="forward-body"
+        class="text-xs font-semibold uppercase tracking-wide text-base-500 dark:text-base-400"
+      >
+        Add a message (optional)
+      </label>
+      <textarea
+        id="forward-body"
+        bind:value={body}
+        rows={3}
+        placeholder="Say something with the forwarded message…"
+        class="mt-1 w-full resize-y rounded-md text-sm border-1 font-light focus-visible:outline-0 focus:shadow-input focus:bg-accent-50 dark:focus:border-accent-400 border-neutral-400/50 dark:border-neutral-700 bg-neutral-300/50 dark:bg-neutral-900 text-neutral-950 dark:text-neutral-100 placeholder:text-base-500 dark:placeholder:text-base-50/50 px-3.5 py-2"
+      ></textarea>
     </div>
 
     <Input

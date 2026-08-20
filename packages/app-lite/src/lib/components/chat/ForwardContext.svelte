@@ -6,22 +6,22 @@
 
   let {
     name,
-    handle,
-    avatar,
     did,
+    avatar,
     timestamp,
   }: {
     /** The forwarding user's display name. */
     name?: string;
-    /** The forwarding user's handle. */
-    handle?: string;
+    /** The forwarding user's DID (used for the profile link). */
+    did?: string;
     /** The forwarding user's avatar URL (blob or resolved). */
     avatar?: string;
-    /** The forwarding user's DID. */
-    did?: string;
     /** When the message was forwarded. */
     timestamp: Date;
   } = $props();
+
+  // Bridged (Discord) forwards have no navigable profile; render name as text.
+  const isBridged = $derived(did?.startsWith("did:discord:") ?? false);
 </script>
 
 <div class="flex items-center gap-1.5 text-sm text-base-500 dark:text-base-400 pl-0.5">
@@ -36,11 +36,17 @@
       />
     </span>
   {/if}
-  <span class="font-medium text-base-700 dark:text-base-300 truncate">
-    {name || (handle ? `@${handle}` : did?.slice(0, 12))}
-  </span>
-  {#if handle}
-    <span class="opacity-75 truncate">@{handle}</span>
+  {#if did && !isBridged}
+    <a
+      href={`/user/${did}`}
+      class="font-medium text-accent-700 dark:text-accent-400 hover:underline truncate"
+    >
+      {name || did.slice(0, 12)}
+    </a>
+  {:else}
+    <span class="font-medium text-accent-700 dark:text-accent-400 truncate">
+      {name || did?.slice(0, 12)}
+    </span>
   {/if}
   <span class="shrink-0">forwarded</span>
   <time class="shrink-0 text-[13px] opacity-70">{formatMessageTimestamp(timestamp)}</time>

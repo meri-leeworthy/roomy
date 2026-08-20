@@ -179,6 +179,7 @@ export async function forwardMessage(
   fromRoomId: string,
   messageId: string,
   toRoomId: string,
+  body = "",
 ): Promise<string> {
   const id = newUlid();
   const event: Record<string, unknown> = {
@@ -187,7 +188,7 @@ export async function forwardMessage(
     $type: "space.roomy.message.createMessage.v0",
     body: {
       mimeType: "text/markdown",
-      data: toBytes(new TextEncoder().encode("")),
+      data: toBytes(new TextEncoder().encode(body)),
     },
     extensions: {
       "space.roomy.extension.attachments.v0": {

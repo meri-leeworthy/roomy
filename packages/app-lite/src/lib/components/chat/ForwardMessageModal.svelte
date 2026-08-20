@@ -88,8 +88,8 @@
     return { status: "success", data };
   });
 
-  async function handleForward(roomId: string) {
-    await forwardMessage(spaceId, fromRoomId, messageId, roomId);
+  async function handleForward(roomId: string, body: string) {
+    await forwardMessage(spaceId, fromRoomId, messageId, roomId, body);
     toast.success("Message forwarded");
   }
 </script>

@@ -303,9 +303,8 @@
         {#if message.forwardedFrom}
           <ForwardContext
             name={message.authorName}
-            handle={message.authorHandle}
-            avatar={message.authorAvatar}
             did={message.authorDid}
+            avatar={message.authorAvatar}
             timestamp={new Date(message.timestamp)}
           />
         {:else if message.replyTo}
@@ -459,6 +458,29 @@
         {/if}
       {/snippet}
     </MessageBubble>
+
+    {#if isForward && message.content}
+      <!-- The forwarder's own commentary, rendered below the forwarded
+           message as if it were a separate message (it's modelled as part of
+           the same forward unit). -->
+      <div class="mt-1">
+        <MessageBubble
+          authorDid={message.authorDid}
+          authorName={message.authorName ?? undefined}
+          authorHandle={message.authorHandle ?? undefined}
+          authorAvatarUrl={message.authorAvatar ?? undefined}
+          avatarSrc={resolveBlobUrl(message.authorAvatar)}
+          profileUrl={isBridged ? undefined : `/user/${message.authorDid}`}
+          onAvatarClick={isBridged ? undefined : () => goto(`/user/${message.authorDid}`)}
+          timestamp={new Date(message.timestamp)}
+          {isBridged}
+        >
+          {#snippet content()}
+            <MessageContent content={message.content} mimeType={message.mimeType} />
+          {/snippet}
+        </MessageBubble>
+      </div>
+    {/if}
   </div>
 {/snippet}
 
