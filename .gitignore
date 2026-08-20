@@ -50,3 +50,8 @@ mise.toml
 # Per-repo omp agent system-prompt config (local, not shared)
 .omp/
 /packages/app-lite/src-tauri/gen/android
+
+# app-lite atomic build staging
+dist-staging
+build-staging
+build.old

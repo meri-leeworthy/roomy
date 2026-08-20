@@ -105,8 +105,8 @@ EOF
 )
 
 # Write first so the verification below can read the actual artifact
-echo "$oauth_web_config" > build/oauth-client-metadata.json
-echo "$oauth_native_config" > build/oauth-client-native.json
+echo "$oauth_web_config" > build-staging/oauth-client-metadata.json
+echo "$oauth_native_config" > build-staging/oauth-client-native.json
 
 echo "Scope: ${SCOPE:0:120}..."
 
@@ -118,7 +118,7 @@ echo "Scope: ${SCOPE:0:120}..."
 node -e "
 const fs = require('fs');
 const src = fs.readFileSync('src/lib/config.ts', 'utf-8');
-const meta = fs.readFileSync('build/oauth-client-metadata.json', 'utf-8');
+const meta = fs.readFileSync('build-staging/oauth-client-metadata.json', 'utf-8');
 const parsed = JSON.parse(meta);
 const scope = parsed.scope || '';
 let hasErrors = false;
@@ -171,4 +171,15 @@ fi
 
 echo "All appserver RPC scopes and repo scopes present — verification passed"
 
-echo "Done! OAuth metadata written to build/oauth-client-metadata.json"
+echo "Done! OAuth metadata written to build-staging/oauth-client-metadata.json"
+
+# ── Publish atomically ──────────────────────────────────────────────────
+# The static server serves `build/` live, so never let a partial build leak
+# in. Swap staging into place in one shot; the previous build is kept briefly
+# as build.old and dropped after. A failed `pnpm build` above leaves build/
+# untouched (staging is only moved after everything succeeded).
+rm -rf build.old
+if [ -e build ]; then mv build build.old; fi
+mv build-staging build
+rm -rf build.old
+echo "Published build/ atomically (old copy at build.old until removed)"
