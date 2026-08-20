@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
-  import { IconReplyLine } from "@roomy/design/icons";
+  import { IconReplyLine, IconForward } from "@roomy/design/icons";
   import { createMessageQuery } from "$lib/queries/message";
   import { resolveBlobUrl } from "$lib/utils";
   import { messageContentToPlaintext } from "./messagePreview";
@@ -80,8 +80,13 @@
       </a>
     {/if}
   </div>
-  <div class="line-clamp-1 overflow-hidden italic">
-    {@html messageContentToPlaintext(previewContent, previewMime)}
+  <div class="flex items-center gap-1 italic">
+    {#if forwardedFrom}
+      <IconForward class="size-3.5 shrink-0 text-base-500 dark:text-base-400" />
+    {/if}
+    <span class="line-clamp-1 overflow-hidden">
+      {@html messageContentToPlaintext(previewContent, previewMime)}
+    </span>
   </div>
 {:else if target.isPending}
   <div class="h-5"></div>
