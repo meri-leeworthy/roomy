@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import { Modal } from "@foxui/core";
   import Input from "../ui/input/Input.svelte";
   import Button from "../ui/button/Button.svelte";
@@ -20,14 +21,16 @@
     open = $bindable(false),
     fetchState,
     onForward,
+    composer,
   }: {
     open: boolean;
     fetchState: ForwardFetchState;
-    onForward: (roomIds: string[], body: string) => void | Promise<void>;
+    onForward: (roomIds: string[]) => void | Promise<void>;
+    /** WYSIWYG message composer (the chat input). Renders above the room list. */
+    composer?: Snippet;
   } = $props();
 
   let query = $state("");
-  let body = $state("");
   let selected = $state<string[]>([]);
   let forwarding = $state(false);
   let errorMessage = $state<string | null>(null);
@@ -35,7 +38,6 @@
   $effect(() => {
     if (!open) {
       query = "";
-      body = "";
       selected = [];
       forwarding = false;
       errorMessage = null;
@@ -65,7 +67,7 @@
     forwarding = true;
     errorMessage = null;
     try {
-      await onForward(selected, body);
+      await onForward(selected);
       open = false;
     } catch (e) {
       errorMessage = e instanceof Error ? e.message : "Failed to forward message";
@@ -85,21 +87,19 @@
       </p>
     </div>
 
-    <div>
-      <label
-        for="forward-body"
-        class="text-xs font-semibold uppercase tracking-wide text-base-500 dark:text-base-400"
-      >
-        Add a message (optional)
-      </label>
-      <textarea
-        id="forward-body"
-        bind:value={body}
-        rows={3}
-        placeholder="Say something with the forwarded message…"
-        class="mt-1 w-full resize-y rounded-md text-sm border-1 font-light focus-visible:outline-0 focus:shadow-input focus:bg-accent-50 dark:focus:border-accent-400 border-neutral-400/50 dark:border-neutral-700 bg-neutral-300/50 dark:bg-neutral-900 text-neutral-950 dark:text-neutral-100 placeholder:text-base-500 dark:placeholder:text-base-50/50 px-3.5 py-2"
-      ></textarea>
-    </div>
+    {#if composer}
+      <div>
+        <label
+          for="forward-composer"
+          class="text-xs font-semibold uppercase tracking-wide text-base-500 dark:text-base-400"
+        >
+          Add a message (optional)
+        </label>
+        <div id="forward-composer" class="mt-1 rounded-md border border-neutral-400/50 dark:border-neutral-700 bg-neutral-300/50 dark:bg-neutral-900 px-2 py-1.5 focus-within:border-accent-400">
+          {@render composer()}
+        </div>
+      </div>
+    {/if}
 
     <Input
       bind:value={query}

@@ -58,6 +58,8 @@
      * false so they don't hijack the composer's clear/focus.
      */
     composer?: boolean;
+    /** When false, bare Enter inserts a new block instead of sending. */
+    sendOnEnter?: boolean;
   };
 
   let {
@@ -72,6 +74,7 @@
     disabled = false,
     processImageFile,
     composer = false,
+    sendOnEnter = true,
   }: Props = $props();
 
   let element: HTMLDivElement | undefined = $state();
@@ -132,7 +135,7 @@
         autolink: true,
         defaultProtocol: "https",
       }),
-      initKeyboardShortcutHandler({ onEnter: wrappedOnEnter }),
+      initKeyboardShortcutHandler({ onEnter: wrappedOnEnter, sendOnEnter }),
       // `breaks: true` keeps single newlines (soft breaks) as hard breaks
       // instead of collapsing them to spaces — fixes newlines being stripped
       // when a message is re-parsed or edited.

@@ -15,10 +15,17 @@ import type {
 /* Keyboard Shortcuts: used to add and override existing shortcuts */
 type KeyboardShortcutHandlerProps = {
   onEnter: () => void;
+  /**
+   * When true (chat), bare Enter sends the message. When false (e.g. a modal
+   * composer where a Send button submits), bare Enter inserts a new block
+   * like Shift/Cmd+Enter would.
+   */
+  sendOnEnter?: boolean;
 };
 
 export const initKeyboardShortcutHandler = ({
   onEnter,
+  sendOnEnter = true,
 }: KeyboardShortcutHandlerProps) =>
   Extension.create({
     name: "keyboardShortcutHandler",
@@ -29,11 +36,19 @@ export const initKeyboardShortcutHandler = ({
     addProseMirrorPlugins() {
       return [
         keymap({
-          // Bare Enter sends the message (chat convention).
-          Enter: () => {
-            onEnter();
-            return true;
-          },
+          // Bare Enter sends the message (chat convention). In composer mode
+          // it instead splits the block (new paragraph/list item).
+          Enter: sendOnEnter
+            ? () => {
+                onEnter();
+                return true;
+              }
+            : (state, dispatch) => {
+                if (!this.editor.commands.splitListItem("listItem")) {
+                  splitBlock(state, dispatch);
+                }
+                return true;
+              },
           // Shift/Cmd+Enter create a new block. In a list this means a new
           // list item (splitListItem); elsewhere a new paragraph (splitBlock).
           // This lets users build lists and stack multiple headers in one

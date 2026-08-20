@@ -1,11 +1,13 @@
 <script lang="ts">
   import { schemas } from "@roomy-space/sdk";
+  import type { Block } from "@roomy-space/sdk";
   import ForwardMessageModal, {
     type ForwardFetchState,
     type ForwardTarget,
   } from "@roomy/design/components/modals/ForwardMessageModal.svelte";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { forwardMessage } from "$lib/mutations/message";
+  import ChatInput from "./ChatInput.svelte";
   import { toast } from "@foxui/core";
 
   type SidebarChannel =
@@ -23,6 +25,18 @@
     fromRoomId: string;
     messageId: string;
   } = $props();
+
+  // WYSIWYG composer body (markdown + blocks), bound from ChatInput.
+  let body = $state("");
+  let bodyBlocks: Block[] | undefined = $state();
+
+  // Reset the composer each time the modal opens.
+  $effect(() => {
+    if (open) {
+      body = "";
+      bodyBlocks = undefined;
+    }
+  });
 
   const metaQuery = createSpaceMetadataQuery(() => spaceId, {
     enabled: open,
@@ -88,7 +102,7 @@
     return { status: "success", data };
   });
 
-  async function handleForward(roomIds: string[], body: string) {
+  async function handleForward(roomIds: string[]) {
     await Promise.all(
       roomIds.map((roomId) =>
         forwardMessage(spaceId, fromRoomId, messageId, roomId, body),
@@ -99,4 +113,16 @@
     );
   }
 </script>
-<ForwardMessageModal bind:open {fetchState} onForward={handleForward} />
+
+<ForwardMessageModal bind:open {fetchState} onForward={handleForward}>
+  {#snippet composer()}
+    <ChatInput
+      bind:content={body}
+      bind:blocks={bodyBlocks}
+      placeholder="Say something with the forwarded message…"
+      onEnter={() => Promise.resolve()}
+      sendOnEnter={false}
+      setFocus={true}
+    />
+  {/snippet}
+</ForwardMessageModal>
