@@ -22,6 +22,8 @@
     switch (parts[idx + 1]) {
       case "permissions":
         return "Permissions";
+      case "federations":
+        return "Federations";
       case "members":
         return "Members";
       case "invites":

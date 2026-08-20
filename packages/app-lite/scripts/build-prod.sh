@@ -61,6 +61,12 @@ SCOPE+=" rpc:space.roomy.space.getActivityFeed?aud=*"
 SCOPE+=" rpc:space.roomy.user.getProfile?aud=*"
 SCOPE+=" rpc:space.roomy.embed.getLinkMetadata?aud=*"
 
+# ── Channel federation ───────────────────────────────────────────────────
+SCOPE+=" rpc:space.roomy.federation.getRequests?aud=*"
+SCOPE+=" rpc:space.roomy.federation.getIncoming?aud=*"
+SCOPE+=" rpc:space.roomy.federation.getOutgoing?aud=*"
+SCOPE+=" rpc:space.roomy.federation.getGrants?aud=*"
+
 # ── Web push notification endpoints ──────────────────────────────────────
 SCOPE+=" rpc:space.roomy.push.getVapidPublicKey?aud=*"
 SCOPE+=" rpc:space.roomy.push.getPreferences?aud=*"
