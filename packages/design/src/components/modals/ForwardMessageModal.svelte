@@ -2,7 +2,7 @@
   import { Modal } from "@foxui/core";
   import Input from "../ui/input/Input.svelte";
   import Button from "../ui/button/Button.svelte";
-  import { IconHashtag, IconLoading } from "../../icons/index";
+  import { IconHashtag, IconLoading, IconCheck } from "../../icons/index";
   import ErrorMessage from "../helper/ErrorMessage.svelte";
 
   export interface ForwardTarget {
@@ -23,11 +23,12 @@
   }: {
     open: boolean;
     fetchState: ForwardFetchState;
-    onForward: (roomId: string, body: string) => void | Promise<void>;
+    onForward: (roomIds: string[], body: string) => void | Promise<void>;
   } = $props();
 
   let query = $state("");
   let body = $state("");
+  let selected = $state<string[]>([]);
   let forwarding = $state(false);
   let errorMessage = $state<string | null>(null);
 
@@ -35,6 +36,7 @@
     if (!open) {
       query = "";
       body = "";
+      selected = [];
       forwarding = false;
       errorMessage = null;
     }
@@ -49,12 +51,21 @@
     );
   });
 
-  async function handleForward(target: ForwardTarget) {
+  const selectedIds = $derived(new Set(selected));
+
+  function toggle(target: ForwardTarget) {
     if (forwarding) return;
+    selected = selectedIds.has(target.id)
+      ? selected.filter((id) => id !== target.id)
+      : [...selected, target.id];
+  }
+
+  async function handleSend() {
+    if (forwarding || selected.length === 0) return;
     forwarding = true;
     errorMessage = null;
     try {
-      await onForward(target.id, body);
+      await onForward(selected, body);
       open = false;
     } catch (e) {
       errorMessage = e instanceof Error ? e.message : "Failed to forward message";
@@ -70,7 +81,7 @@
         Forward message
       </h3>
       <p class="text-sm text-base-500 dark:text-base-400">
-        Choose a room to forward this message to.
+        Select one or more rooms, then send.
       </p>
     </div>
 
@@ -115,26 +126,48 @@
       {:else}
         <ul class="flex flex-col gap-1 max-h-[40vh] overflow-y-auto">
           {#each results as target (target.id)}
+            {@const isSelected = selectedIds.has(target.id)}
             <li>
-              <Button
-                variant="ghost"
-                class="w-full justify-start gap-2 py-2 px-2 h-auto font-normal"
-                onclick={() => handleForward(target)}
+              <button
+                type="button"
+                onclick={() => toggle(target)}
                 disabled={forwarding}
+                aria-pressed={isSelected}
+                class={
+                  "w-full flex items-center gap-2 rounded-md py-2 px-2 text-start font-normal border-1 disabled:opacity-50 " +
+                  (isSelected
+                    ? "border-accent-500/60 bg-accent-50 dark:bg-accent-900/40"
+                    : "border-transparent hover:bg-base-100 dark:hover:bg-base-400/10")
+                }
               >
                 <IconHashtag class="size-4 shrink-0 text-base-400" />
-                <span class="truncate text-sm text-base-800 dark:text-base-200">
+                <span class="truncate text-sm text-base-800 dark:text-base-200 flex-1">
                   {target.name ?? "Unnamed room"}
                 </span>
-              </Button>
+                {#if isSelected}
+                  <IconCheck class="size-4 shrink-0 text-accent-600 dark:text-accent-400" />
+                {/if}
+              </button>
             </li>
           {/each}
         </ul>
       {/if}
     {/if}
 
-    <div class="flex justify-end">
-      <Button variant="primary" onclick={() => (open = false)}>Cancel</Button>
+    <div class="flex justify-end gap-2">
+      <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
+      <Button
+        variant="primary"
+        onclick={handleSend}
+        disabled={selected.length === 0 || forwarding}
+      >
+        {#if forwarding}
+          <IconLoading class="size-4 animate-spin" />
+          Sending…
+        {:else}
+          Send {selected.length > 0 ? `to ${selected.length} room${selected.length > 1 ? "s" : ""}` : ""}
+        {/if}
+      </Button>
     </div>
   </div>
 </Modal>

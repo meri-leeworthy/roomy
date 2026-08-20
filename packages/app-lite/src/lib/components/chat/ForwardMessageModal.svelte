@@ -88,9 +88,15 @@
     return { status: "success", data };
   });
 
-  async function handleForward(roomId: string, body: string) {
-    await forwardMessage(spaceId, fromRoomId, messageId, roomId, body);
-    toast.success("Message forwarded");
+  async function handleForward(roomIds: string[], body: string) {
+    await Promise.all(
+      roomIds.map((roomId) =>
+        forwardMessage(spaceId, fromRoomId, messageId, roomId, body),
+      ),
+    );
+    toast.success(
+      `Message forwarded to ${roomIds.length} room${roomIds.length > 1 ? "s" : ""}`,
+    );
   }
 </script>
 <ForwardMessageModal bind:open {fetchState} onForward={handleForward} />

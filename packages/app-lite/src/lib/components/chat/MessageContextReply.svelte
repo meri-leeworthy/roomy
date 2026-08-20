@@ -15,6 +15,22 @@
 
   const target = createMessageQuery(() => replyToId, () => roomId);
 
+  // If the message being replied to is a forward, its own content is the
+  // forwarder's (often-empty) note; the message the forwarder embedded lives
+  // in another room. Show the original's content as the reply preview.
+  const forwardedFrom = $derived(target.data?.forwardedFrom);
+  const original = createMessageQuery(
+    () => forwardedFrom?.messageId ?? "",
+    () => forwardedFrom?.roomId ?? "",
+    { enabled: !!forwardedFrom },
+  );
+  const previewContent = $derived(
+    original.data?.content ?? target.data?.content ?? "",
+  );
+  const previewMime = $derived(
+    original.data?.mimeType ?? target.data?.mimeType,
+  );
+
   let isBridged = $derived(target.data?.authorDid?.startsWith("did:discord:") ?? false);
 </script>
 
@@ -65,7 +81,7 @@
     {/if}
   </div>
   <div class="line-clamp-1 overflow-hidden italic">
-    {@html messageContentToPlaintext(target.data.content ?? "", target.data.mimeType)}
+    {@html messageContentToPlaintext(previewContent, previewMime)}
   </div>
 {:else if target.isPending}
   <div class="h-5"></div>
