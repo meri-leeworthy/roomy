@@ -26,7 +26,7 @@
     open: boolean;
     fetchState: ForwardFetchState;
     onForward: (roomIds: string[]) => void | Promise<void>;
-    /** WYSIWYG message composer (the chat input). Renders above the room list. */
+    /** WYSIWYG message composer (the chat input). Renders below the room picker. */
     composer?: Snippet;
   } = $props();
 
@@ -87,20 +87,6 @@
       </p>
     </div>
 
-    {#if composer}
-      <div>
-        <label
-          for="forward-composer"
-          class="text-xs font-semibold uppercase tracking-wide text-base-500 dark:text-base-400"
-        >
-          Add a message (optional)
-        </label>
-        <div id="forward-composer" class="mt-1 rounded-md border border-neutral-400/50 dark:border-neutral-700 bg-neutral-300/50 dark:bg-neutral-900 px-2 py-1.5 focus-within:border-accent-400">
-          {@render composer()}
-        </div>
-      </div>
-    {/if}
-
     <Input
       bind:value={query}
       placeholder="Search rooms…"
@@ -152,6 +138,20 @@
           {/each}
         </ul>
       {/if}
+    {/if}
+
+    {#if composer}
+      <div>
+        <label
+          for="forward-composer"
+          class="text-xs font-semibold uppercase tracking-wide text-base-500 dark:text-base-400"
+        >
+          Add a message (optional)
+        </label>
+        <div id="forward-composer" class="mt-1 rounded-md border border-neutral-400/50 dark:border-neutral-700 bg-neutral-300/50 dark:bg-neutral-900 px-2 py-1.5 focus-within:border-accent-400">
+          {@render composer()}
+        </div>
+      </div>
     {/if}
 
     <div class="flex justify-end gap-2">
