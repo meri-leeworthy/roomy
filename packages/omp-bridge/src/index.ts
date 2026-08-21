@@ -124,7 +124,9 @@ export async function listen(auth: BridgeAuth, opts: BridgeOptions): Promise<voi
   const enqueue = (roomId: string, task: () => Promise<unknown>) => {
     const prev = roomQueues.get(roomId) ?? Promise.resolve();
     const next = prev.then(task, task);
-    roomQueues.set(roomId, next.catch(() => {}));
+    // Log task failures instead of swallowing them: a rejected handleMessage
+    // previously vanished silently, making the bridge quietly ignore mentions.
+    roomQueues.set(roomId, next.catch((e) => log(`[task error] ${e instanceof Error ? e.stack ?? e.message : String(e)}`)));
   };
 
   const scopedRooms = opts.spaceId || opts.roomId
@@ -313,16 +315,6 @@ async function handleMessage(
   sessions: SessionStore | undefined,
   log: (m: string) => void,
 ): Promise<void> {
-async function handleMessage(
-  auth: BridgeAuth,
-  opts: BridgeOptions,
-  msg: IncomingMessage,
-  roomId: string,
-  spaceId: string,
-  identity: AgentIdentity,
-  sessions: SessionStore | undefined,
-  log: (m: string) => void,
-): Promise<void> {
   const mentioned = isMentioned(msg, identity);
   const mentionOnly = opts.mentionOnly ?? true;
   if (mentionOnly && !mentioned) return;
@@ -376,7 +368,6 @@ async function handleMessage(
   } catch (error) {
     log(`error: ${error instanceof Error ? error.message : String(error)}`);
   }
-}
 }
 
 async function resolveRooms(
