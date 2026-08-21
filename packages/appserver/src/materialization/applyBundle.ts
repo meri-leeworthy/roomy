@@ -39,7 +39,7 @@ import { isThread, refreshThreadActivityOnMessage, upsertUserThreadActivity } fr
 import { upsertUserRoomParticipation } from "../queries/userRoomParticipation.ts";
 import { upsertActivityItem } from "./activityItem.ts";
 import { writeSetUserProfileToGlobal } from "./profiles.ts";
-import { isGlobalEdgeStatement } from "./statementRouting.ts";
+import { isGlobalDbStatement } from "./statementRouting.ts";
 import { decodeTime } from "ulidx";
 
 const decodeTimeFromId = (id: string): number => decodeTime(id);
@@ -296,7 +296,7 @@ async function runStatementForTargets(
   globalDb: DbLike | undefined,
   statement: SqlStatement,
 ): Promise<void> {
-  if (isGlobalEdgeStatement(statement.sql)) {
+  if (isGlobalDbStatement(statement.sql)) {
     if (globalDb) await runStatement(globalDb, statement);
     return;
   }

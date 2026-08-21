@@ -50,6 +50,18 @@ pnpm build                  # Build all packages via turbo
 pnpm publish-packages       # Version & publish SDK to npm
 ```
 
+> **@roomy-space/sdk is a dependency of every other package** (app-lite,
+> appserver, discord-bridge, the CLI). Its `exports` resolve to the built
+> `packages/sdk/dist`, not its `src`. After fetching new code (git pull,
+> switching branches, or applying a PR), rebuild the SDK before running
+> anything that imports it — otherwise stale/absent `dist` artifacts cause
+> confusing failures (e.g. appserver tests reporting "no materializer for
+> event"). When you edit SDK `src`, rebuild before testing dependents:
+>
+> ```bash
+> pnpm --filter @roomy-space/sdk build
+> ```
+
 ### Type Checking & Tests
 
 pnpm --filter app-lite check              # TypeScript check (svelte-check) for app-lite

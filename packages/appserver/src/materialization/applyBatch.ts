@@ -27,7 +27,7 @@ import type {
 
 import { materialize } from "./materializer.ts";
 import { applyBundle, getSavepointMutex } from "./applyBundle.ts";
-import { isGlobalEdgeStatement } from "./statementRouting.ts";
+import { isGlobalDbStatement } from "./statementRouting.ts";
 import type { StatementBundleSuccess } from "./types.ts";
 import {
   isDebugEnabled,
@@ -160,7 +160,7 @@ export async function applyBatch(
               : Array.isArray(params)
                 ? (params as unknown[])
                 : [params],
-          derived: isGlobalEdgeStatement(stmt.sql) ? "global" : "space",
+          derived: isGlobalDbStatement(stmt.sql) ? "global" : "space",
         });
         // Phase 3: maintain the global entity→space index. Every `insert
         // into entities` statement carries (id, stream_id) as its first two

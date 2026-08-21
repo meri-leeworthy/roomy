@@ -57,6 +57,10 @@ function topicsForSignal(signal: InvalidationEvent["signal"]): Topic[] {
       case "space.roomy.space.getMembers":
       case "space.roomy.space.getInvites":
       case "space.roomy.space.getActivityFeed":
+      case "space.roomy.federation.getRequests":
+      case "space.roomy.federation.getIncoming":
+      case "space.roomy.federation.getOutgoing":
+      case "space.roomy.federation.getGrants":
         return qi.params["spaceId"]
           ? [topicKey("space", qi.params["spaceId"])]
           : [];

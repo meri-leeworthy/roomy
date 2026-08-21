@@ -7,7 +7,8 @@
  */
 
 import { createAccessMemo, roomAccess, spaceAccess } from "../auth/access.ts";
-import { openReadStateDb, openSpaceDb } from "../db/db.ts";
+import { createFederationMemo, federatedRoomAccess } from "../auth/federation.ts";
+import { openReadStateDb, openSpaceDb, openGlobalDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { getReadPositions } from "../queries/readPositions.ts";
 import { queryActiveThreads, resolveThreadsByIds } from "../queries/userActiveThreads.ts";
@@ -39,6 +40,11 @@ interface SidebarChannel {
   unreadCount: number;
   lastRead?: string;
   activeThreads?: ActiveSidebarThread[];
+  /** Set for channels federated INTO this space from another (origin) space. */
+  federated?: {
+    originSpaceId: string;
+    permission: "read" | "readwrite";
+  };
 }
 
 interface SidebarCategory {
@@ -100,6 +106,10 @@ export const getMetadataHandler: QueryHandler<
   // × ~N channels × ~3 passes). The memo collapses the space-level checks
   // to one set for the whole request and caches per-room decisions.
   const memo = createAccessMemo();
+  // Per-request federation memo: collapses the N×SQL fan-out in the sidebar
+  // loop below (every federated channel re-queries the same joined-spaces row
+  // and the same per-space B access). See auth/federation.ts.
+  const fedMemo = createFederationMemo();
   const access = await spaceAccess(db, spaceId, userDid, memo);
   if (access.isBanned) {
     throw new XrpcError(403, "Forbidden", "Caller is banned from this space");
@@ -216,6 +226,14 @@ export const getMetadataHandler: QueryHandler<
       if (ch) orphans.push(ch);
     }
 
+    // ── Federated channels (Phase 2) ─────────────────────────────────
+    // Channels of OTHER spaces (origins) that are federated INTO this space
+    // with an origin grant. They appear in B's sidebar, decorated with their
+    // origin space. B admins see all federated channels; B members see only
+    // those they have a receiver grant for (see plan §5.5 / Phase 3).
+    const federatedChannels = await buildFederatedSidebarChannels(spaceId, userDid, fedMemo, memo);
+    if (federatedChannels.length > 0) orphans.push(...federatedChannels);
+
     // ── Active threads ────────────────────────────────────────────────
     // Fetch up to 8 threads the user has recently interacted with and
     // distribute them into their parent channels for the sidebar.
@@ -315,3 +333,86 @@ export const getMetadataHandler: QueryHandler<
     ...(deletedRooms !== undefined ? { deletedRooms } : {}),
   }) as GetMetadataResult;
 };
+
+/**
+ * Build the federated-channel entries for a space's sidebar: channels owned
+ * by OTHER spaces (origins) that are federated into this space (B) with an
+ * active origin grant. Each is decorated with its origin space + the grant
+ * level. B admins see all federated channels; B members see only those they
+ * have effective (receiver) access to.
+ */
+async function buildFederatedSidebarChannels(
+  spaceId: string,
+  userDid: string,
+  fedMemo: ReturnType<typeof createFederationMemo>,
+  memo: ReturnType<typeof createAccessMemo>,
+): Promise<SidebarChannel[]> {
+  const globalDb = openGlobalDb();
+  const rows = await globalDb
+    .query(
+      `select frp.space_id as origin, frp.room_id as room_id, frp.permission as permission
+         from federation_room_permissions frp
+         join space_federations sf
+           on sf.space_id = frp.space_id
+          and sf.federating_space_did = frp.federating_space_did
+        where frp.federating_space_did = ?
+          and sf.status = 'active'`,
+    )
+    .all<{ origin: string; room_id: string; permission: string }>(spaceId);
+
+  if (rows.length === 0) return [];
+
+  // Group grants by origin space so we fetch channel metadata once per origin.
+  const byOrigin = new Map<string, Array<{ roomId: string; permission: string }>>();
+  for (const r of rows) {
+    const list = byOrigin.get(r.origin) ?? [];
+    list.push({ roomId: r.room_id, permission: r.permission });
+    byOrigin.set(r.origin, list);
+  }
+
+  const out: SidebarChannel[] = [];
+  for (const [origin, grants] of byOrigin) {
+    const originDb = openSpaceDb(origin);
+    const ids = grants.map((g) => g.roomId);
+    const placeholders = ids.map(() => "?").join(", ");
+    const infoRows = await originDb
+      .query(
+        `select e.id as id, ci.name as name
+           from entities e
+           left join comp_info ci on ci.entity = e.id
+          where e.id in (${placeholders})`,
+      )
+      .all<{ id: string; name: string | null }>(...ids);
+    const nameById = new Map(infoRows.map((r) => [r.id, r.name]));
+
+    for (const g of grants) {
+      // Skip grants whose origin channel no longer exists (deleted/archived)
+      // so the sidebar doesn't show a dangling federated entry.
+      if (!nameById.has(g.roomId)) continue;
+
+      // Only include channels the caller can actually read (B admins get
+      // origin-level access; B members need a receiver grant).
+      const fed = await federatedRoomAccess(originDb, globalDb, g.roomId, userDid, {
+        spaceDbResolver: openSpaceDb,
+        memo: fedMemo,
+        accessMemo: memo,
+      });
+      if (!fed || !fed.canRead) continue;
+
+      out.push(stripNulls({
+        id: g.roomId,
+        name: nameById.get(g.roomId) ?? undefined,
+        // defaultAccess reflects the *effective* access for this caller
+        // (capped by their receiver grant), not the origin ceiling — a B
+        // member with a 'read' receiver grant on a 'readwrite' origin channel
+        // sees defaultAccess 'read' and canWrite false.
+        defaultAccess: fed.canWrite ? "readwrite" : "read",
+        canRead: true,
+        canWrite: fed.canWrite,
+        unreadCount: 0,
+        federated: { originSpaceId: origin, permission: g.permission },
+      }) as SidebarChannel);
+    }
+  }
+  return out;
+}

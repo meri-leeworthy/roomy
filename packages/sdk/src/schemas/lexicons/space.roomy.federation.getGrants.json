@@ -1,0 +1,104 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.federation.getGrants",
+  "defs": {
+    "originGrants": {
+      "type": "object",
+      "required": [
+        "federatingSpaceDid",
+        "permission",
+        "roomId"
+      ],
+      "properties": {
+        "federatingSpaceDid": {
+          "type": "string"
+        },
+        "permission": {
+          "type": "string",
+          "knownValues": [
+            "read",
+            "readwrite"
+          ]
+        },
+        "roomId": {
+          "type": "string"
+        }
+      }
+    },
+    "receiverGrants": {
+      "type": "object",
+      "required": [
+        "grantee",
+        "kind",
+        "originSpaceId",
+        "permission",
+        "roomId"
+      ],
+      "properties": {
+        "grantee": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "knownValues": [
+            "role",
+            "user"
+          ]
+        },
+        "originSpaceId": {
+          "type": "string"
+        },
+        "permission": {
+          "type": "string",
+          "knownValues": [
+            "read",
+            "readwrite"
+          ]
+        },
+        "roomId": {
+          "type": "string"
+        }
+      }
+    },
+    "main": {
+      "type": "query",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "spaceId"
+        ],
+        "properties": {
+          "spaceId": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "originGrants",
+            "receiverGrants"
+          ],
+          "properties": {
+            "originGrants": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#originGrants"
+              }
+            },
+            "receiverGrants": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#receiverGrants"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

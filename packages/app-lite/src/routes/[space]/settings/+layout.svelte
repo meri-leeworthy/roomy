@@ -20,8 +20,10 @@
     const idx = parts.indexOf("settings");
     if (idx === -1 || idx === parts.length - 1) return "General";
     switch (parts[idx + 1]) {
-      case "roles":
-        return "Roles";
+      case "permissions":
+        return "Permissions";
+      case "federations":
+        return "Federations";
       case "members":
         return "Members";
       case "invites":

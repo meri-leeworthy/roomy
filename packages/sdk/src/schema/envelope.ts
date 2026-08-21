@@ -18,6 +18,7 @@ import {
   InviteEventVariant,
   StateEventVariant,
   RoleEventVariant,
+  FederationEventVariant,
 } from "./events";
 
 /** Any event variant that is sent in a room */
@@ -38,6 +39,7 @@ export const SpaceEventVariantUnion = type.or(
   InviteEventVariant,
   StateEventVariant,
   RoleEventVariant,
+  FederationEventVariant,
 );
 
 /** Any event that is sent in a Roomy room.  */

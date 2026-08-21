@@ -45,6 +45,10 @@ import { getSpaceSummaryHandler } from "./handlers/space.roomy.space.getSpaceSum
 import { getSpaceThreadsHandler } from "./handlers/space.roomy.space.getThreads.ts";
 import { getRolesHandler } from "./handlers/space.roomy.space.getRoles.ts";
 import { getInvitesHandler } from "./handlers/space.roomy.space.getInvites.ts";
+import { getFederationRequestsHandler } from "./handlers/space.roomy.federation.getRequests.ts";
+import { getFederationIncomingHandler } from "./handlers/space.roomy.federation.getIncoming.ts";
+import { getFederationOutgoingHandler } from "./handlers/space.roomy.federation.getOutgoing.ts";
+import { getFederationGrantsHandler } from "./handlers/space.roomy.federation.getGrants.ts";
 import { getRoomMetadataHandler } from "./handlers/space.roomy.room.getMetadata.ts";
 import { getRoomSummaryHandler } from "./handlers/space.roomy.room.getRoomSummary.ts";
 import { getRoomThreadsHandler } from "./handlers/space.roomy.room.getThreads.ts";
@@ -264,6 +268,26 @@ export function buildRouter(
       handler: getInvitesHandler,
       paramsSchema: schemas.queries.getInvites.Params,
       outputSchema: schemas.queries.getInvites.Response,
+    })
+    .query("space.roomy.federation.getRequests", {
+      handler: getFederationRequestsHandler,
+      paramsSchema: schemas.queries.getFederationRequests.Params,
+      outputSchema: schemas.queries.getFederationRequests.Response,
+    })
+    .query("space.roomy.federation.getIncoming", {
+      handler: getFederationIncomingHandler,
+      paramsSchema: schemas.queries.getFederationIncoming.Params,
+      outputSchema: schemas.queries.getFederationIncoming.Response,
+    })
+    .query("space.roomy.federation.getOutgoing", {
+      handler: getFederationOutgoingHandler,
+      paramsSchema: schemas.queries.getFederationOutgoing.Params,
+      outputSchema: schemas.queries.getFederationOutgoing.Response,
+    })
+    .query("space.roomy.federation.getGrants", {
+      handler: getFederationGrantsHandler,
+      paramsSchema: schemas.queries.getFederationGrants.Params,
+      outputSchema: schemas.queries.getFederationGrants.Response,
     })
     .query("space.roomy.room.getMetadata", {
       handler: getRoomMetadataHandler,

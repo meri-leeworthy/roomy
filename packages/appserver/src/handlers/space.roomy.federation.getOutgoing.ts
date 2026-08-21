@@ -1,0 +1,65 @@
+/**
+ * XRPC: space.roomy.federation.getOutgoing (query).
+ *
+ * Returns the federations *from* a space (A): relationships where A is the
+ * origin. Visible to A's admins so they can manage the spaces federated to
+ * A (approve/reject/remove) and, in later phases, configure per-channel
+ * grants.
+ */
+
+import { requireFederationAdmin } from "./federationAdmin.ts";
+import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
+
+interface FederationRow {
+  federatingSpaceDid: string;
+  status: string;
+  requestedByDid: string;
+  requestedAt: number;
+  decidedByDid?: string;
+  decidedAt?: number;
+  message?: string;
+}
+
+interface GetOutgoingResult {
+  federations: FederationRow[];
+}
+
+export const getFederationOutgoingHandler: QueryHandler<
+  QueryParams,
+  GetOutgoingResult
+> = async (params: QueryParams, auth: AuthCtx) => {
+  const { spaceId, db } = await requireFederationAdmin(
+    params,
+    auth,
+    "outgoing federations",
+  );
+  const rows = await db
+    .query(
+      `select federating_space_did, status, requested_by_did, requested_at,
+              decided_by_did, decided_at, message
+         from space_federations
+        where space_id = ?
+        order by requested_at desc`,
+    )
+    .all<{
+      federating_space_did: string;
+      status: string;
+      requested_by_did: string;
+      requested_at: number;
+      decided_by_did: string | null;
+      decided_at: number | null;
+      message: string | null;
+    }>(spaceId);
+
+  return {
+    federations: rows.map((r) => ({
+      federatingSpaceDid: r.federating_space_did,
+      status: r.status,
+      requestedByDid: r.requested_by_did,
+      requestedAt: r.requested_at,
+      ...(r.decided_by_did ? { decidedByDid: r.decided_by_did } : {}),
+      ...(r.decided_at !== null ? { decidedAt: r.decided_at } : {}),
+      ...(r.message ? { message: r.message } : {}),
+    })),
+  };
+};

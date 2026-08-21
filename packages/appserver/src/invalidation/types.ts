@@ -31,6 +31,10 @@ export type QueryNsid =
   | "space.roomy.room.getMessages"
   | "space.roomy.room.getThreads"
   | "space.roomy.message.getMessage"
+  | "space.roomy.federation.getRequests"
+  | "space.roomy.federation.getIncoming"
+  | "space.roomy.federation.getOutgoing"
+  | "space.roomy.federation.getGrants"
   | "space.roomy.sync.getEvents"
 
 // ─── Signals ────────────────────────────────────────────────────────────

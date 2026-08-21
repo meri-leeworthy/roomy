@@ -156,7 +156,7 @@
       <div class="space-y-6">
         <Button variant="ghost" class="justify-start" onclick={() => (selectedRoleId = null)}>
           <IconArrowLeft class="size-4" />
-          Roles
+          Permissions
         </Button>
 
         <div class="flex items-start justify-between gap-4">
@@ -291,7 +291,7 @@
     <div class="space-y-6">
       <div class="flex items-start justify-between gap-4">
         <p class="text-sm text-base-500 dark:text-base-400">
-          Roles control access to channels in your space.
+          Permissions control access to channels in your space.
         </p>
         {#if isAdmin}
           <Button variant="secondary" size="icon" onclick={() => (createOpen = true)}>

@@ -42,6 +42,13 @@ import {
   RemoveMemberRole,
   SetRoleRoomPermission,
 } from "./roles";
+import {
+  FederationRequest,
+  FederationRespond,
+  FederationRemove,
+  SetRoomPermission,
+  SetReceiverPermission,
+} from "./federation";
 
 /** Registry of all defined events by their $type */
 export const eventRegistry = {
@@ -83,6 +90,11 @@ export const eventRegistry = {
   "space.roomy.role.addMemberRole.v0": AddMemberRole,
   "space.roomy.role.removeMemberRole.v0": RemoveMemberRole,
   "space.roomy.role.setRoleRoomPermission.v0": SetRoleRoomPermission,
+  "space.roomy.federation.request.v0": FederationRequest,
+  "space.roomy.federation.respond.v0": FederationRespond,
+  "space.roomy.federation.remove.v0": FederationRemove,
+  "space.roomy.federation.setRoomPermission.v0": SetRoomPermission,
+  "space.roomy.federation.setReceiverPermission.v0": SetReceiverPermission,
 } as const satisfies Record<EventType, DefinedEvent<any, boolean>>;
 
 /** Get the causal dependencies for an event */

@@ -10,9 +10,10 @@
 
 import { parseEvent, type Event, StreamDid } from "@roomy-space/sdk";
 import { log } from "../log.ts";
-import { openSpaceDb } from "../db/db.ts";
+import { openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { checkWriteAuth } from "../auth/writeAuth.ts";
-import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
+import { spaceAccess } from "../auth/access.ts";
+import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import type { AuthCtx, ProcedureHandler, QueryParams } from "../xrpc/types.ts";
 import {
@@ -62,7 +63,16 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
   }
   log.info("sendEvents", { spaceId, callerDid, count: body.events.length });
   const db = openSpaceDb(spaceId);
-  const access = await requireSpaceAccess(db, spaceId, callerDid);
+  // Space access is resolved here (for writeAuth + to reject banned callers)
+  // but NOT treated as a hard gate: a caller who is not a member/admin of the
+  // target space may still be a member of a *federated* space and authorized
+  // to write to a federated channel. Per-event `writeAuth` is the sole
+  // authority on what the caller may send — it denies events that require
+  // membership/admin and allows federated room writes.
+  const access = await spaceAccess(db, spaceId, callerDid);
+  if (access.isBanned) {
+    throw new XrpcError(403, "Forbidden", "Caller is banned from this space");
+  }
 
   // 3. Validate + authorize each event
   const parsedEvents: (typeof Event.infer)[] = [];
@@ -84,7 +94,15 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
       );
     }
     const event = parsed.data;
-    const denial = await checkWriteAuth(db, spaceId, callerDid, event, access);
+    const denial = await checkWriteAuth(
+      db,
+      spaceId,
+      callerDid,
+      event,
+      access,
+      openSpaceDb,
+      openGlobalDb(),
+    );
     if (denial) {
       throw new XrpcError(
         denial.status,

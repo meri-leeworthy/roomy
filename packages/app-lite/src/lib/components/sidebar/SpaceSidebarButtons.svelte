@@ -8,14 +8,18 @@
   import { spaceNavigation } from "$lib/components/layout/last-room.svelte";
   import { isPushFeatureEnabled } from "$lib/push.svelte";
   import { isAuthenticated, isInitializing } from "$lib/auth.svelte";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
+  import { createFederationRequestsQuery } from "$lib/queries/federation";
 
   let {
     spaceId = $bindable(),
     allowPublicJoin = false,
+    isAdmin = false,
     onInvite,
   }: {
     spaceId?: string;
     allowPublicJoin?: boolean;
+    isAdmin?: boolean;
     onInvite?: () => void;
   } = $props();
 
@@ -29,6 +33,19 @@
       });
     }
   });
+
+  // Channel-federation flag gate + pending-request badge (admins only).
+  const flagsQuery = createFeatureFlagsQuery();
+  const federationEnabled = $derived(
+    flagsQuery.data?.flags.includes("channel-federation") ?? false,
+  );
+  const requestsQuery = createFederationRequestsQuery(
+    () => currentSpaceId ?? "",
+    { enabled: () => federationEnabled && isAdmin && !!currentSpaceId },
+  );
+  const pendingRequestCount = $derived(
+    requestsQuery.data?.requests?.length ?? 0,
+  );
 
   // When the settings panel is open, the button shows an X (close) icon.
   // When closed, it shows the settings cog.
@@ -100,20 +117,30 @@
        navigating; the user navigates by selecting a page from the panel.
        Closing it navigates back to the space's most recently accessed channel,
        like the space selector. The button shows an X when the panel is open. -->
-  <Button
-    variant="ghost"
-    size="default"
-    class="w-full justify-center"
-    aria-label={settingsBar.expanded ? "Close settings" : "Settings"}
-    title={settingsBar.expanded ? "Close settings" : "Settings"}
-    aria-expanded={settingsBar.expanded}
-    data-current={settingsBar.expanded}
-    onclick={toggleSettings}
-  >
-    {#if settingsBar.expanded}
-      <IconX />
-    {:else}
-      <IconSettings />
+  <div class="relative">
+    <Button
+      variant="ghost"
+      size="default"
+      class="w-full justify-center"
+      aria-label={settingsBar.expanded ? "Close settings" : "Settings"}
+      title={settingsBar.expanded ? "Close settings" : "Settings"}
+      aria-expanded={settingsBar.expanded}
+      data-current={settingsBar.expanded}
+      onclick={toggleSettings}
+    >
+      {#if settingsBar.expanded}
+        <IconX />
+      {:else}
+        <IconSettings />
+      {/if}
+    </Button>
+    {#if !settingsBar.expanded && pendingRequestCount > 0}
+      <span
+        class="absolute -top-0.5 -right-0.5 min-w-4 h-4 px-1 rounded-full bg-accent-500 text-white text-[10px] font-bold flex items-center justify-center pointer-events-none"
+        title={`${pendingRequestCount} pending federation ${pendingRequestCount === 1 ? "request" : "requests"}`}
+      >
+        {pendingRequestCount}
+      </span>
     {/if}
-  </Button>
+  </div>
 </div>

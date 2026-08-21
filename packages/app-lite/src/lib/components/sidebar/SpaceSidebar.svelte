@@ -24,12 +24,15 @@
   import {
     IconCheck,
     IconGripVertical,
+    IconHashtag,
     IconHome,
     IconPencil,
     IconPlus,
+    IconShare,
     IconTrash,
   } from "@roomy/design/icons";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { createRoomMetadataQuery } from "$lib/queries/room-metadata";
   import { isAuthenticated, isInitializing } from "$lib/auth.svelte";
   import { isPushFeatureEnabled } from "$lib/push.svelte";
@@ -56,6 +59,8 @@ import RoomyMark from "$lib/components/RoomyMark.svelte";
     typeof schemas.queries.getSpaceMetadata.SidebarCategory.infer;
 
   let { spaceId }: { spaceId?: string } = $props();
+
+  const flagsQuery = createFeatureFlagsQuery();
 
   const metaQuery = createSpaceMetadataQuery(
     () => spaceId ?? "",
@@ -153,11 +158,18 @@ import RoomyMark from "$lib/components/RoomyMark.svelte";
         (meta?.joinPolicy.allowMemberInvites ?? false)),
   );
   const showDiscordBridgeTab = false; //$derived(meta?.isAdmin ?? false);
+  const federationEnabled = $derived(
+    flagsQuery.data?.flags.includes("channel-federation") ?? false,
+  );
+  const showFederationTab = $derived(
+    federationEnabled && (meta?.isAdmin ?? false),
+  );
   const settingsTabs = $derived(
     [
       { slug: "", label: "General" },
-      { slug: "roles", label: "Roles" },
+      { slug: "permissions", label: "Permissions" },
       { slug: "members", label: "Members" },
+      ...(showFederationTab ? [{ slug: "federations", label: "Federations" }] : []),
       ...(pushFeatureEnabled ? [{ slug: "notifications", label: "Notifications" }] : []),
       ...(showInvitesTab ? [{ slug: "invites", label: "Invites" }] : []),
       ...(showDiscordBridgeTab
@@ -584,6 +596,7 @@ import RoomyMark from "$lib/components/RoomyMark.svelte";
       <SpaceSidebarButtons
         {spaceId}
         allowPublicJoin={meta?.joinPolicy.allowPublicJoin ?? false}
+        isAdmin={meta?.isAdmin ?? false}
         onInvite={onInvite}
       />
     {/if}
@@ -804,6 +817,7 @@ import RoomyMark from "$lib/components/RoomyMark.svelte";
 {#snippet channelItem(channel: SidebarChannel)}
   {@const isActive = activeChannelId === channel.id}
   {@const channelThreads = threadsByChannel.get(channel.id)}
+  {@const isFederated = channel.federated !== undefined}
   <div class={!channel.canRead ? "opacity-50 pointer-events-none" : ""}>
     <SidebarItemShell
       variant="channel"
@@ -812,7 +826,24 @@ import RoomyMark from "$lib/components/RoomyMark.svelte";
       active={isActive}
       hasUnreadDot={channel.unreadCount > 0}
       hasUnread={channel.unreadCount > 0}
-    />
+    >
+      {#snippet icon()}
+        {#if isFederated}
+          <IconShare class="shrink-0 size-3.5 text-accent-500" aria-label="Federated from another space" />
+        {:else}
+          <IconHashtag class="shrink-0 text-base-500" />
+        {/if}
+      {/snippet}
+      {#snippet trailing()}
+        {#if isFederated}
+          <span
+            class="shrink-0 mr-1 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide bg-accent-500/10 text-accent-600 dark:text-accent-400"
+          >
+            shared
+          </span>
+        {/if}
+      {/snippet}
+    </SidebarItemShell>
     {#if !isEditing && channelThreads?.length}
       <LinkedRoomList
         rooms={channelThreads}

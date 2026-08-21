@@ -1,0 +1,76 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.federation.getOutgoing",
+  "defs": {
+    "federations": {
+      "type": "object",
+      "required": [
+        "federatingSpaceDid",
+        "requestedAt",
+        "requestedByDid",
+        "status"
+      ],
+      "properties": {
+        "federatingSpaceDid": {
+          "type": "string"
+        },
+        "requestedAt": {
+          "type": "integer"
+        },
+        "requestedByDid": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "knownValues": [
+            "active",
+            "pending",
+            "rejected",
+            "removed"
+          ]
+        },
+        "decidedAt": {
+          "type": "integer"
+        },
+        "decidedByDid": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "main": {
+      "type": "query",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "spaceId"
+        ],
+        "properties": {
+          "spaceId": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "federations"
+          ],
+          "properties": {
+            "federations": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#federations"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

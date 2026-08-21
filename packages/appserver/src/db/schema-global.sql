@@ -105,3 +105,58 @@ create table if not exists mentions (
   primary key (did, message_id)
 ) strict;
 create index if not exists idx_mentions_did_created on mentions(did, created_at desc);
+
+-- Channel-federation registry. Cross-space by nature, so it lives in the
+-- global DB. `space_id` is the origin space (A) whose channels are exposed;
+-- `federating_space_did` is the receiving space (B). One row per (A, B).
+--
+-- Status transitions:
+--   request   -> pending
+--   respond   -> active | rejected
+--   remove    -> removed   (pending/active/rejected -> removed)
+--   re-request after removed -> pending
+--
+-- Written by the SDK federation materialisers (space.roomy.federation.*),
+-- routed here by statementRouting.ts (matches `space_federations`).
+create table if not exists space_federations (
+  space_id text not null,            -- origin space A
+  federating_space_did text not null, -- receiving space B
+  status text not null check(status in ('pending','active','rejected','removed')),
+  requested_by_did text not null,    -- admin of B who asked
+  requested_at integer not null default (unixepoch() * 1000),
+  message text,                      -- request note (A-admin visible)
+  decided_by_did text,               -- admin of A who decided
+  decided_at integer,
+  decision_message text,             -- decision note
+  primary key (space_id, federating_space_did)
+) strict;
+create index if not exists idx_space_fed_recv on space_federations(federating_space_did, status);
+create index if not exists idx_space_fed_origin_status on space_federations(space_id, status);
+
+-- Origin grant: A-admin-set access for a receiving space B on a channel of A.
+-- Mirrors role_rooms. permission null == removed / not exposed. Grants are
+-- channel-scoped: threads inherit from their parent channel (see plan §5.5),
+-- so lookups for a thread use its parent channel id as the room_id.
+create table if not exists federation_room_permissions (
+  space_id             text not null,   -- origin space A
+  federating_space_did text not null,   -- receiving space B
+  room_id              text not null,   -- channel id in A
+  permission           text not null check(permission in ('read','readwrite')),
+  primary key (space_id, federating_space_did, room_id)
+) strict;
+create index if not exists idx_frp_recv on federation_room_permissions(federating_space_did, permission);
+create index if not exists idx_frp_room on federation_room_permissions(room_id);
+
+-- Receiver grant: B-admin-set access for a B member or role on a federated
+-- channel of A. Ceiling is the origin grant (federation_room_permissions).
+-- kind = 'user' (grantee is a B user DID) | 'role' (grantee is a B role id).
+create table if not exists federation_receiver_permissions (
+  space_id             text not null,   -- origin space A
+  federating_space_did text not null,   -- receiving space B
+  room_id              text not null,   -- channel id in A
+  grantee              text not null,   -- B user DID or B role id
+  kind                 text not null check(kind in ('user','role')),
+  permission           text not null check(permission in ('read','readwrite')),
+  primary key (space_id, federating_space_did, room_id, grantee, kind)
+) strict;
+create index if not exists idx_frper_room on federation_receiver_permissions(room_id);
