@@ -257,6 +257,11 @@ program
   .option("--duration <ms>", "Stop after this many ms (0 = run forever)", "0")
   .option("--include-self", "Also react to the agent's own messages (testing)")
   .option("--no-thinking", "Don't post the agent's thinking trace, just the answer")
+  .option("--no-continuity", "Give each mention a fresh omp session (default: resume per-room)")
+  .option("--session-file <path>", "Path for the room → omp session map (default ~/.roomy/omp-sessions.json)")
+  .option("--no-stream-thinking", "Don't stream thinking chunks; bundle thinking with the final answer")
+  .option("--thinking-chunk <n>", "Approx char threshold for each streamed thinking chunk (default 2000)", "2000")
+  .option("--system-prompt-file <path>", "File appended to omp's system prompt (default: $OMP_SYSTEM_PROMPT_FILE)")
   .action(async (options: {
     space?: string;
     room?: string;
@@ -268,6 +273,11 @@ program
     duration: string;
     includeSelf?: boolean;
     thinking: boolean;
+    continuity: boolean;
+    sessionFile?: string;
+    streamThinking: boolean;
+    thinkingChunk: string;
+    systemPromptFile?: string;
   }) => {
     try {
       const config = loadConfig();
@@ -283,6 +293,11 @@ program
         durationMs: Number(options.duration),
         includeSelf: options.includeSelf,
         thinking: options.thinking,
+        continuity: options.continuity,
+        sessionFile: options.sessionFile,
+        streamThinking: options.streamThinking,
+        thinkingChunkSize: Number(options.thinkingChunk),
+        systemPromptFile: options.systemPromptFile ?? process.env.OMP_SYSTEM_PROMPT_FILE,
       });
     } catch (error) {
       console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);

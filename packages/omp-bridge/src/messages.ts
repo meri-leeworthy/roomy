@@ -89,6 +89,16 @@ export function buildReplyBlocks(answer: string, thinking?: string): Block[] {
   return blocks;
 }
 
+/** Build a single blockquote block carrying a chunk of the thinking trace. */
+export function buildThinkingBlocks(thinking: string): Block[] {
+  return [
+    {
+      $type: "space.roomy.richtext.blocks#blockquote",
+      text: thinking,
+    },
+  ];
+}
+
 /**
  * Decide whether a message mentions the agent. The DID is authoritative (a
  * `#didMention` facet is a stable, unambiguous match); plain-text matching is a

@@ -20,8 +20,17 @@ Roomy room ──WS──▶ appserver (mention detection) ──#mention──�
   (`mentions:<did>`), so it receives every message that mentions the agent
   across all spaces it has joined — one subscription, no per-room bookkeeping.
 - Runs `omp -p --mode=json --print-thoughts` and posts the model's **thinking
-  trace** (as a blockquote) above the final answer in a single rich message.
+  trace** to the room in **message-sized chunks as it streams** (each chunk a
+  blockquote message), then posts the final answer as its own message. Set
+  `streamThinking: false` to bundle the thinking with the answer instead, or
+  `thinkingChunkSize` to tune the chunk threshold (default 2000 chars).
 - Mention matching is DID-authoritative; self-mentions are excluded.
+- **Session continuity (default on):** each room keeps its own omp session. The
+  first mention in a room starts a fresh session; later mentions `--resume` that
+  session so the agent remembers the conversation across mentions (and across
+  bridge restarts). The room → session map is persisted to `~/.roomy/omp-sessions.json`
+  (override with `sessionFile`; disable with `continuity: false`). Runs in the
+  same room are serialized so concurrent mentions can't race on a resumed session.
 
 ## Usage
 
@@ -32,6 +41,11 @@ await listen(auth, {
   cwd: "/path/to/workspace",
   // spaceId / roomId to scope; omitted = all joined spaces
   // model: "deepseek-v4-flash", prefix: "...", ompBin: "omp"
+  // continuity: true,  // per-room omp session (conversation continuity)
+  // sessionFile: "~/.roomy/omp-sessions.json",
+  // streamThinking: true,  // stream thinking chunks as messages (default)
+  // thinkingChunkSize: 2000,
+  // systemPromptFile: "~/.omp/workflow-context.md",  // appended to omp's system prompt every run
 });
 ```
 
