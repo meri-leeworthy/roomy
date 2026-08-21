@@ -14,6 +14,8 @@ export interface SendOptions {
   /** Rich-text blocks body (new format). When set, `text` is ignored and the
    *  wire body is the blocks+facets document. */
   blocks?: Block[];
+  /** ID of a message to reply to. Creates a thread rooted at that message. */
+  parent?: string;
 }
 
 /**
@@ -49,7 +51,15 @@ export async function sendMessage(
     room: roomId,
     $type: "space.roomy.message.createMessage.v0" as const,
     body,
-    extensions: {},
+    extensions: opts.parent
+      ? {
+          "space.roomy.extension.attachments.v0": {
+            attachments: [
+              { $type: "space.roomy.attachment.reply.v0", target: opts.parent },
+            ],
+          },
+        }
+      : {},
   };
 
   await xrpc.procedure("space.roomy.space.sendEvents", {

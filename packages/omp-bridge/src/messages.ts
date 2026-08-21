@@ -20,6 +20,10 @@ export interface AgentIdentity {
   agentName: string;
 }
 
+/** Prefix marking a thinking-trace message, so consumers can filter the noise
+ *  out of context (and out of inter-agent communication). */
+export const THINKING_MARKER = "💭";
+
 /**
  * Post a reply to a room as the bridge's own message. Builds the createMessage
  * event directly (the bridge owns its own posting path; it doesn't reuse the
@@ -34,6 +38,7 @@ export async function sendReply(
   roomId: string,
   text: string,
   blocks?: Block[],
+  parent?: string,
 ): Promise<{ messageId: string }> {
   const messageId = newUlid();
   const body = blocks && blocks.length > 0
@@ -61,7 +66,17 @@ export async function sendReply(
         room: roomId,
         $type: "space.roomy.message.createMessage.v0",
         body,
-        extensions: {},
+        // When the agent is replying to a mention, thread the reply under the
+        // parent so all task chatter stays in that thread (not the room root).
+        extensions: parent
+          ? {
+              "space.roomy.extension.attachments.v0": {
+                attachments: [
+                  { $type: "space.roomy.attachment.reply.v0", target: parent },
+                ],
+              },
+            }
+          : {},
       },
     ],
   });
@@ -79,7 +94,7 @@ export function buildReplyBlocks(answer: string, thinking?: string): Block[] {
   if (thinking) {
     blocks.push({
       $type: "space.roomy.richtext.blocks#blockquote",
-      text: thinking,
+      text: `${THINKING_MARKER} ${thinking}`,
     });
   }
   blocks.push({
@@ -94,7 +109,7 @@ export function buildThinkingBlocks(thinking: string): Block[] {
   return [
     {
       $type: "space.roomy.richtext.blocks#blockquote",
-      text: thinking,
+      text: `${THINKING_MARKER} ${thinking}`,
     },
   ];
 }
@@ -120,13 +135,18 @@ export function isMentioned(msg: IncomingMessage, identity: AgentIdentity): bool
     }
   }
 
+  // Strict fallback: only an explicit @Name / @handle / @did mention counts.
+  // A bare substring of the agent's name (e.g. "Chanterelle" appearing in a
+  // report, thinking trace, or forwarded message) must NOT trigger the agent.
   const text = msg.content ?? "";
-  const local = agentHandle.split("@").pop()?.split(".")[0] ?? "";
-  const needles = [agentDid, agentHandle, local, agentName]
-    .filter(Boolean)
-    .map((n) => n.toLowerCase());
-  const lower = text.toLowerCase();
-  return needles.some((n) => n.length > 0 && lower.includes(n));
+  const needles = [agentName, agentHandle, agentDid].filter(Boolean);
+  return needles.some((n) => {
+    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Multi-word names (e.g. "Little Fox"): allow whitespace between words
+    // after the leading @, so `@Little Fox` and `@Little\nFox` both match.
+    const spaced = esc.replace(/\\ /g, "\\s*");
+    return new RegExp(`@${spaced}(?![\\w-])`, "i").test(text);
+  });
 }
 
 /** Extract plain text from a message regardless of mime type. */

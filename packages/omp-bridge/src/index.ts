@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { runOmp, buildPrompt } from "./omp.js";
 import {
-  sendReply, buildReplyBlocks, buildThinkingBlocks, isMentioned, plaintext,
+  sendReply, buildReplyBlocks, buildThinkingBlocks, isMentioned, plaintext, THINKING_MARKER,
   type IncomingMessage, type AgentIdentity,
 } from "./messages.js";
 
@@ -47,6 +47,9 @@ export interface BridgeOptions {
   /** Path to a file whose contents are appended to omp's system prompt on every
    *  run (unified workflow context for each new session). */
   systemPromptFile?: string;
+  /** How many recent messages in the room to load into the prompt when the
+   *  agent is mentioned (conversation context). Default 20. 0 disables. */
+  recent?: number;
   /** Give each room its own omp session so repeated mentions keep context. Default true. */
   continuity?: boolean;
   /** Where to persist room → omp session id mappings. Defaults to ~/.roomy/omp-sessions.json. */
@@ -256,6 +259,60 @@ async function resolveAgentIdentity(
   return { agentDid, agentHandle, agentName };
 }
 
+/**
+ * Fetch recent messages in a room, build a compact conversation-context string
+ * (oldest-first, excluding the agent's own replies and the triggering message),
+ * and surface the thread parent of the triggering message so the reply can be
+ * threaded into the same conversation.
+ */
+async function fetchRecentContext(
+  xrpc: DirectXrpcClient,
+  roomId: string,
+  agentDid: string,
+  msgId: string,
+  limit: number,
+): Promise<{ context: string; parent?: string }> {
+  if (limit <= 0) return { context: "" };
+  try {
+    const res = await xrpc.query("space.roomy.room.getMessages", {
+      roomId,
+      limit: String(limit),
+    });
+    const lines: string[] = [];
+    let parent: string | undefined;
+    for (const m of (res.messages as any[]) ?? []) {
+      if (m.id === msgId) {
+        parent = m.replyTo ?? parent;
+        continue;
+      }
+      if (m.authorDid === agentDid) continue; // skip our own replies
+      const from = m.authorName ?? m.authorDid ?? "?";
+      const content = plaintext({ content: m.content ?? "", mimeType: m.mimeType ?? "text/markdown" } as IncomingMessage);
+      if (!content) continue;
+      // Skip thinking-trace messages (marked with 💭) — high noise, low signal;
+      // they pollute the context and aren't part of the real conversation.
+      if (content.startsWith(THINKING_MARKER)) continue;
+      lines.push(`[${from}]: ${content}`);
+    }
+    const context = lines.length
+      ? `Recent conversation in this room (oldest first):\n${lines.reverse().join("\n")}`
+      : "";
+    return { context, parent };
+  } catch {
+    return { context: "", parent: undefined };
+  }
+}
+
+async function handleMessage(
+  auth: BridgeAuth,
+  opts: BridgeOptions,
+  msg: IncomingMessage,
+  roomId: string,
+  spaceId: string,
+  identity: AgentIdentity,
+  sessions: SessionStore | undefined,
+  log: (m: string) => void,
+): Promise<void> {
 async function handleMessage(
   auth: BridgeAuth,
   opts: BridgeOptions,
@@ -270,7 +327,10 @@ async function handleMessage(
   const mentionOnly = opts.mentionOnly ?? true;
   if (mentionOnly && !mentioned) return;
 
-  const prompt = buildPrompt(msg, roomId, identity, opts.prefix);
+  const recent = opts.recent ?? 20;
+  const ctx = await fetchRecentContext(auth.xrpc, roomId, identity.agentDid, msg.id, recent);
+  const prompt = buildPrompt(msg, roomId, identity, opts.prefix, ctx.context);
+  const parent = ctx.parent ?? msg.id;
   const resume = sessions?.get(spaceId, roomId);
   if (resume) log(`continuing omp session ${resume}`);
   log(`${mentioned ? "mentioned" : "message"} from ${msg.authorName || msg.authorDid}: ${truncate(msg.content, 80)}`);
@@ -285,7 +345,7 @@ async function handleMessage(
       onThinking: (chunk) => {
         streamedThinking = true;
         thinkingChain = thinkingChain.then(() =>
-          sendReply(auth.xrpc, spaceId, roomId, chunk, buildThinkingBlocks(chunk)),
+          sendReply(auth.xrpc, spaceId, roomId, chunk, buildThinkingBlocks(chunk), parent),
         );
       },
     });
@@ -297,7 +357,7 @@ async function handleMessage(
     await thinkingChain;
     if (streamThinking && streamedThinking) {
       // Thinking was already streamed to the room as messages; post the answer.
-      const { messageId } = await sendReply(auth.xrpc, spaceId, roomId, reply.answer);
+      const { messageId } = await sendReply(auth.xrpc, spaceId, roomId, reply.answer, undefined, parent);
       log(`replied ${messageId} (answer; thinking streamed)`);
     } else {
       const thinking = reply.thinking?.trim();
@@ -309,12 +369,14 @@ async function handleMessage(
         roomId,
         reply.answer,
         blocks.length > 0 ? blocks : undefined,
+        parent,
       );
       log(`replied ${messageId}${postThinking ? " (with thinking)" : ""}`);
     }
   } catch (error) {
     log(`error: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
 }
 
 async function resolveRooms(
