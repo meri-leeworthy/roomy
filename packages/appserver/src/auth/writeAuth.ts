@@ -490,6 +490,64 @@ async function checkFederationRespond(
   return undefined;
 }
 
+/**
+ * Authorize a receiver-grant write (`setReceiverPermission`, sent on B's
+ * stream). Requires a B admin (via requireSpaceAdminCheck) and — when *setting*
+ * a grant (permission != null) — verifies that the origin space A has actually
+ * exposed the channel to B through an active origin grant. A receiver grant
+ * is meaningless (and inert) without that origin grant, so blocking it
+ * prevents admins from creating stale rows they can't act on. Clearing a grant
+ * (permission == null) is always allowed so admins can clean up stale entries.
+ */
+async function checkSetReceiverPermission(
+  db: DbLike,
+  spaceId: string,
+  callerDid: string,
+  event: { $type: string; [k: string]: unknown },
+  access?: SpaceAccess,
+  globalDb?: DbLike,
+): Promise<WriteAuthResult> {
+  // B admin of the receiving space (spaceId === B).
+  const adminResult = await requireSpaceAdminCheck(db, spaceId, callerDid, access);
+  if (adminResult) return adminResult;
+
+  const originSpaceId = event.originSpaceId;
+  const roomId = event.roomId;
+  if (typeof originSpaceId !== "string" || originSpaceId === "") {
+    return denied(400, "InvalidRequest", `Event is missing required 'originSpaceId' field`);
+  }
+  if (typeof roomId !== "string" || roomId === "") {
+    return denied(400, "InvalidRequest", `Event is missing required 'roomId' field`);
+  }
+
+  // Granting (non-null) requires the origin grant to exist and be active.
+  if (event.permission === null || event.permission === undefined) return undefined;
+  if (!globalDb) return undefined; // defensive: no global DB -> skip origin check
+
+  const exposed = await globalDb
+    .query(
+      `select 1
+         from space_federations sf
+         join federation_room_permissions frp
+           on frp.space_id = sf.space_id
+          and frp.federating_space_did = sf.federating_space_did
+        where sf.space_id = ?
+          and sf.federating_space_did = ?
+          and sf.status = 'active'
+          and frp.room_id = ?`,
+    )
+    .get<{ n: number }>(originSpaceId, spaceId, roomId);
+  if (!exposed) {
+    return denied(
+      409,
+      "Conflict",
+      "Origin space has not exposed this channel to your space",
+    );
+  }
+
+  return undefined;
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────
 
 /**
@@ -601,10 +659,11 @@ export async function checkWriteAuth(
     if ($type === "space.roomy.federation.respond.v0") {
       return await checkFederationRespond(db, spaceId, callerDid, event, access, globalDb);
     }
+    if ($type === "space.roomy.federation.setReceiverPermission.v0") {
+      return await checkSetReceiverPermission(db, spaceId, callerDid, event, access, globalDb);
+    }
     // remove may be initiated by an admin of either side (A or B);
-    // setRoomPermission targets the origin space (A) and requires an A
-    // admin; setReceiverPermission targets B's stream (spaceId === B)
-    // and requires a B admin.
+    // setRoomPermission targets the origin space (A) and requires an A admin.
     if ($type === "space.roomy.federation.remove.v0") {
       return await checkFederationRemove(db, spaceId, callerDid, event, access, dbResolver);
     }

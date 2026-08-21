@@ -7,7 +7,7 @@
  */
 
 import { createAccessMemo, roomAccess, spaceAccess } from "../auth/access.ts";
-import { federatedRoomAccess } from "../auth/federation.ts";
+import { createFederationMemo, federatedRoomAccess } from "../auth/federation.ts";
 import { openReadStateDb, openSpaceDb, openGlobalDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { getReadPositions } from "../queries/readPositions.ts";
@@ -106,6 +106,10 @@ export const getMetadataHandler: QueryHandler<
   // × ~N channels × ~3 passes). The memo collapses the space-level checks
   // to one set for the whole request and caches per-room decisions.
   const memo = createAccessMemo();
+  // Per-request federation memo: collapses the N×SQL fan-out in the sidebar
+  // loop below (every federated channel re-queries the same joined-spaces row
+  // and the same per-space B access). See auth/federation.ts.
+  const fedMemo = createFederationMemo();
   const access = await spaceAccess(db, spaceId, userDid, memo);
   if (access.isBanned) {
     throw new XrpcError(403, "Forbidden", "Caller is banned from this space");
@@ -227,7 +231,7 @@ export const getMetadataHandler: QueryHandler<
     // with an origin grant. They appear in B's sidebar, decorated with their
     // origin space. B admins see all federated channels; B members see only
     // those they have a receiver grant for (see plan §5.5 / Phase 3).
-    const federatedChannels = await buildFederatedSidebarChannels(spaceId, userDid);
+    const federatedChannels = await buildFederatedSidebarChannels(spaceId, userDid, fedMemo, memo);
     if (federatedChannels.length > 0) orphans.push(...federatedChannels);
 
     // ── Active threads ────────────────────────────────────────────────
@@ -340,6 +344,8 @@ export const getMetadataHandler: QueryHandler<
 async function buildFederatedSidebarChannels(
   spaceId: string,
   userDid: string,
+  fedMemo: ReturnType<typeof createFederationMemo>,
+  memo: ReturnType<typeof createAccessMemo>,
 ): Promise<SidebarChannel[]> {
   const globalDb = openGlobalDb();
   const rows = await globalDb
@@ -388,13 +394,19 @@ async function buildFederatedSidebarChannels(
       // origin-level access; B members need a receiver grant).
       const fed = await federatedRoomAccess(originDb, globalDb, g.roomId, userDid, {
         spaceDbResolver: openSpaceDb,
+        memo: fedMemo,
+        accessMemo: memo,
       });
       if (!fed || !fed.canRead) continue;
 
       out.push(stripNulls({
         id: g.roomId,
         name: nameById.get(g.roomId) ?? undefined,
-        defaultAccess: g.permission === "readwrite" ? "readwrite" : "read",
+        // defaultAccess reflects the *effective* access for this caller
+        // (capped by their receiver grant), not the origin ceiling — a B
+        // member with a 'read' receiver grant on a 'readwrite' origin channel
+        // sees defaultAccess 'read' and canWrite false.
+        defaultAccess: fed.canWrite ? "readwrite" : "read",
         canRead: true,
         canWrite: fed.canWrite,
         unreadCount: 0,

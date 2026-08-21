@@ -30,7 +30,7 @@
  */
 
 import type { DbLike } from "../db/types.ts";
-import { resolveRoom, spaceAccess } from "./access.ts";
+import { resolveRoom, spaceAccess, type AccessMemo } from "./access.ts";
 
 export interface FederatedRoomAccess {
   canRead: boolean;
@@ -46,6 +46,44 @@ export interface FederationAccessOptions {
    * user receiver grants and the origin grant are considered.
    */
   spaceDbResolver?: (spaceDid: string) => DbLike;
+  /**
+   * Per-request federation memo. When omitted, a transient memo is built for
+   * this call only (dedupes the nested global queries within a single call).
+   * Threading the *same* memo across a whole handler (e.g. the getMetadata
+   * sidebar loop, where every federated channel re-queries the same joined-
+   * spaces row and per-space B access) collapses that N×SQL fan-out.
+   */
+  memo?: FederationMemo;
+  /**
+   * Optional per-request `AccessMemo` forwarded to the `spaceAccess` calls so
+   * the ~5 space-level queries per receiving space (B) are computed once per
+   * request rather than once per federated channel.
+   */
+  accessMemo?: AccessMemo;
+}
+
+/**
+ * Per-request cache for the global-DB federation lookups. It is keyed by
+ * user / (origin, home) / (origin, home, room) and is intentionally
+ * per-request (never process-global): federation state can change between
+ * requests via events, and a stale cache would be a security bug.
+ */
+export interface FederationMemo {
+  /** Joined-space DIDs per caller did (empty array = member of none). */
+  readonly joinedSpaces: Map<string, string[]>;
+  /** Active-federation existence per `${origin}\0${home}`. */
+  readonly activeFederation: Map<string, boolean>;
+  /** Origin grant per `${origin}\0${home}\0${room}` (null = no grant). */
+  readonly originGrant: Map<string, Permission | null>;
+}
+
+/** Create a fresh per-request federation memo. */
+export function createFederationMemo(): FederationMemo {
+  return {
+    joinedSpaces: new Map(),
+    activeFederation: new Map(),
+    originGrant: new Map(),
+  };
 }
 
 type Permission = "read" | "readwrite";
@@ -61,6 +99,16 @@ function minPermission(a: Permission, b: Permission): Permission {
 function maxPermission(a: Permission | null, b: Permission): Permission {
   if (a === null) return b;
   return level(a) >= level(b) ? a : b;
+}
+
+function joinedKey(did: string): string {
+  return did;
+}
+function fedKey(origin: string, home: string): string {
+  return `${origin}\0${home}`;
+}
+function originKey(origin: string, home: string, room: string): string {
+  return `${origin}\0${home}\0${room}`;
 }
 
 /**
@@ -85,29 +133,54 @@ export async function federatedRoomAccess(
   const originSpace = row.spaceId;
   const grantRoom = parentChannelId ?? roomId;
 
+  const memo = opts.memo ?? createFederationMemo();
+
   // The caller's membership spaces (head = user DID, tail = space DID).
-  const spaces = await globalDb
-    .query("select tail from edges where head = ? and label = 'joinedSpace'")
-    .all<{ tail: string }>(did);
+  // Cached per did — identical across every channel in a request.
+  let homeSpaces: string[];
+  if (memo.joinedSpaces.has(joinedKey(did))) {
+    homeSpaces = memo.joinedSpaces.get(joinedKey(did))!;
+  } else {
+    const spaces = await globalDb
+      .query("select tail from edges where head = ? and label = 'joinedSpace'")
+      .all<{ tail: string }>(did);
+    homeSpaces = spaces.map((s) => s.tail);
+    memo.joinedSpaces.set(joinedKey(did), homeSpaces);
+  }
 
-  for (const s of spaces) {
-    const homeSpace = s.tail;
-
+  for (const homeSpace of homeSpaces) {
     // Active federation from origin -> this home space?
-    const fed = await globalDb
-      .query(
-        "select 1 as n from space_federations where space_id = ? and federating_space_did = ? and status = 'active'",
-      )
-      .get<{ n: number }>(originSpace, homeSpace);
-    if (!fed) continue;
+    const fk = fedKey(originSpace, homeSpace);
+    let active: boolean;
+    if (memo.activeFederation.has(fk)) {
+      active = memo.activeFederation.get(fk)!;
+    } else {
+      const fed = await globalDb
+        .query(
+          "select 1 as n from space_federations where space_id = ? and federating_space_did = ? and status = 'active'",
+        )
+        .get<{ n: number }>(originSpace, homeSpace);
+      // `.get()` returns null when no row matches (not undefined).
+      active = fed != null;
+      memo.activeFederation.set(fk, active);
+    }
+    if (!active) continue;
 
     // Origin grant on the (parent) channel?
-    const origin = await globalDb
-      .query(
-        "select permission from federation_room_permissions where space_id = ? and federating_space_did = ? and room_id = ?",
-      )
-      .get<{ permission: Permission }>(originSpace, homeSpace, grantRoom);
-    if (!origin) continue;
+    const ok = originKey(originSpace, homeSpace, grantRoom);
+    let origin: Permission | null;
+    if (memo.originGrant.has(ok)) {
+      origin = memo.originGrant.get(ok)!;
+    } else {
+      const o = await globalDb
+        .query(
+          "select permission from federation_room_permissions where space_id = ? and federating_space_did = ? and room_id = ?",
+        )
+        .get<{ permission: Permission }>(originSpace, homeSpace, grantRoom);
+      origin = o?.permission ?? null;
+      memo.originGrant.set(ok, origin);
+    }
+    if (origin === null) continue;
 
     // Resolve the caller's standing in the receiving space B once. Used for
     // the B-admin override below, and to deny access to B-banned members
@@ -116,14 +189,14 @@ export async function federatedRoomAccess(
     let bAccess: Awaited<ReturnType<typeof spaceAccess>> | null = null;
     if (opts.spaceDbResolver) {
       const bDb = opts.spaceDbResolver(homeSpace);
-      bAccess = await spaceAccess(bDb, homeSpace, did);
+      bAccess = await spaceAccess(bDb, homeSpace, did, opts.accessMemo);
     }
 
     // B admin override: admins of the receiving space get origin-level access.
     if (bAccess?.isAdmin) {
       return {
         canRead: true,
-        canWrite: origin.permission === "readwrite",
+        canWrite: origin === "readwrite",
         homeSpaceDid: homeSpace,
       };
     }
@@ -142,7 +215,7 @@ export async function federatedRoomAccess(
     );
     if (receiver === null) continue; // no receiver grant -> no access
 
-    const effective = minPermission(origin.permission, receiver);
+    const effective = minPermission(origin, receiver);
     return {
       canRead: true,
       canWrite: effective === "readwrite",

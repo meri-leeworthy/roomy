@@ -327,6 +327,61 @@ describe("auth/writeAuth — federation setReceiverPermission", () => {
     const result = await checkWriteAuth(bDb, B, MEMBER_A, setReceiverEvent(A, "01CHANNEL00000000000000000", "did:plc:bob", "user", "read"));
     expect(result?.status).toBe(403);
   });
+
+  test("admin of B cannot grant on a channel A has not exposed (409)", async () => {
+    const { asyncDb: bDb } = freshDb();
+    await seedSpace(bDb, B);
+    await seedUser(bDb, ADMIN_B);
+    await addEdge(bDb, B, ADMIN_B, "admin");
+    const globalDb = freshGlobalDb();
+    // Active federation, but NO origin grant for the channel.
+    await globalDb.run(
+      "insert into space_federations (space_id, federating_space_did, status, requested_by_did) values (?, ?, 'active', ?)",
+      [A, B, ADMIN_B],
+    );
+    const result = await checkWriteAuth(
+      bDb, B, ADMIN_B,
+      setReceiverEvent(A, "01CHANNEL00000000000000000", "did:plc:bob", "user", "read"),
+      undefined, undefined, globalDb,
+    );
+    expect(result?.status).toBe(409);
+  });
+
+  test("admin of B can grant on a channel A has exposed via an active origin grant", async () => {
+    const { asyncDb: bDb } = freshDb();
+    await seedSpace(bDb, B);
+    await seedUser(bDb, ADMIN_B);
+    await addEdge(bDb, B, ADMIN_B, "admin");
+    const globalDb = freshGlobalDb();
+    await globalDb.run(
+      "insert into space_federations (space_id, federating_space_did, status, requested_by_did) values (?, ?, 'active', ?)",
+      [A, B, ADMIN_B],
+    );
+    await globalDb.run(
+      "insert into federation_room_permissions (space_id, federating_space_did, room_id, permission) values (?, ?, ?, 'readwrite')",
+      [A, B, "01CHANNEL00000000000000000"],
+    );
+    const result = await checkWriteAuth(
+      bDb, B, ADMIN_B,
+      setReceiverEvent(A, "01CHANNEL00000000000000000", "did:plc:bob", "user", "read"),
+      undefined, undefined, globalDb,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  test("admin of B can always clear a receiver grant (null) even without an origin grant", async () => {
+    const { asyncDb: bDb } = freshDb();
+    await seedSpace(bDb, B);
+    await seedUser(bDb, ADMIN_B);
+    await addEdge(bDb, B, ADMIN_B, "admin");
+    const globalDb = freshGlobalDb();
+    const result = await checkWriteAuth(
+      bDb, B, ADMIN_B,
+      setReceiverEvent(A, "01CHANNEL00000000000000000", "did:plc:bob", "user", null),
+      undefined, undefined, globalDb,
+    );
+    expect(result).toBeUndefined();
+  });
 });
 
 describe("auth/writeAuth — federated writes (Phase 3)", () => {

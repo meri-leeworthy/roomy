@@ -10,13 +10,13 @@
  *
  * Feeds the settings Federations UI: the origin-grant toggles (A side) and
  * the receiver-grant config (B side).
+ *
+ * Both queries join `space_federations` on an active relationship so grants
+ * belonging to a removed/rejected federation are not surfaced (they are
+ * inert and would only confuse the admin UI).
  */
 
-import { openGlobalDb, openSpaceDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
-import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
-import { XrpcError } from "../xrpc/errors.ts";
-import { requireString } from "../xrpc/params.ts";
+import { requireFederationAdmin } from "./federationAdmin.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
 
 interface OriginGrant {
@@ -42,32 +42,22 @@ export const getFederationGrantsHandler: QueryHandler<
   QueryParams,
   GetGrantsResult
 > = async (params: QueryParams, auth: AuthCtx) => {
-  const userDid = parseUserDid(auth);
-  if (userDid === null) {
-    throw new XrpcError(401, "AuthRequired", "Authentication required");
-  }
-  const spaceId = requireString(params, "spaceId");
-
-  await hydrateUserMembership(userDid);
-
-  const spaceDb = openSpaceDb(spaceId);
-  const access = await requireSpaceAccess(spaceDb, spaceId, userDid);
-  if (!access.isAdmin) {
-    throw new XrpcError(
-      403,
-      "Forbidden",
-      "Only space admins can view federation grants",
-    );
-  }
-
-  const db = openGlobalDb();
+  const { spaceId, db } = await requireFederationAdmin(
+    params,
+    auth,
+    "federation grants",
+  );
 
   const originRows = await db
     .query(
-      `select federating_space_did, room_id, permission
-         from federation_room_permissions
-        where space_id = ?
-        order by federating_space_did, room_id`,
+      `select frp.federating_space_did, frp.room_id, frp.permission
+         from federation_room_permissions frp
+         join space_federations sf
+           on sf.space_id = frp.space_id
+          and sf.federating_space_did = frp.federating_space_did
+        where frp.space_id = ?
+          and sf.status = 'active'
+        order by frp.federating_space_did, frp.room_id`,
     )
     .all<{
       federating_space_did: string;
@@ -77,10 +67,14 @@ export const getFederationGrantsHandler: QueryHandler<
 
   const receiverRows = await db
     .query(
-      `select space_id, room_id, grantee, kind, permission
-         from federation_receiver_permissions
-        where federating_space_did = ?
-        order by space_id, room_id, kind, grantee`,
+      `select frp.space_id, frp.room_id, frp.grantee, frp.kind, frp.permission
+         from federation_receiver_permissions frp
+         join space_federations sf
+           on sf.space_id = frp.space_id
+          and sf.federating_space_did = frp.federating_space_did
+        where frp.federating_space_did = ?
+          and sf.status = 'active'
+        order by frp.space_id, frp.room_id, frp.kind, frp.grantee`,
     )
     .all<{
       space_id: string;
