@@ -92,7 +92,7 @@ export const JoinSpace = defineEvent(
       values (
         ${event.id},
         'text/markdown',
-        cast(('[@' || coalesce((select handle from comp_user where did = ${user}), ${user}) || '](/user/' || ${user} || ') joined the space.') as blob),
+        cast(('[@' || ${user} || '](/user/' || ${user} || ') joined the space.') as blob),
         ${event.id}
     )`,
   ],

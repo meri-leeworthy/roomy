@@ -309,6 +309,9 @@
             },
             "sort_idx": {
               "type": "string"
+            },
+            "system": {
+              "type": "boolean"
             }
           }
         }

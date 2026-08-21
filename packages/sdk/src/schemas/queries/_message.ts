@@ -104,6 +104,12 @@ export const Message = type({
   authorName: "string",
   "authorHandle?": "string",
   "authorAvatar?": "string",
+  /**
+   * True for system messages (e.g. "X joined the space", "X created
+   * [thread]") — authored by the space itself. The author line is not
+   * meaningful for these; clients should hide the author identity.
+   */
+  "system?": "boolean",
   timestamp: "string",
   "replyTo?": "string",
   "forwardedFrom?": ForwardedFrom,

@@ -179,10 +179,15 @@
   // message (see the onclick on the message box below). Only one message's
   // toolbar is open at a time (shared `toolbarOpenState`).
   let isToolbarOpen = $derived(toolbarOpenState.id === message.id);
+  // System messages (e.g. "X joined the space", "X created [thread]") are
+  // authored by the space itself. They carry no meaningful author identity, so
+  // render them as a centred system notice without an avatar/author line.
+  let isSystem = $derived(message.system === true);
   let showToolbar = $derived(
-    (!isEditing &&
+    !isSystem &&
+      !isEditing &&
       !isThreading &&
-      ((!isMobile.current && hovered) || (isMobile.current && isToolbarOpen))) ||
+      ((!isMobile.current && hovered) || (isMobile.current && isToolbarOpen)) ||
       keepToolbarOpen,
   );
 
@@ -294,7 +299,8 @@
       onAvatarClick={effBridged ? undefined : () => goto(`/user/${eff ? eff.authorDid : message.authorDid}`)}
       timestamp={new Date(eff ? eff.timestamp : message.timestamp)}
       isBridged={effBridged}
-      {mergeWithPrevious}
+      isSystem={isSystem}
+      mergeWithPrevious={isSystem ? false : mergeWithPrevious}
       {isSelected}
       {isEditing}
       {showToolbar}

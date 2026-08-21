@@ -58,17 +58,17 @@ export const CreateRoomLink = defineEvent(
         `,
       // 'linked to' is probably not what we want, but this is not a user facing affordance for now
       //
-      // The author handle may be NULL when the acting user has no profile yet
-      // (e.g. the Discord bridge bot, which sends thread creation without a
-      // comp_user row). SQLite's || with a NULL operand yields NULL for the
-      // whole expression, which would materialise an *empty* system message.
-      // Coalesce to the DID so the message is always non-empty and clickable.
+      // The user label is stored as their DID (deterministic at materialisation
+      // time — the acting user may have no profile row yet, e.g. the Discord
+      // bridge bot). The appserver resolves the DID to a display name/handle at
+      // read time from the global profile store, so we never bake a missing or
+      // stale handle into the stored message.
       sql`
         insert or replace into comp_content (entity, mime_type, data, last_edit)
         values (
           ${event.id},
           'text/markdown',
-          cast(('[@' || coalesce((select handle from comp_user where did = ${user}), ${user}) || '](/user/' || ${user} || ') ' || ${event.isCreationLink ? "created [" : "linked to ["} || coalesce((select name from comp_info where entity = ${event.linkToRoom}), 'this room') || '](' || ${event.linkToRoom} || '?parent=' || ${event.room} || ').') as blob),
+          cast(('[@' || ${user} || '](/user/' || ${user} || ') ' || ${event.isCreationLink ? "created [" : "linked to ["} || coalesce((select name from comp_info where entity = ${event.linkToRoom}), 'this room') || '](' || ${event.linkToRoom} || '?parent=' || ${event.room} || ').') as blob),
           ${event.id}
       )
       `,

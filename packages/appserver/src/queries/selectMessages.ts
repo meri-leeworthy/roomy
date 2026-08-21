@@ -17,7 +17,7 @@
 import type { DbLike } from "../db/types.ts";
 import { decodeContent } from "../db/content.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
-import { hydrateProfiles } from "./profileStore.ts";
+import { hydrateProfiles, resolveProfiles } from "./profileStore.ts";
 
 export interface ReactionDto {
   emoji: string;
@@ -59,6 +59,13 @@ export interface MessageDto {
   authorName: string;
   authorHandle?: string;
   authorAvatar?: string;
+  /**
+   * True for system messages — messages authored by the space itself (e.g.
+   * "X joined the space", "X created [thread]"). The author line is not
+   * meaningful for these; clients hide the author identity and rely on the
+   * message body.
+   */
+  system?: boolean;
   timestamp: string;
   replyTo?: string;
   forwardedFrom?: { messageId: string; name: string; roomId: string };
@@ -74,6 +81,7 @@ export type SelectScope =
 
 interface BaseRow {
   id: string;
+  stream_id: string | null;
   sort_idx: string | null;
   room: string | null;
   mime_type: string | null;
@@ -100,6 +108,7 @@ export async function selectMessages(
     const sql = `
       select
         e.id as id,
+        e.stream_id as stream_id,
         e.sort_idx as sort_idx,
         e.room as room,
         cc.mime_type as mime_type,
@@ -147,6 +156,7 @@ export async function selectMessages(
         `
         select
           e.id as id,
+          e.stream_id as stream_id,
           e.sort_idx as sort_idx,
           e.room as room,
           cc.mime_type as mime_type,
@@ -462,6 +472,10 @@ export async function selectMessages(
       authorName: authorName ?? "",
       authorHandle: authorHandle,
       authorAvatar: authorAvatar,
+      system:
+        authorDid != null && r.stream_id != null && authorDid === r.stream_id
+          ? true
+          : undefined,
       timestamp: ts != null ? new Date(ts).toISOString() : "",
       replyTo: r.reply_to,
       forwardedFrom:
@@ -493,6 +507,14 @@ export async function selectMessages(
     },
   );
 
+  // System messages are authored by the space and reference a *different*
+  // user (the joiner / thread creator) in their body by DID — the SDK
+  // materialiser stores the raw DID as the link label deterministically.
+  // Resolve those DIDs to the user's current handle/display name here, at
+  // read time, so the UI never shows a bare DID and we don't bake a missing
+  // or stale handle into the stored message.
+  await resolveSystemMessageNames(messages);
+
   // Sort ascending so callers get oldest → newest (matches spec example).
   // sort_idx is set by the materializer for messages (using the canonical
   // timestamp from the ULID or timestampOverride extension). Fall back to
@@ -512,4 +534,50 @@ export async function selectMessages(
   }
 
   return { messages, nextCursor };
+}
+
+/**
+ * Resolve display names for users referenced by system messages.
+ *
+ * A system message is authored by the space and references a *different*
+ * user (the joiner / thread creator) in its markdown body as
+ * `[@<did>](/user/<did>)`. The materialiser stores the raw DID as the link
+ * label deterministically, so resolve it to the user's current display
+ * name / handle from the global profile store and rewrite the link label —
+ * the UI never shows a bare DID. DIDs we can't resolve are left untouched
+ * (the user has no profile anywhere); the label remains a clickable link.
+ */
+async function resolveSystemMessageNames(messages: MessageDto[]): Promise<void> {
+  const systemMessages = messages.filter((m) => m.system);
+  if (systemMessages.length === 0) return;
+
+  // Collect every `/user/<did>` reference so we can batch-resolve profiles.
+  const userLinkRe = /\[\@[^\]]+\]\(\/user\/([^)]+)\)/g;
+  const dids = new Set<string>();
+  for (const m of systemMessages) {
+    for (const match of m.content.matchAll(userLinkRe)) {
+      const raw = match[1];
+      if (raw) dids.add(decodeURIComponent(raw));
+    }
+  }
+  if (dids.size === 0) return;
+
+  const profiles = await resolveProfiles([...dids]);
+  const labelRe = /\[\@([^\]]+)\]\(\/user\/([^)]+)\)/g;
+  for (const m of systemMessages) {
+    if (!m.content.includes("/user/")) continue;
+    m.content = m.content.replace(
+      labelRe,
+      (whole: string, label: string, didPath: string) => {
+        const did = decodeURIComponent(didPath);
+        const p = profiles.get(did);
+        // Only rewrite the deterministic DID label (label === DID path); leave
+        // any pre-existing baked handle or user-authored content untouched.
+        if (!p || label !== didPath) return whole;
+        const display = p.name || (p.handle ? `@${p.handle}` : null);
+        if (!display) return whole;
+        return `[@${display}]${whole.slice(whole.indexOf("("))}`;
+      },
+    );
+  }
 }

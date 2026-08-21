@@ -25,6 +25,7 @@
     // Timestamp + flags
     timestamp,
     isBridged = false,
+    isSystem = false,
     mergeWithPrevious = false,
     isSelected = false,
     isEditing = false,
@@ -51,6 +52,8 @@
     profileUrl?: string;
     timestamp: Date;
     isBridged?: boolean;
+    /** System notice (e.g. "X joined the space"). Renders centred without an author identity line or avatar. */
+    isSystem?: boolean;
     mergeWithPrevious?: boolean;
     isSelected?: boolean;
     isEditing?: boolean;
@@ -96,8 +99,8 @@
   </div>
 
   <div class="group relative flex w-full justify-start gap-3">
-    <!-- Avatar, or left margin -->
-    {#if !mergeWithPrevious}
+    <!-- Avatar, or left margin (skipped for centred system notices) -->
+    {#if !isSystem && !mergeWithPrevious}
       <div class="size-8 sm:size-10">
         <button
           onclick={(e) => {
@@ -113,13 +116,21 @@
           />
         </button>
       </div>
-    {:else}
+    {:else if !isSystem}
       <div class="w-8 shrink-0 sm:w-10"></div>
     {/if}
 
-    <div class="flex flex-col flex-1 min-w-0">
-      <!-- Username, timestamp -->
-      {#if !mergeWithPrevious}
+    <div
+      class:justify-center={isSystem}
+      class:items-center={isSystem}
+      class="flex flex-col flex-1 min-w-0"
+    >
+      <!-- Username, timestamp (system notices render a small centred timestamp instead) -->
+      {#if isSystem}
+        <span class="text-[11px] font-medium uppercase tracking-wide text-base-400 dark:text-base-500 mb-1">
+          {@render timestampLabel(timestamp)}
+        </span>
+      {:else if !mergeWithPrevious}
         <div class="text-sm w-full text-start">
           <span class="gap-2">
           {#if profileUrl}
@@ -173,7 +184,10 @@
 
       <!-- Message text -->
       <div
-        class="prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline text-sm font-normal text-left max-w-full overflow-auto hide-scrollbar"
+        class="prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline text-sm font-normal max-w-full overflow-auto hide-scrollbar"
+        class:text-left={!isSystem}
+        class:text-center={isSystem}
+        class:opacity-75={isSystem}
       >
         {#if content}
           {@render content()}
