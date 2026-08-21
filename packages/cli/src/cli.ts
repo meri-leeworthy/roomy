@@ -139,6 +139,27 @@ program
 // ── send ──────────────────────────────────────────────────────────────────
 
 program
+  .command("delete-room")
+  .description("Delete (soft-delete) a room/channel (requires space admin)")
+  .requiredOption("--space <id>", "Space ID")
+  .requiredOption("--room <id>", "Room ID to delete")
+  .action(async (options: { space: string; room: string }) => {
+    try {
+      const config = loadConfig();
+      const { xrpc } = await authenticate(config);
+      const { deleteRoom } = await import("@roomy-space/sdk");
+      const events = deleteRoom({ roomId: options.room as never });
+      await xrpc.procedure("space.roomy.space.sendEvents", { spaceId: options.space, events });
+      const id = events[0]?.id;
+      if (!id) throw new Error("deleteRoom returned no event");
+      console.log(`Deleted room: ${options.room}`);
+    } catch (error) {
+      console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+  });
+
+program
   .command("send")
   .description("Send a message to a room (defaults to the lobby)")
   .requiredOption("--space <id>", "Space ID")
