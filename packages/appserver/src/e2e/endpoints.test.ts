@@ -30,6 +30,7 @@ import type { AsyncDatabase } from "../db/asyncDatabase.ts";
 
 const USER = "did:plc:e2e-user";
 const ADMIN = "did:plc:e2e-admin";
+const MENT = "did:plc:e2e-mentioned";
 const SPACE = "did:web:space-e2e.example";
 const ROOM = newUlid();
 const MSG_A = newUlid();
@@ -466,6 +467,59 @@ describe("space.roomy.message.getReactions", () => {
     // Handle should resolve from the global store, not fall back to the DID.
     expect(reactor.handle).toBe("reactor.test");
     expect(reactor.did).toBe(REACTOR);
+  });
+});
+
+// ─── space.roomy.mention.getMentions ─────────────────────────────────────
+
+describe("space.roomy.mention.getMentions", () => {
+  test("mention rows load messages from per-space DBs (no 'entities' table on global DB)", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    const MENTIONED = "did:plc:e2e-mentioned";
+
+    seedSpace(db, SPACE, USER);
+    seedJoinedSpace(db, USER, SPACE);
+    seedRoom(db, ROOM, SPACE);
+    seedMessage(db, MSG_A, ROOM, SPACE, "a");
+    // Author profile lives in the global store; without it the read path
+    // tries on-demand hydration (network) and falls back to an empty name.
+    seedUser(db, USER, "author.test");
+    // Seed the mention row exactly as materialization dual-writes it.
+    await (ctx.db as unknown as AsyncDatabase)
+      .global()
+      .run(
+        "insert into mentions (did, message_id, space_did, room_id, created_at) values (?, ?, ?, ?, ?)",
+        [MENT, MSG_A, SPACE, ROOM, Date.now()],
+      );
+
+    const res = await ctx.authedFetch(MENT)(
+      `${ctx.baseUrl}/xrpc/space.roomy.mention.getMentions?did=${encodeURIComponent(MENT)}`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.mentions).toHaveLength(1);
+    expect(body.mentions[0].message.id).toBe(MSG_A);
+    expect(body.mentions[0].spaceId).toBe(SPACE);
+    expect(body.mentions[0].roomId).toBe(ROOM);
+  });
+
+  test("empty mentions → empty", async () => {
+    const ctx = await startAppserver();
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.mention.getMentions?did=${encodeURIComponent(USER)}`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.mentions).toEqual([]);
+  });
+
+  test("forbidden: querying another user's mentions", async () => {
+    const ctx = await startAppserver();
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.mention.getMentions?did=${encodeURIComponent("did:plc:someone-else")}`,
+    );
+    expect(res.status).toBe(403);
   });
 });
 

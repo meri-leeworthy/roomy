@@ -141,9 +141,13 @@ export async function getMentions(
 /**
  * Load the full message snapshots for a set of mention rows, grouped by
  * space (each space's messages live in that space's per-space DB).
+ *
+ * The `mentions` table lives in the global DB, but the message rows (and the
+ * `entities`/`comp_*` tables they join against) live in per-space DBs — so
+ * this routes each space's message batch to that space's DB. Querying the
+ * global DB here would fail with "no such table: entities".
  */
 export async function loadMentionMessages(
-  db: DbLike,
   rows: MentionRow[],
 ): Promise<Map<Ulid, MessageDto>> {
   const bySpace = new Map<StreamDid, Ulid[]>();
@@ -154,7 +158,7 @@ export async function loadMentionMessages(
   }
   const out = new Map<Ulid, MessageDto>();
   for (const [spaceDid, ids] of bySpace) {
-    const { messages } = await selectMessages(db ?? openSpaceDb(spaceDid), {
+    const { messages } = await selectMessages(openSpaceDb(spaceDid), {
       kind: "ids",
       ids,
     });

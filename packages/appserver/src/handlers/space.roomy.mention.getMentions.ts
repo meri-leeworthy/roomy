@@ -41,7 +41,7 @@ export const getMentionsHandler: QueryHandler<
   const db = openGlobalDb();
   const { mentions, cursor: nextCursor } = await getMentions(db, did, limit, cursor);
 
-  const messages = await loadMentionMessages(db, mentions);
+  const messages = await loadMentionMessages(mentions);
 
   return {
     mentions: mentions
