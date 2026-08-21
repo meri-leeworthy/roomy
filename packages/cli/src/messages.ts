@@ -1,4 +1,4 @@
-import { newUlid, toBytes, transport, utf8ByteLength } from "@roomy-space/sdk";
+import { newUlid, toBytes, transport, utf8ByteLength, deserializeBody, blocksToPlaintext } from "@roomy-space/sdk";
 import type { Block } from "@roomy-space/sdk";
 type DirectXrpcClient = InstanceType<typeof transport.DirectXrpcClient>;
 
@@ -8,6 +8,25 @@ export interface MessageInfo {
   authorName: string;
   content: string;
   timestamp: string;
+  mimeType?: string;
+}
+
+/**
+ * Render a message body as readable text. Rich-text bodies arrive on the wire
+ * as base64-encoded JSON (mimeType application/vnd.roomy.richtext+json); decode
+ * them to plaintext so callers don't have to handle raw base64 blobs.
+ */
+export function decodeMessageText(content: string, mimeType?: string): string {
+  if (mimeType === "application/vnd.roomy.richtext+json") {
+    try {
+      const bytes = Buffer.from(content, "base64");
+      const blocks = deserializeBody(mimeType, bytes);
+      if (Array.isArray(blocks)) return blocksToPlaintext(blocks);
+    } catch {
+      // fall back to raw content if it isn't valid richtext
+    }
+  }
+  return content;
 }
 
 export interface SendOptions {
@@ -116,7 +135,8 @@ export async function readMessages(
     id: m.id,
     authorDid: m.authorDid,
     authorName: m.authorName,
-    content: m.content,
+    content: decodeMessageText(m.content, m.mimeType),
     timestamp: m.timestamp,
+    mimeType: m.mimeType,
   }));
 }
