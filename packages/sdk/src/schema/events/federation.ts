@@ -68,6 +68,11 @@ const FederationRespondSchema = type({
 export const FederationRespond = defineEvent(
   FederationRespondSchema,
   ({ streamId, user, event }) => [
+    // Only a request that is actually awaiting a decision may be decided.
+    // Guarding on `status = 'pending'` makes this a no-op for any other
+    // state (already active/rejected/removed) — even if an event bypasses
+    // the writeAuth guard (e.g. re-materialisation) it can't orphan grants
+    // by rejecting an active federation, or resurrect a removed one.
     sql`
       update space_federations set
         status = ${event.approve ? "active" : "rejected"},
@@ -76,6 +81,7 @@ export const FederationRespond = defineEvent(
         decision_message = ${event.message ?? null}
       where space_id = ${streamId}
         and federating_space_did = ${event.federatingSpaceDid}
+        and status = 'pending'
     `,
   ],
 );

@@ -116,6 +116,35 @@ describe("federation materialization (global DB)", () => {
     expect(await statusOf(globalDb, A, B)).toBe("removed");
   });
 
+  test("a re-request after removal flips status back to pending (recovery path)", async () => {
+    const { db, asyncDb } = freshDb();
+    const { asyncDb: globalDb } = freshGlobalDb();
+    seedSpace(db);
+    await applyBatch(asyncDb, A, [decoded(requestEvent(B), 0)], { isBackfill: true }, globalDb);
+    await applyBatch(asyncDb, A, [decoded(respondEvent(B, true), 1)], { isBackfill: true }, globalDb);
+    await applyBatch(asyncDb, A, [decoded(removeEvent(B), 2)], { isBackfill: true }, globalDb);
+    expect(await statusOf(globalDb, A, B)).toBe("removed");
+    // Re-request: materializer's on-conflict branch flips removed -> pending.
+    await applyBatch(asyncDb, A, [decoded(requestEvent(B), 3)], { isBackfill: true }, globalDb);
+    expect(await statusOf(globalDb, A, B)).toBe("pending");
+  });
+
+  test("respond on a non-pending federation is a no-op (state machine guard)", async () => {
+    const { db, asyncDb } = freshDb();
+    const { asyncDb: globalDb } = freshGlobalDb();
+    seedSpace(db);
+    // No request ever sent: respond against nothing stays a no-op.
+    await applyBatch(asyncDb, A, [decoded(respondEvent(B, true), 0)], { isBackfill: true }, globalDb);
+    expect(await statusOf(globalDb, A, B)).toBeUndefined();
+
+    // Establish active, then a stray reject must NOT flip it (nor orphan).
+    await applyBatch(asyncDb, A, [decoded(requestEvent(B), 1)], { isBackfill: true }, globalDb);
+    await applyBatch(asyncDb, A, [decoded(respondEvent(B, true), 2)], { isBackfill: true }, globalDb);
+    expect(await statusOf(globalDb, A, B)).toBe("active");
+    await applyBatch(asyncDb, A, [decoded(respondEvent(B, false), 3)], { isBackfill: true }, globalDb);
+    expect(await statusOf(globalDb, A, B)).toBe("active");
+  });
+
   test("setRoomPermission upserts an origin grant in the global DB", async () => {
     const CHANNEL = "01CHANNEL00000000000000000";
     const { db, asyncDb } = freshDb();

@@ -366,18 +366,24 @@ async function checkFederationRequest(
     );
   }
 
-  // Guard against a duplicate request: there must be no existing active
-  // (or already-decided) federation for this (A, B) pair. A re-request while
-  // a request is already pending is a no-op (kept pending); requesting while
-  // active/rejected is an error so the requesting admin doesn't think their
-  // request will be reconsidered.
+  // Guard against a duplicate request: there must be no existing *live* or
+  // already-decided federation for this (A, B) pair that can't be re-opened.
+  // A re-request while a request is already pending is an idempotent no-op
+  // (the materializer keeps it pending). A re-request after the federation was
+  // removed re-establishes it (the materializer flips 'removed' back to
+  // 'pending') — this is the recovery path for a torn-down federation.
+  // Requesting while active/rejected is an error so the requesting admin
+  // doesn't think their request will be reconsidered.
   if (globalDb) {
     const existing = await globalDb
       .query(
         "select status from space_federations where space_id = ? and federating_space_did = ?",
       )
       .get<{ status: string }>(spaceId, federatingSpaceDid);
-    if (existing && existing.status !== "pending") {
+    if (
+      existing &&
+      (existing.status === "active" || existing.status === "rejected")
+    ) {
       return denied(
         409,
         "Conflict",
@@ -421,6 +427,67 @@ async function checkFederationRemove(
     "Forbidden",
     "Only an admin of this space or the federated space can remove the federation",
   );
+}
+
+/**
+ * Authorize a federation respond (approve/reject). Requires an admin of the
+ * origin space A, and restricts the decision to a request that is actually
+ * awaiting a decision. Responding to a federation that doesn't exist (404) or
+ * isn't pending (409 — e.g. already active/rejected/removed) is rejected so
+ * the A admin can't accidentally orphan grants (rejecting an active
+ * federation) or resurrect a removed one (approving it back to active). This
+ * mirrors the guard the materializer's `status = 'pending'` predicate.
+ */
+async function checkFederationRespond(
+  db: DbLike,
+  spaceId: string,
+  callerDid: string,
+  event: { $type: string; [k: string]: unknown },
+  access?: SpaceAccess,
+  globalDb?: DbLike,
+): Promise<WriteAuthResult> {
+  // Admin of the origin space A (decisions are A's to make).
+  const a = access ?? (await spaceAccess(db, spaceId, callerDid));
+  if (!a.isAdmin) {
+    return denied(
+      403,
+      "Forbidden",
+      "Only an admin of this space can respond to a federation request",
+    );
+  }
+
+  const federatingSpaceDid = event.federatingSpaceDid;
+  if (typeof federatingSpaceDid !== "string" || federatingSpaceDid === "") {
+    return denied(
+      400,
+      "InvalidRequest",
+      `Event is missing required 'federatingSpaceDid' field`,
+    );
+  }
+
+  if (globalDb) {
+    const existing = await globalDb
+      .query(
+        "select status from space_federations where space_id = ? and federating_space_did = ?",
+      )
+      .get<{ status: string }>(spaceId, federatingSpaceDid);
+    if (!existing) {
+      return denied(
+        404,
+        "NotFound",
+        "No federation request from this space to respond to",
+      );
+    }
+    if (existing.status !== "pending") {
+      return denied(
+        409,
+        "Conflict",
+        `Cannot respond to a federation with status: ${existing.status}`,
+      );
+    }
+  }
+
+  return undefined;
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────
@@ -531,9 +598,12 @@ export async function checkWriteAuth(
     if ($type === "space.roomy.federation.request.v0") {
       return await checkFederationRequest(db, spaceId, callerDid, event, access, dbResolver, globalDb);
     }
+    if ($type === "space.roomy.federation.respond.v0") {
+      return await checkFederationRespond(db, spaceId, callerDid, event, access, globalDb);
+    }
     // remove may be initiated by an admin of either side (A or B);
-    // respond / setRoomPermission target the origin space (A) and require
-    // an A admin; setReceiverPermission targets B's stream (spaceId === B)
+    // setRoomPermission targets the origin space (A) and requires an A
+    // admin; setReceiverPermission targets B's stream (spaceId === B)
     // and requires a B admin.
     if ($type === "space.roomy.federation.remove.v0") {
       return await checkFederationRemove(db, spaceId, callerDid, event, access, dbResolver);

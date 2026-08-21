@@ -165,6 +165,32 @@ describe("auth/writeAuth — federation request", () => {
     );
     expect(result).toBeUndefined();
   });
+
+  test("re-requesting after a federation was removed is allowed (recovery path)", async () => {
+    const { aDb, bDb } = await seedRequestContext({ memberA: ADMIN_B, adminB: true });
+    const globalDb = freshGlobalDb();
+    await globalDb.run(
+      "insert into space_federations (space_id, federating_space_did, status, requested_by_did) values (?, ?, 'removed', ?)",
+      [A, B, ADMIN_B],
+    );
+    const result = await checkWriteAuth(
+      aDb, A, ADMIN_B, requestEvent(B), undefined, () => bDb, globalDb,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  test("re-requesting after a rejected federation is a 409", async () => {
+    const { aDb, bDb } = await seedRequestContext({ memberA: ADMIN_B, adminB: true });
+    const globalDb = freshGlobalDb();
+    await globalDb.run(
+      "insert into space_federations (space_id, federating_space_did, status, requested_by_did) values (?, ?, 'rejected', ?)",
+      [A, B, ADMIN_B],
+    );
+    const result = await checkWriteAuth(
+      aDb, A, ADMIN_B, requestEvent(B), undefined, () => bDb, globalDb,
+    );
+    expect(result?.status).toBe(409);
+  });
 });
 
 describe("auth/writeAuth — federation respond/remove", () => {
@@ -175,6 +201,44 @@ describe("auth/writeAuth — federation respond/remove", () => {
     await addEdge(aDb, A, ADMIN_A, "admin");
     const result = await checkWriteAuth(aDb, A, ADMIN_A, respondEvent(B, true));
     expect(result).toBeUndefined();
+  });
+
+  test("admin of A cannot respond to a pending-less federation (missing = 404)", async () => {
+    const { asyncDb: aDb } = freshDb();
+    await seedSpace(aDb, A);
+    await seedUser(aDb, ADMIN_A);
+    await addEdge(aDb, A, ADMIN_A, "admin");
+    const globalDb = freshGlobalDb();
+    const result = await checkWriteAuth(aDb, A, ADMIN_A, respondEvent(B, true), undefined, undefined, globalDb);
+    expect(result?.status).toBe(404);
+  });
+
+  test("admin of A cannot respond to an already-active federation (409)", async () => {
+    const { asyncDb: aDb } = freshDb();
+    await seedSpace(aDb, A);
+    await seedUser(aDb, ADMIN_A);
+    await addEdge(aDb, A, ADMIN_A, "admin");
+    const globalDb = freshGlobalDb();
+    await globalDb.run(
+      "insert into space_federations (space_id, federating_space_did, status, requested_by_did) values (?, ?, 'active', ?)",
+      [A, B, ADMIN_A],
+    );
+    const result = await checkWriteAuth(aDb, A, ADMIN_A, respondEvent(B, true), undefined, undefined, globalDb);
+    expect(result?.status).toBe(409);
+  });
+
+  test("admin of A cannot respond to a removed federation (409, no resurrect)", async () => {
+    const { asyncDb: aDb } = freshDb();
+    await seedSpace(aDb, A);
+    await seedUser(aDb, ADMIN_A);
+    await addEdge(aDb, A, ADMIN_A, "admin");
+    const globalDb = freshGlobalDb();
+    await globalDb.run(
+      "insert into space_federations (space_id, federating_space_did, status, requested_by_did) values (?, ?, 'removed', ?)",
+      [A, B, ADMIN_A],
+    );
+    const result = await checkWriteAuth(aDb, A, ADMIN_A, respondEvent(B, true), undefined, undefined, globalDb);
+    expect(result?.status).toBe(409);
   });
 
   test("non-admin of A cannot respond", async () => {
