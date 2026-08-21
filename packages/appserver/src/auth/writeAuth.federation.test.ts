@@ -139,6 +139,32 @@ describe("auth/writeAuth — federation request", () => {
     });
     expect(result?.status).toBe(400);
   });
+
+  test("re-requesting while an active federation exists is a 409", async () => {
+    const { aDb, bDb } = await seedRequestContext({ memberA: ADMIN_B, adminB: true });
+    const globalDb = freshGlobalDb();
+    await globalDb.run(
+      "insert into space_federations (space_id, federating_space_did, status, requested_by_did) values (?, ?, 'active', ?)",
+      [A, B, ADMIN_B],
+    );
+    const result = await checkWriteAuth(
+      aDb, A, ADMIN_B, requestEvent(B), undefined, () => bDb, globalDb,
+    );
+    expect(result?.status).toBe(409);
+  });
+
+  test("re-requesting while pending is allowed (idempotent no-op)", async () => {
+    const { aDb, bDb } = await seedRequestContext({ memberA: ADMIN_B, adminB: true });
+    const globalDb = freshGlobalDb();
+    await globalDb.run(
+      "insert into space_federations (space_id, federating_space_did, status, requested_by_did) values (?, ?, 'pending', ?)",
+      [A, B, ADMIN_B],
+    );
+    const result = await checkWriteAuth(
+      aDb, A, ADMIN_B, requestEvent(B), undefined, () => bDb, globalDb,
+    );
+    expect(result).toBeUndefined();
+  });
 });
 
 describe("auth/writeAuth — federation respond/remove", () => {
@@ -167,6 +193,33 @@ describe("auth/writeAuth — federation respond/remove", () => {
     await addEdge(aDb, A, ADMIN_A, "admin");
     const result = await checkWriteAuth(aDb, A, ADMIN_A, removeEvent(B));
     expect(result).toBeUndefined();
+  });
+
+  test("admin of B can remove the federation (B-side revocation)", async () => {
+    const { asyncDb: aDb } = freshDb();
+    const { asyncDb: bDb } = freshDb();
+    await seedSpace(aDb, A);
+    await seedUser(aDb, ADMIN_B);
+    await addEdge(aDb, A, ADMIN_B, "member");
+    await seedSpace(bDb, B);
+    await seedUser(bDb, ADMIN_B);
+    await addEdge(bDb, B, ADMIN_B, "admin");
+    // ADMIN_B is not an admin of A, but is an admin of B.
+    const result = await checkWriteAuth(aDb, A, ADMIN_B, removeEvent(B), undefined, () => bDb);
+    expect(result).toBeUndefined();
+  });
+
+  test("a non-admin of both sides cannot remove", async () => {
+    const { asyncDb: aDb } = freshDb();
+    const { asyncDb: bDb } = freshDb();
+    await seedSpace(aDb, A);
+    await seedUser(aDb, MEMBER_A);
+    await addEdge(aDb, A, MEMBER_A, "member");
+    await seedSpace(bDb, B);
+    await seedUser(bDb, MEMBER_A);
+    await addEdge(bDb, B, MEMBER_A, "member");
+    const result = await checkWriteAuth(aDb, A, MEMBER_A, removeEvent(B), undefined, () => bDb);
+    expect(result?.status).toBe(403);
   });
 
   test("admin of A can set an origin grant", async () => {

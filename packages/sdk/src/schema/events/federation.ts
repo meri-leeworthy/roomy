@@ -101,6 +101,18 @@ export const FederationRemove = defineEvent(
       where space_id = ${streamId}
         and federating_space_did = ${event.federatingSpaceDid}
     `,
+    // Drop every grant the federation created: the origin grants A set on
+    // its channels, and the receiver grants B authored for those channels.
+    sql`
+      delete from federation_room_permissions
+       where space_id = ${streamId}
+         and federating_space_did = ${event.federatingSpaceDid}
+    `,
+    sql`
+      delete from federation_receiver_permissions
+       where space_id = ${streamId}
+         and federating_space_did = ${event.federatingSpaceDid}
+    `,
   ],
 );
 

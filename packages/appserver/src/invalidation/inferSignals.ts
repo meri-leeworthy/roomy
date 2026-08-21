@@ -597,6 +597,92 @@ function handleMarkRead(event: AppliedEvent): InvalidationEvent[] {
   ];
 }
 
+// ─── Federation events ──────────────────────────────────────────────────
+
+/**
+ * A federation request was submitted (stream A). A's admins' request list
+ * and outgoing view change.
+ */
+function handleFederationRequest(event: AppliedEvent): InvalidationEvent[] {
+  const spaceId = event.streamDid;
+  return [
+    invalidate("space.roomy.federation.getRequests", { spaceId }),
+    invalidate("space.roomy.federation.getOutgoing", { spaceId }),
+  ];
+}
+
+/**
+ * A request was approved/rejected (stream A). A's request/outgoing/grants
+ * views change; B's incoming view and (on approval) B's sidebar federated
+ * channels change too.
+ */
+function handleFederationRespond(event: AppliedEvent): InvalidationEvent[] {
+  const spaceId = event.streamDid;
+  const b = event.details?.federatingSpaceDid as string | undefined;
+  const signals: InvalidationEvent[] = [
+    invalidate("space.roomy.federation.getRequests", { spaceId }),
+    invalidate("space.roomy.federation.getOutgoing", { spaceId }),
+    invalidate("space.roomy.federation.getGrants", { spaceId }),
+  ];
+  if (b) {
+    signals.push(invalidate("space.roomy.federation.getIncoming", { spaceId: b }));
+    signals.push(invalidate("space.roomy.space.getMetadata", { spaceId: b }));
+    signals.push(invalidate("space.roomy.space.getSpaces", {}));
+  }
+  return signals;
+}
+
+/**
+ * A federation was removed (stream A, initiated by an A or B admin). Grants
+ * are dropped; A's outgoing/grants views and B's incoming/sidebar change.
+ */
+function handleFederationRemove(event: AppliedEvent): InvalidationEvent[] {
+  const spaceId = event.streamDid;
+  const b = event.details?.federatingSpaceDid as string | undefined;
+  const signals: InvalidationEvent[] = [
+    invalidate("space.roomy.federation.getOutgoing", { spaceId }),
+    invalidate("space.roomy.federation.getGrants", { spaceId }),
+  ];
+  if (b) {
+    signals.push(invalidate("space.roomy.federation.getIncoming", { spaceId: b }));
+    signals.push(invalidate("space.roomy.space.getMetadata", { spaceId: b }));
+    signals.push(invalidate("space.roomy.space.getSpaces", {}));
+  }
+  return signals;
+}
+
+/**
+ * An origin grant changed (stream A). A's outgoing/grants views change; B's
+ * sidebar visibility of the channel changes (the channel may appear, hide,
+ * or flip read→readwrite).
+ */
+function handleSetRoomPermission(event: AppliedEvent): InvalidationEvent[] {
+  const spaceId = event.streamDid;
+  const b = event.details?.federatingSpaceDid as string | undefined;
+  const signals: InvalidationEvent[] = [
+    invalidate("space.roomy.federation.getOutgoing", { spaceId }),
+    invalidate("space.roomy.federation.getGrants", { spaceId }),
+  ];
+  if (b) {
+    signals.push(invalidate("space.roomy.space.getMetadata", { spaceId: b }));
+    signals.push(invalidate("space.roomy.space.getSpaces", {}));
+  }
+  return signals;
+}
+
+/**
+ * A receiver grant changed (stream B — B admins author these). B's grants
+ * view and B members' sidebar visibility change.
+ */
+function handleSetReceiverPermission(event: AppliedEvent): InvalidationEvent[] {
+  const spaceId = event.streamDid;
+  return [
+    invalidate("space.roomy.federation.getGrants", { spaceId }),
+    invalidate("space.roomy.space.getMetadata", { spaceId }),
+    invalidate("space.roomy.space.getSpaces", {}),
+  ];
+}
+
 // ─── Dispatch table ─────────────────────────────────────────────────────
 
 const HANDLERS: Record<string, (event: AppliedEvent, db?: DbLike, messageSnapshots?: ReadonlyMap<Ulid, MessageDto>) => InvalidationEvent[] | Promise<InvalidationEvent[]>> = {
@@ -653,6 +739,13 @@ const HANDLERS: Record<string, (event: AppliedEvent, db?: DbLike, messageSnapsho
 
   // State
   "space.roomy.state.markRead.v0": handleMarkRead,
+
+  // Channel federation
+  "space.roomy.federation.request.v0": handleFederationRequest,
+  "space.roomy.federation.respond.v0": handleFederationRespond,
+  "space.roomy.federation.remove.v0": handleFederationRemove,
+  "space.roomy.federation.setRoomPermission.v0": handleSetRoomPermission,
+  "space.roomy.federation.setReceiverPermission.v0": handleSetReceiverPermission,
 
   // Calendar — no XRPC endpoints yet
   "space.roomy.openmeet.configure.v0": () => [],

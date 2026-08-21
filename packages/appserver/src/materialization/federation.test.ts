@@ -144,4 +144,25 @@ describe("federation materialization (global DB)", () => {
     await applyBatch(asyncDb, B, [decoded(setReceiverPermEvent(A, CHANNEL, "did:plc:bob", "user", null), 1)], { isBackfill: true }, globalDb);
     expect(await receiverPermissionOf(globalDb, A, B, CHANNEL, "did:plc:bob", "user")).toBeUndefined();
   });
+
+  test("remove drops every origin and receiver grant for the federation", async () => {
+    const CHANNEL = "01CHANNEL00000000000000000";
+    const { db, asyncDb } = freshDb();
+    const { asyncDb: globalDb } = freshGlobalDb();
+    seedSpace(db);
+    // Establish an active federation A<->B.
+    await applyBatch(asyncDb, A, [decoded(requestEvent(B), 0)], { isBackfill: true }, globalDb);
+    await applyBatch(asyncDb, A, [decoded(respondEvent(B, true), 1)], { isBackfill: true }, globalDb);
+    // Both sides author grants.
+    await applyBatch(asyncDb, A, [decoded(setRoomPermEvent(B, CHANNEL, "readwrite"), 2)], { isBackfill: true }, globalDb);
+    await applyBatch(asyncDb, B, [decoded(setReceiverPermEvent(A, CHANNEL, "did:plc:bob", "user", "readwrite"), 0)], { isBackfill: true }, globalDb);
+    expect(await permissionOf(globalDb, A, B, CHANNEL)).toBe("readwrite");
+    expect(await receiverPermissionOf(globalDb, A, B, CHANNEL, "did:plc:bob", "user")).toBe("readwrite");
+
+    // Removing the federation (on A's stream) wipes all grants.
+    await applyBatch(asyncDb, A, [decoded(removeEvent(B), 3)], { isBackfill: true }, globalDb);
+    expect(await statusOf(globalDb, A, B)).toBe("removed");
+    expect(await permissionOf(globalDb, A, B, CHANNEL)).toBeUndefined();
+    expect(await receiverPermissionOf(globalDb, A, B, CHANNEL, "did:plc:bob", "user")).toBeUndefined();
+  });
 });

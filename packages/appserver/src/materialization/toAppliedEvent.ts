@@ -131,6 +131,26 @@ function extractDetails(
     case "space.roomy.role.setRoleRoomPermission.v0":
       return { roomId: event["roomId"] };
 
+    // Federation events: surface the counterpart space(s) and, for the
+    // per-channel grant events, the affected channel so invalidation can
+    // reach the right spaces' queries.
+    case "space.roomy.federation.request.v0":
+    case "space.roomy.federation.respond.v0":
+    case "space.roomy.federation.remove.v0":
+      return { federatingSpaceDid: event["federatingSpaceDid"] };
+
+    case "space.roomy.federation.setRoomPermission.v0":
+      return {
+        federatingSpaceDid: event["federatingSpaceDid"],
+        roomId: event["roomId"],
+      };
+
+    case "space.roomy.federation.setReceiverPermission.v0":
+      return {
+        originSpaceId: event["originSpaceId"],
+        roomId: event["roomId"],
+      };
+
     default:
       return undefined;
   }

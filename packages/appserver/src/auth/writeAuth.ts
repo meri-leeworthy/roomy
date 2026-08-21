@@ -23,7 +23,7 @@ import { federatedRoomAccess } from "./federation.ts";
 // ── Result type ──────────────────────────────────────────────────────────
 
 export interface WriteAuthDenial {
-  status: 400 | 403 | 404;
+  status: 400 | 403 | 404 | 409;
   error: string;
   message: string;
 }
@@ -197,7 +197,7 @@ const FEDERATION_TYPES = new Set([
 // ── Helper: denial constructors ──────────────────────────────────────────
 
 function denied(
-  status: 400 | 403 | 404,
+  status: 400 | 403 | 404 | 409,
   error: string,
   message: string,
 ): WriteAuthDenial {
@@ -322,6 +322,7 @@ async function checkFederationRequest(
   event: { $type: string; [k: string]: unknown },
   access?: SpaceAccess,
   dbResolver?: (spaceDid: string) => DbLike,
+  globalDb?: DbLike,
 ): Promise<WriteAuthResult> {
   const federatingSpaceDid = event.federatingSpaceDid;
   if (typeof federatingSpaceDid !== "string" || federatingSpaceDid === "") {
@@ -364,7 +365,62 @@ async function checkFederationRequest(
       "Caller is not an admin of the requesting space",
     );
   }
+
+  // Guard against a duplicate request: there must be no existing active
+  // (or already-decided) federation for this (A, B) pair. A re-request while
+  // a request is already pending is a no-op (kept pending); requesting while
+  // active/rejected is an error so the requesting admin doesn't think their
+  // request will be reconsidered.
+  if (globalDb) {
+    const existing = await globalDb
+      .query(
+        "select status from space_federations where space_id = ? and federating_space_did = ?",
+      )
+      .get<{ status: string }>(spaceId, federatingSpaceDid);
+    if (existing && existing.status !== "pending") {
+      return denied(
+        409,
+        "Conflict",
+        `A federation with this space already exists (status: ${existing.status})`,
+      );
+    }
+  }
+
   return undefined;
+}
+
+/**
+ * Authorize a federation removal. The relationship can be torn down by an
+ * admin of either side: an admin of the origin space A, or an admin of the
+ * receiving space B (B may revoke its own membership at any time). `remove`
+ * is sent on A's stream, so `spaceId` is A and the B-admin check needs the
+ * cross-space `dbResolver`.
+ */
+async function checkFederationRemove(
+  db: DbLike,
+  spaceId: string,
+  callerDid: string,
+  event: { $type: string; [k: string]: unknown },
+  access?: SpaceAccess,
+  dbResolver?: (spaceDid: string) => DbLike,
+): Promise<WriteAuthResult> {
+  // Admin of the origin space A.
+  const a = access ?? (await spaceAccess(db, spaceId, callerDid));
+  if (a.isAdmin) return undefined;
+
+  // Admin of the receiving space B (cross-space).
+  const federatingSpaceDid = event.federatingSpaceDid;
+  if (typeof federatingSpaceDid === "string" && federatingSpaceDid !== "" && dbResolver) {
+    const bDb = dbResolver(federatingSpaceDid);
+    const b = await spaceAccess(bDb, federatingSpaceDid, callerDid);
+    if (b.isAdmin) return undefined;
+  }
+
+  return denied(
+    403,
+    "Forbidden",
+    "Only an admin of this space or the federated space can remove the federation",
+  );
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────
@@ -473,9 +529,15 @@ export async function checkWriteAuth(
   // ── Channel federation ──
   if (FEDERATION_TYPES.has($type)) {
     if ($type === "space.roomy.federation.request.v0") {
-      return await checkFederationRequest(db, spaceId, callerDid, event, access, dbResolver);
+      return await checkFederationRequest(db, spaceId, callerDid, event, access, dbResolver, globalDb);
     }
-    // respond / remove target the origin space (A) and require an A admin.
+    // remove may be initiated by an admin of either side (A or B);
+    // respond / setRoomPermission target the origin space (A) and require
+    // an A admin; setReceiverPermission targets B's stream (spaceId === B)
+    // and requires a B admin.
+    if ($type === "space.roomy.federation.remove.v0") {
+      return await checkFederationRemove(db, spaceId, callerDid, event, access, dbResolver);
+    }
     return await requireSpaceAdminCheck(db, spaceId, callerDid, access);
   }
 

@@ -380,6 +380,10 @@ async function buildFederatedSidebarChannels(
     const nameById = new Map(infoRows.map((r) => [r.id, r.name]));
 
     for (const g of grants) {
+      // Skip grants whose origin channel no longer exists (deleted/archived)
+      // so the sidebar doesn't show a dangling federated entry.
+      if (!nameById.has(g.roomId)) continue;
+
       // Only include channels the caller can actually read (B admins get
       // origin-level access; B members need a receiver grant).
       const fed = await federatedRoomAccess(originDb, globalDb, g.roomId, userDid, {

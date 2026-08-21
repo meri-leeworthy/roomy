@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-19
 **Commit (baseline):** `dc29633f`
-**Status:** Phase 1 (relationship lifecycle) **implemented**. Read/write federation + frontend UI are later phases.
+**Status:** Phases 1-4 **shipped** (backend relationship lifecycle, origin + receiver grants, federated read/write, flag-gated frontend). Phase 5 hardening **shipped** (revoke cleanup, B-side removal, double-request guard, banned-member denial, invalidation on grant changes, deleted-channel sidebar skip).
 **Gated by:** frontend feature flag `channel-federation` (registered; no Phase-1 UI to gate yet).
 
 ## 0. Implementation status
@@ -11,6 +11,7 @@
 - **Phase 2 backend shipped:** SDK event `space.roomy.federation.setRoomPermission.v0` (origin grants) + `federation_room_permissions` table; `auth/federation.ts` `federatedRoomAccess` (channel-scoped, thread-inheriting via `resolveRoom`); `requireRoomRead` federation fallback (only consulted when native access denies); `getMetadata` sidebar injection of federated channels into the receiving space, decorated with `federated: { originSpaceId, permission }`. Tests: `src/auth/federation.test.ts`, plus materializer/writeAuth coverage.
 - **Phase 3 backend shipped:** SDK event `space.roomy.federation.setReceiverPermission.v0` (receiver grants) + `federation_receiver_permissions` table; `federatedRoomAccess` now applies receiver grants (user + role kinds) capped by the origin grant, with a B-admin override (admins of the receiving space get origin-level access); federated **writes** via `requireRoomWrite` and `writeAuth.requireRoomWriteCheck` (both origin + receiver grants must allow write); `getMetadata` sidebar filters federated channels by the caller's effective access (B admins see all, B members only what they're granted). Tests: receiver-grant/ceiling/role/admin cases, federated-write auth, materializer.
 - **Phase 4 frontend shipped (flag-gated):** federation RPCs added to the OAuth scope (`config.ts` + `build-prod.sh`); `channel-federation` flag gates a settings **Federations** page (`[space]/settings/federations`) with (1) pending-request approve/reject, (2) **origin-grant** toggles per own channel per accepted federation (`setRoomPermission`), and (3) **receiver-grant** toggles per federated channel per B role (`setReceiverPermission`); a pending-count badge on the settings icon; and federated-channel decoration (share icon + "shared" chip) in the sidebar. Added `space.roomy.federation.getGrants` query to feed the grant toggles. The plan's "list accepted federations alongside roles in the Permissions surface" is delivered as the dedicated Federations page instead (cleaner separation; same events/backing).
+- **Phase 5 hardening shipped:** (a) `remove` now drops every origin + receiver grant for the federation (SDK materializer); (b) a **B admin can remove the federation** (B-side revocation) via `checkFederationRemove`, in addition to an A admin; (c) a **double-request guard** returns 409 when a federation already exists (active/rejected/removed) — re-request while pending stays an idempotent no-op; (d) **invalidation signals** for all five federation events (`getRequests`/`getIncoming`/`getOutgoing`/`getGrants` + both spaces' `getMetadata`/`getSpaces`), so both spaces' sync caches refresh on grant changes — new nsids wired into `inferSignals` + `topicsForSignal`; (e) a **B-banned member loses federated access** despite a stale receiver grant; (f) `getMetadata` skips origin channels that no longer exist (deleted). Tests: materializer (remove wipes grants), writeAuth (B-side remove, non-admin deny, double-request 409), inferSignals (federation events), federatedRoomAccess (banned member).
 - **Roles → Permissions hard rename shipped**: settings route moved `settings/roles` → `settings/permissions`; `settings/roles` redirects (307) to `settings/permissions`.
 - **Decisions confirmed:** mutual A↔B federation is in scope and trivial (independent relationships); transitive re-federation is out of scope. Storage is the **global-DB registry** (chosen over the virtual-role-in-`roles` alternative).
 - **Global schema version is NOT bumped**: `initializeVersionedSchema` re-applies the DDL idempotently when the version matches, so adding `space_federations` heals existing DBs without wiping the global DB (which would also discard externally-fetched `profiles`).
@@ -279,11 +280,11 @@ All frontend work gated on the `channel-federation` feature flag (returned by `s
 - **Space B sidebar:** federated channels rendered with a special decoration (origin-space chip/icon); visible to B admins by default, to B members per receiver grants.
 - **Space B receiver config:** admins see a "federated channels" section to set receiver grants (`setReceiverPermission`) for B roles/users.
 
-### Phase 5 — Hardening
+### Phase 5 — Hardening ✅ shipped
 - Revoke (A removes federation → clean up grants + remove from B sidebar).
 - B-side rejection/removal; banning a federated B member; edge cases (origin channel deleted/renamed, origin space deleted, B member leaves B). **Mutual federation A↔B is explicitly supported and trivially modeled** — the two directions are independent `space_federations` rows and grant lookups are anchored by the channel's owning space, so they cannot cycle. Guard only against accidental double-request (one pending request per `(A,B)` pair).
 - Invalidation signals so both spaces' sync caches update on grant changes.
-- E2E tests (app-password auth mode, local appserver) covering the full request→approve→grant→read/write chain.
+- E2E tests (app-password auth mode, local appserver) covering the full request→approve→grant→read/write chain. *(Remaining follow-up: a full HTTP E2E of the request→approve→grant→read/write chain; unit coverage of the chain is complete across the auth/materialization/invalidation suites.)*
 
 ---
 

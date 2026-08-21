@@ -109,18 +109,27 @@ export async function federatedRoomAccess(
       .get<{ permission: Permission }>(originSpace, homeSpace, grantRoom);
     if (!origin) continue;
 
-    // B admin override: admins of the receiving space get origin-level access.
+    // Resolve the caller's standing in the receiving space B once. Used for
+    // the B-admin override below, and to deny access to B-banned members
+    // (a banned B member must not keep reading/writing a federated channel
+    // through a stale receiver grant).
+    let bAccess: Awaited<ReturnType<typeof spaceAccess>> | null = null;
     if (opts.spaceDbResolver) {
       const bDb = opts.spaceDbResolver(homeSpace);
-      const bAccess = await spaceAccess(bDb, homeSpace, did);
-      if (bAccess.isAdmin) {
-        return {
-          canRead: true,
-          canWrite: origin.permission === "readwrite",
-          homeSpaceDid: homeSpace,
-        };
-      }
+      bAccess = await spaceAccess(bDb, homeSpace, did);
     }
+
+    // B admin override: admins of the receiving space get origin-level access.
+    if (bAccess?.isAdmin) {
+      return {
+        canRead: true,
+        canWrite: origin.permission === "readwrite",
+        homeSpaceDid: homeSpace,
+      };
+    }
+
+    // A non-admin B member who is banned in B gets no federated access.
+    if (bAccess?.isBanned) continue;
 
     // Receiver grant for a non-admin B member.
     const receiver = await resolveReceiverGrant(

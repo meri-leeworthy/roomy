@@ -206,4 +206,20 @@ describe("federation access — origin + receiver grants", () => {
     const fed = await federatedRoomAccess(spaceDb, globalDb, CHANNEL, USER, { spaceDbResolver: freshSpaceDb });
     expect(fed).toBeNull();
   });
+
+  test("a B-banned member loses access despite a receiver grant", async () => {
+    const spaceDb = freshSpaceDb();
+    const globalDb = freshGlobalDb();
+    const bDb = freshSpaceDb();
+    await seedSpaceA(spaceDb);
+    await seedActiveFederationWithOriginGrant(globalDb, "readwrite");
+    await seedReceiverGrant(globalDb, USER, "user", "readwrite");
+    // USER is a member of B but is now banned there.
+    await bDb.run("insert into entities (id, stream_id) values (?, ?)", [B, B]);
+    await bDb.run("insert into entities (id, stream_id) values (?, ?)", [USER, USER]);
+    await bDb.run("insert into edges (head, tail, label) values (?, ?, 'member')", [B, USER]);
+    await bDb.run("insert into comp_bans (entity, user_did) values (?, ?)", [B, USER]);
+    const fed = await federatedRoomAccess(spaceDb, globalDb, CHANNEL, USER, { spaceDbResolver: () => bDb });
+    expect(fed).toBeNull();
+  });
 });
