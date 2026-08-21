@@ -284,7 +284,7 @@ All frontend work gated on the `channel-federation` feature flag (returned by `s
 - Revoke (A removes federation → clean up grants + remove from B sidebar).
 - B-side rejection/removal; banning a federated B member; edge cases (origin channel deleted/renamed, origin space deleted, B member leaves B). **Mutual federation A↔B is explicitly supported and trivially modeled** — the two directions are independent `space_federations` rows and grant lookups are anchored by the channel's owning space, so they cannot cycle. Guard only against accidental double-request (one pending request per `(A,B)` pair).
 - Invalidation signals so both spaces' sync caches update on grant changes.
-- E2E tests (app-password auth mode, local appserver) covering the full request→approve→grant→read/write chain. *(Remaining follow-up: a full HTTP E2E of the request→approve→grant→read/write chain; unit coverage of the chain is complete across the auth/materialization/invalidation suites.)*
+- E2E tests (app-password auth mode, local appserver) covering the full request→approve→grant→read/write chain. **Shipped**: `src/e2e/federation.test.ts` drives the whole chain over real XRPC (B-admin request → A-admin approve → origin grant → receiver grant → federated read/write, plus no-grant denial and A-side revoke). This surfaced a real gap — `sendEvents`' hard space-membership gate blocked B members before writeAuth ever ran — fixed by relaxing the gate (banned callers still rejected; writeAuth remains the sole per-event authority).
 
 ---
 
