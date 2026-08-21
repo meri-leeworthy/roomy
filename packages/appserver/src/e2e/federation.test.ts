@@ -1,0 +1,258 @@
+/**
+ * HTTP E2E — full channel-federation chain.
+ *
+ * Boots a real appserver (test-mode auth) with two spaces A (origin) and B
+ * (receiving), then drives the entire flow over XRPC:
+ *
+ *   request → approve → origin grant → receiver grant → federated read → federated write
+ *
+ * This is the integration test the Phase 5 plan calls for: it proves the
+ * cross-space access, global-DB registry, and materialization all line up
+ * through the real HTTP transport (not direct DB pokes).
+ */
+
+import { describe, expect, test, beforeEach } from "bun:test";
+import { newUlid } from "@roomy-space/sdk";
+import {
+  startAppserver,
+  seedSpace,
+  seedRoom,
+  seedJoinedSpace,
+  type E2eContext,
+} from "./helpers.ts";
+
+const A = "did:web:fed-a.example"; // origin space A
+const B = "did:web:fed-b.example"; // receiving space B
+const ADMIN_A = "did:plc:admin-a";
+const ADMIN_B = "did:plc:admin-b";
+const MEMBER_B = "did:plc:member-b"; // B member granted federated access
+const MEMBER_C = "did:plc:member-c"; // B member NOT granted federated access
+const CHANNEL = newUlid();
+
+function base64(text: string): string {
+  return Buffer.from(text, "utf8").toString("base64");
+}
+
+describe("channel federation — full HTTP E2E chain", () => {
+  let ctx: E2eContext;
+
+  beforeEach(async () => {
+    ctx = await startAppserver();
+    const { db } = ctx;
+
+    // Space A (origin): ADMIN_A is admin; ADMIN_B is a member (the federation
+    // precondition). A private space (no public join).
+    seedSpace(db, A, ADMIN_A);
+    seedSpace(db, A, ADMIN_B);
+    // Space B (receiving): ADMIN_B is admin; MEMBER_B/MEMBER_C are members.
+    seedSpace(db, B, ADMIN_B);
+    seedSpace(db, B, MEMBER_B);
+    seedSpace(db, B, MEMBER_C);
+    // Admin edges (head=spaceId, tail=did, label='admin').
+    (db as any).forSpace(A).run(
+      "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
+      [A, ADMIN_A],
+    );
+    (db as any).forSpace(B).run(
+      "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
+      [B, ADMIN_B],
+    );
+    // Global membership (joinedSpace) so federatedRoomAccess detects B as a
+    // home space for ADMIN_B / MEMBER_B.
+    seedJoinedSpace(db, ADMIN_B, B);
+    seedJoinedSpace(db, MEMBER_B, B);
+    seedJoinedSpace(db, MEMBER_C, B);
+    // A private channel in A: default_access 'none' so B can only access it
+    // through federation, never natively.
+    seedRoom(db, CHANNEL, A);
+    (db as any).forSpace(A).run(
+      "update comp_room set default_access = 'none' where entity = ?",
+      [CHANNEL],
+    );
+  });
+
+  const send = (did: string, spaceId: string, event: Record<string, unknown>) =>
+    ctx.authedFetch(did)(`${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`, {
+      method: "POST",
+      body: JSON.stringify({ spaceId, events: [event] }),
+    });
+
+  test("full request → approve → grant → read → write chain", async () => {
+    // 1. ADMIN_B (admin of B, member of A) submits a federation request on A.
+    let res = await send(ADMIN_B, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.request.v0",
+      federatingSpaceDid: B,
+      message: "please federate",
+    });
+    expect(res.status).toBe(200);
+
+    // 2. ADMIN_A sees the pending request.
+    res = await ctx.authedFetch(ADMIN_A)(
+      `${ctx.baseUrl}/xrpc/space.roomy.federation.getRequests?spaceId=${A}`,
+    );
+    expect(res.status).toBe(200);
+    let body = await res.json();
+    expect(body.requests).toHaveLength(1);
+    expect(body.requests[0].federatingSpaceDid).toBe(B);
+
+    // 3. ADMIN_A approves.
+    res = await send(ADMIN_A, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.respond.v0",
+      federatingSpaceDid: B,
+      approve: true,
+    });
+    expect(res.status).toBe(200);
+
+    // ADMIN_A's outgoing list shows the federation as active.
+    res = await ctx.authedFetch(ADMIN_A)(
+      `${ctx.baseUrl}/xrpc/space.roomy.federation.getOutgoing?spaceId=${A}`,
+    );
+    body = await res.json();
+    expect(body.federations.some((f: { federatingSpaceDid: string; status: string }) =>
+      f.federatingSpaceDid === B && f.status === "active",
+    )).toBe(true);
+
+    // 4. ADMIN_A grants origin readwrite on the channel.
+    res = await send(ADMIN_A, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.setRoomPermission.v0",
+      federatingSpaceDid: B,
+      roomId: CHANNEL,
+      permission: "readwrite",
+    });
+    expect(res.status).toBe(200);
+
+    // 5. ADMIN_A's grants view shows the origin grant.
+    res = await ctx.authedFetch(ADMIN_A)(
+      `${ctx.baseUrl}/xrpc/space.roomy.federation.getGrants?spaceId=${A}`,
+    );
+    body = await res.json();
+    expect(body.originGrants).toEqual([
+      { federatingSpaceDid: B, roomId: CHANNEL, permission: "readwrite" },
+    ]);
+
+    // 6. ADMIN_B configures a receiver grant for MEMBER_B (on B's stream).
+    res = await send(ADMIN_B, B, {
+      id: newUlid(),
+      $type: "space.roomy.federation.setReceiverPermission.v0",
+      originSpaceId: A,
+      roomId: CHANNEL,
+      grantee: MEMBER_B,
+      kind: "user",
+      permission: "readwrite",
+    });
+    expect(res.status).toBe(200);
+
+    // 7. ADMIN_B's grants view shows the receiver grant.
+    res = await ctx.authedFetch(ADMIN_B)(
+      `${ctx.baseUrl}/xrpc/space.roomy.federation.getGrants?spaceId=${B}`,
+    );
+    body = await res.json();
+    expect(body.receiverGrants).toEqual([
+      {
+        originSpaceId: A,
+        roomId: CHANNEL,
+        grantee: MEMBER_B,
+        kind: "user",
+        permission: "readwrite",
+      },
+    ]);
+
+    // 8. MEMBER_B can now READ the federated channel (federated access).
+    res = await ctx.authedFetch(MEMBER_B)(
+      `${ctx.baseUrl}/xrpc/space.roomy.room.getMetadata?roomId=${CHANNEL}`,
+    );
+    expect(res.status).toBe(200);
+    body = await res.json();
+    expect(body.canRead).toBe(true);
+    expect(body.canWrite).toBe(true);
+
+    // 9. MEMBER_B can WRITE a message to the federated channel (on A's stream).
+    res = await send(MEMBER_B, A, {
+      id: newUlid(),
+      $type: "space.roomy.message.createMessage.v0",
+      room: CHANNEL,
+      body: {
+        mimeType: "text/plain",
+        data: { $bytes: base64("hello from federated space B") },
+      },
+      extensions: {},
+    });
+    expect(res.status).toBe(200);
+
+    // 10. MEMBER_B can read the message back via the federated channel.
+    res = await ctx.authedFetch(MEMBER_B)(
+      `${ctx.baseUrl}/xrpc/space.roomy.room.getMessages?roomId=${CHANNEL}`,
+    );
+    expect(res.status).toBe(200);
+    body = await res.json();
+    expect(Array.isArray(body.messages)).toBe(true);
+    expect(body.messages.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a B member without a receiver grant is denied federated read", async () => {
+    // Establish request → approve → origin grant (but no receiver grant for
+    // MEMBER_C).
+    await send(ADMIN_B, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.request.v0",
+      federatingSpaceDid: B,
+    });
+    await send(ADMIN_A, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.respond.v0",
+      federatingSpaceDid: B,
+      approve: true,
+    });
+    await send(ADMIN_A, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.setRoomPermission.v0",
+      federatingSpaceDid: B,
+      roomId: CHANNEL,
+      permission: "read",
+    });
+
+    const res = await ctx.authedFetch(MEMBER_C)(
+      `${ctx.baseUrl}/xrpc/space.roomy.room.getMetadata?roomId=${CHANNEL}`,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  test("A-side revoke drops the channel from B's grant view", async () => {
+    await send(ADMIN_B, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.request.v0",
+      federatingSpaceDid: B,
+    });
+    await send(ADMIN_A, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.respond.v0",
+      federatingSpaceDid: B,
+      approve: true,
+    });
+    await send(ADMIN_A, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.setRoomPermission.v0",
+      federatingSpaceDid: B,
+      roomId: CHANNEL,
+      permission: "readwrite",
+    });
+
+    // ADMIN_A revokes the federation.
+    let res = await send(ADMIN_A, A, {
+      id: newUlid(),
+      $type: "space.roomy.federation.remove.v0",
+      federatingSpaceDid: B,
+    });
+    expect(res.status).toBe(200);
+
+    // The origin grant is gone.
+    res = await ctx.authedFetch(ADMIN_A)(
+      `${ctx.baseUrl}/xrpc/space.roomy.federation.getGrants?spaceId=${A}`,
+    );
+    const body = await res.json();
+    expect(body.originGrants).toHaveLength(0);
+  });
+});
