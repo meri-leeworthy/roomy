@@ -1,5 +1,5 @@
 [Unit]
-Description=Roomy -> omp agent bridge
+Description=Roomy -> omp agent bridge (Little Fox)
 After=network-online.target
 Wants=network-online.target
 
