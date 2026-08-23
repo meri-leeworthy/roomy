@@ -9,6 +9,7 @@
   import { setCurrentSpace, setLastActiveSpaceId } from "$lib/components/layout/current-space.svelte";
   import JoinSpaceModal from "$lib/components/layout/JoinSpaceModal.svelte";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
+  import { preloadRoomMessages } from "$lib/preload";
   import SeoMeta from "$lib/components/seo/SeoMeta.svelte";
 
   let { children } = $props();
@@ -36,6 +37,16 @@
   $effect(() => {
     if (metaQuery.data) {
       setLastActiveSpaceId(spaceId);
+    }
+  });
+
+  // Background data preloading: once this space's sidebar (getSpaceMetadata)
+  // is loaded, prefetch the first page of messages for every readable room so
+  // navigating into a room renders instantly. Idempotent via ensureQueryData
+  // — re-runs on sidebar updates only fetch newly-appeared rooms.
+  $effect(() => {
+    if (metaQuery.data) {
+      void preloadRoomMessages(spaceId);
     }
   });
 
