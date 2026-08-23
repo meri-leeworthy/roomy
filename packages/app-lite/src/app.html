@@ -60,17 +60,27 @@
     <title>Roomy</title>
     %sveltekit.head%
     <script>
-      let dark = localStorage.getItem("darkMode");
-      if (dark) {
-        dark = JSON.parse(dark);
+      // Theme mode: "light" | "dark" | "system" (legacy values were booleans).
+      let mode = localStorage.getItem("darkMode");
+      if (mode) {
+        mode = JSON.parse(mode);
+        if (mode === true) mode = "dark";
+        else if (mode === false) mode = "light";
       } else {
-        dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        mode = "system";
       }
       const root = document.documentElement;
-      if (dark) {
-        root.classList.add("dark");
-      } else {
-        root.classList.remove("dark");
+      const applyDark = (dark) => {
+        if (dark) root.classList.add("dark");
+        else root.classList.remove("dark");
+      };
+      const systemDark = () =>
+        window.matchMedia("(prefers-color-scheme: dark)").matches;
+      applyDark(mode === "dark" || (mode === "system" && systemDark()));
+      if (mode === "system") {
+        window
+          .matchMedia("(prefers-color-scheme: dark)")
+          .addEventListener("change", (event) => applyDark(event.matches));
       }
 
       const accentColor = localStorage.getItem("accentColor");

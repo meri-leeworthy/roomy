@@ -8,6 +8,8 @@
     AccordionContent,
   } from "@foxui/core";
   import ThemeToggle from "@roomy/design/components/ui/theme-toggle/ThemeToggle.svelte";
+  import { readThemeMode } from "@roomy/design/utils";
+  import type { ThemeMode } from "@roomy/design/utils";
   import { onMount } from "svelte";
 
   const accentColors = [
@@ -40,6 +42,8 @@
     return `var(--color-${color}-500)`;
   }
 
+  let themeMode = $state<ThemeMode>("system");
+
   onMount(() => {
     const savedAccent = localStorage.getItem("accentColor");
     if (savedAccent) {
@@ -50,6 +54,12 @@
     if (savedBase) {
       baseColor = JSON.parse(savedBase);
     }
+
+    themeMode = readThemeMode();
+    window.addEventListener("theme-changed", (event) => {
+      const detail = (event as CustomEvent).detail as { themeMode?: ThemeMode };
+      if (detail.themeMode) themeMode = detail.themeMode;
+    });
   });
 
   function selectAccentColor(color: string) {
@@ -84,8 +94,11 @@
 <div class="flex flex-col w-full">
   <div class="flex items-center justify-between py-2 pr-0.5">
     <span class="text-sm font-medium text-base-700 dark:text-base-300">
-      <span class="dark:hidden">Light Mode</span>
-      <span class="hidden dark:inline">Dark Mode</span>
+      {themeMode === "light"
+        ? "Light Mode"
+        : themeMode === "dark"
+          ? "Dark Mode"
+          : "System Mode"}
     </span>
     <ThemeToggle />
   </div>
