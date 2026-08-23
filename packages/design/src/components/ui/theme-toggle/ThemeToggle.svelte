@@ -23,6 +23,7 @@ SOFTWARE.
 -->
 <script lang="ts" module>
 	import type { ButtonProps } from '../button/Button.svelte';
+	import type { ThemeMode } from '../../../utils/index.js';
 
 	export type ThemeToggleProps = ButtonProps;
 </script>
@@ -30,6 +31,12 @@ SOFTWARE.
 <script lang="ts">
 	import Button from '../button/Button.svelte';
 	import { cn } from '../../../utils/index.js';
+	import {
+		applyThemeMode,
+		initSystemThemeListener,
+		nextThemeMode,
+		readThemeMode,
+	} from '../../../utils/index.js';
 
 	let {
 		class: className,
@@ -37,34 +44,18 @@ SOFTWARE.
 		...restProps
 	}: ThemeToggleProps = $props();
 
-	let isDark = $state(false);
+	let themeMode = $state<ThemeMode>('system');
 
 	function toggleTheme() {
-		isDark = !isDark;
-		const root = document.documentElement;
-
-		if (isDark) {
-			root.classList.add('dark');
-			localStorage.setItem('darkMode', JSON.stringify(true));
-		} else {
-			root.classList.remove('dark');
-			localStorage.setItem('darkMode', JSON.stringify(false));
-		}
-
-		// Dispatch event for other components
-		window.dispatchEvent(
-			new CustomEvent('theme-changed', { detail: { darkMode: isDark } })
-		);
+		themeMode = nextThemeMode(themeMode);
+		applyThemeMode(themeMode);
 	}
 
-	// Initialize dark mode state on mount
+	// Initialize theme mode on mount and live-follow the OS preference while
+	// the mode is "system".
 	$effect(() => {
-		const stored = localStorage.getItem('darkMode');
-		if (stored !== null) {
-			isDark = JSON.parse(stored);
-		} else {
-			isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-		}
+		themeMode = readThemeMode();
+		return initSystemThemeListener();
 	});
 </script>
 
@@ -85,7 +76,9 @@ SOFTWARE.
 		viewBox="0 0 24 24"
 		stroke-width="1.5"
 		stroke="currentColor"
-		class="size-5! block transition-colors duration-500 dark:hidden"
+		class="size-5! transition-colors duration-500"
+		class:block={themeMode === 'light'}
+		class:hidden={themeMode !== 'light'}
 	>
 		<path
 			stroke-linecap="round"
@@ -99,12 +92,30 @@ SOFTWARE.
 		viewBox="0 0 24 24"
 		stroke-width="1.5"
 		stroke="currentColor"
-		class="size-5! hidden transition-colors duration-500 dark:block dark:text-white"
+		class="size-5! transition-colors duration-500 dark:text-white"
+		class:block={themeMode === 'dark'}
+		class:hidden={themeMode !== 'dark'}
 	>
 		<path
 			stroke-linecap="round"
 			stroke-linejoin="round"
 			d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z"
+		/>
+	</svg>
+	<svg
+		xmlns="http://www.w3.org/2000/svg"
+		fill="none"
+		viewBox="0 0 24 24"
+		stroke-width="1.5"
+		stroke="currentColor"
+		class="size-5! transition-colors duration-500"
+		class:block={themeMode === 'system'}
+		class:hidden={themeMode !== 'system'}
+	>
+		<path
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25"
 		/>
 	</svg>
 
