@@ -6,8 +6,17 @@
   import ToggleTabs from "@roomy/design/components/layout/ToggleTabs.svelte";
   import ActivityFeed from "$lib/components/feed/ActivityFeed.svelte";
   import ThreadsTab from "$lib/components/thread/ThreadsTab.svelte";
+  import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
 
   const spaceId = $derived(page.params.space!);
+
+  const spaceMetaQuery = createSpaceMetadataQuery(() => spaceId);
+
+  // Feed badge: channels with unreads. Threads badge: engaged threads with
+  // unreads. Both come from space.getMetadata (the sidebar query the layout
+  // already fetches, so this is a cache hit).
+  const unreadRoomCount = $derived(spaceMetaQuery.data?.unreadRoomCount ?? 0);
+  const unreadThreadCount = $derived(spaceMetaQuery.data?.unreadThreadCount ?? 0);
 
   let activeTab = $state(
     spaceNavigation.get(spaceId)?.viewMode === "threads" ? "Threads" : "Feed",
@@ -59,8 +68,8 @@
     >
       <ToggleTabs
         items={[
-          { name: "Feed", href: "#feed" },
-          { name: "Threads", href: "#threads" },
+          { name: "Feed", href: "#feed", badge: unreadRoomCount },
+          { name: "Threads", href: "#threads", badge: unreadThreadCount },
         ]}
         active={activeTab}
       />

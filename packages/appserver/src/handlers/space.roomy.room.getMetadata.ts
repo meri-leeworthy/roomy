@@ -8,7 +8,7 @@
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
-import { getReadPosition, getReadPositions, type ReadPosition } from "../queries/readPositions.ts";
+import { getChannelUnreadThreadCount, getReadPosition, getReadPositions, type ReadPosition } from "../queries/readPositions.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -34,6 +34,8 @@ interface GetRoomMetadataResult {
   canWrite: boolean;
   lastRead?: string;
   unreadCount: number;
+  /** Number of engaged threads in this channel with unread messages. */
+  unreadThreadCount: number;
   recentThreads: RecentThread[];
 }
 
@@ -118,8 +120,20 @@ export const getRoomMetadataHandler: QueryHandler<
   }
 
   let pos: ReadPosition;
+  let unreadThreadCount = 0;
   if (userDid !== null) {
     pos = await getReadPosition(mainDb, userDid, roomId);
+    // Channel pages show a Threads-tab badge: engaged threads in this
+    // channel with unreads. Thread rooms have no sibling-thread badge.
+    if (access.parentChannelId === null) {
+      unreadThreadCount = await getChannelUnreadThreadCount(
+        mainDb,
+        db,
+        roomId,
+        userDid,
+        memo,
+      );
+    }
   } else {
     pos = { unreadCount: 0, lastRead: null };
   }
@@ -133,6 +147,7 @@ export const getRoomMetadataHandler: QueryHandler<
     canWrite: access.canWrite,
     lastRead: (pos.lastRead as string | null) ?? null,
     unreadCount: pos.unreadCount,
+    unreadThreadCount,
     recentThreads,
   }) as GetRoomMetadataResult;
 };

@@ -27,5 +27,7 @@ export const Response = type({
   canWrite: "boolean",
   "lastRead?": "string",
   unreadCount: "number",
+  /** Number of threads in this channel with unread messages (engaged only). */
+  unreadThreadCount: "number",
   recentThreads: RecentThread.array(),
 });

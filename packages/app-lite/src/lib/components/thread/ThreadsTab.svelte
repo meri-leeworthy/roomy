@@ -27,6 +27,7 @@
     channelName?: string;
     canonicalParent?: string;
     unreadCount?: number;
+    unread?: boolean;
     activity: {
       latestTimestamp?: string;
       latestMembers: Array<{ did: string; name?: string | null; avatar?: string | null }>;
@@ -38,7 +39,9 @@
       kind: "space.roomy.thread",
       channelName: t.channelName,
       canonicalParent: t.canonicalParent,
-      unread: (t.unreadCount ?? 0) > 0,
+      // Honest unread: the server marks threads with messages the user
+      // hasn't read, including threads they've never engaged with.
+      unread: t.unread ?? (t.unreadCount ?? 0) > 0,
       activity: {
         members: t.activity.latestMembers.map((m) => ({
           id: m.did,

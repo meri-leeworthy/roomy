@@ -21,6 +21,9 @@ import {
   seedReaction,
   seedUser,
   seedActivityItem,
+  seedReadPosition,
+  spaceDb,
+  readStateDb,
   type E2eContext,
 } from "./helpers.ts";
 import { _setAdminDids } from "../admin.ts";
@@ -120,6 +123,39 @@ describe("space.roomy.space.getSpaces", () => {
     const body = await res.json();
     expect(body.spaces).toEqual([]);
   });
+
+  test("unreadRoomCount counts channels + engaged threads with unreads", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    seedSpace(db, SPACE, USER);
+    seedJoinedSpace(db, USER, SPACE);
+
+    // Channel with unread messages.
+    const channel = newUlid();
+    seedRoom(db, channel, SPACE);
+    seedReadPosition(db, USER, channel, "0", 3);
+
+    // Engaged thread with unread messages (user_thread_activity + read_positions).
+    const thread = newUlid();
+    seedRoom(db, thread, SPACE, "space.roomy.thread");
+    readStateDb(db).run(
+      `insert into user_thread_activity (user_did, thread_id, last_active_at, updated_at)
+       values (?, ?, ?, ?)`,
+      [USER, thread, Date.now(), Date.now()],
+    );
+    seedReadPosition(db, USER, thread, "0", 1);
+
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.getSpaces?includeLeft=false`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const space = body.spaces.find((s: { id: string }) => s.id === SPACE);
+    expect(space).toBeDefined();
+    // Home cards show the combined rooms-with-unreads count.
+    expect(space.unreadRoomCount).toBe(2);
+    expect(space.unreadCount).toBe(4);
+  });
 });
 
 // ─── space.roomy.space.getMetadata ────────────────────────────────────────
@@ -205,6 +241,45 @@ describe("space.roomy.space.getThreads", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.threads).toEqual([]);
+  });
+
+  test("threads the user never engaged with read as unread (honest view)", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    seedSpace(db, SPACE, USER);
+    seedJoinedSpace(db, USER, SPACE);
+
+    // A thread with messages, linked from a channel. The user has NO
+    // user_thread_activity row and NO read_positions row for it.
+    const channel = newUlid();
+    seedRoom(db, channel, SPACE);
+    const thread = newUlid();
+    seedRoom(db, thread, SPACE, "space.roomy.thread");
+    // Canonical parent link (channel → thread).
+    spaceDb(db, SPACE).run(
+      `insert into edges (head, tail, label, payload) values (?, ?, 'link', ?)`,
+      [channel, thread, JSON.stringify({ canonical_parent: 1 })],
+    );
+    const msgId = newUlid();
+    seedMessage(db, msgId, thread, SPACE, "a");
+    // comp_content.timestamp drives latestTimestamp in listThreadActivity;
+    // seedMessage leaves it null, so set it explicitly.
+    spaceDb(db, SPACE).run(
+      "update comp_content set timestamp = ? where entity = ?",
+      [Date.now(), msgId],
+    );
+    seedActivityItem(db, thread, SPACE, Date.now());
+
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.getThreads?spaceId=${SPACE}`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const t = body.threads.find((x: { id: string }) => x.id === thread);
+    expect(t).toBeDefined();
+    // unreadCount is 0 (no read_positions row) but the honest flag is true.
+    expect(t.unreadCount).toBe(0);
+    expect(t.unread).toBe(true);
   });
 });
 
@@ -316,6 +391,41 @@ describe("space.roomy.room.getMetadata", () => {
       `${ctx.baseUrl}/xrpc/space.roomy.room.getMetadata?roomId=${newUlid()}`,
     );
     expect(res.status).toBe(404);
+  });
+
+  test("channel metadata reports engaged threads with unreads (Threads-tab badge)", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    seedSpace(db, SPACE, USER);
+    seedJoinedSpace(db, USER, SPACE);
+
+    const channel = newUlid();
+    seedRoom(db, channel, SPACE);
+
+    // Two engaged threads in the channel; one has unread messages.
+    const t1 = newUlid();
+    const t2 = newUlid();
+    for (const t of [t1, t2]) {
+      seedRoom(db, t, SPACE, "space.roomy.thread");
+      spaceDb(db, SPACE).run(
+        `insert into edges (head, tail, label, payload) values (?, ?, 'link', ?)`,
+        [channel, t, JSON.stringify({ canonical_parent: 1 })],
+      );
+      readStateDb(db).run(
+        `insert into user_thread_activity (user_did, thread_id, last_active_at, updated_at)
+         values (?, ?, ?, ?)`,
+        [USER, t, Date.now(), Date.now()],
+      );
+    }
+    seedReadPosition(db, USER, t1, "0", 2); // unread
+    seedReadPosition(db, USER, t2, "0", 0); // read
+
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.room.getMetadata?roomId=${channel}`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.unreadThreadCount).toBe(1);
   });
 });
 

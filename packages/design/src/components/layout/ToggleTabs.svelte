@@ -6,7 +6,7 @@
     items,
     active = $bindable(),
   }: {
-    items: { name: string; href: string }[];
+    items: { name: string; href: string; badge?: number }[];
     active: string;
   } = $props();
 
@@ -19,7 +19,7 @@
       class="rounded-lg text-base-950 dark:text-base-100"
       style="display: inline-grid; grid-auto-flow: column; grid-auto-columns: 2fr;"
     >
-      {#each items as { name, href }}
+      {#each items as { name, href, badge }}
         <Tabs.Trigger value={name}>
           {#snippet child({ props })}
             <a
@@ -52,7 +52,16 @@
               data-[state=active]:shadow-none
               "
             >
-              {name}
+              <span class="inline-flex items-center gap-1.5">
+                {name}
+                {#if badge && badge > 0}
+                  <span
+                    class="inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full text-[10px] font-semibold leading-none bg-accent-500 text-white"
+                  >
+                    {badge > 99 ? "99+" : badge}
+                  </span>
+                {/if}
+              </span>
             </a>
           {/snippet}
         </Tabs.Trigger>

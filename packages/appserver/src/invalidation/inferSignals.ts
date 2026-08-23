@@ -182,6 +182,41 @@ async function handleCreateMessage(
   // no refetch.
   const users = await getRoomReadPositionUsers(db ?? openReadStateDb(), roomId);
   if (users.length > 0) {
+    // Determine which users became newly-unread: their unread_count went
+    // 0 → 1 with this message's +1 bump. Those users' room-count badges
+    // (channels-with-unreads / engaged-threads-with-unreads) increment.
+    const readState = db ?? openReadStateDb();
+    const ph = users.map(() => "?").join(",");
+    const unreadRows = await readState
+      .query(
+        `select user_did, unread_count from read_positions
+          where user_did in (${ph}) and room_id = ?`,
+      )
+      .all<{ user_did: string; unread_count: number }>([...users, roomId]);
+    const newlyUnread = unreadRows
+      .filter((r) => r.unread_count === 1)
+      .map((r) => r.user_did as UserDid);
+
+    // Thread messages only bump engaged users and carry the parent channel
+    // so the client can patch the channel-scoped thread count.
+    const spaceDb = db ?? openSpaceDb(event.streamDid);
+    const roomRow = await spaceDb
+      .query("select label from comp_room where entity = ?")
+      .get<{ label: string | null }>(roomId);
+    const isThread = roomRow?.label === "space.roomy.thread";
+    let parentChannelId: string | undefined;
+    if (isThread) {
+      const parent = await spaceDb
+        .query(
+          `select head from edges
+            where tail = ? and label = 'link'
+              and coalesce(json_extract(payload, '$.canonical_parent'), 0) = 1
+            limit 1`,
+        )
+        .get<{ head: string }>(roomId);
+      parentChannelId = parent?.head;
+    }
+
     signals.push({
       kind: "roomMetadataDiff",
       signal: {
@@ -190,6 +225,18 @@ async function handleCreateMessage(
         seq: 0,
         delta: 1,
         users,
+        ...(parentChannelId ? { parentChannelId } : {}),
+        ...(isThread
+          ? {
+              threadUnreadDeltas: new Map(
+                newlyUnread.map((u) => [u, 1] as const),
+              ),
+            }
+          : {
+              roomUnreadDeltas: new Map(
+                newlyUnread.map((u) => [u, 1] as const),
+              ),
+            }),
       },
     });
   }

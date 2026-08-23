@@ -193,6 +193,11 @@ describe("inferSignals: message events", () => {
       expect(roomDiff!.signal.delta).toBe(1);
       expect(roomDiff!.signal.users).toHaveLength(1);
       expect(roomDiff!.signal.users[0]).toBe(USER_DID);
+      // The seeded read_positions row has unread_count = 1 (the +1 bump
+      // already applied), so the user became newly-unread: the channel
+      // room-count delta is +1 for them.
+      expect(roomDiff!.signal.roomUnreadDeltas?.get(USER_DID)).toBe(1);
+      expect(roomDiff!.signal.threadUnreadDeltas).toBeUndefined();
     }
 
     // Still invalidates room metadata (recentThreads) and space metadata

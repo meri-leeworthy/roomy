@@ -112,6 +112,9 @@
         "name": {
           "type": "string"
         },
+        "unread": {
+          "type": "boolean"
+        },
         "unreadCount": {
           "type": "integer"
         }

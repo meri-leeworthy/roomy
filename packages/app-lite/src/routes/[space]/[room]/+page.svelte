@@ -107,6 +107,9 @@
   const roomUnreadCount = $derived(
     sidebarRoomInfo?.unreadCount ?? roomQuery.data?.unreadCount ?? 0,
   );
+  const roomUnreadThreadCount = $derived(
+    roomQuery.data?.unreadThreadCount ?? 0,
+  );
   const roomKind = $derived(
     sidebarRoomInfo?.kind ?? roomQuery.data?.kind,
   );
@@ -204,6 +207,7 @@
           items={channelTabList.map((x) => ({
             name: x,
             href: `#${x.toLowerCase()}`,
+            badge: x === "Threads" ? roomUnreadThreadCount : undefined,
           }))}
           active={channelActiveTab}
         />

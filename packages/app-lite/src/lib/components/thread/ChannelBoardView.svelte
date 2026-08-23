@@ -31,6 +31,9 @@
       name: t.name ?? "Unnamed Thread",
       kind: "space.roomy.thread",
       canonicalParent: t.canonicalParent,
+      // Honest unread: the server marks threads with messages the user
+      // hasn't read, including threads they've never engaged with.
+      unread: t.unread ?? (t.unreadCount ?? 0) > 0,
       activity: {
         members: t.activity.latestMembers.map((m) => ({
           id: m.did,

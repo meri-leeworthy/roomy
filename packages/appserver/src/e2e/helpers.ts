@@ -420,7 +420,8 @@ type AsyncLike = {
   run(sql: string, ...params: unknown[]): Promise<unknown>;
 };
 
-function spaceDb(db: Database, spaceDid: string): AsyncLike {
+/** Route a write to a space's per-space DB (entities, comp_room, edges). */
+export function spaceDb(db: Database, spaceDid: string): AsyncLike {
   return (db as unknown as RoutedDb).forSpace(spaceDid);
 }
 
@@ -428,7 +429,8 @@ function globalDb(db: Database): AsyncLike {
   return (db as unknown as RoutedDb).global();
 }
 
-function readStateDb(db: Database): AsyncLike {
+/** Route a write to the read-state DB (read_positions, user_thread_activity). */
+export function readStateDb(db: Database): AsyncLike {
   return (db as unknown as RoutedDb).readState();
 }
 

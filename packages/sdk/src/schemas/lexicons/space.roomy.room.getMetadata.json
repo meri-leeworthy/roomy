@@ -55,7 +55,8 @@
             "kind",
             "recentThreads",
             "spaceId",
-            "unreadCount"
+            "unreadCount",
+            "unreadThreadCount"
           ],
           "properties": {
             "canRead": {
@@ -86,6 +87,9 @@
               "type": "string"
             },
             "unreadCount": {
+              "type": "integer"
+            },
+            "unreadThreadCount": {
               "type": "integer"
             },
             "lastRead": {

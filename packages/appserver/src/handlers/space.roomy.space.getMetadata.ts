@@ -9,7 +9,7 @@
 import { createAccessMemo, roomAccess, spaceAccess } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
-import { getReadPositions } from "../queries/readPositions.ts";
+import { getReadPositions, getSpaceUnreadStats } from "../queries/readPositions.ts";
 import { queryActiveThreads, resolveThreadsByIds } from "../queries/userActiveThreads.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -61,6 +61,10 @@ interface GetMetadataResult {
   joinPolicy: { allowPublicJoin: boolean; allowMemberInvites: boolean };
   isMember: boolean;
   isAdmin: boolean;
+  /** Number of channels with unread messages (sidebar-visible rooms only). */
+  unreadRoomCount: number;
+  /** Number of engaged threads with unread messages. */
+  unreadThreadCount: number;
   sidebar: { categories: SidebarCategory[]; orphans: SidebarChannel[] };
   deletedRooms?: DeletedRoom[];
 }
@@ -151,7 +155,13 @@ export const getMetadataHandler: QueryHandler<
 
   // Sidebar requires a logged-in user — anonymous callers can't get member
   // or admin status, so isMember/isAdmin is always false for them.
+  let unreadRoomCount = 0;
+  let unreadThreadCount = 0;
   if (userDid !== null && (access.isMember || access.isAdmin)) {
+    const stats = await getSpaceUnreadStats(mainDb, db, userDid, spaceId, memo);
+    unreadRoomCount = stats.unreadRoomCount;
+    unreadThreadCount = stats.unreadThreadCount;
+
     const allChannelRows = await db
       .query(
         `select e.id as id, ci.name as name, cr.default_access as default_access
@@ -311,6 +321,8 @@ export const getMetadataHandler: QueryHandler<
     },
     isMember: access.isMember,
     isAdmin: access.isAdmin,
+    unreadRoomCount,
+    unreadThreadCount,
     sidebar: { categories, orphans },
     ...(deletedRooms !== undefined ? { deletedRooms } : {}),
   }) as GetMetadataResult;

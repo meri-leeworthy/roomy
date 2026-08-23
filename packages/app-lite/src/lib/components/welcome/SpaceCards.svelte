@@ -5,7 +5,7 @@
   let {
     spaces,
   }: {
-    spaces: { id: string; name?: string; avatar?: string; unreadCount?: number }[];
+    spaces: { id: string; name?: string; avatar?: string; unreadRoomCount?: number }[];
   } = $props();
 </script>
 
@@ -34,8 +34,8 @@
       <div class="flex items-center justify-center gap-1.5 w-full">
         <span class="size-1.5 rounded-full bg-accent-500 dark:bg-white shrink-0"></span>
         <span class="text-xs text-base-500 dark:text-base-400 leading-relaxed truncate">
-          {#if space.unreadCount && space.unreadCount > 0}
-            {space.unreadCount} unread
+          {#if space.unreadRoomCount && space.unreadRoomCount > 0}
+            {space.unreadRoomCount} {space.unreadRoomCount === 1 ? "room" : "rooms"} with unreads
           {:else}
             Up to date
           {/if}

@@ -327,19 +327,29 @@ export class SyncManager {
       seq: number;
       delta: number;
       users: ReadonlyArray<string>;
+      parentChannelId?: string;
+      roomUnreadDeltas?: ReadonlyMap<string, number>;
+      threadUnreadDeltas?: ReadonlyMap<string, number>;
     },
   ): void {
     // Per-user: the frame carries a delta (the same for every user), but
     // we still send one frame per user rather than broadcasting — only
     // users with a read_positions row for this room should see the unread
     // bump. A user may have multiple connections open (multiple tabs).
-    const frame = messageFrame("#roomMetadataDiff", {
-      spaceId: signal.spaceId,
-      roomId: signal.roomId,
-      delta: signal.delta,
-      seq: signal.seq,
-    });
     for (const user of signal.users) {
+      const frame = messageFrame("#roomMetadataDiff", {
+        spaceId: signal.spaceId,
+        roomId: signal.roomId,
+        delta: signal.delta,
+        seq: signal.seq,
+        ...(signal.parentChannelId ? { parentChannelId: signal.parentChannelId } : {}),
+        ...(signal.roomUnreadDeltas?.get(user)
+          ? { roomUnreadDelta: signal.roomUnreadDeltas.get(user) }
+          : {}),
+        ...(signal.threadUnreadDeltas?.get(user)
+          ? { threadUnreadDelta: signal.threadUnreadDeltas.get(user) }
+          : {}),
+      });
       for (const conn of this.#connections.values()) {
         if (!conn.isOpen) continue;
         if (conn.did !== user) continue;

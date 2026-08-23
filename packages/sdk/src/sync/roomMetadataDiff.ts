@@ -1,10 +1,10 @@
 /**
  * Hardcoded room-metadata-diff applicator.
  *
- * Companion to {@link applyMessageDiff} — patches three cache entries from a
+ * Companion to {@link applyMessageDiff} — patches cache entries from a
  * single `#roomMetadataDiff` frame so message-create no longer forces a
  * `getSpaces` / `space.getMetadata` / `room.getMetadata` refetch for the
- * unread-count field.
+ * unread-count fields.
  *
  * The frame carries a `delta` (always `+1` per message), not an absolute
  * count — each patcher adds `delta` to the cached `unreadCount`. When the
@@ -14,10 +14,23 @@
  * (e.g. the channel isn't in the sidebar), the patcher returns `prev`
  * unchanged — a harmless no-op rather than a destructive delete.
  *
- * The three patchers:
- *   - {@link patchRoomMetadata}  → `room.getMetadata` response
- *   - {@link patchSpaces}        → `getSpaces` response (the matching space)
- *   - {@link patchSpaceMetadata} → `space.getMetadata` response (sidebar tree)
+ * The frame also carries per-user room-count deltas:
+ *   - `roomUnreadDelta` — `+1` when a channel message makes a channel
+ *     newly-unread for the user, `-1` when reading makes it fully-read.
+ *     Patches `getSpaces[].unreadRoomCount` and
+ *     `space.getMetadata.unreadRoomCount`.
+ *   - `threadUnreadDelta` — same for engaged threads. Patches
+ *     `getSpaces[].unreadThreadCount`, `space.getMetadata.unreadThreadCount`,
+ *     and the parent channel's `room.getMetadata.unreadThreadCount`.
+ *   - `parentChannelId` — the thread's parent channel, so the channel-scoped
+ *     thread count can be patched.
+ *
+ * The patchers:
+ *   - {@link patchRoomMetadata}        → `room.getMetadata` response (the room)
+ *   - {@link patchChannelThreadCount} → `room.getMetadata` response (the
+ *     parent channel's `unreadThreadCount`)
+ *   - {@link patchSpaces}             → `getSpaces` response (the matching space)
+ *   - {@link patchSpaceMetadata}      → `space.getMetadata` response (sidebar tree)
  */
 
 import { Response as RoomMetadataResponseSchema } from "../schemas/queries/getRoomMetadata";
@@ -41,6 +54,18 @@ export type {
   SpaceMetadataResponse,
 };
 
+/** Per-user deltas carried by a `#roomMetadataDiff` frame. */
+export interface RoomMetadataDiffPatch {
+  /** The unread-count increment (`+1` per message) for the room itself. */
+  delta: number;
+  /** `+1`/`-1` for the space's channel-with-unreads count. */
+  roomUnreadDelta?: number;
+  /** `+1`/`-1` for the space's engaged-threads-with-unreads count. */
+  threadUnreadDelta?: number;
+  /** The thread's parent channel id (thread messages only). */
+  parentChannelId?: string;
+}
+
 /**
  * Patch `room.getMetadata.unreadCount` by adding `delta`.
  * Returns `undefined` when there's no cached entry (no-op for
@@ -48,28 +73,53 @@ export type {
  */
 export function patchRoomMetadata(
   prev: RoomMetadataResponse | undefined,
-  delta: number,
+  patch: RoomMetadataDiffPatch,
 ): RoomMetadataResponse | undefined {
   if (!prev) return undefined;
-  return { ...prev, unreadCount: prev.unreadCount + delta };
+  return { ...prev, unreadCount: prev.unreadCount + patch.delta };
+}
+
+/**
+ * Patch a channel's `room.getMetadata.unreadThreadCount` by adding
+ * `threadUnreadDelta`. Used for thread messages: the frame's `roomId` is the
+ * thread, so the channel's own metadata entry (keyed by the channel id) is
+ * patched separately. Returns `undefined` when there's no cached entry;
+ * returns `prev` unchanged when the entry exists.
+ */
+export function patchChannelThreadCount(
+  prev: RoomMetadataResponse | undefined,
+  threadUnreadDelta: number,
+): RoomMetadataResponse | undefined {
+  if (!prev) return undefined;
+  return { ...prev, unreadThreadCount: prev.unreadThreadCount + threadUnreadDelta };
 }
 
 /**
  * Patch the matching space's `unreadCount` in a `getSpaces` response by
- * adding `delta`. Returns `undefined` when there's no cached entry; returns
- * `prev` unchanged when the space isn't in the list.
+ * adding `delta`, plus the rooms-with-unreads count by the per-user deltas.
+ * (`getSpaces.unreadRoomCount` is the combined channels + engaged-threads
+ * count the home cards show; the split lives on `space.getMetadata`.)
+ * Returns `undefined` when there's no cached entry; returns `prev` unchanged
+ * when the space isn't in the list.
  */
 export function patchSpaces(
   prev: GetSpacesResponse | undefined,
   spaceId: string,
-  delta: number,
+  patch: RoomMetadataDiffPatch,
 ): GetSpacesResponse | undefined {
   if (!prev) return undefined;
   let found = false;
   const spaces: Space[] = prev.spaces.map((space) => {
     if (space.id === spaceId) {
       found = true;
-      return { ...space, unreadCount: space.unreadCount + delta };
+      return {
+        ...space,
+        unreadCount: space.unreadCount + patch.delta,
+        unreadRoomCount:
+          space.unreadRoomCount +
+          (patch.roomUnreadDelta ?? 0) +
+          (patch.threadUnreadDelta ?? 0),
+      };
     }
     return space;
   });
@@ -78,28 +128,41 @@ export function patchSpaces(
 }
 
 /**
- * Patch the channel entry in a `space.getMetadata` sidebar tree by adding
- * `delta` to its `unreadCount`. Walks `sidebar.categories[].channels[]` and
- * `sidebar.orphans[]` to find the channel by `roomId`. Returns `undefined`
- * when there's no cached entry; returns `prev` unchanged when the channel
- * isn't in the sidebar (the caller may have no read access to it, or the
- * room is a thread not shown at the channel level).
+ * Patch a `space.getMetadata` response: the channel entry's `unreadCount`
+ * (by `roomId`), the matching active-thread entry's `unreadCount` (when
+ * `parentChannelId` is present), and the top-level `unreadRoomCount` /
+ * `unreadThreadCount` by the per-user deltas. Returns `undefined` when
+ * there's no cached entry; returns `prev` unchanged when nothing matched.
  */
 export function patchSpaceMetadata(
   prev: SpaceMetadataResponse | undefined,
   roomId: string,
-  delta: number,
+  patch: RoomMetadataDiffPatch,
 ): SpaceMetadataResponse | undefined {
   if (!prev) return undefined;
 
   let touched = false;
 
   const patchChannel = (ch: SidebarChannel): SidebarChannel => {
+    let out = ch;
     if (ch.id === roomId) {
       touched = true;
-      return { ...ch, unreadCount: ch.unreadCount + delta };
+      out = { ...out, unreadCount: out.unreadCount + patch.delta };
     }
-    return ch;
+    // A thread message: bump the matching active-thread entry under its
+    // parent channel (the thread may not be in the sidebar at all — the
+    // active-threads list is capped — in which case this is a no-op).
+    if (patch.parentChannelId && ch.id === patch.parentChannelId && out.activeThreads) {
+      const threads = out.activeThreads.map((t) => {
+        if (t.id === roomId) {
+          touched = true;
+          return { ...t, unreadCount: t.unreadCount + patch.delta };
+        }
+        return t;
+      });
+      if (threads !== out.activeThreads) out = { ...out, activeThreads: threads };
+    }
+    return out;
   };
 
   const categories: SidebarCategory[] = prev.sidebar.categories.map((cat) => ({
@@ -108,9 +171,11 @@ export function patchSpaceMetadata(
   }));
   const orphans = prev.sidebar.orphans.map(patchChannel);
 
-  if (!touched) return prev;
+  if (!touched && !patch.roomUnreadDelta && !patch.threadUnreadDelta) return prev;
   return {
     ...prev,
+    unreadRoomCount: prev.unreadRoomCount + (patch.roomUnreadDelta ?? 0),
+    unreadThreadCount: prev.unreadThreadCount + (patch.threadUnreadDelta ?? 0),
     sidebar: { categories, orphans },
   };
 }

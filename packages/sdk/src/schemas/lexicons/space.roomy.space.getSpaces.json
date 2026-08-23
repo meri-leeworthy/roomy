@@ -9,7 +9,8 @@
         "isAdmin",
         "isMember",
         "roleIds",
-        "unreadCount"
+        "unreadCount",
+        "unreadRoomCount"
       ],
       "properties": {
         "id": {
@@ -28,6 +29,9 @@
           }
         },
         "unreadCount": {
+          "type": "integer"
+        },
+        "unreadRoomCount": {
           "type": "integer"
         },
         "avatar": {

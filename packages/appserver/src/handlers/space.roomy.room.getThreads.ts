@@ -11,7 +11,7 @@ import { createAccessMemo, roomAccess } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
-import { getReadPositions } from "../queries/readPositions.ts";
+import { getEngagedThreadIds, getReadPositions } from "../queries/readPositions.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { optionalInt, optionalString, requireString } from "../xrpc/params.ts";
@@ -22,6 +22,8 @@ interface ThreadRow {
   name?: string;
   canonicalParent?: string;
   unreadCount: number;
+  /** Honest unread flag: has messages and (unreadCount > 0 or not engaged). */
+  unread: boolean;
   activity: {
     latestTimestamp?: string;
     latestMembers: Array<{
@@ -76,6 +78,12 @@ export const getRoomThreadsHandler: QueryHandler<
   // Collect all thread IDs for batch unread lookup
   const threadIds = all.map((t) => t.id);
   const readPositions = auth.did ? await getReadPositions(mainDb, auth.did, threadIds) : new Map();
+  // Threads the user has never engaged with have no read_positions row of
+  // their own — they read as unread in the threads view even though their
+  // unreadCount is 0 (the honest view of what you have and haven't read).
+  const engagedThreadIds = auth.did
+    ? await getEngagedThreadIds(mainDb, auth.did, threadIds)
+    : new Set<string>();
 
   const threads: ThreadRow[] = [];
   for (const t of all) {
@@ -104,7 +112,14 @@ export const getRoomThreadsHandler: QueryHandler<
       };
     }
 
-    const thread: ThreadRow = { id: t.id, activity, unreadCount: readPositions.get(t.id)?.unreadCount ?? 0 };
+    const pos = readPositions.get(t.id);
+    const unreadCount = pos?.unreadCount ?? 0;
+    const thread: ThreadRow = {
+      id: t.id,
+      activity,
+      unreadCount,
+      unread: t.latestTimestamp != null && (unreadCount > 0 || !engagedThreadIds.has(t.id)),
+    };
     if (t.name != null) thread.name = t.name;
     if (t.canonicalParent != null) thread.canonicalParent = t.canonicalParent;
     threads.push(thread);

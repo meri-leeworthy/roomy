@@ -106,19 +106,31 @@ export async function getReadPositions(
 }
 
 /**
- * Sum unread counts across all rooms the user can read in a given space.
- * This is used for the per-space unreadCount in getSpaces.
+ * Unread stats for a space: total unread messages plus the number of rooms
+ * (channels + engaged threads) that have any unread messages.
+ *
+ * Used for the per-space unreadCount / unreadRoomCount / unreadThreadCount
+ * in getSpaces and space.getMetadata.
  *
  * Filters channels by the user's roomAccess so inaccessible channels
- * (e.g. role-gated or invite-only) are excluded from the total.
+ * (e.g. role-gated or invite-only) are excluded from the totals.
  */
-export async function getSpaceUnreadCount(
+export interface SpaceUnreadStats {
+  /** Total unread messages across accessible channels + engaged threads. */
+  unreadCount: number;
+  /** Number of accessible channels with unread messages. */
+  unreadRoomCount: number;
+  /** Number of engaged threads with unread messages. */
+  unreadThreadCount: number;
+}
+
+export async function getSpaceUnreadStats(
   readStateDb: DbLike,
   spaceDb: DbLike,
   userDid: string,
   spaceId: string,
   memo?: AccessMemo,
-): Promise<number> {
+): Promise<SpaceUnreadStats> {
   // Fetch all non-deleted channels in the space (per-space DB).
   const allChannels = await spaceDb
     .query(
@@ -165,19 +177,129 @@ export async function getSpaceUnreadCount(
   await ensureReadPositions(readStateDb, userDid, threadIds);
 
   const allRoomIds = [...accessible, ...threadIds];
-  if (allRoomIds.length === 0) return 0;
+  if (allRoomIds.length === 0) {
+    return { unreadCount: 0, unreadRoomCount: 0, unreadThreadCount: 0 };
+  }
 
-  // Sum unread counts across accessible channels and engaged threads.
+  // Sum unread counts and count rooms with unreads across accessible
+  // channels and engaged threads.
   const placeholders = allRoomIds.map(() => "?").join(",");
   const row = await readStateDb
     .query(
-      `select coalesce(sum(unread_count), 0) as total
+      `select coalesce(sum(unread_count), 0) as total,
+              coalesce(sum(case when unread_count > 0 then 1 else 0 end), 0) as rooms_with_unread
          from read_positions
         where user_did = ? and room_id in (${placeholders})`,
     )
-    .get<{ total: number }>([userDid, ...allRoomIds]);
-  return row?.total ?? 0;
+    .get<{ total: number; rooms_with_unread: number }>([userDid, ...allRoomIds]);
+  const total = row?.total ?? 0;
+  const roomsWithUnread = row?.rooms_with_unread ?? 0;
+
+  // Split the room count into channels vs engaged threads. The thread ids
+  // are a subset of allRoomIds; count how many of them have unreads.
+  let threadRoomsWithUnread = 0;
+  if (threadIds.length > 0) {
+    const tph = threadIds.map(() => "?").join(",");
+    const trow = await readStateDb
+      .query(
+        `select count(*) as n from read_positions
+          where user_did = ? and room_id in (${tph}) and unread_count > 0`,
+      )
+      .get<{ n: number }>([userDid, ...threadIds]);
+    threadRoomsWithUnread = trow?.n ?? 0;
+  }
+
+  return {
+    unreadCount: total,
+    unreadRoomCount: roomsWithUnread - threadRoomsWithUnread,
+    unreadThreadCount: threadRoomsWithUnread,
+  };
 }
+
+/**
+ * Count engaged threads with unread messages in a channel. Used for the
+ * channel-scoped `unreadThreadCount` in room.getMetadata (the Threads tab
+ * badge on a channel page).
+ *
+ * Only threads the user has engaged with (user_thread_activity) count —
+ * matching the sidebar/space-count semantics. Threads the user has never
+ * interacted with are surfaced honestly in the threads view itself, but
+ * don't contribute to badge counts.
+ */
+export async function getChannelUnreadThreadCount(
+  readStateDb: DbLike,
+  spaceDb: DbLike,
+  channelId: string,
+  userDid: string,
+  memo?: AccessMemo,
+): Promise<number> {
+  // Engaged threads linked from this channel (canonical parent link). The
+  // engagement rows live in the read-state DB; the link edges live in the
+  // per-space DB.
+  const engaged = await readStateDb
+    .query(
+      `select thread_id from user_thread_activity
+        where user_did = ?`,
+    )
+    .all<{ thread_id: string }>([userDid]);
+  if (engaged.length === 0) return 0;
+
+  const eph = engaged.map(() => "?").join(",");
+  const linked = await spaceDb
+    .query(
+      `select link_e.tail as thread_id
+         from edges link_e
+        where link_e.head = ?
+          and link_e.label = 'link'
+          and coalesce(json_extract(link_e.payload, '$.canonical_parent'), 0) = 1
+          and link_e.tail in (${eph})`,
+    )
+    .all<{ thread_id: string }>([channelId, ...engaged.map((r) => r.thread_id)]);
+
+  if (linked.length === 0) return 0;
+
+  // Filter to threads the user can read (threads inherit access from their
+  // parent channel, but role grants can differ per room).
+  const m = memo ?? createAccessMemo();
+  const accessible: string[] = [];
+  for (const r of linked) {
+    const acc = await roomAccess(spaceDb, r.thread_id, userDid, m);
+    if (acc.canRead) accessible.push(r.thread_id);
+  }
+  if (accessible.length === 0) return 0;
+
+  await ensureReadPositions(readStateDb, userDid, accessible);
+  const ph = accessible.map(() => "?").join(",");
+  const row = await readStateDb
+    .query(
+      `select count(*) as n from read_positions
+        where user_did = ? and room_id in (${ph}) and unread_count > 0`,
+    )
+    .get<{ n: number }>([userDid, ...accessible]);
+  return row?.n ?? 0;
+}
+/**
+ * Return the set of thread ids the user has engaged with (user_thread_activity
+ * rows). Used by the getThreads handlers to compute the honest unread flag:
+ * a thread the user has never engaged with has no read_positions row of their
+ * own, so it reads as unread even though `unreadCount` is 0.
+ */
+export async function getEngagedThreadIds(
+  db: DbLike,
+  userDid: string,
+  threadIds: string[],
+): Promise<Set<string>> {
+  if (threadIds.length === 0) return new Set();
+  const ph = threadIds.map(() => "?").join(",");
+  const rows = await db
+    .query(
+      `select thread_id from user_thread_activity
+        where user_did = ? and thread_id in (${ph})`,
+    )
+    .all<{ thread_id: string }>([userDid, ...threadIds]);
+  return new Set(rows.map((r) => r.thread_id));
+}
+
 /**
  * Return every user with a `read_positions` row for `roomId`. This is
  * exactly the set the materializer's unread-count bump touched (see

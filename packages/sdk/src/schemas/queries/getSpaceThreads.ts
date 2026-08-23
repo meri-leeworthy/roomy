@@ -34,6 +34,13 @@ export const Thread = type({
   "channel?": "string",
   "channelName?": "string",
   "unreadCount?": "number",
+  /**
+   * Honest unread flag for the threads view: true when the thread has
+   * messages the user hasn't read, including threads they haven't engaged
+   * with (no read_positions row). UI badges only count engaged threads;
+   * this field is what the threads view renders.
+   */
+  "unread?": "boolean",
   activity: ThreadActivity,
 });
 

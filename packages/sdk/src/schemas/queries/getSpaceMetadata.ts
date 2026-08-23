@@ -65,6 +65,10 @@ export const Response = type({
   joinPolicy: JoinPolicy,
   isMember: "boolean",
   isAdmin: "boolean",
+  /** Number of channels with unread messages (sidebar-visible rooms only). */
+  unreadRoomCount: "number",
+  /** Number of engaged threads with unread messages. */
+  unreadThreadCount: "number",
   sidebar: {
     categories: SidebarCategory.array(),
     orphans: SidebarChannel.array(),

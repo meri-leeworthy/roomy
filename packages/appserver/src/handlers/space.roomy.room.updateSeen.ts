@@ -169,6 +169,19 @@ export const updateSeenHandler: ProcedureHandler<UpdateSeenBody, void> = async (
         },
       },
     ];
+    // Reading a thread changes the parent channel's unreadThreadCount (the
+    // Threads-tab badge on the channel page) — invalidate the channel's
+    // metadata too. `access.parentChannelId` is null for channels.
+    if (access.parentChannelId) {
+      signals.push({
+        kind: "queryInvalidation",
+        signal: {
+          nsid: "space.roomy.room.getMetadata" as QueryNsid,
+          params: { roomId: access.parentChannelId },
+          affectedUser: userDid,
+        },
+      });
+    }
     router.emit(signals);
   }
 };

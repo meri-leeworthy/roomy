@@ -25,6 +25,7 @@ describe("schemas/queries", () => {
           id: "01H000000000000000000000XX",
           name: "Roomy Dev",
           unreadCount: 0,
+          unreadRoomCount: 0,
           isMember: true,
           isAdmin: false,
           roleIds: [],
@@ -41,6 +42,8 @@ describe("schemas/queries", () => {
       joinPolicy: { allowPublicJoin: true, allowMemberInvites: false },
       isMember: true,
       isAdmin: false,
+      unreadRoomCount: 0,
+      unreadThreadCount: 0,
       sidebar: {
         categories: [
           {
@@ -141,6 +144,7 @@ describe("schemas/queries", () => {
       canWrite: true,
       lastRead: "2026-05-17T00:00:00.000Z",
       unreadCount: 3,
+      unreadThreadCount: 0,
       recentThreads: [
         {
           id: "01T0000000000000000000000X",

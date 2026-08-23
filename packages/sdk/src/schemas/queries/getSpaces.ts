@@ -18,6 +18,8 @@ export const Space = type({
   "description?": "string",
   "handle?": "string",
   unreadCount: "number",
+  /** Number of rooms (channels + engaged threads) with unread messages. */
+  unreadRoomCount: "number",
   isMember: "boolean",
   isAdmin: "boolean",
   roleIds: "string[]",

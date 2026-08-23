@@ -13,7 +13,7 @@
 import type { DbLike } from "../db/types.ts";
 import type { StreamDid, UserDid } from "@roomy-space/sdk";
 import { openSpaceDb } from "../db/db.ts";
-import { getSpaceUnreadCount } from "./readPositions.ts";
+import { getSpaceUnreadStats } from "./readPositions.ts";
 import { selectUserSpaces } from "./userSpaceMembership.ts";
 
 /**
@@ -41,6 +41,8 @@ export interface SpaceRow {
   description?: string;
   handle?: string;
   unreadCount: number;
+  /** Number of rooms (channels + engaged threads) with unread messages. */
+  unreadRoomCount: number;
   isMember: boolean;
   isAdmin: boolean;
   roleIds: string[];
@@ -77,10 +79,14 @@ export async function selectJoinedSpaces(
       // Left spaces are always included (isMember/isAdmin false). Joined
       // spaces require a member/admin edge (real membership truth).
       if (!isLeft && !row.is_member && !row.is_admin) return null;
-      const unreadCount = await getSpaceUnreadCount(readStateDb, spaceDb, userDid, r.space_did);
+      const stats = await getSpaceUnreadStats(readStateDb, spaceDb, userDid, r.space_did);
       const space: SpaceRow = {
         id: r.space_did,
-        unreadCount,
+        unreadCount: stats.unreadCount,
+        // Home cards show "rooms with unreads" — channels + engaged threads
+        // (the spec's "homepage counts only count channels and active
+        // threads"). The split lives on space.getMetadata for the toggles.
+        unreadRoomCount: stats.unreadRoomCount + stats.unreadThreadCount,
         // A left space is never a member/admin, regardless of any stale
         // per-space member/admin edge (leaving persists those edges).
         isMember: isLeft ? false : !!row.is_member,
