@@ -131,6 +131,46 @@ describe("selectMessages system messages", () => {
     expect(m.content).toBe(`[@alice.bsky.social](/user/${USER}) joined the space.`);
   });
 
+  test("an empty display name (Bluesky displayName:'') falls back to the handle", async () => {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    const msgId = newUlid();
+
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [STREAM, STREAM]);
+    await db.run(
+      "insert into entities (id, stream_id, room) values (?, ?, ?)",
+      [msgId, STREAM, roomId],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      msgId,
+      STREAM,
+    ]);
+    const body = `[@${USER}](/user/${USER}) joined the space.`;
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit) values (?, 'text/markdown', ?, ?)",
+      [msgId, Buffer.from(body), msgId],
+    );
+
+    await seedGlobalProfile(STREAM, null, "Test Space");
+    // The Bluesky appview returns displayName:"" for users without one — the
+    // empty string must NOT win over the handle (regression: raw DID label).
+    await seedGlobalProfile(USER, "alice.bsky.social", "");
+
+    const { messages } = await selectMessages(db, {
+      kind: "room",
+      roomId,
+      limit: 50,
+      cursor: null,
+    });
+
+    expect(messages.length).toBe(1);
+    const m = messages[0]!;
+    expect(m.system).toBe(true);
+    expect(m.content).toBe(`[@alice.bsky.social](/user/${USER}) joined the space.`);
+    // The raw DID must never appear as the visible link label.
+    expect(m.content).not.toContain(`[@${USER}]`);
+  });
+
   test("user-authored messages are not flagged system and are not rewritten", async () => {
     const db = freshSpaceDb();
     const roomId = newUlid();

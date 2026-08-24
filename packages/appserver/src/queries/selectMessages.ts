@@ -574,7 +574,11 @@ async function resolveSystemMessageNames(messages: MessageDto[]): Promise<void> 
         // Only rewrite the deterministic DID label (label === DID path); leave
         // any pre-existing baked handle or user-authored content untouched.
         if (!p || label !== didPath) return whole;
-        const rendered = p.name ?? (p.handle ? `@${p.handle}` : null);
+        // Treat empty/whitespace names as absent: the Bluesky appview returns
+        // displayName:"" for users without one, and "" would win over the
+        // handle (and then fail the !rendered guard, bailing to the raw DID).
+        const name = p.name?.trim() ? p.name : null;
+        const rendered = name ?? (p.handle ? `@${p.handle}` : null);
         if (!rendered) return whole;
         return `[${rendered}]${whole.slice(whole.indexOf("("))}`;
       },
