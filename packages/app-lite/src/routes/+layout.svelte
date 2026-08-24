@@ -6,8 +6,11 @@
   import { queryClient } from "$lib/client";
   import { auth, init, updateProfile } from "$lib/auth.svelte";
   import { installPushDebug } from "$lib/push-debug";
-  import { installPushSubscriptionChangeListener } from "$lib/push.svelte";
   import { preloadSpaceSidebars } from "$lib/preload";
+  import {
+    installNotificationNavigateListener,
+    installPushSubscriptionChangeListener,
+  } from "$lib/push.svelte";
   import { startSync, stopSync } from "$lib/sync.svelte";
   import { restoreScrollPositionsFromStorage, saveScrollPositionsToStorage } from "$lib/components/chat/scroll-position.svelte";
   import {
@@ -51,6 +54,7 @@
     init();
     installPushDebug();
     installPushSubscriptionChangeListener();
+    installNotificationNavigateListener();
     restoreScrollPositionsFromStorage();
 
     // Background data preloading: once auth settles, prefetch the sidebar

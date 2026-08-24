@@ -20,6 +20,7 @@
  */
 
 import { px, auth } from "$lib/auth.svelte";
+import { goto } from "$app/navigation";
 import { registerPushSubscription, unregisterPushSubscription } from "$lib/mutations/push-subscription";
 
 /**
@@ -319,6 +320,25 @@ export function installPushSubscriptionChangeListener(): () => void {
       // The login-time subscribeIfAlreadyPermitted will retry on next session.
       console.warn("[push] re-register of rotated subscription failed:", e);
     }
+  };
+  navigator.serviceWorker.addEventListener("message", handler);
+  return () => navigator.serviceWorker.removeEventListener("message", handler);
+}
+
+/**
+ * Listen for `navigate` messages from the service worker (sent when the user
+ * clicks a push notification while an app tab is already open). The SW focuses
+ * the existing tab and posts the originating room's `spaceId`/`roomId`; this
+ * handler routes the tab into that room. Install once in the root layout.
+ */
+export function installNotificationNavigateListener(): () => void {
+  if (!supportsPush()) return () => {};
+  const handler = (event: MessageEvent) => {
+    const data = event.data as { type?: string; spaceId?: string; roomId?: string } | null;
+    if (data?.type !== "navigate") return;
+    const { spaceId, roomId } = data;
+    if (!spaceId || !roomId) return;
+    goto(`/${spaceId}/${roomId}`);
   };
   navigator.serviceWorker.addEventListener("message", handler);
   return () => navigator.serviceWorker.removeEventListener("message", handler);
