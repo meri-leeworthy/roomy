@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   install:
-    name: Install & build
+    name: Install
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,9 +37,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build SDK (dist needed by appserver tests + SDK smoke test)
-        run: pnpm turbo run build-lib
-
   test-sdk:
     name: Test SDK
     needs: install
@@ -58,6 +55,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Build SDK (dist needed by the smoke test)
+        run: pnpm turbo run build-lib
       - name: Test SDK
         run: pnpm --filter @roomy-space/sdk test:run
 
@@ -79,6 +78,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Build SDK (design depends on its dist)
+        run: pnpm turbo run build-lib
       - name: Test Design
         run: pnpm --filter @roomy/design test
 
@@ -104,8 +105,10 @@ jobs:
           bun-version-file: .bun-version
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Build SDK (appserver imports its dist)
+        run: pnpm turbo run build-lib
       - name: Test Appserver
-        run: bun test --cwd packages/appserver
+        run: bun test --cwd packages/appserver --isolate
 
   test-discord-bridge:
     name: Test Discord Bridge
@@ -129,6 +132,8 @@ jobs:
           bun-version-file: .bun-version
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Build SDK (discord-bridge imports its dist)
+        run: pnpm turbo run build-lib
       - name: Test Discord Bridge
         run: bun test --cwd packages/discord-bridge
 
@@ -150,6 +155,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Build SDK (typecheck resolves its dist types)
+        run: pnpm turbo run build-lib
       - name: Typecheck Appserver
         run: pnpm --filter @roomy/appserver typecheck
 
@@ -171,6 +178,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Build SDK (svelte-check resolves its dist types)
+        run: pnpm turbo run build-lib
       - name: Check App-lite
         run: pnpm --filter app-lite check
 
