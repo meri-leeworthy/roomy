@@ -74,6 +74,7 @@ import { startPushDispatcher, pushDispatcherStats, _resetPushDispatcher } from "
 import { schemas } from "@roomy-space/sdk";
 import { initHappyView, type HappyViewConfig } from "./happyview.ts";
 import { getArbiterConfig, type ArbiterConfig } from "./arbiter/config.ts";
+import type { GetProfilesFn } from "./materialization/profiles.ts";
 
 import { proxyBlob } from "./blob.ts";
 import {
@@ -113,6 +114,10 @@ export interface AppserverOptions {
    *  (`HAPPYVIEW_ENDPOINT` / `HAPPYVIEW_DID`). When `null`, HappyView is
    *  disabled and profile fetching uses Bluesky only. */
   happyView?: HappyViewConfig | null;
+  /** Custom profile fetcher for materialization. When set, replaces the
+   *  HappyView-first / Bluesky fallback pipeline entirely. Tests pass a
+   *  no-op stub to keep E2E runs hermetic (no api.bsky.app calls). */
+  getProfiles?: GetProfilesFn;
   /** Arbiter server config. When unset, reads from env (`ARBITER_URL` /
    *  `ARBITER_DID`). When `null`, the arbiter is disabled and new spaces are
    *  self-provisioned (legacy did:plc path). */
@@ -451,6 +456,7 @@ export async function createAppserver(
     invalidationRouter,
     appserverUrl: serviceEndpoint,
     happyView,
+    getProfiles: opts.getProfiles,
     arbiter,
     ownDid,
   });

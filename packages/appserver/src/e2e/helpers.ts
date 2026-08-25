@@ -25,7 +25,7 @@ import { closeDb, openDb } from "../db/db.ts";
 import { _resetRateLimit } from "../xrpc/rateLimit.ts";
 import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper, stopEmbedSweeper } from "../embed/sweeper.ts";
-import { _resetProfileStoreCache } from "../queries/profileStore.ts";
+import { _resetProfileStoreCache, _setTestGetProfiles } from "../queries/profileStore.ts";
 import { newUlid } from "@roomy-space/sdk";
 import type { Database } from "bun:sqlite";
 
@@ -62,6 +62,11 @@ export async function startAppserver(): Promise<E2eContext> {
   _resetHydrationInflight();
   _resetEmbedSweeper();
   _resetProfileStoreCache();
+  // Hermetic: without stubs, profile hydration falls back to live
+  // api.bsky.app fetches, which pile up under parallel load and blow the
+  // 5s per-test timeout. Tests don't assert on profile materialization, so
+  // no-op fetchers are safe.
+  _setTestGetProfiles(async () => []);
 
   // Open the singleton DB in-memory so handlers' internal openDb() resolves.
   const db = openDb({ path: ":memory:" }) as unknown as Database;
@@ -72,6 +77,11 @@ export async function startAppserver(): Promise<E2eContext> {
     dbPath: ":memory:",
     readStateDbPath: ":memory:",
     quiet: true,
+    // Keep E2E runs hermetic: without a stub, materialization falls back to
+    // live api.bsky.app profile fetches, which pile up under parallel load
+    // and blow the 5s per-test timeout. Tests don't assert on profile
+    // materialization, so a no-op fetcher is safe.
+    getProfiles: async () => [],
   });
 
   const baseUrl = `http://localhost:${handle.port}`;
@@ -103,6 +113,7 @@ export async function startAppserver(): Promise<E2eContext> {
     _resetHydrationInflight();
     _resetEmbedSweeper();
     _resetProfileStoreCache();
+    _setTestGetProfiles(null);
   });
 
   return { handle, baseUrl, authedFetch, anonFetch, db };
