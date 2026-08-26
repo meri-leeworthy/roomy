@@ -34,6 +34,7 @@ import {
   type RoomyProfileExtras,
 } from "./roomyProfile.ts";
 import type { HappyViewConfig } from "../happyview.ts";
+import { log } from "../log.ts";
 
 
 /**
@@ -75,7 +76,7 @@ export const defaultGetProfiles: GetProfilesFn = async (dids: UserDid[]) => {
           `https://api.bsky.app/xrpc/app.bsky.actor.getProfiles?${params.toString()}`,
         );
         if (!resp.ok) {
-          console.warn(
+          log.warn(
             `[materialize] defaultGetProfiles: bsky appview returned ${resp.status} for ${chunk.length} DIDs`,
           );
           continue;
@@ -88,7 +89,7 @@ export const defaultGetProfiles: GetProfilesFn = async (dids: UserDid[]) => {
         // backfill (profile still missing from the global store →
         // filterMissing returns them).
         const message = err instanceof Error ? err.message : String(err);
-        console.warn(
+        log.warn(
           `[materialize] defaultGetProfiles: chunk failed (${chunk.length} DIDs): ${message}`,
         );
       }
@@ -96,7 +97,7 @@ export const defaultGetProfiles: GetProfilesFn = async (dids: UserDid[]) => {
   } catch (err) {
     // Defensive outer guard for unexpected non-fetch errors.
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(
+    log.warn(
       `[materialize] defaultGetProfiles: aborted for ${dids.length} DIDs: ${message}`,
     );
   }

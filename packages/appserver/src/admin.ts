@@ -11,6 +11,7 @@
 
 import { XrpcError } from "./xrpc/errors.ts";
 import type { AuthCtx } from "./xrpc/types.ts";
+import { log } from "./log.ts";
 
 const RAW = process.env.APPSERVER_ADMIN_DIDS ?? "";
 
@@ -21,12 +22,12 @@ export const ADMIN_DIDS: ReadonlySet<string> = new Set(
 );
 
 if (ADMIN_DIDS.size === 0) {
-  console.warn(
+  log.warn(
     "[admin] APPSERVER_ADMIN_DIDS is unset; admin endpoints will reject all requests. " +
       "Set a comma-separated list of DIDs (e.g. did:plc:abc...,did:web:foo.bar) to allow access.",
   );
 } else {
-  console.info(
+  log.info(
     `[admin] APPSERVER_ADMIN_DIDS configured with ${ADMIN_DIDS.size} DID(s)`,
   );
 }

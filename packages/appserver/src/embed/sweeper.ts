@@ -217,7 +217,7 @@ export async function prioritiseLinksForRead(
     // getMessages/getMessage into a 500. Messages are the product; embed cards
     // are a secondary enhancement. The sweeper's idle poll picks these links
     // up regardless, so skipping the poke on a DB hiccup is harmless.
-    console.warn("[embed] prioritiseLinksForRead failed:", err);
+    log.warn("[embed] prioritiseLinksForRead failed:", err);
   }
 }
 
@@ -230,7 +230,7 @@ function markDbError(err: unknown): void {
   dbErrorCount = Math.min(dbErrorCount + 1, 8);
   const backoffMs = Math.min(60_000 * 2 ** (dbErrorCount - 1), 30 * 60_000);
   dbBackoffUntil = Date.now() + backoffMs;
-  console.warn(
+  log.warn(
     `[embed-sweeper] DB error (#${dbErrorCount}); backing off ${Math.round(backoffMs / 1000)}s:`,
     err,
   );
@@ -278,7 +278,7 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
     try {
       pending = await findPendingLinksForUrls(globalDb, priority);
     } catch (err) {
-      console.warn("[embed-sweeper] findPendingLinksForUrls failed:", err);
+      log.warn("[embed-sweeper] findPendingLinksForUrls failed:", err);
       markDbError(err);
       pending = [];
     }
@@ -307,7 +307,7 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
     } catch (err) {
       // A transient DB error shouldn't kill the loop. Back off so a
       // dead DB doesn't cause a tight fetch-and-fail cycle.
-      console.warn("[embed-sweeper] findPendingLinks failed:", err);
+      log.warn("[embed-sweeper] findPendingLinks failed:", err);
       markDbError(err);
     }
   }
@@ -551,7 +551,7 @@ async function emitEnrichmentInvalidation(
       )
       .all<{ messageId: string; roomId: string }>([...enrichedUrls]);
   } catch (err) {
-    console.warn("[embed-sweeper] room lookup failed:", err);
+    log.warn("[embed-sweeper] room lookup failed:", err);
     return;
   }
 
@@ -567,7 +567,7 @@ async function emitEnrichmentInvalidation(
       ids: [...messageIdToRoom.keys()],
     })).messages;
   } catch (err) {
-    console.warn("[embed-sweeper] selectMessages failed:", err);
+    log.warn("[embed-sweeper] selectMessages failed:", err);
     return;
   }
 

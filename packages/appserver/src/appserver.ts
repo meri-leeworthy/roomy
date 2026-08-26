@@ -80,6 +80,8 @@ import { getArbiterConfig, type ArbiterConfig } from "./arbiter/config.ts";
 import type { GetProfilesFn } from "./materialization/profiles.ts";
 
 import { proxyBlob } from "./blob.ts";
+import { log } from "./log.ts";
+import { resolveBuildId } from "./telemetry/build.ts";
 import {
   CACHEABLE_NSIDS,
   createQueryCacheFromEnv,
@@ -105,7 +107,7 @@ export interface AppserverOptions {
   dbPath?: string;
   /** Read-state DB path. Defaults to `dbPath("roomy-readstate.sqlite")` (under `DATA_DIR`). */
   readStateDbPath?: string;
-  /** Suppress the per-request console.log. Tests set this to quiet output. */
+  /** Suppress the per-request log.info lines. Tests set this to quiet output. */
   quiet?: boolean;
   /** Disable the background embed enrichment sweeper. Useful for tests that don't exercise embeds. */
   disableEmbedSweeper?: boolean;
@@ -458,7 +460,7 @@ export async function createAppserver(
     const cutoff = Date.now() - ACTIVE_WINDOW_MS;
     const purged = await purgeStaleThreadActivity(openReadStateDb(), cutoff);
     if (purged > 0) {
-      console.log(`[maintenance] purged ${purged} stale user_thread_activity rows`);
+      log.info(`[maintenance] purged ${purged} stale user_thread_activity rows`);
     }
   }, 60 * 60 * 1000);
   maintenanceTimer.unref();
@@ -525,7 +527,7 @@ export async function createAppserver(
         // requests are in flight; the rejection is expected and must not
         // surface as an unhandled error (bun exits 1 on those). The server
         // is being stopped anyway.
-        if (!quiet) console.log(`${req.method} ${new URL(req.url).pathname} → error during teardown: ${err instanceof Error ? err.message : String(err)}`);
+        if (!quiet) log.info(`${req.method} ${new URL(req.url).pathname} → error during teardown: ${err instanceof Error ? err.message : String(err)}`);
         return new Response("Service shutting down", { status: 503 });
       }
     },
@@ -552,6 +554,7 @@ export async function createAppserver(
             uptime: process.uptime(),
             did: ownDid,
             port,
+            build_id: resolveBuildId(),
           }),
           { headers: { "content-type": "application/json", ...corsHeaders } },
         );
@@ -605,7 +608,7 @@ export async function createAppserver(
         const did = decodeURIComponent(blobMatch[1]!);
         const cid = decodeURIComponent(blobMatch[2]!);
         const res = await proxyBlob(did, cid, req);
-        if (!quiet) console.log(`${req.method} ${url.pathname} → ${res.status}`);
+        if (!quiet) log.info(`${req.method} ${url.pathname} → ${res.status}`);
         for (const [k, v] of Object.entries(corsHeaders)) {
           res.headers.set(k, v);
         }
@@ -614,17 +617,17 @@ export async function createAppserver(
 
       const res = await router.fetch(req, server);
       if (res === undefined) {
-        if (!quiet) console.log(`${req.method} ${url.pathname} → [ws upgrade]`);
+        if (!quiet) log.info(`${req.method} ${url.pathname} → [ws upgrade]`);
         return undefined;
       }
-      if (!quiet) console.log(`${req.method} ${url.pathname} → ${res.status}`);
+      if (!quiet) log.info(`${req.method} ${url.pathname} → ${res.status}`);
       for (const [k, v] of Object.entries(corsHeaders)) {
         res.headers.set(k, v);
       }
       return res;
   }
 
-  if (!quiet) console.log(`Appserver listening on port ${port} (DID: ${ownDid})`);
+  if (!quiet) log.info(`Appserver listening on port ${port} (DID: ${ownDid})`);
 
   return {
     server,
@@ -640,34 +643,34 @@ export async function createAppserver(
         try {
           server.stop();
         } catch (e) {
-          console.error("appserver close: server.stop failed", e);
+          log.error("appserver close: server.stop failed", e);
         }
         try {
           clearInterval(maintenanceTimer);
           closeDb();
         } catch (e) {
-          console.error("appserver close: closeDb failed", e);
+          log.error("appserver close: closeDb failed", e);
         }
         try {
           _resetStreamManager();
         } catch (e) {
-          console.error("appserver close: _resetStreamManager failed", e);
+          log.error("appserver close: _resetStreamManager failed", e);
         }
         try {
           _resetPushDispatcher();
         } catch (e) {
-          console.error("appserver close: _resetPushDispatcher failed", e);
+          log.error("appserver close: _resetPushDispatcher failed", e);
         }
         try {
           if (cacheUnsub) cacheUnsub();
           if (queryCache) queryCache.clear();
         } catch (e) {
-          console.error("appserver close: query cache cleanup failed", e);
+          log.error("appserver close: query cache cleanup failed", e);
         }
         try {
           InvalidationRouter.resetInstance();
         } catch (e) {
-          console.error("appserver close: resetInvalidationRouter failed", e);
+          log.error("appserver close: resetInvalidationRouter failed", e);
         }
       });
     },

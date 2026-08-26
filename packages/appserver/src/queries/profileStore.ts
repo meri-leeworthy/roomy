@@ -39,6 +39,7 @@ import {
   insertProfilesWithExtras,
 } from "../materialization/profiles.ts";
 import type { UserDid } from "@roomy-space/sdk";
+import { log } from "../log.ts";
 
 export interface ProfileFields {
   name?: string;
@@ -241,7 +242,7 @@ async function hydrateMissingProfiles(
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(
+    log.warn(
       `[profileStore] on-demand hydration failed for ${dids.length} DIDs: ${message}`,
     );
   }

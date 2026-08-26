@@ -26,6 +26,7 @@ import { inferSignals } from "./inferSignals.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
 import { syncMentionsIndex } from "../queries/mentions.ts";
 import { openSpaceDb } from "../db/db.ts";
+import { log } from "../log.ts";
 
 export class Router implements IInvalidationRouter {
   readonly #listeners = new Set<InvalidationListener>();
@@ -85,7 +86,7 @@ export class Router implements IInvalidationRouter {
       try {
         listener(allSignals);
       } catch (err) {
-        console.error("[InvalidationRouter] listener threw:", err);
+        log.error("[InvalidationRouter] listener threw:", err);
       }
     }
   }
@@ -151,7 +152,7 @@ export class Router implements IInvalidationRouter {
       try {
         listener(signals);
       } catch (err) {
-        console.error("[InvalidationRouter] listener threw:", err);
+        log.error("[InvalidationRouter] listener threw:", err);
       }
     }
   }

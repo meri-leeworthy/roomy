@@ -24,6 +24,7 @@ import { decodeTime } from "ulidx";
 import { createStreamDid } from "./did.ts";
 import { provisionSpace } from "../arbiter/provision.ts";
 import type { ArbiterConfig } from "../arbiter/config.ts";
+import { log } from "../log.ts";
 
 /**
  * Singleton StreamManager — writes events directly to the events DB,
@@ -281,7 +282,7 @@ export class StreamManager {
           try {
             listener(streamDid, decodedEvents);
           } catch (err) {
-            console.error(
+            log.error(
               `StreamEventListener threw for ${streamDid}: ${err instanceof Error ? err.message : String(err)}`,
             );
           }

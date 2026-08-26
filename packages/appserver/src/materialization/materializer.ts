@@ -20,6 +20,7 @@ import type {
   StatementBundle,
   StatementBundleSuccess,
 } from "./types.ts";
+import { log } from "../log.ts";
 
 /** Run the SDK materialiser for a single event and wrap the result. */
 export function materialize(
@@ -32,7 +33,7 @@ export function materialize(
   // Check if we have a materializer for this event type before attempting
   const handler = getMaterializer(kind);
   if (!handler) {
-    console.warn(`[materialize] no materializer for event ${event.id} (kind: ${kind}) — skipping`);
+    log.warn(`[materialize] no materializer for event ${event.id} (kind: ${kind}) — skipping`);
     return {
       status: "error",
       eventId: event.id,
@@ -58,7 +59,7 @@ export function materialize(
     } satisfies StatementBundleSuccess;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[materialize] failed for event ${event.id} (${kind}): ${message}`);
+    log.error(`[materialize] failed for event ${event.id} (${kind}): ${message}`);
     return {
       status: "error",
       eventId: event.id,

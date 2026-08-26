@@ -12,6 +12,7 @@
 import type { DbLike } from "../db/types.ts";
 import { decodeTime, ulid } from "ulidx";
 import type { Event, StreamDid, Ulid } from "@roomy-space/sdk";
+import { log } from "../log.ts";
 
 /**
  * Set `entities.sort_idx` for a freshly-created message based on its canonical
@@ -108,7 +109,7 @@ export async function setMessageSortIdxByReorder(
     )
     .get<{ sort_idx: string }>(streamId, after);
   if (!before) {
-    console.warn(
+    log.warn(
       `[materialize] reorderMessage: 'after' entity ${after} not found for stream ${streamId}`,
     );
     return;
@@ -133,7 +134,7 @@ export async function setMessageSortIdxByReorder(
       next?.sort_idx as Ulid | undefined,
     );
   } catch (e) {
-    console.warn(
+    log.warn(
       `[materialize] reorderMessage: could not compute midpoint for ${messageId}:`,
       e,
     );

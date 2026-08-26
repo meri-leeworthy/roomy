@@ -335,7 +335,7 @@ export async function applyBatch(
                 reason: "apply",
                 message: `[globalDb] ${message}`,
               });
-              console.error(
+              log.error(
                 `[materialize] globalDb write failed for ${streamId} (per-space intact): ${message}`,
               );
             }

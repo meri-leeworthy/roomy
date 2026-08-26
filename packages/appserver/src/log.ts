@@ -1,5 +1,8 @@
 /**
- * Tiny leveled logger gated by the `LOG_LEVEL` env var.
+ * Structured leveled logger gated by the `LOG_LEVEL` env var.
+ *
+ * Emits one JSON object per line to stdout:
+ *   {ts, level, scope, msg, ...fields, error?, build_id, service}
  *
  * Why this exists: best-effort paths (embed fetch failures, per-DID backfill
  * progress, per-stream subscribe debug) can emit thousands of lines per
@@ -12,29 +15,130 @@
  * Levels (threshold inclusive): debug < info < warn < error. Default `info`.
  * Anything emitted at a level below the threshold is dropped silently.
  *
- * This is intentionally minimal — it wraps `console.*` so output format and
- * destinations are unchanged. It is NOT a structured logger; pair it with a
- * non-rate-limited log sink (Loki/Grafana) for production observability.
+ * Two sinks:
+ *   1. stdout — one JSON object per line (the format above).
+ *   2. Loki (optional) — when `ALLOY_URL` is set, records are batched and
+ *      POSTed to the Alloy Loki push API (see `./telemetry/loki.ts`). The
+ *      Loki sink never throws or blocks; it is disabled when `ALLOY_URL` is
+ *      unset (dev default: stdout only).
+ *
+ * Call-site convention: `log.info(scope, msg, fields?)` or
+ * `log.info("[scope] msg", err?)`. A leading `[scope]` prefix in the first
+ * string becomes the `scope` field; a trailing `Error` becomes `error`.
  */
+
+import { createLokiSink, type LokiSink } from "./telemetry/loki.ts";
+import { resolveBuildId } from "./telemetry/build.ts";
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 } as const;
 export type LogLevel = keyof typeof LEVELS;
+
+const SERVICE = "appserver";
 
 function resolveLevel(): LogLevel {
   const raw = (process.env.LOG_LEVEL ?? "info").toLowerCase();
   return raw in LEVELS ? (raw as LogLevel) : "info";
 }
 
-const threshold = LEVELS[resolveLevel()];
+interface ParsedArgs {
+  scope: string;
+  msg: string;
+  fields: Record<string, unknown>;
+  error?: Error;
+}
 
-function emit(level: LogLevel, sink: (...args: unknown[]) => void, args: unknown[]): void {
-  if (LEVELS[level] >= threshold) sink(...args);
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseArgs(args: unknown[]): ParsedArgs {
+  let scope = "app";
+  let msg = "";
+  const fields: Record<string, unknown> = {};
+  let error: Error | undefined;
+
+  const rest = [...args];
+  const first = rest.shift();
+  if (typeof first === "string") {
+    const bracket = first.match(/^\[([^\]]+)\]\s*(.*)$/s);
+    if (bracket) {
+      scope = bracket[1]!;
+      msg = bracket[2] ?? "";
+    } else if (rest.length > 0 && !(rest[0] instanceof Error)) {
+      // `log.info(scope, msg, fields?)` — but `log.error("msg", err)` keeps
+      // the string as the message.
+      scope = first;
+    } else {
+      msg = first;
+    }
+  } else if (first !== undefined) {
+    rest.unshift(first);
+  }
+
+  for (const arg of rest) {
+    if (arg instanceof Error) {
+      error = arg;
+    } else if (typeof arg === "string") {
+      msg = msg.length === 0 ? arg : `${msg} ${arg}`;
+    } else if (isPlainObject(arg)) {
+      Object.assign(fields, arg);
+    } else if (arg !== undefined) {
+      msg = msg.length === 0 ? String(arg) : `${msg} ${String(arg)}`;
+    }
+  }
+  return { scope, msg, fields, error };
+}
+
+function emit(level: LogLevel, args: unknown[]): void {
+  if (LEVELS[level] < LEVELS[resolveLevel()]) return;
+
+  const { scope, msg, fields, error } = parseArgs(args);
+  const record: Record<string, unknown> = {
+    ts: new Date().toISOString(),
+    level,
+    scope,
+    msg,
+    ...fields,
+    build_id: resolveBuildId(),
+    service: SERVICE,
+  };
+  if (error) {
+    record.error = {
+      message: error.message,
+      stack: error.stack,
+    };
+  }
+  const line = JSON.stringify(record);
+
+  const sink =
+    level === "error" ? console.error : level === "warn" ? console.warn : console.info;
+  sink(line);
+
+  const labels: Record<string, string> = {
+    service_name: SERVICE,
+    level,
+    scope,
+  };
+  const replicaId = process.env.RAILWAY_REPLICA_ID;
+  if (replicaId) labels.replica_id = replicaId;
+  const railwayServiceName = process.env.RAILWAY_SERVICE_NAME;
+  if (railwayServiceName) labels.railway_service_name = railwayServiceName;
+
+  lokiSink?.push({ line, labels, ts: Date.now() });
+}
+
+let lokiSink: LokiSink | null = createLokiSink();
+
+/** Test-only: replace the Loki sink (e.g. with a mock or a sink pointed at a
+ *  mock HTTP server). Pass `null` to disable. */
+export function _setLokiSink(sink: LokiSink | null): void {
+  lokiSink?.stop();
+  lokiSink = sink;
 }
 
 export const log = {
-  debug: (...args: unknown[]): void => emit("debug", console.log, args),
-  info: (...args: unknown[]): void => emit("info", console.info, args),
-  warn: (...args: unknown[]): void => emit("warn", console.warn, args),
-  error: (...args: unknown[]): void => emit("error", console.error, args),
+  debug: (...args: unknown[]): void => emit("debug", args),
+  info: (...args: unknown[]): void => emit("info", args),
+  warn: (...args: unknown[]): void => emit("warn", args),
+  error: (...args: unknown[]): void => emit("error", args),
 };
-

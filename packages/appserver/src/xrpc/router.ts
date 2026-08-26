@@ -16,6 +16,7 @@ import {
   rateLimitResponse,
 } from "./rateLimit.ts";
 import type { QueryCache } from "../cache/queryCache.ts";
+import { log } from "../log.ts";
 
 function validateOrReject(
   schema: import("arktype").Type<any>,
@@ -312,9 +313,9 @@ export class XrpcRouter {
           return undefined;
         }
       } catch (err) {
-        console.error(`[xrpc] ${req.method} ${url.pathname} failed:`, err instanceof Error ? err.message : err);
+        log.error(`[xrpc] ${req.method} ${url.pathname} failed:`, err instanceof Error ? err.message : err);
         if (err instanceof Error && err.stack) {
-          console.error(err.stack);
+          log.error(err.stack);
         }
         return toErrorResponse(err);
       }

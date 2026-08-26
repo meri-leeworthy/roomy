@@ -25,6 +25,7 @@ import type {
   QueryNsid,
 } from "../invalidation/types.ts";
 import { messageFrame } from "../xrpc/frame.ts";
+import { log } from "../log.ts";
 
 // ─── Topic helpers ───────────────────────────────────────────────────────
 
@@ -548,7 +549,7 @@ export class SyncManager {
     // delivered once the cursor catches up.
     if (!alreadyBackfilling) {
       this.#backfillStream(state, streamDid).catch((err) => {
-        console.error(
+        log.error(
           `Stream backfill failed for ${streamDid}: ${err instanceof Error ? err.message : String(err)}`,
         );
       });

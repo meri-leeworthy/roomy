@@ -18,6 +18,7 @@ import type { ProfileViewDetailed } from "@atproto/api/dist/client/types/app/bsk
 import { resolvePdsEndpoint } from "../identity.ts";
 import type { UserDid } from "@roomy-space/sdk";
 import type { HappyViewConfig } from "../happyview.ts";
+import { log } from "../log.ts";
 
 /** Shape of a `space.roomy.user.profile` record on the PDS. */
 export interface RoomyProfileRecord {
@@ -115,7 +116,7 @@ export async function getProfilesFromHappyView(
         { headers },
       );
       if (!resp.ok) {
-        console.warn(
+        log.warn(
           `[materialize] HappyView returned ${resp.status} for ${chunk.length} DIDs`,
         );
         continue;
@@ -128,7 +129,7 @@ export async function getProfilesFromHappyView(
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.warn(
+      log.warn(
         `[materialize] HappyView chunk failed (${chunk.length} DIDs): ${message}`,
       );
     }
@@ -164,7 +165,7 @@ export async function getProfileFromHappyView(
       { headers },
     );
     if (!resp.ok) {
-      console.warn(
+      log.warn(
         `[materialize] HappyView returned ${resp.status} for DID ${did}`,
       );
       return null;
@@ -174,7 +175,7 @@ export async function getProfileFromHappyView(
     return data.profiles[0]!;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[materialize] HappyView single-DID fetch failed: ${message}`);
+    log.warn(`[materialize] HappyView single-DID fetch failed: ${message}`);
     return null;
   }
 }
