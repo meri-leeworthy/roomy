@@ -109,7 +109,7 @@ describe("space.roomy.search.messages", () => {
     // A second, restricted room (default_access = none) with a message.
     const secretRoom = await sendRoom(ctx, "secret");
     await sendMessage(ctx, secretRoom, "secret pineapple recipe");
-    await spaceDb(ctx.db as never, SPACE).run(
+    await spaceDb(ctx.db, SPACE).run(
       "update comp_room set default_access = 'none' where entity = ?",
       [secretRoom],
     );
