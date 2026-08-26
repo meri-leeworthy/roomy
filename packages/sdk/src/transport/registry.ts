@@ -97,6 +97,10 @@ export const QUERY_SCHEMAS = {
     params: queries.getMentions.Params,
     response: queries.getMentions.Response,
   },
+  "space.roomy.search.messages": {
+    params: queries.searchMessages.Params,
+    response: queries.searchMessages.Response,
+  },
   "space.roomy.embed.getLinkMetadata": {
     params: queries.getLinkMetadata.Params,
     response: queries.getLinkMetadata.Response,

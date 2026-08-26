@@ -24,6 +24,7 @@ export * as getPreferences from "./getPreferences";
 export * as getFlags from "./getFlags";
 export * as getProfile from "./getProfile";
 export * as getMentions from "./getMentions";
+export * as searchMessages from "./searchMessages";
 export * as getProfiles from "./getProfiles";
 export * as getLinkMetadata from "./getLinkMetadata";
 export * as getFederationRequests from "./getFederationRequests";

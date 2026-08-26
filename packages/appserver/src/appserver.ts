@@ -57,6 +57,7 @@ import { getMessageHandler } from "./handlers/space.roomy.message.getMessage.ts"
 import { getReactionsHandler } from "./handlers/space.roomy.message.getReactions.ts";
 import { getProfileHandler } from "./handlers/space.roomy.user.getProfile.ts";
 import { getMentionsHandler } from "./handlers/space.roomy.mention.getMentions.ts";
+import { searchMessagesHandler } from "./handlers/space.roomy.search.messages.ts";
 import { getLinkMetadataHandler } from "./handlers/space.roomy.embed.getLinkMetadata.ts";
 import { updateSeenHandler } from "./handlers/space.roomy.room.updateSeen.ts";
 import { sendEventsHandler } from "./handlers/space.roomy.space.sendEvents.ts";
@@ -343,6 +344,11 @@ export function buildRouter(
       handler: getMentionsHandler,
       paramsSchema: schemas.queries.getMentions.Params,
       outputSchema: schemas.queries.getMentions.Response,
+    })
+    .query("space.roomy.search.messages", {
+      handler: searchMessagesHandler,
+      paramsSchema: schemas.queries.searchMessages.Params,
+      outputSchema: schemas.queries.searchMessages.Response,
     })
     .query("space.roomy.embed.getLinkMetadata", {
       handler: getLinkMetadataHandler,

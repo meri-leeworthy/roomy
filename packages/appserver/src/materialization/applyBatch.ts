@@ -44,6 +44,7 @@ import {
   type MembershipIntent,
 } from "../queries/userSpaceMembership.ts";
 import { decodeContent, decodeRichTextBody } from "../db/content.ts";
+import { indexMessageFts, removeMessageFts } from "../queries/messageSearch.ts";
 import { RICHTEXT_MIME, extractFacetUrls } from "@roomy-space/sdk";
 import { decodeTime, ulid } from "ulidx";
 
@@ -450,6 +451,11 @@ async function applyChunkSideEffects(
       };
       await applyBundle(db, bundle, { isBackfill, streamId }, globalDb, openReadStateDb());
 
+      // Full-text search index (Phase 1): index the message's plaintext so
+      // space.roomy.search.messages can find it. Runs after the chunk's
+      // statements so the entity/comp_content/author rows exist.
+      await indexMessageFts(db, e.event.id);
+
       const body = (e.event as Record<string, unknown>).body as
         | { mimeType?: string; data?: { buf: Uint8Array } }
         | undefined;
@@ -493,6 +499,19 @@ async function applyChunkSideEffects(
             );
           }
         }
+      }
+    } else if (e.event.$type === "space.roomy.message.editMessage.v0") {
+      // Re-index the edited message: the chunk's statements updated
+      // comp_content, so re-derive the plaintext and replace the FTS row.
+      const messageId = (e.event as Record<string, unknown>).messageId as string | undefined;
+      if (messageId) {
+        await indexMessageFts(db, messageId);
+      }
+    } else if (e.event.$type === "space.roomy.message.deleteMessage.v0") {
+      // Drop the deleted message from the FTS index.
+      const messageId = (e.event as Record<string, unknown>).messageId as string | undefined;
+      if (messageId) {
+        await removeMessageFts(db, messageId);
       }
     }
   }
