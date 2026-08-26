@@ -431,18 +431,38 @@ type AsyncLike = {
   run(sql: string, ...params: unknown[]): Promise<unknown>;
 };
 
+/**
+ * Seed writes are fire-and-forget: the test body runs synchronously and the
+ * `afterEach` teardown (`closeDb()`) can terminate the worker while seed
+ * requests are still in flight, rejecting their promises. A dropped promise
+ * surfaces as an unhandled rejection and fails the whole run (bun exits 1).
+ * Attach a no-op catch so the rejection is considered handled — awaited
+ * callers still observe it via the returned promise.
+ */
+function swallowDropped<T>(p: Promise<T>): Promise<T> {
+  p.catch(() => {});
+  return p;
+}
+
+function wrapAsyncLike(inner: AsyncLike): AsyncLike {
+  return {
+    query: (sql) => inner.query(sql),
+    run: (sql, ...params) => swallowDropped(inner.run(sql, ...params)),
+  };
+}
+
 /** Route a write to a space's per-space DB (entities, comp_room, edges). */
 export function spaceDb(db: Database, spaceDid: string): AsyncLike {
-  return (db as unknown as RoutedDb).forSpace(spaceDid);
+  return wrapAsyncLike((db as unknown as RoutedDb).forSpace(spaceDid));
 }
 
 function globalDb(db: Database): AsyncLike {
-  return (db as unknown as RoutedDb).global();
+  return wrapAsyncLike((db as unknown as RoutedDb).global());
 }
 
 /** Route a write to the read-state DB (read_positions, user_thread_activity). */
 export function readStateDb(db: Database): AsyncLike {
-  return (db as unknown as RoutedDb).readState();
+  return wrapAsyncLike((db as unknown as RoutedDb).readState());
 }
 
 // ─── Full-path materialization helper ────────────────────────────────────

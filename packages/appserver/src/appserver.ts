@@ -500,11 +500,26 @@ export async function createAppserver(
     port,
     idleTimeout: 255,
     fetch: async (req, server) => {
-      if (req.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders });
+      try {
+        return await handleFetch(req, server);
+      } catch (err) {
+        // During teardown (tests) the DB workers are terminated while
+        // requests are in flight; the rejection is expected and must not
+        // surface as an unhandled error (bun exits 1 on those). The server
+        // is being stopped anyway.
+        if (!quiet) console.log(`${req.method} ${new URL(req.url).pathname} → error during teardown: ${err instanceof Error ? err.message : String(err)}`);
+        return new Response("Service shutting down", { status: 503 });
       }
+    },
+    websocket: router.websocket,
+  });
 
-      const url = new URL(req.url);
+  async function handleFetch(req: Request, server: Server<WsData>): Promise<Response | undefined> {
+    if (req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+
+    const url = new URL(req.url);
 
       if (url.pathname === "/.well-known/did.json") {
         return new Response(JSON.stringify(DID_DOCUMENT), {
@@ -589,9 +604,7 @@ export async function createAppserver(
         res.headers.set(k, v);
       }
       return res;
-    },
-    websocket: router.websocket,
-  });
+  }
 
   if (!quiet) console.log(`Appserver listening on port ${port} (DID: ${ownDid})`);
 
@@ -602,8 +615,12 @@ export async function createAppserver(
     queryCache,
     close(): Promise<void> {
       return stopEmbedSweeper().finally(() => {
+        // Graceful stop: wait for in-flight requests to complete so their
+        // DB awaits resolve (or reject into the fetch guard's catch) before
+        // the workers are terminated. A forced stop kills the handlers
+        // mid-await, leaving their rejections unhandled (bun exits 1).
         try {
-          server.stop(true);
+          server.stop();
         } catch (e) {
           console.error("appserver close: server.stop failed", e);
         }
