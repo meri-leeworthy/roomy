@@ -99,7 +99,12 @@
       authorAvatar?: string;
       timestamp: string;
       replyTo?: string;
-      forwardedFrom?: &#123; name: string; roomId: string &#125;;
+      forwardedFrom?: &#123;
+        messageId: string;
+        name: string;
+        roomId: string;
+        message?: Message; // fully denormalised original (nested forwards chain)
+      &#125;;
       reactions: Array&lt;&#123; emoji: string; count: number; myReactionId?: string &#125;&gt;;
       media: Array&lt;&#123; url: string; type: string; alt?: string; width?: number; height?: number; blurhash?: string; size?: number; length?: number; name?: string &#125;&gt;;
       linkEmbeds: Array&lt;&#123; url: string; embed?: object &#125;&gt;;

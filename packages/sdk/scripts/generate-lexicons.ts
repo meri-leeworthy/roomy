@@ -78,18 +78,81 @@ interface LexObjDef {
   properties: Record<string, LexSlot>;
 }
 
+/** A named array definition (emitted for `$defs` array entries). */
+interface LexArrayDef {
+  type: "array";
+  items: LexSlot;
+}
+
+/** Any named def that can live in a lexicon's `defs`. */
+type LexDef = LexObjDef | LexArrayDef;
+
 /** Accumulator for named defs extracted during schema conversion. */
 class DefCollector {
-  readonly defs = new Map<string, LexObjDef>();
+  readonly defs = new Map<string, LexDef>();
   readonly #usedNames = new Set<string>();
+  /**
+   * JSON-Schema `$defs` entries (from arktype `scope` types), keyed by their
+   * `$defs` name. Ref resolution looks up entries here.
+   */
+  #rawDefs: Record<string, unknown> | null = null;
+  /**
+   * JSON-Schema `$defs` key → lexicon def name. Recursive schemas
+   * (`Message` ↔ `ForwardedFrom`) are emitted as `$ref`s; this map lets a
+   * ref resolve to the same lexicon def every time it appears, so the
+   * recursion terminates instead of re-extracting the def at every
+   * reference site.
+   */
+  readonly #defKeyToName = new Map<string, string>();
 
   constructor(private nsid: string) {}
+
+  /** Point the collector at the source document's `$defs` (root schema). */
+  setRawDefs(defs: unknown): void {
+    if (typeof defs === "object" && defs !== null) {
+      this.#rawDefs = defs as Record<string, unknown>;
+    }
+  }
+
+  /** Resolve a `$defs` key to its JSON-Schema entry, if known. */
+  rawDef(defKey: string): Record<string, unknown> | null {
+    const entry = this.#rawDefs?.[defKey];
+    return typeof entry === "object" && entry !== null
+      ? (entry as Record<string, unknown>)
+      : null;
+  }
+
+  /** Whether a `$defs` key already has a reserved lexicon def name. */
+  nameForDefKey(defKey: string): string | undefined {
+    return this.#defKeyToName.get(defKey);
+  }
+
+  /**
+   * Reserve a lexicon def name for a `$defs` key. The name is registered
+   * before the body converts so recursive refs back to this key resolve.
+   * Call `complete` with the converted body afterwards.
+   */
+  reserve(defKey: string, baseName: string): string {
+    let name = baseName;
+    let suffix = 2;
+    while (this.#usedNames.has(name)) {
+      name = `${baseName}${suffix++}`;
+    }
+    this.#usedNames.add(name);
+    this.#defKeyToName.set(defKey, name);
+    return name;
+  }
+
+  /** Fill in the def body after conversion. */
+  complete(name: string, def: LexDef): void {
+    this.defs.set(name, def);
+  }
 
   /**
    * Register a named def. If the name collides, appends a numeric suffix.
    * Returns the final def name (without the `#` prefix).
    */
-  register(baseName: string, def: LexObjDef): string {
+  register(baseName: string, def: LexDef): string {
     let name = baseName;
     let suffix = 2;
     while (this.#usedNames.has(name)) {
@@ -143,6 +206,47 @@ function convertSlot(
     throw new Error(
       `${nsid}: ${path} → unsupported anyOf (only T|null is supported), got ${JSON.stringify(s["anyOf"])}`,
     );
+  }
+
+  // Recursive/repeated type: a `$ref` into the JSON Schema `$defs` (emitted
+  // by arktype `scope` types). Resolves to a previously-extracted lexicon
+  // def name; the first sighting extracts the def body immediately (the name
+  // is registered up front, so cycles terminate).
+  if (typeof s["$ref"] === "string") {
+    const ref = s["$ref"] as string;
+    const match = /^#\/\$defs\/(.+)$/.exec(ref);
+    if (!match || !match[1]) {
+      throw new Error(`${nsid}: ${path} → unsupported $ref: ${ref}`);
+    }
+    const defKey = match[1];
+    const existing = collector.nameForDefKey(defKey);
+    if (existing) {
+      return { type: "ref", ref: `#${existing}` };
+    }
+    const rawDef = collector.rawDef(defKey);
+    if (!rawDef) {
+      throw new Error(`${nsid}: ${path} → unresolved $defs entry ${defKey}`);
+    }
+    // Array defs are inlined at the reference site (items must still be
+    // refs) — matching how the non-recursive generator handled arrays — so
+    // only the item object gets a named def. Object defs are extracted as
+    // named defs keyed by their first reference site.
+    if (rawDef["type"] === "array") {
+      return {
+        type: "array",
+        items: convertSlot(rawDef["items"], nsid, `${path}[]`, collector),
+      };
+    }
+    if (rawDef["type"] !== "object") {
+      throw new Error(
+        `${nsid}: ${path} → $defs entry ${defKey} must be an object or array, got ${String(rawDef["type"])}`,
+      );
+    }
+    const raw = path.split(".").pop() || "obj";
+    const baseName = raw.replace(/(\[\]|\|nullable)+$/, "");
+    const name = collector.reserve(defKey, baseName);
+    collector.complete(name, convertObjectDef(rawDef, nsid, `${path}.${defKey}`, collector));
+    return { type: "ref", ref: `#${name}` };
   }
 
   // String literal unions ('read' | 'readwrite') emit { enum: [...] } without a
@@ -237,6 +341,33 @@ function convertObjectDef(
     ...(outNullable.length > 0 ? { nullable: outNullable } : {}),
     properties: outProps,
   };
+}
+
+/**
+ * Convert a JSON Schema `$defs` entry (an object or an array of objects,
+ * from arktype `scope` types) into a lexicon def. Arrays resolve to a
+ * `{ type: "array", items: … }` def with the item type extracted as a named
+ * def. `baseName` seeds the def's lexicon name.
+ */
+function convertRefDef(
+  defSchema: Record<string, unknown>,
+  nsid: string,
+  path: string,
+  collector: DefCollector,
+): LexObjDef | { type: "array"; items: LexSlot } {
+  const t = defSchema["type"];
+  if (t === "object") {
+    return convertObjectDef(defSchema, nsid, path, collector);
+  }
+  if (t === "array") {
+    return {
+      type: "array",
+      items: convertSlot(defSchema["items"], nsid, `${path}[]`, collector),
+    };
+  }
+  throw new Error(
+    `${nsid}: ${path} → $defs entry must be an object or array, got ${String(t)}`,
+  );
 }
 
 /** Check if a JSON Schema node represents a nullable type. */
@@ -342,23 +473,49 @@ function lexBodySchema(
   arkType: ArkLike,
   nsid: string,
   kind: string,
-): { schema: unknown; defs: Record<string, LexObjDef> } {
+): { schema: unknown; defs: Record<string, LexDef> } {
   const js = arkType.toJsonSchema!() as Record<string, unknown>;
   const collector = new DefCollector(nsid);
+  collector.setRawDefs(js["$defs"]);
 
   // If the top-level is an object, we can inline it in the schema
   // (atproto allows this) — but its properties must use refs for nested objects.
   if (js["type"] === "object") {
     const def = convertObjectDef(js, nsid, kind, collector);
-    const additionalDefs: Record<string, LexObjDef> = {};
+    const additionalDefs: Record<string, LexDef> = {};
     for (const [name, d] of collector.defs) {
       additionalDefs[name] = d;
     }
     return { schema: def, defs: additionalDefs };
   }
 
+  // A `$ref` root (e.g. a recursive `Message` type, or a wrapper whose top
+  // level is a ref): resolve the named def and reference it from the output
+  // schema.
+  if (typeof js["$ref"] === "string") {
+    const match = /^#\/\$defs\/(.+)$/.exec(js["$ref"] as string);
+    if (!match || !match[1]) {
+      throw new Error(`${nsid}: ${kind} → unsupported root $ref: ${js["$ref"]}`);
+    }
+    const defKey = match[1];
+    const rawDef = collector.rawDef(defKey);
+    if (!rawDef) {
+      throw new Error(`${nsid}: ${kind} → unresolved $defs entry ${defKey}`);
+    }
+    const baseName = defKey
+      .replace(/^intersection\d+$/, kind)
+      .replace(/^type\d+$/, kind);
+    const name = collector.reserve(defKey, baseName);
+    collector.complete(name, convertRefDef(rawDef, nsid, `${kind}.${defKey}`, collector));
+    const additionalDefs: Record<string, LexDef> = {};
+    for (const [n, d] of collector.defs) {
+      additionalDefs[n] = d;
+    }
+    return { schema: { type: "ref", ref: `#${name}` }, defs: additionalDefs };
+  }
+
   throw new Error(
-    `${nsid}: ${kind} body schema must be an object, got ${String(js["type"])}`,
+    `${nsid}: ${kind} body schema must be an object, got ${String(js["type"] ?? js["$ref"])}`,
   );
 }
 

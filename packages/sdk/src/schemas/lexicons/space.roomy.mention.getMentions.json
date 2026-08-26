@@ -44,63 +44,6 @@
         }
       }
     },
-    "p": {
-      "type": "object",
-      "properties": {
-        "n": {
-          "type": "string"
-        },
-        "u": {
-          "type": "string"
-        }
-      }
-    },
-    "thumb": {
-      "type": "object",
-      "required": [
-        "u"
-      ],
-      "properties": {
-        "u": {
-          "type": "string"
-        },
-        "d": {
-          "type": "string"
-        },
-        "h": {
-          "type": "integer"
-        },
-        "m": {
-          "type": "string"
-        },
-        "w": {
-          "type": "integer"
-        }
-      }
-    },
-    "vid": {
-      "type": "object",
-      "required": [
-        "u"
-      ],
-      "properties": {
-        "u": {
-          "type": "string"
-        },
-        "d": {
-          "type": "string"
-        },
-        "h": {
-          "type": "integer"
-        },
-        "m": {
-          "type": "string"
-        },
-        "w": {
-          "type": "integer"
-        }
-      }
-    },
     "embed": {
       "type": "object",
       "properties": {
@@ -124,18 +67,18 @@
         },
         "p": {
           "type": "ref",
-          "ref": "#p"
+          "ref": "#au"
         },
         "t": {
           "type": "string"
         },
         "thumb": {
           "type": "ref",
-          "ref": "#thumb"
+          "ref": "#imgs"
         },
         "vid": {
           "type": "ref",
-          "ref": "#vid"
+          "ref": "#imgs"
         }
       }
     },
@@ -224,6 +167,10 @@
         },
         "roomId": {
           "type": "string"
+        },
+        "message": {
+          "type": "ref",
+          "ref": "#message"
         }
       }
     },
@@ -320,6 +267,24 @@
         }
       }
     },
+    "output": {
+      "type": "object",
+      "required": [
+        "mentions"
+      ],
+      "properties": {
+        "mentions": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#mentions"
+          }
+        },
+        "cursor": {
+          "type": "string"
+        }
+      }
+    },
     "main": {
       "type": "query",
       "parameters": {
@@ -342,22 +307,8 @@
       "output": {
         "encoding": "application/json",
         "schema": {
-          "type": "object",
-          "required": [
-            "mentions"
-          ],
-          "properties": {
-            "mentions": {
-              "type": "array",
-              "items": {
-                "type": "ref",
-                "ref": "#mentions"
-              }
-            },
-            "cursor": {
-              "type": "string"
-            }
-          }
+          "type": "ref",
+          "ref": "#output"
         }
       }
     }

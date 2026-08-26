@@ -50,12 +50,12 @@ export async function setMessageSortIdxByTimestamp(db: DbLike, event: Event): Pr
  * forwarded messages can end up displayed after newer ones).
  *
  * Copying the original's sort_idx places the forwarded copy at the same
- * chronological position as the original, which is also consistent with the
- * displayed timestamp (selectMessages substitutes the original's timestamp
- * and content for the forwarded copy). No-op if the original isn't
- * materialised yet (the forward edge was skipped — see the guarded insert in
- * the SDK materialiser) or has no sort_idx. forwardMessages is currently
- * capped at one message per event.
+ * chronological position as the original, consistent with the embedded
+ * original's timestamp (`selectMessages` nests the original's full message
+ * under `forwardedFrom.message`). No-op if the original isn't materialised
+ * yet (the forward edge was skipped — see the guarded insert in the SDK
+ * materialiser) or has no sort_idx. forwardMessages is currently capped at
+ * one message per event.
  */
 export async function setMessageSortIdxByForward(db: DbLike, event: Event): Promise<void> {
   if (event.$type !== "space.roomy.message.forwardMessages.v0") return;

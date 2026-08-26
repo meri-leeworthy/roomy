@@ -44,63 +44,6 @@
         }
       }
     },
-    "p": {
-      "type": "object",
-      "properties": {
-        "n": {
-          "type": "string"
-        },
-        "u": {
-          "type": "string"
-        }
-      }
-    },
-    "thumb": {
-      "type": "object",
-      "required": [
-        "u"
-      ],
-      "properties": {
-        "u": {
-          "type": "string"
-        },
-        "d": {
-          "type": "string"
-        },
-        "h": {
-          "type": "integer"
-        },
-        "m": {
-          "type": "string"
-        },
-        "w": {
-          "type": "integer"
-        }
-      }
-    },
-    "vid": {
-      "type": "object",
-      "required": [
-        "u"
-      ],
-      "properties": {
-        "u": {
-          "type": "string"
-        },
-        "d": {
-          "type": "string"
-        },
-        "h": {
-          "type": "integer"
-        },
-        "m": {
-          "type": "string"
-        },
-        "w": {
-          "type": "integer"
-        }
-      }
-    },
     "embed": {
       "type": "object",
       "properties": {
@@ -124,18 +67,18 @@
         },
         "p": {
           "type": "ref",
-          "ref": "#p"
+          "ref": "#au"
         },
         "t": {
           "type": "string"
         },
         "thumb": {
           "type": "ref",
-          "ref": "#thumb"
+          "ref": "#imgs"
         },
         "vid": {
           "type": "ref",
-          "ref": "#vid"
+          "ref": "#imgs"
         }
       }
     },
@@ -224,6 +167,83 @@
         },
         "roomId": {
           "type": "string"
+        },
+        "message": {
+          "type": "ref",
+          "ref": "#output"
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": [
+        "authorDid",
+        "authorName",
+        "content",
+        "id",
+        "linkEmbeds",
+        "media",
+        "reactions",
+        "timestamp"
+      ],
+      "properties": {
+        "authorDid": {
+          "type": "string"
+        },
+        "authorName": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "linkEmbeds": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#linkEmbeds"
+          }
+        },
+        "media": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#media"
+          }
+        },
+        "reactions": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#reactions"
+          }
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "authorAvatar": {
+          "type": "string"
+        },
+        "authorHandle": {
+          "type": "string"
+        },
+        "forwardedFrom": {
+          "type": "ref",
+          "ref": "#forwardedFrom"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "replyTo": {
+          "type": "string"
+        },
+        "sort_idx": {
+          "type": "string"
+        },
+        "system": {
+          "type": "boolean"
         }
       }
     },
@@ -243,77 +263,8 @@
       "output": {
         "encoding": "application/json",
         "schema": {
-          "type": "object",
-          "required": [
-            "authorDid",
-            "authorName",
-            "content",
-            "id",
-            "linkEmbeds",
-            "media",
-            "reactions",
-            "timestamp"
-          ],
-          "properties": {
-            "authorDid": {
-              "type": "string"
-            },
-            "authorName": {
-              "type": "string"
-            },
-            "content": {
-              "type": "string"
-            },
-            "id": {
-              "type": "string"
-            },
-            "linkEmbeds": {
-              "type": "array",
-              "items": {
-                "type": "ref",
-                "ref": "#linkEmbeds"
-              }
-            },
-            "media": {
-              "type": "array",
-              "items": {
-                "type": "ref",
-                "ref": "#media"
-              }
-            },
-            "reactions": {
-              "type": "array",
-              "items": {
-                "type": "ref",
-                "ref": "#reactions"
-              }
-            },
-            "timestamp": {
-              "type": "string"
-            },
-            "authorAvatar": {
-              "type": "string"
-            },
-            "authorHandle": {
-              "type": "string"
-            },
-            "forwardedFrom": {
-              "type": "ref",
-              "ref": "#forwardedFrom"
-            },
-            "mimeType": {
-              "type": "string"
-            },
-            "replyTo": {
-              "type": "string"
-            },
-            "sort_idx": {
-              "type": "string"
-            },
-            "system": {
-              "type": "boolean"
-            }
-          }
+          "type": "ref",
+          "ref": "#output"
         }
       }
     }

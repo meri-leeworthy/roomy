@@ -19,7 +19,7 @@ import type { QueryCache } from "../cache/queryCache.ts";
 import { log } from "../log.ts";
 
 function validateOrReject(
-  schema: import("arktype").Type<any>,
+  schema: import("arktype").Type<any, any>,
   data: unknown,
   nsid: string,
   kind: "params" | "input",
@@ -41,7 +41,7 @@ function validateOrReject(
 }
 
 function validateOutputOrThrow(
-  schema: import("arktype").Type<any>,
+  schema: import("arktype").Type<any, any>,
   data: unknown,
   nsid: string,
 ): unknown {

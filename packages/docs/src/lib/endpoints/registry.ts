@@ -458,7 +458,7 @@ export const endpoints: EndpointGroup[] = [
         outputSchema: {
           type: "object",
           properties: {
-            messages: { type: "Array<MessageDto>", description: "Messages. Each has: id, content, authorDid, authorName, authorAvatar, timestamp, replyTo, forwardedFrom, reactions, media, tags." },
+            messages: { type: "Array<MessageDto>", description: "Messages. Each has: id, content, authorDid, authorName, authorAvatar, timestamp, replyTo, forwardedFrom (with nested denormalised message), reactions, media, tags." },
             cursor: { type: "string | null", description: "Next page cursor, null if no more pages." },
           },
         },
@@ -537,7 +537,7 @@ export const endpoints: EndpointGroup[] = [
             authorAvatar: { type: "string | null", description: "Avatar URL of the author." },
             timestamp: { type: "string", description: "ISO timestamp." },
             replyTo: { type: "string | null", description: "Parent message ID." },
-            forwardedFrom: { type: "{ name: string; roomId: string } | null", description: "Original source if forwarded." },
+            forwardedFrom: { type: "{ messageId: string; name: string; roomId: string; message?: MessageDto } | null", description: "Original source if forwarded; message carries the fully denormalised original." },
             reactions: { type: "Array<{ emoji: string; dids: string[] }>", description: "Reactions grouped by emoji." },
             media: { type: "Array<{ url: string; type: string; alt: string | null }>", description: "Attached media." },
             tags: { type: "string[]", description: "Message tags." },

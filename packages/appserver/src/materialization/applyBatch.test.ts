@@ -632,11 +632,17 @@ describe("forwardMessages sort order", () => {
     });
 
     // Ascending: the older original's forward first, then the newer's.
+    // Legacy forward references carry no own content — the original is
+    // nested under `forwardedFrom.message` (never substituted into the row).
     expect(messages).toHaveLength(2);
     expect(messages[0]?.id).toBe(fwdOldId);
-    expect(messages[0]?.content).toBe("old msg");
+    expect(messages[0]?.content).toBe("");
+    expect(messages[0]?.forwardedFrom?.message?.id).toBe(msgOldId);
+    expect(messages[0]?.forwardedFrom?.message?.content).toBe("old msg");
     expect(messages[1]?.id).toBe(fwdNewId);
-    expect(messages[1]?.content).toBe("new msg");
+    expect(messages[1]?.content).toBe("");
+    expect(messages[1]?.forwardedFrom?.message?.id).toBe(msgNewId);
+    expect(messages[1]?.forwardedFrom?.message?.content).toBe("new msg");
   });
 })
 

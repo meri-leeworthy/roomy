@@ -95,6 +95,10 @@
     // SDK's applyMessageDiff — already chronological, so use it as-is.
     const chronological = data;
 
+    // Merge keys on the message's own authorDid. Forwards are the
+    // forwarder's message (authorDid = forwarder, no server-side
+    // substitution), so adjacent forwards merge with the forwarder's other
+    // messages — never with the original author's.
     return chronological.map((message, index) => {
       const prev = index > 0 ? chronological[index - 1] : null;
       let mergeWithPrevious = false;

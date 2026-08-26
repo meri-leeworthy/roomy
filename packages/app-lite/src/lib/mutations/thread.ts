@@ -1,4 +1,4 @@
-import { newUlid } from "@roomy-space/sdk";
+import { newUlid, toBytes } from "@roomy-space/sdk";
 import { sendEvents } from "./send-events";
 import { createRoom } from "./room";
 
@@ -8,6 +8,9 @@ import { createRoom } from "./room";
  * 2. Links it to the parent room
  * 3. Forwards each selected message into the thread (originals stay in place)
  *
+ * Forwards use the modern representation: a `createMessage` event carrying a
+ * `space.roomy.attachment.forward.v0` attachment (a real message with an
+ * empty body — a forward without commentary), mirroring `forwardMessage`.
  * All events are batched into a single sendEvents call.
  */
 export async function createThread({
@@ -27,7 +30,7 @@ export async function createThread({
     name: threadName,
   });
 
-  // 2. Build link + move events
+  // 2. Build link + forward events
   const events: Array<Record<string, unknown>> = [];
 
   // Link from parent → thread
@@ -40,14 +43,29 @@ export async function createThread({
   });
 
   // Forward each selected message into the thread. The original message stays
-  // in the parent room; a forward reference is created in the thread.
+  // in the parent room; a forward message (empty body + forward attachment)
+  // is created in the thread, embedding the original.
   for (const msgId of messageIds) {
     events.push({
       id: newUlid(),
       room: threadId,
-      $type: "space.roomy.message.forwardMessages.v0",
-      messageIds: [msgId],
-      fromRoomId: parentRoomId,
+      $type: "space.roomy.message.createMessage.v0",
+      body: {
+        mimeType: "text/markdown",
+        data: toBytes(new TextEncoder().encode("")),
+      },
+      extensions: {
+        "space.roomy.extension.attachments.v0": {
+          $type: "space.roomy.extension.attachments.v0",
+          attachments: [
+            {
+              $type: "space.roomy.attachment.forward.v0",
+              target: msgId,
+              fromRoomId: parentRoomId,
+            },
+          ],
+        },
+      },
     });
   }
 

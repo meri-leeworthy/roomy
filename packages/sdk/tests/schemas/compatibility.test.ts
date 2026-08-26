@@ -211,6 +211,61 @@ describe("schemas/queries", () => {
     const parsed = queries.getMessage.Response(ex);
     assertOk(parsed);
   });
+
+  it("getMessage parses a forward with a nested denormalised original (recursive)", () => {
+    const ex = {
+      id: "01M000000000000000000000F1",
+      content: "my take on this",
+      authorDid: "did:plc:forwarder",
+      authorName: "bob",
+      timestamp: "2026-05-17T00:01:00.000Z",
+      forwardedFrom: {
+        messageId: "01M000000000000000000000F0",
+        name: "General",
+        roomId: "01CH0000000000000000000000",
+        message: {
+          id: "01M000000000000000000000F0",
+          content: "original body",
+          authorDid: "did:plc:abcdef",
+          authorName: "alice",
+          timestamp: "2026-05-17T00:00:00.000Z",
+          reactions: [],
+          media: [],
+          linkEmbeds: [],
+        },
+      },
+      reactions: [],
+      media: [],
+      linkEmbeds: [],
+    };
+    const parsed = queries.getMessage.Response(ex);
+    assertOk(parsed);
+    // The nested original is fully typed and readable.
+    expect(parsed.forwardedFrom?.message?.content).toBe("original body");
+    expect(parsed.forwardedFrom?.message?.authorDid).toBe("did:plc:abcdef");
+    // A forward's original may itself be a forward (nested chain).
+    const deep = {
+      id: "01M000000000000000000000F2",
+      content: "",
+      authorDid: "did:plc:carol",
+      authorName: "carol",
+      timestamp: "2026-05-17T00:02:00.000Z",
+      forwardedFrom: {
+        messageId: "01M000000000000000000000F1",
+        name: "Other",
+        roomId: "01CH0000000000000000000001",
+        message: ex,
+      },
+      reactions: [],
+      media: [],
+      linkEmbeds: [],
+    };
+    const deepParsed = queries.getMessage.Response(deep);
+    assertOk(deepParsed);
+    expect(deepParsed.forwardedFrom?.message?.forwardedFrom?.message?.content).toBe(
+      "original body",
+    );
+  });
 });
 
 describe("schemas/procedures", () => {

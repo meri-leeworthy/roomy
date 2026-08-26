@@ -12,7 +12,6 @@
   import MediaEmbed from "./embeds/MediaEmbed.svelte";
   import LinkCard from "./embeds/LinkCard.svelte";
   import ForwardContext from "./ForwardContext.svelte";
-  import { createMessageQuery } from "$lib/queries/message";
   import MessageContent from "./MessageContent.svelte";
   import ChatInput from "./ChatInput.svelte";
   import { editMessage, removeLinkEmbed } from "$lib/mutations/message";
@@ -196,21 +195,19 @@
 
   // ── Forwards ──────────────────────────────────────────────────────────
   // A forward is a real message (authored by the forwarder) carrying a
-  // forward attachment. The bubble renders as a normal message by the
-  // ORIGINAL author; the forwarder is surfaced only in the forward context
-  // line above the author line. Fetch the original so we can render it.
+  // forward attachment. The bubble renders the embedded original (fully
+  // denormalised server-side as `forwardedFrom.message` — content, author,
+  // timestamp), with the forwarder surfaced in the forward context line
+  // above. The forwarder's own note (if any) renders as a second bubble
+  // below. No extra fetch: the original arrives with the room query.
   const forwardedFrom = $derived(message.forwardedFrom);
   const isForward = $derived(!!forwardedFrom);
-  const originalQuery = createMessageQuery(
-    () => forwardedFrom?.messageId ?? "",
-    () => forwardedFrom?.roomId ?? "",
-    { enabled: isForward },
-  );
-  const original = $derived(originalQuery.data);
-  /** The bubble's effective author: the original author when forwarding. */
-  const eff = $derived(isForward && original ? original : null);
+  /** The embedded original message (denormalised server-side). */
+  const original = $derived(forwardedFrom?.message);
   const effBridged = $derived(
-    eff ? eff.authorDid.startsWith("did:discord:") : isBridged,
+    original
+      ? original.authorDid.startsWith("did:discord:")
+      : isBridged,
   );
 
   // Edit stays author-only; space admins may delete anyone's message.
@@ -290,14 +287,14 @@
     }}
   >
     <MessageBubble
-      authorDid={eff ? eff.authorDid : message.authorDid}
-      authorName={eff ? (eff.authorName ?? undefined) : (message.authorName ?? undefined)}
-      authorHandle={eff ? (eff.authorHandle ?? undefined) : (message.authorHandle ?? undefined)}
-      authorAvatarUrl={eff ? (eff.authorAvatar ?? undefined) : (message.authorAvatar ?? undefined)}
-      avatarSrc={eff ? resolveBlobUrl(eff.authorAvatar) : resolveBlobUrl(message.authorAvatar)}
-      profileUrl={effBridged ? undefined : `/user/${eff ? eff.authorDid : message.authorDid}`}
-      onAvatarClick={effBridged ? undefined : () => goto(`/user/${eff ? eff.authorDid : message.authorDid}`)}
-      timestamp={new Date(eff ? eff.timestamp : message.timestamp)}
+      authorDid={original ? original.authorDid : message.authorDid}
+      authorName={original ? (original.authorName ?? undefined) : (message.authorName ?? undefined)}
+      authorHandle={original ? (original.authorHandle ?? undefined) : (message.authorHandle ?? undefined)}
+      authorAvatarUrl={original ? (original.authorAvatar ?? undefined) : (message.authorAvatar ?? undefined)}
+      avatarSrc={original ? resolveBlobUrl(original.authorAvatar) : resolveBlobUrl(message.authorAvatar)}
+      profileUrl={effBridged ? undefined : `/user/${original ? original.authorDid : message.authorDid}`}
+      onAvatarClick={effBridged ? undefined : () => goto(`/user/${original ? original.authorDid : message.authorDid}`)}
+      timestamp={new Date(original ? original.timestamp : message.timestamp)}
       isBridged={effBridged}
       isSystem={isSystem}
       mergeWithPrevious={isSystem ? false : mergeWithPrevious}
@@ -376,8 +373,6 @@
         {:else if isForward}
           {#if original}
             <MessageContent content={original.content} mimeType={original.mimeType} />
-          {:else if originalQuery.isPending}
-            <div class="h-5"></div>
           {:else}
             <span class="italic text-base-400 text-sm">Original message unavailable</span>
           {/if}
@@ -412,15 +407,16 @@
       {/snippet}
 
       {#snippet linkEmbeds()}
-        {#if message.linkEmbeds && message.linkEmbeds.length > 0}
-          {@const withEmbed = message.linkEmbeds.filter((l) => l.embed)}
+        {@const embeds = (isForward ? original?.linkEmbeds : message.linkEmbeds) ?? []}
+        {#if embeds.length > 0}
+          {@const withEmbed = embeds.filter((l: Message["linkEmbeds"][number]) => l.embed)}
           {#if withEmbed.length > 0}
             <div class="flex flex-col gap-2 mt-1">
               {#each withEmbed as link (link.url)}
                 <LinkCard
                   url={link.url}
                   embed={link.embed}
-                  onRemove={isAuthor ? () => handleRemoveEmbed(link.url) : undefined}
+                  onRemove={!isForward && isAuthor ? () => handleRemoveEmbed(link.url) : undefined}
                 />
               {/each}
             </div>
@@ -429,10 +425,11 @@
       {/snippet}
 
       {#snippet media()}
-        {#if message.media && message.media.length > 0}
-          {@const nonLinkMedia = message.media.filter((m) => !m.type.startsWith("text/"))}
+        {@const media = (isForward ? original?.media : message.media) ?? []}
+        {#if media.length > 0}
+          {@const nonLinkMedia = media.filter((m: Message["media"][number]) => !m.type.startsWith("text/"))}
           {#if nonLinkMedia.length > 0}
-            <MediaEmbed media={nonLinkMedia.map((m) => ({ ...m, alt: m.alt ?? undefined }))} />
+            <MediaEmbed media={nonLinkMedia.map((m: Message["media"][number]) => ({ ...m, alt: m.alt ?? undefined }))} />
           {/if}
         {/if}
       {/snippet}

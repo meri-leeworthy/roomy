@@ -208,3 +208,152 @@ describe("selectMessages system messages", () => {
     expect(m.content).toBe(body);
   });
 });
+
+describe("selectMessages nested forwards", () => {
+  /** Seed content + author edge for a message row. */
+  async function seedContent(
+    db: DbLike,
+    messageId: string,
+    content: string,
+  ): Promise<void> {
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit, timestamp) values (?, 'text/markdown', ?, ?, ?)",
+      [messageId, Buffer.from(content), messageId, 1_700_000_000_000],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      messageId,
+      USER,
+    ]);
+  }
+
+  /**
+   * Seed a forward-as-embed row: a real message with its own content plus a
+   * `forward` edge to an original in another room (mirroring the modern
+   * createMessage + forward attachment materialisation).
+   */
+  async function seedForward(
+    db: DbLike,
+    roomId: string,
+    forwardId: string,
+    originalId: string,
+    originalRoomId: string,
+    originalRoomName: string,
+    ownContent: string,
+  ): Promise<void> {
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [USER, STREAM]);
+    await db.run(
+      "insert into entities (id, stream_id, room) values (?, ?, ?)",
+      [forwardId, STREAM, roomId],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      forwardId,
+      USER,
+    ]);
+    if (ownContent) {
+      await db.run(
+        "insert into comp_content (entity, mime_type, data, last_edit) values (?, 'text/markdown', ?, ?)",
+        [forwardId, Buffer.from(ownContent), forwardId],
+      );
+    }
+    // The original's entity + its room's info (forward_target_room_name join).
+    // `or ignore` so chained forwards (originalId already materialised as a
+    // forward row) don't trip the PK.
+    await db.run(
+      "insert or ignore into entities (id, stream_id, room) values (?, ?, ?)",
+      [originalId, STREAM, originalRoomId],
+    );
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+      originalRoomId,
+      STREAM,
+    ]);
+    await db.run("insert or replace into comp_info (entity, name) values (?, ?)", [
+      originalRoomId,
+      originalRoomName,
+    ]);
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'forward')", [
+      forwardId,
+      originalId,
+    ]);
+  }
+
+  test("forward-as-embed rows carry the nested denormalised original (no substitution)", async () => {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    const channelId = newUlid();
+
+    const originalId = newUlid();
+    const fwdId = newUlid();
+
+    // seedForward creates the entities (original + its room) first, so the
+    // content/author inserts below don't trip entity FKs.
+    await seedForward(db, roomId, fwdId, originalId, channelId, "General", "");
+    await seedContent(db, originalId, "original body");
+
+    await seedGlobalProfile(USER, "alice.bsky.social", "Alice Example");
+
+    const { messages } = await selectMessages(db, {
+      kind: "room",
+      roomId,
+      limit: 50,
+      cursor: null,
+    });
+
+    expect(messages).toHaveLength(1);
+    const fwd = messages[0]!;
+    // The forward row keeps the forwarder's own (empty) content — the
+    // original is nested, never substituted into the row.
+    expect(fwd.id).toBe(fwdId);
+    expect(fwd.content).toBe("");
+    expect(fwd.authorDid).toBe(USER);
+    // ForwardedFrom keeps the compat fields + the nested denormalised message.
+    expect(fwd.forwardedFrom?.messageId).toBe(originalId);
+    expect(fwd.forwardedFrom?.roomId).toBe(channelId);
+    expect(fwd.forwardedFrom?.name).toBe("General");
+    const orig = fwd.forwardedFrom?.message;
+    expect(orig?.id).toBe(originalId);
+    expect(orig?.content).toBe("original body");
+    expect(orig?.authorDid).toBe(USER);
+    expect(orig?.authorName).toBe("Alice Example");
+    expect(orig?.timestamp).toBeTruthy();
+  });
+
+  test("nested forwards resolve through multiple levels", async () => {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    const channelId = newUlid();
+    const room2 = newUlid();
+
+    // Chain: a forward of a forward. topFwdId (room) embeds midFwdId
+    // (channel), which itself embeds rootOriginalId (room2).
+    const rootOriginalId = newUlid();
+    const midFwdId = newUlid();
+    const topFwdId = newUlid();
+
+    await seedForward(db, channelId, midFwdId, rootOriginalId, room2, "Room 2", "mid note");
+    await seedForward(db, roomId, topFwdId, midFwdId, channelId, "General", "");
+    await seedContent(db, rootOriginalId, "root body");
+
+    await seedGlobalProfile(USER, "alice.bsky.social", "Alice Example");
+
+    const { messages } = await selectMessages(db, {
+      kind: "room",
+      roomId,
+      limit: 50,
+      cursor: null,
+    });
+
+    expect(messages).toHaveLength(1);
+    const top = messages[0]!;
+    expect(top.id).toBe(topFwdId);
+    // Level 1: the embedded original is the channel-level forward.
+    const mid = top.forwardedFrom?.message;
+    expect(mid?.id).toBe(midFwdId);
+    expect(mid?.content).toBe("mid note");
+    // Level 2: that forward's own embedded original is the root message.
+    const root = mid?.forwardedFrom?.message;
+    expect(root?.id).toBe(rootOriginalId);
+    expect(root?.content).toBe("root body");
+    // The root has no further forward chain.
+    expect(root?.forwardedFrom).toBeUndefined();
+  });
+});

@@ -17,18 +17,15 @@
 
   // If the message being replied to is a forward, its own content is the
   // forwarder's (often-empty) note; the message the forwarder embedded lives
-  // in another room. Show the original's content as the reply preview.
+  // in another room. The original is denormalised server-side as
+  // `forwardedFrom.message` — show its content as the reply preview, with no
+  // extra fetch.
   const forwardedFrom = $derived(target.data?.forwardedFrom);
-  const original = createMessageQuery(
-    () => forwardedFrom?.messageId ?? "",
-    () => forwardedFrom?.roomId ?? "",
-    { enabled: !!forwardedFrom },
-  );
   const previewContent = $derived(
-    original.data?.content ?? target.data?.content ?? "",
+    forwardedFrom?.message?.content ?? target.data?.content ?? "",
   );
   const previewMime = $derived(
-    original.data?.mimeType ?? target.data?.mimeType,
+    forwardedFrom?.message?.mimeType ?? target.data?.mimeType,
   );
 
   let isBridged = $derived(target.data?.authorDid?.startsWith("did:discord:") ?? false);

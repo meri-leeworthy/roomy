@@ -32,9 +32,9 @@ export interface QueryDef {
   handler: QueryHandler;
   parseParams?: (raw: QueryParams) => QueryParams;
   /** Arktype schema for incoming query-string params. Rejects on parse failure. */
-  paramsSchema?: Type<any>;
+  paramsSchema?: Type<any, any>;
   /** Arktype schema for outgoing JSON response. Throws (500) on parse failure. */
-  outputSchema?: Type<any>;
+  outputSchema?: Type<any, any>;
 }
 
 export type ProcedureHandler<
@@ -47,11 +47,11 @@ export interface ProcedureDef {
   handler: ProcedureHandler;
   parseParams?: (raw: QueryParams) => QueryParams;
   /** Arktype schema for incoming JSON body. Rejects on parse failure. */
-  inputSchema?: Type<any>;
+  inputSchema?: Type<any, any>;
   /** Arktype schema for outgoing JSON response. Throws (500) on parse failure.
    * If omitted, the handler is expected to return void/undefined and the
    * response short-circuits to 200 with no body (b57ad1ca behaviour). */
-  outputSchema?: Type<any>;
+  outputSchema?: Type<any, any>;
 }
 
 export interface SubscriptionDef {
