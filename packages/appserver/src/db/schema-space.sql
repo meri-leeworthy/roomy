@@ -126,27 +126,6 @@ create table if not exists comp_content (
   updated_at integer not null default (unixepoch() * 1000)
 ) strict;
 
--- Full-text search index over message content (Phase 1 of search-endpoints.md,
--- Option A: own rowid, denormalised copy of the decoded plaintext).
---
--- Populated by the materialiser alongside comp_content (applyChunkSideEffects):
---   - createMessage  → delete-then-insert (FTS5 has no unique constraint)
---   - editMessage    → delete-then-insert with the re-decoded content
---   - deleteMessage  → delete by entity
---
--- `content` is the only indexed column; the rest are unindexed metadata for
--- filtering (room read-access pre-filter) and future use. `entity` is the
--- message ULID (comp_content.entity). `timestamp` is the canonical message
--- timestamp as an ISO string.
-create virtual table if not exists message_fts using fts5(
-  entity unindexed,
-  room unindexed,
-  author_did unindexed,
-  content,
-  timestamp unindexed,
-  tokenize = 'unicode61'
-);
-
 create table if not exists comp_info (
   entity text primary key references entities(id) on delete cascade,
   name text,

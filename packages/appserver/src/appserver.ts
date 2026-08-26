@@ -74,8 +74,11 @@ import { registerSubscriptionHandler } from "./handlers/space.roomy.push.registe
 import { unregisterSubscriptionHandler } from "./handlers/space.roomy.push.unregisterSubscription.ts";
 import { setPreferencesHandler } from "./handlers/space.roomy.push.setPreferences.ts";
 import { startPushDispatcher, pushDispatcherStats, _resetPushDispatcher } from "./push/dispatcher.ts";
+import { startSearchIndexer, stopSearchIndexer, searchIndexerStats } from "./search/indexer.ts";
+import { startSearchBackfill, stopSearchBackfill, searchBackfillStats } from "./search/backfill.ts";
 import { schemas } from "@roomy-space/sdk";
 import { initHappyView, type HappyViewConfig } from "./happyview.ts";
+import { initQdrant } from "./qdrant.ts";
 import { getArbiterConfig, type ArbiterConfig } from "./arbiter/config.ts";
 import type { GetProfilesFn } from "./materialization/profiles.ts";
 
@@ -419,6 +422,12 @@ export async function createAppserver(
     ? initHappyView()
     : (opts.happyView as HappyViewConfig | null);
 
+  // ─── Qdrant config ──────────────────────────────────────────────────
+  // Initialize the process-wide singleton from env (`QDRANT_URL` /
+  // `QDRANT_API_KEY`). When unset, search is unavailable but the appserver
+  // runs fine without it (the indexer queues nothing; the endpoint 503s).
+  initQdrant();
+
   // ─── Arbiter config ────────────────────────────────────────────────
   // When `opts.arbiter` is unset, reads from env (`ARBITER_URL` /
   // `ARBITER_DID`). When `null`, the arbiter is disabled and new spaces are
@@ -483,6 +492,12 @@ export async function createAppserver(
   setStreamManager(streamManager);
   // Start the centralized embed enrichment sweeper.
   startEmbedSweeper({ globalDb: openGlobalDb(), invalidationRouter });
+  // Start the Qdrant message-search indexer (drains the enqueue queue from
+  // applyChunkSideEffects) and the boot backfill sweeper (re-indexes
+  // messages missing from Qdrant). Both are no-op-safe when Qdrant is not
+  // configured.
+  startSearchIndexer();
+  startSearchBackfill({ globalDb: openGlobalDb() });
   // Start the centralized push dispatcher unconditionally. The dispatcher is
   // global infrastructure that processes every live createMessage and
   // computes fan-out; the `push-notifications` feature flag is a per-recipient
@@ -577,6 +592,15 @@ export async function createAppserver(
           headers: { "content-type": "application/json", ...corsHeaders },
         });
       }
+      if (url.pathname === "/health/search") {
+        return new Response(
+          JSON.stringify({
+            indexer: searchIndexerStats(),
+            backfill: searchBackfillStats(),
+          }),
+          { headers: { "content-type": "application/json", ...corsHeaders } },
+        );
+      }
       if (url.pathname === "/health/cache") {
         const cacheStats = queryCache?.stats ?? {
           hits: 0,
@@ -635,7 +659,10 @@ export async function createAppserver(
     ownDid,
     queryCache,
     close(): Promise<void> {
-      return stopEmbedSweeper().finally(() => {
+      return stopEmbedSweeper()
+        .then(() => stopSearchIndexer())
+        .then(() => stopSearchBackfill())
+        .finally(() => {
         // Graceful stop: wait for in-flight requests to complete so their
         // DB awaits resolve (or reject into the fetch guard's catch) before
         // the workers are terminated. A forced stop kills the handlers

@@ -223,8 +223,12 @@ describe("reMaterializeFromLocalEvents", () => {
       member,
       streamDid,
     );
+    // Simulate an in-progress v6 migration (a DB that was mid-upgrade when
+    // the v7 bump landed): fresh DBs only stamp the current version, so the
+    // pending v6 marker must be created explicitly. The registered v6 task
+    // must still run and reconstruct membership.
     await globalDb.run(
-      "update global_schema_migrations set completed_at = null where version = '6'",
+      "insert or ignore into global_schema_migrations (version, completed_at) values ('6', null)",
     );
 
     // The per-space cursor is current, so no events are replayed. The pending

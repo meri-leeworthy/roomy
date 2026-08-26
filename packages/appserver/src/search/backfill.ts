@@ -1,0 +1,285 @@
+/**
+ * Qdrant backfill sweeper (Phase 2).
+ *
+ * On boot, re-index messages that are missing from Qdrant. The appserver
+ * keeps a per-space cursor in the global DB (`search_backfill_cursor`); each
+ * sweep cycle walks one space's messages after its cursor, upserts them
+ * (idempotent — point ids are deterministic UUIDv5), and advances the
+ * cursor.
+ *
+ * Wipe repair: when the `messages` collection has been (re)created — e.g.
+ * the Qdrant deployment was wiped — `ensureMessagesCollection` reports the
+ * creation and the sweeper clears every cursor so the full corpus is
+ * re-indexed from the beginning. Cursor-less spaces are picked in
+ * updated_at round-robin order (absent cursors first, oldest first).
+ *
+ * Mirrors the embed sweeper's `pending_links` pattern: a global-DB-backed
+ * backlog drained by a background loop with poke support.
+ */
+
+import type { DbLike } from "../db/types.ts";
+import { openSpaceDb } from "../db/db.ts";
+import { getQdrantClient, ensureMessagesCollection, upsertMessage, type QdrantClientLike } from "./qdrantSearch.ts";
+import { encodeSparse } from "./bm25.ts";
+import { extractMessageText } from "./text.ts";
+import { log } from "../log.ts";
+
+/** Max messages to re-index per sweep cycle. */
+const SWEEP_BATCH = 100;
+/** How often to poll for pending spaces while idle. */
+const IDLE_POLL_MS = 60_000;
+
+// ─── Singleton state ────────────────────────────────────────────────────
+
+let sweeperGlobalDb: DbLike | undefined;
+let started = false;
+/** Resolved when the background loop exits. Used by stopSearchBackfill. */
+let loopPromise: Promise<void> | undefined;
+/** Resolved by pokeSearchBackfill to wake an idle loop immediately. */
+let wake: (() => void) | null = null;
+/** Consecutive DB/Qdrant errors — escalates backoff so a down service doesn't tight-loop. */
+let dbErrorCount = 0;
+/** Timestamp (ms) until which the sweeper should skip cycles. */
+let dbBackoffUntil = 0;
+
+// ─── Stats (for /health/search) ─────────────────────────────────────────
+let statsBackfilled = 0;
+
+// ─── Lifecycle ──────────────────────────────────────────────────────────
+
+export interface SearchBackfillOpts {
+  /** Global DB — the `search_backfill_cursor` table lives here. */
+  globalDb: DbLike;
+}
+
+/**
+ * Start the backfill sweeper. Idempotent — safe to call multiple times.
+ * Called once at appserver startup (see `index.ts`).
+ */
+export function startSearchBackfill(opts: SearchBackfillOpts): void {
+  if (started) return;
+  started = true;
+  sweeperGlobalDb = opts.globalDb;
+  loopPromise = runBackfillLoop().catch((err) => {
+    log.error("[search-backfill] loop crashed:", err);
+  });
+}
+
+/** Wake the sweeper to run a cycle immediately. Cheap no-op when busy. */
+export function pokeSearchBackfill(): void {
+  if (wake) {
+    const fn = wake;
+    wake = null;
+    fn();
+  }
+}
+
+/** Wait for the background loop to exit. Idempotent. Used by tests. */
+export async function stopSearchBackfill(): Promise<void> {
+  started = false;
+  if (wake) {
+    const fn = wake;
+    wake = null;
+    fn();
+  }
+  const p = loopPromise;
+  loopPromise = undefined;
+  if (p) await p;
+}
+
+/** Snapshot of sweeper state for the `/health/search` endpoint. */
+export function searchBackfillStats(): {
+  backfilled: number;
+  dbBackoffActive: boolean;
+} {
+  return {
+    backfilled: statsBackfilled,
+    dbBackoffActive: Date.now() < dbBackoffUntil,
+  };
+}
+
+/** Reset stats (tests only. Does not stop a running loop). */
+export function _resetSearchBackfill(): void {
+  statsBackfilled = 0;
+  dbErrorCount = 0;
+  dbBackoffUntil = 0;
+}
+
+// ─── Loop ───────────────────────────────────────────────────────────────
+
+async function runBackfillLoop(): Promise<void> {
+  const globalDb = sweeperGlobalDb;
+  if (!globalDb) return;
+
+  for (;;) {
+    if (!started) return; // allow clean exit via stopSearchBackfill
+    try {
+      const full = await sweepCycle(globalDb);
+      if (full) continue;
+      await waitForId(IDLE_POLL_MS);
+    } catch (err) {
+      // Outer resilience (mirrors the embed sweeper): an unexpected throw
+      // must not permanently kill the process-wide loop.
+      log.error("[search-backfill] sweep threw (continuing):", err);
+      await waitForId(IDLE_POLL_MS);
+    }
+  }
+}
+
+/**
+ * Run one sweep cycle: pick the space with the oldest cursor, find its
+ * messages after the cursor, index them, and advance. Returns true when a
+ * batch was full (more likely remain → loop without waiting).
+ */
+export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
+  if (!started) return false;
+  if (Date.now() < dbBackoffUntil) {
+    await waitForId(dbBackoffUntil - Date.now());
+    return false;
+  }
+
+  const client = getQdrantClient();
+  if (!client) return false; // Qdrant not configured — nothing to do
+
+  try {
+    const created = await ensureMessagesCollection(client);
+    if (created) await clearAllCursors(globalDb);
+  } catch (err) {
+    markDbError(err);
+    return false;
+  }
+
+  const spaceDid = await nextCursorSpace(globalDb);
+  if (spaceDid === null) return false;
+
+  const spaceDb = openSpaceDb(spaceDid);
+  const cursorRow = await globalDb
+    .query("select cursor from search_backfill_cursor where space_did = ?")
+    .get<{ cursor: string }>(spaceDid);
+  const cursor = cursorRow?.cursor ?? null;
+
+  const rows = await spaceDb
+    .query(
+      `select e.id as id, e.room as room, cc.mime_type as mime_type,
+              cc.data as data, cc.timestamp as timestamp
+         from entities e
+         left join comp_content cc on cc.entity = e.id
+        where e.stream_id = ?
+          and e.room is not null
+          and cc.entity is not null
+          and (? is null or e.id > ?)
+        order by e.id
+        limit ?`,
+    )
+    .all<{
+      id: string;
+      room: string;
+      mime_type: string | null;
+      data: Buffer | Uint8Array | null;
+      timestamp: number | null;
+    }>([spaceDid, cursor, cursor, SWEEP_BATCH]);
+
+  let indexedCount = 0;
+  for (const row of rows) {
+    const text = extractMessageText(row.mime_type, row.data);
+    if (text === "") continue;
+    try {
+      const sparse = encodeSparse(text);
+      const threadId = await resolveThreadId(spaceDb, row.room);
+      await upsertMessage(client, row.id, sparse, {
+        spaceDid,
+        roomId: row.room,
+        threadId,
+        authorDid: "",
+        timestamp: row.timestamp != null
+          ? new Date(row.timestamp).toISOString()
+          : new Date().toISOString(),
+      });
+      indexedCount++;
+    } catch (err) {
+      log.warn(`[search-backfill] upsert failed for ${row.id}:`, err);
+    }
+  }
+
+  if (indexedCount > 0) statsBackfilled += indexedCount;
+  if (indexedCount > 0 || rows.length > 0) markDbOk();
+
+  if (rows.length > 0) {
+    const lastId = rows[rows.length - 1]!.id;
+    await setCursor(globalDb, spaceDid, lastId);
+  }
+
+  return rows.length >= SWEEP_BATCH;
+}
+
+/** Pick the space whose cursor is oldest/absent (round-robin fairness). */
+async function nextCursorSpace(globalDb: DbLike): Promise<string | null> {
+  const row = await globalDb
+    .query(
+      `select s.space_did as id
+         from (select distinct space_did from entity_space) s
+         left join search_backfill_cursor c on c.space_did = s.space_did
+        order by coalesce(c.updated_at, 0) asc
+        limit 1`,
+    )
+    .get<{ id: string }>();
+  return row?.id ?? null;
+}
+
+async function setCursor(
+  globalDb: DbLike,
+  spaceDid: string,
+  cursor: string,
+): Promise<void> {
+  await globalDb.run(
+    `insert into search_backfill_cursor (space_did, cursor, updated_at)
+     values (?, ?, ?)
+     on conflict (space_did) do update set
+       cursor = excluded.cursor,
+       updated_at = excluded.updated_at`,
+    [spaceDid, cursor, Date.now()],
+  );
+}
+
+/** Clear every cursor (collection was wiped — re-index everything). */
+async function clearAllCursors(globalDb: DbLike): Promise<void> {
+  await globalDb.run("delete from search_backfill_cursor");
+}
+
+/** The message's own room when that room is a thread, else null. */
+async function resolveThreadId(db: DbLike, roomId: string): Promise<string | null> {
+  const row = await db
+    .query("select label from comp_room where entity = ?")
+    .get<{ label: string | null }>(roomId);
+  return row?.label === "space.roomy.thread" ? roomId : null;
+}
+
+/** Resolve after `ms`, or immediately when {@link pokeSearchBackfill} fires. */
+function waitForId(ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const timer = setTimeout(() => {
+    wake = null;
+    resolve();
+  }, ms);
+  wake = () => {
+    clearTimeout(timer);
+    resolve();
+  };
+  return promise;
+}
+
+/** Escalate backoff on consecutive errors (a down Qdrant shouldn't tight-loop). */
+function markDbError(err: unknown): void {
+  dbErrorCount = Math.min(dbErrorCount + 1, 8);
+  dbBackoffUntil = Date.now() + Math.min(60_000 * 2 ** (dbErrorCount - 1), 30 * 60_000);
+  log.warn(
+    `[search-backfill] error (#${dbErrorCount}); backing off ${Math.round((dbBackoffUntil - Date.now()) / 1000)}s:`,
+    err,
+  );
+}
+
+/** Reset the backoff after a successful cycle. */
+function markDbOk(): void {
+  if (dbErrorCount !== 0) dbErrorCount = 0;
+  if (dbBackoffUntil !== 0) dbBackoffUntil = 0;
+}

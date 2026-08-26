@@ -106,6 +106,19 @@ create table if not exists mentions (
 ) strict;
 create index if not exists idx_mentions_did_created on mentions(did, created_at desc);
 
+-- Search backfill cursor (Phase 2 of search-endpoints.md). One row per
+-- space, tracking how far the Qdrant backfill sweeper has walked that
+-- space's messages (the cursor is the last message id, ULID-ordered, from
+-- the space's per-space DB). Lives in the global DB because it is
+-- cross-space state; a fresh/wipe-recreated Qdrant collection clears every
+-- cursor so the full corpus is re-indexed. Additive DDL only — created
+-- idempotently on any schema version.
+create table if not exists search_backfill_cursor (
+  space_did text primary key,
+  cursor text not null,
+  updated_at integer not null default (unixepoch() * 1000)
+) strict;
+
 -- Channel-federation registry. Cross-space by nature, so it lives in the
 -- global DB. `space_id` is the origin space (A) whose channels are exposed;
 -- `federating_space_did` is the receiving space (B). One row per (A, B).

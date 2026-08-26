@@ -18,7 +18,13 @@ type GlobalMigrationTask = (
  */
 const GLOBAL_MIGRATION_TASKS: Record<string, GlobalMigrationTask> = {
   "6": repairGlobalMembership,
+  // v7: additive DDL only — the `search_backfill_cursor` table is created
+  // by the schema exec; no data migration is needed.
+  "7": noopMigration,
 };
+
+/** No-op for additive-DDL-only bumps (the table is created by the schema exec). */
+async function noopMigration(): Promise<void> {}
 
 /**
  * Run incomplete global post-migrations in version order.

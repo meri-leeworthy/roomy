@@ -18,6 +18,7 @@
     "@atproto/identity": "^0.4.12",
     "@atproto/xrpc-server": "^0.10.19",
     "@did-plc/lib": "^0.0.4",
+    "@qdrant/js-client-rest": "^1.19.0",
     "@roomy-space/sdk": "workspace:*",
     "arktype": "^2.1.29",
     "rate-limiter-flexible": "^11.2.0",

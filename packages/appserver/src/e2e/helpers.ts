@@ -25,6 +25,9 @@ import { closeDb, openDb } from "../db/db.ts";
 import { _resetRateLimit } from "../xrpc/rateLimit.ts";
 import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper, stopEmbedSweeper } from "../embed/sweeper.ts";
+import { stopSearchIndexer, _resetSearchIndexer } from "../search/indexer.ts";
+import { stopSearchBackfill, _resetSearchBackfill } from "../search/backfill.ts";
+import { _resetQdrantClient, _resetMessagesCollection } from "../search/qdrantSearch.ts";
 import { _resetProfileStoreCache, _setTestGetProfiles } from "../queries/profileStore.ts";
 import { newUlid } from "@roomy-space/sdk";
 import type { Database } from "bun:sqlite";
@@ -55,12 +58,18 @@ export interface E2eContext {
  * Call this inside `beforeEach` or at the top of a `describe` block.
  */
 export async function startAppserver(): Promise<E2eContext> {
-  // Stop any running background sweeper loop before resetting state.
+  // Stop any running background sweeper/indexer loops before resetting state.
   await stopEmbedSweeper();
+  await stopSearchIndexer();
+  await stopSearchBackfill();
   closeDb();
   _resetRateLimit();
   _resetHydrationInflight();
   _resetEmbedSweeper();
+  _resetSearchIndexer();
+  _resetSearchBackfill();
+  _resetQdrantClient();
+  _resetMessagesCollection();
   _resetProfileStoreCache();
   // Hermetic: without stubs, profile hydration falls back to live
   // api.bsky.app fetches, which pile up under parallel load and blow the
@@ -112,6 +121,10 @@ export async function startAppserver(): Promise<E2eContext> {
     await handle.close();
     _resetHydrationInflight();
     _resetEmbedSweeper();
+    _resetSearchIndexer();
+    _resetSearchBackfill();
+    _resetQdrantClient();
+    _resetMessagesCollection();
     _resetProfileStoreCache();
     _setTestGetProfiles(null);
   });
