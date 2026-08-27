@@ -6,6 +6,7 @@
   import Button from "@roomy/design/components/ui/button/Button.svelte";
   import { resolveBlobUrl } from "$lib/utils";
   import { createSpacesQuery } from "$lib/queries/spaces";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { spaceNavigation } from "$lib/components/layout/last-room.svelte";
   import { serverBar } from "$lib/components/layout/server-bar.svelte";
 
@@ -24,6 +25,12 @@
   // translateX animation stays entirely on the compositor thread.
 
   const spacesQuery = createSpacesQuery({ includeLeft: true });
+
+  // Search feature flag: gates the Explore (cross-space search) button.
+  const flagsQuery = createFeatureFlagsQuery();
+  const searchEnabled = $derived(
+    flagsQuery.data?.flags.includes("search") ?? false,
+  );
 
   const joinedSpaces = $derived(
     (spacesQuery.data?.spaces ?? []).filter((s) => s.isMember),
@@ -88,27 +95,29 @@
     </Button>
   </div>
 
-  <!-- Explore (cross-space search) button -->
-  <div class={wide ? "mx-2.5" : "flex justify-center"}>
-    <Button
-      href="/explore"
-      variant="ghost"
-      data-current={onExplore}
-      class={[
-        "p-0 rounded-xl",
-        wide
-          ? "flex items-center gap-4.5 h-9 pl-3.5 pr-2 w-full justify-start [&_svg]:size-5"
-          : "size-12 [&_svg]:size-6",
-      ].join(" ")}
-      aria-label="Explore"
-      title="Explore"
-    >
-      <IconSearch />
-      {#if wide}
-        <span class="text-sm font-normal truncate">Explore</span>
-      {/if}
-    </Button>
-  </div>
+  <!-- Explore (cross-space search) button — gated on the `search` feature flag -->
+  {#if searchEnabled}
+    <div class={wide ? "mx-2.5" : "flex justify-center"}>
+      <Button
+        href="/explore"
+        variant="ghost"
+        data-current={onExplore}
+        class={[
+          "p-0 rounded-xl",
+          wide
+            ? "flex items-center gap-4.5 h-9 pl-3.5 pr-2 w-full justify-start [&_svg]:size-5"
+            : "size-12 [&_svg]:size-6",
+        ].join(" ")}
+        aria-label="Explore"
+        title="Explore"
+      >
+        <IconSearch />
+        {#if wide}
+          <span class="text-sm font-normal truncate">Explore</span>
+        {/if}
+      </Button>
+    </div>
+  {/if}
 
   <!-- Divider -->
   <div

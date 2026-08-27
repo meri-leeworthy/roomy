@@ -29,9 +29,9 @@
     content: string;
     /**
      * Blocks+facets form of the editor content, kept in sync with `content`
-     * on every update. The send path uses this when the `richtext-schema`
-     * feature flag is enabled; `content` (markdown) remains for the legacy
-     * path and for messaging-state's string `input` binding.
+     * on every update. The send path uses this when the composer produced
+     * blocks; `content` (markdown) remains for the legacy path and for
+     * messaging-state's string `input` binding.
      */
     blocks?: Block[];
     /**

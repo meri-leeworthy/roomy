@@ -2,11 +2,11 @@
  * XRPC: space.roomy.admin.push.getStats (query).
  *
  * Returns the push dispatcher's lifetime counters (dispatched, delivered,
- * gone, failed, digests fired), current queue depth, VAPID configuration
- * status, and feature flag state. This is the "is the pipeline even alive?"
- * diagnostic — if `deliveredOk` is 0 and `failed` is climbing, the push
- * service is rejecting; if `dispatched` is 0, no messages are being
- * evaluated for push; if VAPID isn't configured, delivery is a no-op.
+ * gone, failed, digests fired), current queue depth, and VAPID configuration
+ * status. This is the "is the pipeline even alive?" diagnostic — if
+ * `deliveredOk` is 0 and `failed` is climbing, the push service is rejecting;
+ * if `dispatched` is 0, no messages are being evaluated for push; if VAPID
+ * isn't configured, delivery is a no-op.
  *
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
@@ -15,7 +15,6 @@ import { openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { isPushConfigured, getVapidPublicKey } from "../push/webpush.ts";
 import { pushDispatcherStats } from "../push/dispatcher.ts";
-import { getAllFlagState } from "../queries/featureFlags.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
 
 interface PushStatsResult {
@@ -32,11 +31,6 @@ interface PushStatsResult {
   };
   /** Total subscription rows across all users. */
   totalSubscriptions: number;
-  /** Feature flag state for push-notifications. */
-  pushFlag: {
-    globalEnabled: boolean;
-    assignedDids: string[];
-  } | null;
 }
 
 export const adminGetPushStatsHandler: QueryHandler<
@@ -54,10 +48,6 @@ export const adminGetPushStatsHandler: QueryHandler<
   ).get<{ n: number }>();
   const totalSubscriptions = countRow?.n ?? 0;
 
-  // Feature flag state for push-notifications.
-  const allFlags = await getAllFlagState(db);
-  const pushFlag = allFlags.find((f) => f.key === "push-notifications") ?? null;
-
   return {
     vapidConfigured: isPushConfigured(),
     vapidPublicKey: getVapidPublicKey(),
@@ -71,8 +61,5 @@ export const adminGetPushStatsHandler: QueryHandler<
       digestsFired: stats.digestsFired,
     },
     totalSubscriptions,
-    pushFlag: pushFlag
-      ? { globalEnabled: pushFlag.globalEnabled, assignedDids: pushFlag.assignedDids }
-      : null,
   };
 };

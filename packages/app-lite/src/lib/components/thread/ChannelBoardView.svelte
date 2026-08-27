@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { createRoomThreadsQuery, type RoomThread } from "$lib/queries/threads";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import BoardViewShell from "@roomy/design/components/content/thread/boardView/BoardView.svelte";
   import type { ThreadInfo } from "@roomy/design/components/content/thread/boardView/types.ts";
   import { IconSearch } from "@roomy/design/icons";
@@ -13,6 +14,12 @@
   } = $props();
 
   const roomId = $derived(page.params.room!);
+
+  // Search feature flag: gates the thread-name search input.
+  const flagsQuery = createFeatureFlagsQuery();
+  const searchEnabled = $derived(
+    flagsQuery.data?.flags.includes("search") ?? false,
+  );
 
   // Debounced search input: filters threads by name server-side (SQLite LIKE
   // on the thread name). 200ms matches the mention typeahead debounce.
@@ -29,7 +36,10 @@
     return () => clearTimeout(timer);
   });
 
-  const threadsQuery = createRoomThreadsQuery(() => roomId, () => searchTerm);
+  const threadsQuery = createRoomThreadsQuery(
+    () => roomId,
+    () => (searchEnabled ? searchTerm : undefined),
+  );
 
   // Flatten all pages into a single array.
   let threads = $derived<ThreadInfo[]>(
@@ -82,17 +92,19 @@
   </div>
 {:else}
   <div class="flex flex-col h-full min-h-0">
-    <div class="shrink-0 px-3 pt-2">
-      <div class="relative">
-        <IconSearch class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-base-400" />
-        <input
-          type="text"
-          bind:value={searchInput}
-          placeholder="Search threads…"
-          class="w-full ring-1 ring-inset ring-base-300 dark:ring-base-700 focus:ring-2 focus:ring-accent-500 bg-base-100 dark:bg-base-800/50 focus:bg-accent-400/5 dark:focus:bg-accent-600/5 text-base-900 dark:text-base-100 placeholder:text-base-400 dark:placeholder:text-base-500 rounded-2xl pl-9 pr-3 py-1.5 text-sm font-medium outline-none border-0 transition-colors"
-        />
+    {#if searchEnabled}
+      <div class="shrink-0 px-3 pt-2">
+        <div class="relative">
+          <IconSearch class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-base-400" />
+          <input
+            type="text"
+            bind:value={searchInput}
+            placeholder="Search threads…"
+            class="w-full ring-1 ring-inset ring-base-300 dark:ring-base-700 focus:ring-2 focus:ring-accent-500 bg-base-100 dark:bg-base-800/50 focus:bg-accent-400/5 dark:focus:bg-accent-600/5 text-base-900 dark:text-base-100 placeholder:text-base-400 dark:placeholder:text-base-500 rounded-2xl pl-9 pr-3 py-1.5 text-sm font-medium outline-none border-0 transition-colors"
+          />
+        </div>
       </div>
-    </div>
+    {/if}
     <div class="flex-1 min-h-0">
       <BoardViewShell {threads} {emptyMessage} {hrefFor} hideChannel {loadMore} {hasMore} />
     </div>

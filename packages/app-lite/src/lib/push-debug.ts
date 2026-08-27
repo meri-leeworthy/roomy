@@ -55,7 +55,6 @@ interface PushDiagnostics {
     configured: boolean;
     length: number | null;
   } | null;
-  featureFlagEnabled: boolean | null;
   lastRegisteredEndpoint: string | null;
 }
 
@@ -172,18 +171,11 @@ export function installPushDebug(): void {
       }
 
       let vapidInfo: PushDiagnostics["vapidKey"] = null;
-      let featureFlag: boolean | null = null;
       try {
         const res = await px().query("space.roomy.push.getVapidPublicKey", {});
         const key = typeof res.publicKey === "string" ? res.publicKey : "";
         vapidInfo = { configured: key !== "", length: key ? key.length : null };
       } catch { vapidInfo = { configured: false, length: null }; }
-
-      try {
-        const flagsRes = await px().query("space.roomy.getFlags", {});
-        const flags = Array.isArray(flagsRes.flags) ? flagsRes.flags : [];
-        featureFlag = flags.includes("push-notifications");
-      } catch { featureFlag = null; }
 
       const result: PushDiagnostics = {
         timestamp: now,
@@ -197,7 +189,6 @@ export function installPushDebug(): void {
         serviceWorker: swInfo,
         subscription: subInfo,
         vapidKey: vapidInfo,
-        featureFlagEnabled: featureFlag,
         lastRegisteredEndpoint: localStorage.getItem("roomy.push.lastEndpoint"),
       };
       console.info("[push] diagnostics:", result);

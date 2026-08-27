@@ -19,29 +19,9 @@
  * silently skip — never breaking login.
  */
 
-import { px, auth } from "$lib/auth.svelte";
+import { px } from "$lib/auth.svelte";
 import { goto } from "$app/navigation";
 import { registerPushSubscription, unregisterPushSubscription } from "$lib/mutations/push-subscription";
-
-/**
- * Check whether the push-notifications feature flag is enabled for the
- * current user. Returns true if the flag is active (global or per-user).
- * Uses a direct XRPC call (no Tanstack Query — this is a one-shot check
- * at push time, not a reactive query).
- */
-export async function isPushFeatureEnabled(): Promise<boolean> {
-  // Wait for auth init to finish before checking auth state
-  while (auth.initializing) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  if (!auth.authenticated) return false;
-  try {
-    const res = await px().query("space.roomy.getFlags", {});
-    return res.flags.includes("push-notifications");
-  } catch {
-    return false;
-  }
-}
 
 /** localStorage key for the last endpoint we registered (idempotency hint). */
 const LAST_ENDPOINT_KEY = "roomy.push.lastEndpoint";
@@ -63,7 +43,6 @@ export type PushOutcome =
   | { status: "unsupported" }
   | { status: "denied" }
   | { status: "no-key" }
-  | { status: "disabled" }
   | { status: "timeout" }
   | { status: "failed"; message: string };
 
@@ -77,8 +56,6 @@ export function pushOutcomeMessage(o: PushOutcome): string {
       return "Notifications are blocked. Re-enable them in your browser's site permissions, then try again.";
     case "no-key":
       return "Push isn't configured on this server yet.";
-    case "disabled":
-      return "Push notifications are not available on this server.";
     case "timeout":
       return "Couldn't contact the push service (timed out). Some browsers — like vanilla Chromium without Google keys — can't use web push; try Firefox, Chrome, Edge, Brave, or Safari.";
     case "failed":
@@ -101,7 +78,6 @@ function supportsPush(): boolean {
  */
 export async function getPushSubscriptionEndpoint(): Promise<string | null> {
   if (!supportsPush()) return null;
-  if (!(await isPushFeatureEnabled())) return null;
   if (typeof Notification !== "undefined" && Notification.permission !== "granted") {
     return null;
   }
@@ -135,7 +111,6 @@ export function base64UrlToUint8Array(base64Url: string): Uint8Array {
  */
 export async function ensurePushSubscription(): Promise<PushOutcome> {
   if (!supportsPush()) return { status: "unsupported" };
-  if (!(await isPushFeatureEnabled())) return { status: "disabled" };
 
   // Request permission FIRST, synchronously within the gesture (no prior
   // await). If we awaited the VAPID key fetch first, Safari would reject the
@@ -162,9 +137,6 @@ export async function ensurePushSubscription(): Promise<PushOutcome> {
  */
 export async function subscribeIfAlreadyPermitted(): Promise<void> {
   console.debug("[push:login] subscribeIfAlreadyPermitted starting");
-  const flagOk = await isPushFeatureEnabled();
-  console.debug("[push:login] feature flag enabled:", flagOk);
-  if (!flagOk) return;
   if (!supportsPush()) {
     console.debug("[push:login] push not supported, skipping");
     return;

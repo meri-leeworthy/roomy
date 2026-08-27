@@ -500,11 +500,9 @@ export async function createAppserver(
   startSearchBackfill({ globalDb: openGlobalDb() });
   // Start the centralized push dispatcher unconditionally. The dispatcher is
   // global infrastructure that processes every live createMessage and
-  // computes fan-out; the `push-notifications` feature flag is a per-recipient
-  // filter applied during evaluation (see push/evaluate.ts), not a process-
-  // level kill switch. Starting it here means the StreamManager's pokes are
-  // always queued and evaluated regardless of flag state. No-op-safe when
-  // VAPID isn't configured (deliveries just find no subscriptions).
+  // computes fan-out. Starting it here means the StreamManager's pokes are
+  // always queued and evaluated. No-op-safe when VAPID isn't configured
+  // (deliveries just find no subscriptions).
   startPushDispatcher({ db: openReadStateDb() });
 
   // ─── XRPC routes ──────────────────────────────────────────────────────

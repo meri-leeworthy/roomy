@@ -11,7 +11,6 @@
  *   3. `space.roomy.room.getMessages` returns the message with the new
  *      `mimeType` and base64-encoded JSON content.
  *   4. Coexistence: a legacy markdown message still round-trips.
- *   5. Feature flag `richtext-schema` is registered on the live appserver.
  *
  * Env (same as the CLI):
  *   ATPROTO_IDENTIFIER / ATPROTO_APP_PASSWORD  (app-password login)
@@ -73,20 +72,6 @@ async function main() {
   info(`authenticated as ${agent.did}`);
   info(`appserver: ${cfg.appserverUrl} (${cfg.appserverDid})`);
   const cleanup = process.env.E2E_CLEANUP !== "false";
-
-  // 0. Feature flag: getFlags returns only *enabled* flags (defaults off), so
-  // this is informational — the real proof the branch is deployed is that the
-  // richtext message round-trips below (coexistence design: the appserver
-  // accepts both formats unconditionally).
-  try {
-    const flags = await xrpc.query("space.roomy.getFlags", {});
-    const keys = Array.isArray(flags) ? flags : (flags as any).flags ?? [];
-    const list = Array.isArray(keys) ? keys.map((f: any) => (typeof f === "string" ? f : f?.key)).filter(Boolean) : [];
-    info(`feature flags enabled for user: ${JSON.stringify(list)} (richtext-schema defaults off; coexistence means the server accepts both formats)`);
-  } catch (e: any) {
-    bad(`getFlags failed — ${e?.message ?? e}`);
-    failures++;
-  }
 
   // 1. Create a disposable space.
   info("creating test space…");

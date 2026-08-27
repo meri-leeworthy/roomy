@@ -79,7 +79,7 @@ describe("space.roomy.admin.getFlags / setFlag / clearFlag", () => {
 
     const set = await ctx.authedFetch(ADMIN)(
       `${ctx.baseUrl}/xrpc/space.roomy.admin.setFlag`,
-      { method: "POST", body: JSON.stringify({ flag: "push-notifications", all: true }) },
+      { method: "POST", body: JSON.stringify({ flag: "channel-federation", all: true }) },
     );
     expect(set.status).toBe(200);
 
@@ -92,7 +92,7 @@ describe("space.roomy.admin.getFlags / setFlag / clearFlag", () => {
 
     const clear = await ctx.authedFetch(ADMIN)(
       `${ctx.baseUrl}/xrpc/space.roomy.admin.clearFlag`,
-      { method: "POST", body: JSON.stringify({ flag: "push-notifications", all: true }) },
+      { method: "POST", body: JSON.stringify({ flag: "channel-federation", all: true }) },
     );
     expect(clear.status).toBe(200);
   });

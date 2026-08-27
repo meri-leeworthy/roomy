@@ -18,7 +18,6 @@
   import MessageContext from "./MessageContext.svelte";
   import { px, auth } from "$lib/auth.svelte";
   import { queryClient } from "$lib/client";
-  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import type { Message } from "$lib/queries/messages";
   import type { Member, ExternalAdmin } from "$lib/queries/members";
   import type { TypeaheadUser } from "@roomy/design/components/ui/user-typeahead/UserTypeahead.svelte";
@@ -52,18 +51,9 @@
   // child ChatInput's onMount runs and triggers focus.
   const isCoarsePointer = browser && matchMedia("(pointer: coarse)").matches;
 
-  // Feature-flag gate for the new richtext send path. Mounted at component
-  // top level so the query runs; the flag is read synchronously from the
-  // cached result at send time (no await). Until the query has loaded, the
-  // legacy markdown path is used.
-  const flagsQuery = createFeatureFlagsQuery();
-  const richtextEnabled = $derived(
-    flagsQuery.data?.flags.includes("richtext-schema") ?? false,
-  );
-
-  // Blocks+facets form of the composer content, bound from ChatInput. Only
-  // used when the richtext flag is on; the markdown string binding remains
-  // the source of truth for messaging-state.
+  // Blocks+facets form of the composer content, bound from ChatInput. The
+  // send path uses it when the composer produced blocks; the markdown string
+  // binding remains the source of truth for messaging-state.
   let blocks: Block[] | undefined = $state();
 
   // ── Client-side link embeds ────────────────────────────────────────────
@@ -301,13 +291,11 @@
     const message = state.input;
     const filesToUpload = [...state.files];
 
-    // New-format send path: gated on the cached feature flag (synchronous
-    // read — no await at send time). When enabled and the composer produced
-    // blocks, the wire body is serializeBlocks(blocks) and the mentions
-    // sidecar is dropped (mentions fold into `#didMention` facets). Until
-    // the flag query has loaded, or when blocks are absent, the legacy
+    // New-format send path: when the composer produced blocks, the wire body
+    // is serializeBlocks(blocks) and the mentions sidecar is dropped (mentions
+    // fold into `#didMention` facets). When blocks are absent, the legacy
     // markdown path is used.
-    const useRichText = richtextEnabled && !!submittedBlocks && submittedBlocks.length > 0;
+    const useRichText = !!submittedBlocks && submittedBlocks.length > 0;
 
     try {
       const attachments: Record<string, unknown>[] = [];

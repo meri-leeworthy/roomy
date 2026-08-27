@@ -32,8 +32,6 @@
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { createRoomMetadataQuery } from "$lib/queries/room-metadata";
-  import { isAuthenticated, isInitializing } from "$lib/auth.svelte";
-  import { isPushFeatureEnabled } from "$lib/push.svelte";
   import { createRoom, updateSidebar } from "$lib/mutations/room";
   import { newUlid, Ulid } from "@roomy-space/sdk";
   import { serverBar, toggleServerBar } from "$lib/components/layout/server-bar.svelte";
@@ -66,14 +64,6 @@
     { enabled: !!spaceId },
   );
 
-  let pushFeatureEnabled = $state(false);
-  $effect(() => {
-    if (!isInitializing() && isAuthenticated()) {
-      isPushFeatureEnabled().then((enabled) => {
-        pushFeatureEnabled = enabled;
-      });
-    }
-  });
   const roomMetaQuery = createRoomMetadataQuery(
     () => page.params.room ?? "",
     { enabled: !!page.params.room },
@@ -171,7 +161,7 @@
       { slug: "members", label: "Members" },
       ...(showIntegrationsTab ? [{ slug: "integrations", label: "Integrations" }] : []),
       ...(showFederationTab ? [{ slug: "federations", label: "Federation" }] : []),
-      ...(pushFeatureEnabled ? [{ slug: "notifications", label: "Notifications" }] : []),
+      { slug: "notifications", label: "Notifications" },
       ...(showInvitesTab ? [{ slug: "invites", label: "Invites" }] : []),
       ...(showDiscordBridgeTab
         ? [{ slug: "discord-bridge", label: "Discord Bridge" }]

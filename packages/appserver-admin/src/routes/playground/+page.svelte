@@ -614,12 +614,6 @@
                 <p class="text-xs text-base-400 uppercase tracking-wide mb-1">Total Subs</p>
                 <p class="text-sm font-medium">{pushStats.totalSubscriptions}</p>
               </div>
-              <div class="border border-base-200 dark:border-base-800 rounded-xl p-3 bg-white dark:bg-base-900/50">
-                <p class="text-xs text-base-400 uppercase tracking-wide mb-1">Push Flag</p>
-                <p class="text-sm font-medium" class:text-green-600={pushStats.pushFlag?.globalEnabled} class:text-base-500={!pushStats.pushFlag?.globalEnabled}>
-                  {pushStats.pushFlag?.globalEnabled ? "Global ON" : "Off"}
-                </p>
-              </div>
             </div>
           {/if}
         </div>

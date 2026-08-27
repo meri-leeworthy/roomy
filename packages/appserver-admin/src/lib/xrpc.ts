@@ -192,10 +192,6 @@ export interface PushStats {
     digestsFired: number;
   };
   totalSubscriptions: number;
-  pushFlag: {
-    globalEnabled: boolean;
-    assignedDids: string[];
-  } | null;
 }
 
 export async function callAdminGetPushStats(agent: Agent): Promise<PushStats> {

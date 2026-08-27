@@ -19,8 +19,7 @@ export interface FeatureFlagDef {
  * The key is used as the XRPC flag identifier and DB primary key.
  */
 export const FEATURE_FLAGS: readonly FeatureFlagDef[] = [
-  { key: "push-notifications", description: "Enable push notification delivery and subscription" },
-  { key: "richtext-schema", description: "Enable sending messages with the new blocks+facets rich text schema (application/vnd.roomy.richtext+json)" },
+  { key: "search", description: "Enable search UI: member search, thread search, and cross-space Explore" },
   { key: "channel-federation", description: "Enable channel federation: federating a channel from one space into another" },
 ];
 export const FEATURE_FLAG_KEYS: ReadonlySet<string> = new Set(

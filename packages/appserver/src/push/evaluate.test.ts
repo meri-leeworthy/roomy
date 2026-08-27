@@ -178,11 +178,6 @@ async function seedFixture(db: DbLike): Promise<void> {
   await setUserDefault(db, BUSY_READER, "busy");
   await setUserDefault(db, QUIET_READER, "quiet");
   await setUserDefault(db, BANNED_BUSY, "busy");
-  // Enable push-notifications globally so recipients pass the per-user flag
-  // gate added in evaluatePush.
-  await db.run(
-    "insert into readstate.feature_flags (key, global_enabled, updated_at) values ('push-notifications', 1, (unixepoch() * 1000))",
-  );
   // Subscriptions: only busy reader + quiet reader + banned user have devices.
   await addSubscription(db, BUSY_READER);
   await addSubscription(db, QUIET_READER);
@@ -431,11 +426,8 @@ describe("push/evaluate — Engaged digest path", () => {
     );
     await spaceDb.run("insert into edges (head, tail, label) values (?, ?, 'author')", [theirMsg, ENGAGED_READER]);
 
-    // Read-state side: flag + subscription, NO participation row yet (the
+    // Read-state side: subscription, NO participation row yet (the
     // backfill must populate it).
-    await readStateDb.run(
-      "insert into feature_flags (key, global_enabled, updated_at) values ('push-notifications', 1, (unixepoch() * 1000))",
-    );
     await upsertSubscription(readStateDb, {
       userDid: ENGAGED_READER,
       endpoint: "https://push.test/split",

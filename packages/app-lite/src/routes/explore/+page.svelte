@@ -8,6 +8,7 @@
   import { setSidebarContent } from "$lib/components/layout/sidebar.svelte";
   import { setWideSidebar } from "$lib/components/layout/wide-sidebar.svelte";
   import { createSearchMessagesQuery, type SearchMessage } from "$lib/queries/search";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { resolveBlobUrl } from "$lib/utils";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
@@ -16,6 +17,13 @@
   import SeoMeta from "$lib/components/seo/SeoMeta.svelte";
 
   const { queryKey } = cache;
+
+  // Search feature flag: gates the whole Explore page (direct navigation
+  // lands here even when the sidebar button is hidden).
+  const flagsQuery = createFeatureFlagsQuery();
+  const searchEnabled = $derived(
+    flagsQuery.data?.flags.includes("search") ?? false,
+  );
 
   let searchInput = $state("");
   let searchTerm = $state("");
@@ -84,6 +92,13 @@
 {/snippet}
 
 <div class="h-full dark:bg-base-900/20 text-base-800 dark:text-base-200">
+  {#if !searchEnabled}
+    <div class="h-full flex items-center justify-center">
+      <p class="text-sm text-base-500 dark:text-base-400">
+        Search is not enabled for your account yet.
+      </p>
+    </div>
+  {:else}
   <main class="h-full overflow-y-auto text-base-950 dark:text-base-50">
     <div class="flex flex-col items-center py-8 px-4">
       <div class="w-full max-w-2xl flex flex-col gap-4">
@@ -138,4 +153,5 @@
       </div>
     </div>
   </main>
+  {/if}
 </div>
