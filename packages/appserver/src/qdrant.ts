@@ -27,6 +27,12 @@
 export interface QdrantConfig {
   /** Base HTTP origin (no trailing slash), e.g. `https://search-staging.roomy.space`. */
   url: string;
+  /**
+   * Explicit port for the client. The Qdrant client appends `:6333`
+   * whenever the URL has no explicit port — even for https — so a
+   * Cloudflare-fronted Qdrant (443 only) must pass `port: 443` explicitly.
+   */
+  port?: number;
   /** API key for authenticated deployments. */
   apiKey?: string;
 }
@@ -37,8 +43,14 @@ export interface QdrantConfig {
  * Reads `QDRANT_URL` and `QDRANT_API_KEY`. Returns `null` when `QDRANT_URL`
  * is unset OR not a valid http(s) URL — callers fall back to no-op behaviour
  * (no indexing, no search). An invalid URL is treated as disabled rather
- * than crashing the request path: the Qdrant client constructor throws on
- * a protocol-less URL, and a misconfigured env must not 500 every search.
+ * than crashing the request path: the Qdrant client constructor throws on a
+ * protocol-less URL, and a misconfigured env must not 500 every search.
+ *
+ * Port: the Qdrant client defaults to `:6333` when the URL has no explicit
+ * port, even for https. Cloudflare-fronted Qdrant (like
+ * search-staging.roomy.space) only listens on 443, so a bare https URL is
+ * normalized to `port: 443` (passed to the client constructor — URL string
+ * munging can't express it, `new URL()` drops default ports).
  */
 export function getQdrantConfig(): QdrantConfig | null {
   const url = process.env.QDRANT_URL;
@@ -50,9 +62,12 @@ export function getQdrantConfig(): QdrantConfig | null {
     );
     return null;
   }
+  const parsed = new URL(trimmed);
+  const port = parsed.port !== "" ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : undefined;
   const apiKey = process.env.QDRANT_API_KEY;
   return {
     url: trimmed,
+    ...(port !== undefined ? { port } : {}),
     ...(apiKey ? { apiKey } : {}),
   };
 }

@@ -26,17 +26,31 @@ describe("getQdrantConfig", () => {
     process.env.QDRANT_API_KEY = "secret";
     expect(getQdrantConfig()).toEqual({
       url: "https://search-staging.roomy.space",
+      port: 443,
       apiKey: "secret",
     });
 
     delete process.env.QDRANT_API_KEY;
     expect(getQdrantConfig()).toEqual({
       url: "https://search-staging.roomy.space",
+      port: 443,
     });
   });
 
   test("treats a protocol-less URL as disabled (not a crash)", () => {
     process.env.QDRANT_URL = "search-staging.roomy.space";
     expect(getQdrantConfig()).toBeNull();
+  });
+
+  test("normalizes https URLs without a port to port 443 (client defaults to 6333)", () => {
+    process.env.QDRANT_URL = "https://search-staging.roomy.space";
+    expect(getQdrantConfig()?.url).toBe("https://search-staging.roomy.space");
+    expect(getQdrantConfig()?.port).toBe(443);
+  });
+
+  test("keeps an explicit port", () => {
+    process.env.QDRANT_URL = "https://search-staging.roomy.space:6333";
+    expect(getQdrantConfig()?.url).toBe("https://search-staging.roomy.space:6333");
+    expect(getQdrantConfig()?.port).toBe(6333);
   });
 });

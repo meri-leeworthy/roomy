@@ -108,7 +108,11 @@ export function getQdrantClient(): QdrantClientLike | null {
     return null;
   }
   try {
-    clientInstance = new QdrantClient({ url: config.url, apiKey: config.apiKey });
+    clientInstance = new QdrantClient({
+      url: config.url,
+      ...(config.port !== undefined ? { port: config.port } : {}),
+      apiKey: config.apiKey,
+    });
   } catch (err) {
     log.warn(`[qdrant] failed to construct client (${err instanceof Error ? err.message : String(err)}) — message search disabled`);
     clientInstance = null;
