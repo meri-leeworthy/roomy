@@ -1,4 +1,4 @@
-import { createQuery } from "@tanstack/svelte-query";
+import { createQuery, keepPreviousData } from "@tanstack/svelte-query";
 import { cache, schemas } from "@roomy-space/sdk";
 import { px } from "$lib/auth.svelte";
 
@@ -21,5 +21,9 @@ export function createMembersQuery(
         spaceId: spaceId(),
         ...(search() ? { search: search() } : {}),
       }),
+    // Keep the previous member list rendered while a new search term fetches —
+    // without this, each keystroke flips isPending and the list flashes the
+    // loading state.
+    placeholderData: keepPreviousData,
   }));
 }

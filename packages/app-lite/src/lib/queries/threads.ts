@@ -1,4 +1,4 @@
-import { createInfiniteQuery } from "@tanstack/svelte-query";
+import { createInfiniteQuery, keepPreviousData } from "@tanstack/svelte-query";
 import { cache, schemas } from "@roomy-space/sdk";
 import { px } from "$lib/auth.svelte";
 
@@ -27,6 +27,10 @@ export function createSpaceThreadsQuery(
       }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.cursor ?? undefined,
+    // Keep the previous page list rendered while a new search term fetches —
+    // without this, each keystroke flips isPending and the whole view flashes
+    // the loading state.
+    placeholderData: keepPreviousData,
     gcTime: 0,
   }));
 }
@@ -49,6 +53,10 @@ export function createRoomThreadsQuery(
       }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.cursor ?? undefined,
+    // Keep the previous page list rendered while a new search term fetches —
+    // without this, each keystroke flips isPending and the whole view flashes
+    // the loading state.
+    placeholderData: keepPreviousData,
     gcTime: 0,
   }));
 }

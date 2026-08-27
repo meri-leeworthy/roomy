@@ -1,4 +1,4 @@
-import { createQuery } from "@tanstack/svelte-query";
+import { createQuery, keepPreviousData } from "@tanstack/svelte-query";
 import { cache, schemas } from "@roomy-space/sdk";
 import { px } from "$lib/auth.svelte";
 
@@ -26,6 +26,10 @@ export function createSearchMessagesQuery(
           limit: String(limit),
         }),
       enabled,
+      // Keep the previous results rendered while a new term fetches — without
+      // this, each keystroke flips isPending and the results flash the
+      // loading state.
+      placeholderData: keepPreviousData,
       gcTime: 0,
     };
   });
