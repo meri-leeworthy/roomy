@@ -96,7 +96,11 @@ export const searchMessagesHandler: QueryHandler<
     hits = await searchMessages(client, {
       sparse,
       spaceDids,
-      limit: window,
+      // Grow the fetch with the cursor so every page slices a window that
+      // covers [0, offset + window): Qdrant's sparse search returns points
+      // in an undefined order among equal scores, so offset-based
+      // pagination repeats points — the appserver slices instead.
+      limit: window + offset,
     });
   } catch (err) {
     // Surface the configured endpoint so a misconfigured QDRANT_URL is
@@ -111,12 +115,10 @@ export const searchMessagesHandler: QueryHandler<
     );
   }
 
-  // Slice the window by cursor. Qdrant's sparse search returns points in an
-  // undefined order among equal scores, so offset-based pagination repeats
-  // points (offset=1 can return the same point as offset=0). Fetching one
-  // window from offset 0 and slicing here is deterministic; pages beyond the
-  // window return fewer results and the cursor stops once it is exhausted.
-  const windowHits = hits.slice(offset, offset + window);
+  // Slice the fetched set by cursor. A single Qdrant response never repeats
+  // a point, so each page is distinct; the cursor continues while more
+  // results remain in the fetched set and stops once it is exhausted.
+  const windowHits = hits.slice(offset, offset + limit);
 
   // Hydrate per-space, keeping the hits' rank order. Qdrant returns ids;
   // SQLite provides the full message DTOs.
@@ -137,7 +139,7 @@ export const searchMessagesHandler: QueryHandler<
       log.warn(`[search] selectMessages failed for space ${space}:`, err);
     }
   }
-  for (const h of hits) {
+  for (const h of windowHits) {
     const m = hydratedBySpace.get(h.payload.spaceDid)?.get(h.messageId);
     if (m) ranked.push({ message: m, roomId: h.payload.roomId, spaceDid: h.payload.spaceDid });
   }
@@ -158,10 +160,10 @@ export const searchMessagesHandler: QueryHandler<
   }
 
   const result: SearchMessagesResult = { messages: results };
-  // Cursor semantics: offset + limit. Emit when this page didn't exhaust
-  // the window (more results remain in it), or the window itself was full
-  // (more may exist beyond it).
-  if (offset + limit < windowHits.length || windowHits.length === window) {
+  // Cursor semantics: offset + limit. Emit while more results remain in the
+  // fetched set (this page didn't reach the end of it), or the fetched set
+  // itself was full (more may exist beyond it).
+  if (offset + limit < hits.length || hits.length === window + offset) {
     result.cursor = String(offset + limit);
   }
   return stripNulls(result as unknown as Record<string, unknown>) as SearchMessagesResult;
