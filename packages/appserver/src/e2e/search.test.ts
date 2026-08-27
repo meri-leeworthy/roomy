@@ -318,6 +318,46 @@ describe("space.roomy.search.messages (Qdrant)", () => {
     expect(new Set(seen).size).toBe(3);
   });
 
+  test("cursor terminates after the window is exhausted (full-window case)", async () => {
+    const { ctx } = await newAppWithQdrant();
+    const { roomId } = await materializeSpace(ctx, SPACE, USER, {
+      messageText: "alpha page test one",
+    });
+    // More matches than the window (limit=2 → window=6): 8 messages. The
+    // window is the searchable cap — only 6 are ever returned.
+    for (let i = 2; i <= 8; i++) {
+      await sendMessage(ctx, roomId, `alpha page test message number ${i}`);
+    }
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let emptyPages = 0;
+    for (let i = 0; i < 12; i++) {
+      const url = `space.roomy.search.messages?spaceId=${SPACE}&q=page&limit=2${
+        cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+      }`;
+      const res = await get(ctx, url);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      if (body.messages.length === 0) {
+        emptyPages++;
+        // The trailing cursor may resolve to one empty page, but the
+        // cursor must terminate — it must not keep advancing forever.
+        if (body.cursor === undefined) break;
+        expect(emptyPages).toBeLessThanOrEqual(1);
+      } else {
+        seen.push(...body.messages.map((m: { id: string }) => m.id));
+      }
+      if (body.cursor === undefined) break;
+      cursor = body.cursor;
+    }
+
+    // All window-capped matches walked exactly once, and the walk terminated.
+    expect(seen).toHaveLength(6);
+    expect(new Set(seen).size).toBe(6);
+    expect(emptyPages).toBeLessThanOrEqual(1);
+  });
+
   test("empty result set returns 200 with no messages", async () => {
     const { ctx } = await newAppWithQdrant();
     await materializeSpace(ctx, SPACE, USER, { messageText: "the quick brown fox" });

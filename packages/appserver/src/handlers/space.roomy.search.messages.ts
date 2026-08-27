@@ -165,8 +165,12 @@ export const searchMessagesHandler: QueryHandler<
   const result: SearchMessagesResult = { messages: results };
   // Cursor semantics: offset + limit. Emit while more results remain in the
   // fetched window (this page didn't reach the end of it), or the window
-  // itself was full (more may exist beyond it).
-  if (offset + limit < hits.length || hits.length === window) {
+  // itself was full AND this page still had content — one trailing cursor
+  // that resolves to an empty page, so the client can discover the window
+  // is exhausted. Once the window has been fully consumed (offset past the
+  // end), stop: `hits.length === window` alone would emit a cursor on every
+  // subsequent page forever.
+  if (offset + limit < hits.length || (hits.length === window && offset < hits.length)) {
     result.cursor = String(offset + limit);
   }
   return stripNulls(result as unknown as Record<string, unknown>) as SearchMessagesResult;
