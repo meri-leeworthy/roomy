@@ -85,12 +85,12 @@ class FakeQdrant implements QdrantClientLike {
     points: Array<{ id: unknown; score: number; payload?: Record<string, unknown> | null }>;
   }> {
     if (name !== MESSAGES_COLLECTION) throw new Error("wrong collection");
-    const { query, using, filter, limit, offset } = args as {
+    const { query, using, filter, limit, offset = 0 } = args as {
       query: SparseVector;
       using: string;
       filter?: { must?: Array<{ key: string; match: { any?: string[]; value?: string } }> };
       limit: number;
-      offset: number;
+      offset?: number;
     };
     if (using !== BM25_VECTOR_NAME) throw new Error("wrong vector name");
 
@@ -267,7 +267,6 @@ describe("searchMessages", () => {
       sparse: FOX,
       spaceDids: [SpaceRef],
       limit: 10,
-      offset: 0,
     });
     expect(hits.map((h) => h.messageId)).toEqual(["01M1", "01M2"]);
     expect(hits[0]!.score).toBeGreaterThan(hits[1]!.score);
@@ -280,12 +279,11 @@ describe("searchMessages", () => {
       sparse: FOX,
       spaceDids: [],
       limit: 10,
-      offset: 0,
     });
     expect(hits).toEqual([]);
   });
 
-  test("respects limit and offset (cursor pagination)", async () => {
+  test("returns a window of ranked hits (pagination is sliced by the caller)", async () => {
     const fake = new FakeQdrant();
     fake.exists = true;
     for (let i = 0; i < 5; i++) {
@@ -297,11 +295,10 @@ describe("searchMessages", () => {
         timestamp: `2026-01-0${i + 1}T00:00:00.000Z`,
       });
     }
-    const page1 = await searchMessages(fake, { sparse: FOX, spaceDids: [SpaceRef], limit: 2, offset: 0 });
-    const page2 = await searchMessages(fake, { sparse: FOX, spaceDids: [SpaceRef], limit: 2, offset: 2 });
-    expect(page1).toHaveLength(2);
-    expect(page2).toHaveLength(2);
-    const ids = [...page1.map((h) => h.messageId), ...page2.map((h) => h.messageId)];
-    expect(new Set(ids).size).toBe(4);
+    const hits = await searchMessages(fake, { sparse: FOX, spaceDids: [SpaceRef], limit: 3 });
+    expect(hits).toHaveLength(3);
+    // Distinct ids — a single window never repeats a point (offset-based
+    // pagination can, on tied scores).
+    expect(new Set(hits.map((h) => h.messageId)).size).toBe(3);
   });
 });

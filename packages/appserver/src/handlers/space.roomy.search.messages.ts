@@ -88,6 +88,7 @@ export const searchMessagesHandler: QueryHandler<
     return { messages: [] };
   }
 
+  const window = limit * OVERFETCH;
   const offset = cursor !== null ? Number(cursor) : 0;
   const sparse = encodeSparse(q);
   let hits;
@@ -95,8 +96,7 @@ export const searchMessagesHandler: QueryHandler<
     hits = await searchMessages(client, {
       sparse,
       spaceDids,
-      limit: limit * OVERFETCH,
-      offset,
+      limit: window,
     });
   } catch (err) {
     // Surface the configured endpoint so a misconfigured QDRANT_URL is
@@ -111,11 +111,18 @@ export const searchMessagesHandler: QueryHandler<
     );
   }
 
+  // Slice the window by cursor. Qdrant's sparse search returns points in an
+  // undefined order among equal scores, so offset-based pagination repeats
+  // points (offset=1 can return the same point as offset=0). Fetching one
+  // window from offset 0 and slicing here is deterministic; pages beyond the
+  // window return fewer results and the cursor stops once it is exhausted.
+  const windowHits = hits.slice(offset, offset + window);
+
   // Hydrate per-space, keeping the hits' rank order. Qdrant returns ids;
   // SQLite provides the full message DTOs.
   const ranked: Array<{ message: MessageDto; roomId: string; spaceDid: string }> = [];
   const bySpace = new Map<string, string[]>();
-  for (const h of hits) {
+  for (const h of windowHits) {
     const arr = bySpace.get(h.payload.spaceDid) ?? [];
     arr.push(h.messageId);
     bySpace.set(h.payload.spaceDid, arr);
@@ -151,9 +158,10 @@ export const searchMessagesHandler: QueryHandler<
   }
 
   const result: SearchMessagesResult = { messages: results };
-  // Cursor semantics: offset + limit. Emit when more ranked hits survived
-  // than this page shows, or the over-fetch was exhausted (more may exist).
-  if (ranked.length > limit || hits.length === limit * OVERFETCH) {
+  // Cursor semantics: offset + limit. Emit when this page didn't exhaust
+  // the window (more results remain in it), or the window itself was full
+  // (more may exist beyond it).
+  if (offset + limit < windowHits.length || windowHits.length === window) {
     result.cursor = String(offset + limit);
   }
   return stripNulls(result as unknown as Record<string, unknown>) as SearchMessagesResult;

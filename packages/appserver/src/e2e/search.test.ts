@@ -83,12 +83,12 @@ class FakeQdrant implements QdrantClientLike {
   ): Promise<{
     points: Array<{ id: unknown; score: number; payload?: Record<string, unknown> | null }>;
   }> {
-    const { query, using, filter, limit, offset } = args as {
+    const { query, using, filter, limit, offset = 0 } = args as {
       query: SparseVector;
       using: string;
       filter?: { must?: Array<{ key: string; match: { any?: string[] } }> };
       limit: number;
-      offset: number;
+      offset?: number;
     };
     if (using !== "bm25") throw new Error("wrong vector name");
 

@@ -218,16 +218,22 @@ export interface SearchMessagesOptions {
   sparse: SparseVector;
   /** Space DIDs the caller can read; results are restricted to these. */
   spaceDids: string[];
-  /** Over-fetch page size (the caller post-filters by room access). */
+  /**
+   * Window size to fetch. The handler over-fetches (limit×3) and slices by
+   * cursor itself: Qdrant's sparse search returns points in an undefined
+   * order among equal scores, so offset-based pagination can repeat points
+   * (offset=1 may return the same point as offset=0). Fetching one window
+   * from offset 0 and slicing in the appserver is deterministic.
+   */
   limit: number;
-  /** Offset for cursor pagination. */
-  offset: number;
 }
 
 /**
  * Run a sparse BM25 query over `messages`, payload-filtered to the given
  * spaces, ranked by score desc. Returns hits with their payloads (roomId +
- * spaceDid drive the read-access post-filter).
+ * spaceDid drive the read-access post-filter). Always fetches from offset 0
+ * — see {@link SearchMessagesOptions.limit} for why pagination is sliced
+ * by the caller.
  */
 export async function searchMessages(
   client: QdrantClientLike,
@@ -247,7 +253,6 @@ export async function searchMessages(
       ],
     },
     limit: opts.limit,
-    offset: opts.offset,
     with_payload: true,
   });
 
