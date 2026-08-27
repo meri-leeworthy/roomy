@@ -190,6 +190,47 @@ describe("space.roomy.space.getMetadata", () => {
     );
     expect(res.status).toBe(404);
   });
+
+  test("sidebar channels carry activeThreads from user_thread_activity", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    seedSpace(db, SPACE, USER);
+    seedJoinedSpace(db, USER, SPACE);
+
+    // Channel with an engaged thread (user_thread_activity row + link edge).
+    const channel = newUlid();
+    seedRoom(db, channel, SPACE);
+    const thread = newUlid();
+    seedRoom(db, thread, SPACE, "space.roomy.thread");
+    spaceDb(db, SPACE).run(
+      `insert into comp_info (entity, name) values (?, ?)`,
+      [thread, "Engaged Thread"],
+    );
+    spaceDb(db, SPACE).run(
+      `insert into edges (head, tail, label, payload) values (?, ?, 'link', ?)`,
+      [channel, thread, JSON.stringify({ canonical_parent: 1 })],
+    );
+    readStateDb(db).run(
+      `insert into user_thread_activity (user_did, thread_id, last_active_at, updated_at)
+       values (?, ?, ?, ?)`,
+      [USER, thread, Date.now(), Date.now()],
+    );
+
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.getMetadata?spaceId=${SPACE}`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const allChannels = [
+      ...(body.sidebar.categories ?? []).flatMap((c: { channels: unknown[] }) => c.channels),
+      ...(body.sidebar.orphans ?? []),
+    ];
+    const ch = allChannels.find((c: { id: string }) => c.id === channel);
+    expect(ch).toBeDefined();
+    expect(ch.activeThreads).toBeDefined();
+    expect(ch.activeThreads).toHaveLength(1);
+    expect(ch.activeThreads[0].id).toBe(thread);
+  });
 });
 
 // ─── space.roomy.space.getMembers ───────────────────────────────────────
