@@ -137,7 +137,7 @@ export async function ingestDiscordMessage(
 	// ThreadStarterMessage (type 21): forward original message into thread
 	if (message.type === MsgType.ThreadStarterMessage) {
 		writeSkipRecord("thread_starter", message);
-		return handleThreadStarterMessage(message, repo, roomy);
+		return handleThreadStarterMessage(message, repo, roomy, guildId);
 	}
 
 	// Forwarded message: forward the original message into the target
@@ -151,7 +151,7 @@ export async function ingestDiscordMessage(
 		(message.messageSnapshots?.length ?? 0) > 0;
 	if (isForward) {
 		writeSkipRecord("forward", message);
-		return handleForwardMessage(message, repo, roomy);
+		return handleForwardMessage(message, repo, roomy, guildId);
 	}
 
 	// Skip system messages
@@ -392,10 +392,11 @@ async function handleThreadStarterMessage(
 	message: DiscordMessageData,
 	repo: BridgeRepository,
 	roomy: RoomyGateway,
+	guildIdOverride?: string,
 ): Promise<{ synced: number; skipped: number }> {
 	const threadId = message.channelId;
 	const messageId = message.id;
-	const guildId = message.guildId;
+	const guildId = guildIdOverride ?? message.guildId;
 
 	if (
 		!guildId ||
@@ -525,10 +526,11 @@ async function handleForwardMessage(
 	message: DiscordMessageData,
 	repo: BridgeRepository,
 	roomy: RoomyGateway,
+	guildIdOverride?: string,
 ): Promise<{ synced: number; skipped: number }> {
 	const targetChannelId = message.channelId;
 	const messageId = message.id;
-	const guildId = message.guildId;
+	const guildId = guildIdOverride ?? message.guildId;
 
 	if (
 		!guildId ||

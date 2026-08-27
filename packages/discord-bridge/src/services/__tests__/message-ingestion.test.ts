@@ -762,4 +762,35 @@ describe("ingestDiscordMessage — forwarded messages (HAS_SNAPSHOT flag)", () =
 		expect(result).toEqual({ synced: 1, skipped: 0 });
 		expect(createMessageEvent(roomy, SPACE_A)).toBeDefined();
 	});
+
+	// FW06: Backfill regression — REST channel-message payloads omit
+	// `guild_id`, so a forward fetched by backfill has no `guildId` on the
+	// message. `ingestDiscordMessage` receives the resolved
+	// `guildIdOverride` from the backfill service; the forward handlers must
+	// honour it (the `!guildId` guard used to reject the forward even though
+	// the caller had a resolved guild id).
+	test("FW06: backfilled forward with guildIdOverride is forwarded despite missing message.guildId", async () => {
+		const originalId = "6666666666";
+		const sourceChannelId = CHANNEL_2;
+		const sourceRoomUlid = newUlid();
+		mapMessage(repo, originalId, ROOMY_MESSAGE_ULID);
+		repo.registerMapping(SPACE_A, "channel", sourceChannelId, sourceRoomUlid);
+
+		// REST channel-message payloads have no top-level guild_id.
+		const msg = makeForwardMessage(originalId, CHANNEL, sourceChannelId);
+		msg.guildId = undefined;
+		const result = await ingestDiscordMessage(
+			msg,
+			repo,
+			roomy,
+			GUILD, // guildIdOverride (resolved by backfill service)
+		);
+
+		expect(result).toEqual({ synced: 1, skipped: 0 });
+		const event = forwardMessageEvent(roomy, SPACE_A);
+		expectToBeDefined(event);
+		expectToBe(event.$type, "space.roomy.message.forwardMessages.v0");
+		expect(event.room).toBe(ROOMY_CHANNEL_ULID);
+		expect(event.messageIds).toEqual([ROOMY_MESSAGE_ULID]);
+	});
 });
