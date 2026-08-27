@@ -35,14 +35,24 @@ export interface QdrantConfig {
  * Parse Qdrant configuration from environment variables.
  *
  * Reads `QDRANT_URL` and `QDRANT_API_KEY`. Returns `null` when `QDRANT_URL`
- * is unset — callers fall back to no-op behaviour (no indexing, no search).
+ * is unset OR not a valid http(s) URL — callers fall back to no-op behaviour
+ * (no indexing, no search). An invalid URL is treated as disabled rather
+ * than crashing the request path: the Qdrant client constructor throws on
+ * a protocol-less URL, and a misconfigured env must not 500 every search.
  */
 export function getQdrantConfig(): QdrantConfig | null {
   const url = process.env.QDRANT_URL;
   if (!url) return null;
+  const trimmed = url.replace(/\/+$/, "");
+  if (!/^https?:\/\//.test(trimmed)) {
+    console.warn(
+      `[qdrant] QDRANT_URL is not a valid http(s) URL (${JSON.stringify(url)}) — message search disabled; expected e.g. https://search-staging.roomy.space`,
+    );
+    return null;
+  }
   const apiKey = process.env.QDRANT_API_KEY;
   return {
-    url: url.replace(/\/+$/, ""),
+    url: trimmed,
     ...(apiKey ? { apiKey } : {}),
   };
 }
