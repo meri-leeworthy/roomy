@@ -1,7 +1,6 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { createMembersQuery } from "$lib/queries/members";
-  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { resolveBlobUrl } from "$lib/utils";
   import { auth } from "$lib/auth.svelte";
   import { sendEvents } from "$lib/mutations/send-events";
@@ -14,12 +13,6 @@
   import { IconEllipsisHorizontal, IconSearch } from "@roomy/design/icons";
 
   const spaceId = $derived(page.params.space!);
-
-  // Search feature flag: gates the member search input.
-  const flagsQuery = createFeatureFlagsQuery();
-  const searchEnabled = $derived(
-    flagsQuery.data?.flags.includes("search") ?? false,
-  );
 
   // Debounced search input: the query refetches with the `search` param
   // (server-side substring filter on handle/name/DID). 200ms matches the
@@ -37,10 +30,7 @@
     return () => clearTimeout(timer);
   });
 
-  const membersQuery = createMembersQuery(
-    () => spaceId,
-    () => (searchEnabled ? searchTerm : undefined),
-  );
+  const membersQuery = createMembersQuery(() => spaceId, () => searchTerm);
 
   const currentUserDid = $derived(auth.userDid);
 
@@ -121,17 +111,15 @@
 </script>
 
 <div class="max-w-2xl">
-  {#if searchEnabled}
-    <div class="relative mb-4">
-      <IconSearch class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-base-400" />
-      <input
-        type="text"
-        bind:value={searchInput}
-        placeholder="Search members…"
-        class="w-full ring-1 ring-inset ring-base-300 dark:ring-base-700 focus:ring-2 focus:ring-accent-500 bg-base-100 dark:bg-base-800/50 focus:bg-accent-400/5 dark:focus:bg-accent-600/5 text-base-900 dark:text-base-100 placeholder:text-base-400 dark:placeholder:text-base-500 rounded-2xl pl-9 pr-3 py-1.5 text-sm font-medium outline-none border-0 transition-colors"
-      />
-    </div>
-  {/if}
+  <div class="relative mb-4">
+    <IconSearch class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-base-400" />
+    <input
+      type="text"
+      bind:value={searchInput}
+      placeholder="Search members…"
+      class="w-full ring-1 ring-inset ring-base-300 dark:ring-base-700 focus:ring-2 focus:ring-accent-500 bg-base-100 dark:bg-base-800/50 focus:bg-accent-400/5 dark:focus:bg-accent-600/5 text-base-900 dark:text-base-100 placeholder:text-base-400 dark:placeholder:text-base-500 rounded-2xl pl-9 pr-3 py-1.5 text-sm font-medium outline-none border-0 transition-colors"
+    />
+  </div>
   {#if membersQuery.isPending}
     <p class="text-sm text-base-400">Loading…</p>
   {:else if membersQuery.isError}

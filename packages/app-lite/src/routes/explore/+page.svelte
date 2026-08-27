@@ -5,8 +5,9 @@
   import { px } from "$lib/auth.svelte";
   import { queryClient } from "$lib/client";
   import { setNavbar } from "$lib/components/layout/navbar.svelte";
-  import { setSidebarContent } from "$lib/components/layout/sidebar.svelte";
+  import { setSidebarContent, setSidebarHeader } from "$lib/components/layout/sidebar.svelte";
   import { setWideSidebar } from "$lib/components/layout/wide-sidebar.svelte";
+  import RoomyMark from "$lib/components/RoomyMark.svelte";
   import { createSearchMessagesQuery, type SearchMessage } from "$lib/queries/search";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { resolveBlobUrl } from "$lib/utils";
@@ -70,10 +71,12 @@
   onMount(() => {
     setNavbar(exploreNavbar);
     setSidebarContent(undefined);
+    setSidebarHeader(roomyHeader);
     setWideSidebar(true);
     return () => {
       setNavbar(undefined);
       setSidebarContent(undefined);
+      setSidebarHeader(undefined);
       setWideSidebar(false);
     };
   });
@@ -84,6 +87,23 @@
 </script>
 
 <SeoMeta title="Explore - Roomy" description="Search across all your spaces" />
+
+{#snippet roomyHeader()}
+  <!-- Roomy logo + wordmark, matching the Directory page's homepage header
+       (SpaceSidebar spaceHeader) so the sidebar reads identically. -->
+  <div class="w-full h-fit flex justify-between items-center gap-1">
+    <div class="flex items-center gap-2 flex-1 min-w-0">
+      <div class="flex items-center gap-2.75 -mx-1 px-5.5 py-3">
+        <RoomyMark sizeClass="size-8" />
+        <h1
+          class="text-lg font-black opacity-90 text-base-700 dark:text-base-200 truncate max-w-full grow min-w-0"
+        >
+          Roomy
+        </h1>
+      </div>
+    </div>
+  </div>
+{/snippet}
 
 {#snippet exploreNavbar()}
   <div class="flex w-full items-center gap-2 px-2 min-w-0 grow">
