@@ -79,6 +79,8 @@ export function makeMessage(
 		mentionChannelIds: overrides.mentionChannelIds ?? [],
 		stickerItems: overrides.stickerItems ?? [],
 		messageReference: overrides.messageReference ?? undefined,
+		flags: overrides.flags ?? undefined,
+		messageSnapshots: overrides.messageSnapshots ?? undefined,
 	};
 }
 
@@ -201,10 +203,12 @@ export function makeThreadStarterMessage(
 }
 
 /**
- * Pre-built Discord forward message (type 26, MessageForward).
+ * Pre-built Discord forward message.
  *
- * A forward carries empty content; the original message lives in
- * `messageReference` and the message is delivered into `targetChannelSnowflake`.
+ * Discord has no dedicated forward message type: a forward is an ordinary
+ * DEFAULT message (type 0) carrying the HAS_SNAPSHOT flag (1 << 14) and a
+ * `messageSnapshots` array, with `messageReference` pointing at the
+ * original message. The message is delivered into `targetChannelSnowflake`.
  */
 export function makeForwardMessage(
 	originalMsgSnowflake: string,
@@ -215,8 +219,18 @@ export function makeForwardMessage(
 		id: "1111111117",
 		channelId: targetChannelSnowflake,
 		guildId: GUILD,
-		type: 26,
+		type: 0,
 		content: "",
+		flags: 1 << 14, // MESSAGE_FLAG_HAS_SNAPSHOT
+		messageSnapshots: [
+			{
+				message: {
+					content: "original content",
+					timestamp: Date.now(),
+					attachments: [],
+				},
+			},
+		],
 		messageReference: {
 			messageId: originalMsgSnowflake,
 			channelId: sourceChannelSnowflake,

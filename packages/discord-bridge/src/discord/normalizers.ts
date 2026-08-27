@@ -10,6 +10,7 @@ import type {
 	DiscordChannelData,
 	DiscordMessageData,
 	DiscordMessageReference,
+	DiscordMessageSnapshotData,
 	DiscordReactionData,
 	DiscordStickerData,
 	DiscordUserData,
@@ -37,6 +38,43 @@ export function normalizeMessage(msg: MessageProperties): DiscordMessageData {
 		mentionChannelIds: msg.mentionedChannelIds?.map(String),
 		stickerItems: (msg.stickerItems ?? []).map(normalizeSticker),
 		messageReference: normalizeMessageReference(msg.messageReference),
+		flags: msg.flags?.toJSON(),
+		messageSnapshots: (msg.messageSnapshots ?? []).map(
+			normalizeMessageSnapshot,
+		),
+	};
+}
+
+/**
+ * Normalize a DiscordMessageSnapshot (forwarded-message snapshot).
+ *
+ * The snapshot's inner message is a Pick of the original message's fields
+ * (content, timestamp, attachments, …) — no author. Only the fields the
+ * bridge uses are extracted.
+ */
+function normalizeMessageSnapshot(snapshot: {
+	message: {
+		content?: string;
+		timestamp?: number;
+		attachments?: Array<{
+			id: bigint;
+			url: string;
+			filename: string;
+			contentType?: string;
+			size?: number;
+			width?: number;
+			height?: number;
+		}>;
+	};
+}): DiscordMessageSnapshotData {
+	return {
+		message: {
+			content: snapshot.message.content ?? "",
+			timestamp: snapshot.message.timestamp ?? Date.now(),
+			attachments: (snapshot.message.attachments ?? []).map(
+				normalizeAttachment,
+			),
+		},
 	};
 }
 

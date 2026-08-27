@@ -91,6 +91,25 @@ export const DiscordEmbedData = type({
 });
 export type DiscordEmbedData = typeof DiscordEmbedData.infer;
 
+// ─── Message Snapshots (forwards) ───────────────────────────────────────
+
+/**
+ * Minimal subset of a forwarded message (DiscordMessageSnapshot).
+ *
+ * Discord only includes a Pick of the original message's fields in a
+ * snapshot — notably no author. The bridge only needs content, timestamp,
+ * and attachments for snapshot-content fallback.
+ */
+export const DiscordMessageSnapshotData = type({
+	message: {
+		content: "string",
+		timestamp: "number",
+		"attachments?": DiscordAttachmentData.array(),
+	},
+});
+export type DiscordMessageSnapshotData =
+	typeof DiscordMessageSnapshotData.infer;
+
 // ─── Messages ──────────────────────────────────────────────────────────
 
 export const DiscordMessageData = type({
@@ -110,6 +129,8 @@ export const DiscordMessageData = type({
 	"mentionChannelIds?": "string[]",
 	"stickerItems?": DiscordStickerData.array().or("undefined"),
 	"messageReference?": DiscordMessageReference.or("undefined"),
+	"flags?": "number",
+	"messageSnapshots?": DiscordMessageSnapshotData.array().or("undefined"),
 });
 export type DiscordMessageData = typeof DiscordMessageData.infer;
 
@@ -185,5 +206,13 @@ export const MsgType = {
 	ChannelNameChange: 4,
 	ThreadCreated: 18,
 	ThreadStarterMessage: 21,
-	MessageForward: 26,
 } as const;
+
+/**
+ * Discord MessageFlags bit for HAS_SNAPSHOT (1 << 14).
+ *
+ * "This message has a snapshot (via Message Forwarding)". Discord forwards
+ * are ordinary DEFAULT messages (type 0) carrying this flag plus a
+ * `message_snapshots` array — there is no dedicated forward message type.
+ */
+export const MESSAGE_FLAG_HAS_SNAPSHOT = 1 << 14;
