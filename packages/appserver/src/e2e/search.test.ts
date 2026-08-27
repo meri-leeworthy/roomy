@@ -500,4 +500,67 @@ describe("backfill sweeper (Qdrant)", () => {
     expect(typeof last.errorCount).toBe("number");
     expect(typeof last.dbBackoffActive).toBe("boolean");
   });
+
+  test("empty spaces rotate; a 250-message space is fully backfilled", async () => {
+    const { ctx } = await newAppWithQdrant();
+    // Two empty spaces (entity_space entries, no messages) + one message
+    // space with 250 messages (needs 3 sweep visits at SWEEP_BATCH=100).
+    // Without the updated_at refresh on 0-row visits, the sweeper stamps
+    // both empty spaces then re-picks the oldest-stamped one forever,
+    // stalling at 100 backfilled (prod: backfilled=113 then stalled).
+    const EMPTY_A = "did:web:aaa-empty-a.example";
+    const EMPTY_B = "did:web:bbb-empty-b.example";
+    seedSpace(ctx.db as unknown as Database, EMPTY_A, USER, { allowPublicJoin: 1 });
+    seedSpace(ctx.db as unknown as Database, EMPTY_B, USER, { allowPublicJoin: 1 });
+    const { roomId } = await materializeSpace(ctx, SPACE, USER, {
+      messageText: "the quick brown fox jumps",
+    });
+    // 249 more messages → 250 total. Batch ≤50 events per request
+    // (MAX_BATCH_SIZE) to avoid the IP rate limiter.
+    for (let batch = 0; batch < 5; batch++) {
+      const events = [];
+      for (let i = batch * 50; i < Math.min((batch + 1) * 50, 249); i++) {
+        const messageId = newUlid();
+        events.push({
+          id: messageId,
+          $type: "space.roomy.message.createMessage.v0",
+          room: roomId,
+          body: {
+            mimeType: "text/plain",
+            data: { $bytes: Buffer.from(`message number ${i}`).toString("base64") },
+          },
+          extensions: {},
+        });
+      }
+      const res = await ctx.authedFetch(USER)(
+        `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
+        {
+          method: "POST",
+          body: JSON.stringify({ spaceId: SPACE, events }),
+        },
+      );
+      if (res.status !== 200) throw new Error(`sendMessage failed ${res.status}`);
+    }
+    await flushSearchQueue();
+
+    const globalDb = (ctx.db as unknown as {
+      global(): { query(sql: string): { get<T>(...p: unknown[]): Promise<T | null> } };
+    }).global();
+    _resetSearchBackfill();
+    startSearchBackfill({ globalDb: globalDb as never });
+    try {
+      // 30 cycles: 2 empty spaces + 3 message-space visits ≈ 15 cycles, so
+      // 30 is enough to prove rotation continues (no stall on an empty
+      // space).
+      for (let i = 0; i < 30; i++) {
+        await sweepCycle(globalDb as never);
+      }
+    } finally {
+      await stopSearchBackfill();
+    }
+
+    // All 250 messages must be backfilled — with the stale-updated_at bug
+    // the sweeper stalls on an empty space after ~3 cycles and this fails.
+    expect(searchBackfillStats().backfilled).toBe(250);
+  });
 });

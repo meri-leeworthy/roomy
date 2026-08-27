@@ -217,16 +217,19 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
   if (rows.length > 0) {
     const lastId = rows[rows.length - 1]!.id;
     await setCursor(globalDb, spaceDid, lastId);
-  } else if (cursor === null) {
-    // No sweepable rows and no cursor yet (e.g. a space with entity_space
-    // entries but no messages). Without a cursor this space sorts first in
+  } else {
+    // No sweepable rows (e.g. a space with entity_space entries but no
+    // messages). Without a cursor this space sorts first in
     // `nextCursorSpace` (coalesce(updated_at, 0) = 0) and is picked on
     // every cycle, starving every other space — the sweep never advances
-    // and `backfilled` stays 0 with no error or backoff. Stamp a cursor so
-    // the space is marked swept and the loop moves on. The cursor value is
-    // opaque (never compared), so a sentinel is safe. A space that already
-    // has a cursor and returns 0 rows is fully swept — leave it alone.
-    await setCursor(globalDb, spaceDid, "");
+    // and `backfilled` stays 0 with no error or backoff. Stamp a cursor
+    // (sentinel "" when none) AND refresh `updated_at` on every 0-row
+    // visit so the space rotates to the back of the round-robin — a
+    // stale `updated_at` would re-pick it forever once all empty spaces
+    // are stamped. The cursor value is opaque (never compared), so a
+    // sentinel is safe; a fully-swept space keeps its cursor and just
+    // bumps its recency.
+    await setCursor(globalDb, spaceDid, cursor ?? "");
   }
 
   // Progress telemetry (Loki): one structured line per cycle. `backfilled`
