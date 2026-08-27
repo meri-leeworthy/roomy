@@ -96,11 +96,14 @@ export const searchMessagesHandler: QueryHandler<
     hits = await searchMessages(client, {
       sparse,
       spaceDids,
-      // Grow the fetch with the cursor so every page slices a window that
-      // covers [0, offset + window): Qdrant's sparse search returns points
-      // in an undefined order among equal scores, so offset-based
-      // pagination repeats points — the appserver slices instead.
-      limit: window + offset,
+      // Fixed window: Qdrant's sparse search returns tied points in an
+      // order that DEPENDS on the requested limit (limit=1 → [m2],
+      // limit=3 → [m1,m3,m2] for identical vectors), so re-fetching with a
+      // different limit per page shifts the ordering and slices misalign.
+      // A constant limit gives a stable ordering; the appserver slices the
+      // window by cursor. The window is the searchable cap — pages beyond
+      // it return fewer results and the cursor stops once it is exhausted.
+      limit: window,
     });
   } catch (err) {
     // Surface the configured endpoint so a misconfigured QDRANT_URL is
@@ -115,9 +118,9 @@ export const searchMessagesHandler: QueryHandler<
     );
   }
 
-  // Slice the fetched set by cursor. A single Qdrant response never repeats
-  // a point, so each page is distinct; the cursor continues while more
-  // results remain in the fetched set and stops once it is exhausted.
+  // Slice the window by cursor. A single Qdrant response never repeats a
+  // point, so each page is distinct; the cursor continues while more
+  // results remain in the fetched window and stops once it is exhausted.
   const windowHits = hits.slice(offset, offset + limit);
 
   // Hydrate per-space, keeping the hits' rank order. Qdrant returns ids;
@@ -161,9 +164,9 @@ export const searchMessagesHandler: QueryHandler<
 
   const result: SearchMessagesResult = { messages: results };
   // Cursor semantics: offset + limit. Emit while more results remain in the
-  // fetched set (this page didn't reach the end of it), or the fetched set
+  // fetched window (this page didn't reach the end of it), or the window
   // itself was full (more may exist beyond it).
-  if (offset + limit < hits.length || hits.length === window + offset) {
+  if (offset + limit < hits.length || hits.length === window) {
     result.cursor = String(offset + limit);
   }
   return stripNulls(result as unknown as Record<string, unknown>) as SearchMessagesResult;

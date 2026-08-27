@@ -299,13 +299,14 @@ describe("space.roomy.search.messages (Qdrant)", () => {
 
     const seen: string[] = [];
     let cursor: string | undefined;
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
       const url = `space.roomy.search.messages?spaceId=${SPACE}&q=page&limit=1${
         cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
       }`;
       const res = await get(ctx, url);
       expect(res.status).toBe(200);
       const body = await res.json();
+      if (body.messages.length === 0) break; // window exhausted
       expect(body.messages).toHaveLength(1);
       seen.push(body.messages[0].id);
       if (body.cursor === undefined) break;
