@@ -30,6 +30,8 @@
   );
 
   const currentSpaceId = $derived(page.params.space);
+  const onHome = $derived(page.url.pathname === "/");
+  const onExplore = $derived(page.url.pathname === "/explore");
 
   function navigateToSpace(spaceId: string) {
     const state = spaceNavigation.get(spaceId);
@@ -69,7 +71,7 @@
     <Button
       href="/"
       variant="ghost"
-      data-current={!currentSpaceId}
+      data-current={onHome}
       class={[
         "p-0 rounded-xl",
         wide
@@ -91,6 +93,7 @@
     <Button
       href="/explore"
       variant="ghost"
+      data-current={onExplore}
       class={[
         "p-0 rounded-xl",
         wide

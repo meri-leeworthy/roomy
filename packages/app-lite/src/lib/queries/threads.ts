@@ -31,14 +31,21 @@ export function createSpaceThreadsQuery(
   }));
 }
 
-export function createRoomThreadsQuery(roomId: () => string) {
+export function createRoomThreadsQuery(
+  roomId: () => string,
+  search: () => string | undefined = () => undefined,
+) {
   return createInfiniteQuery(() => ({
-    queryKey: queryKey("space.roomy.room.getThreads", { roomId: roomId() }),
+    queryKey: queryKey("space.roomy.room.getThreads", {
+      roomId: roomId(),
+      ...(search() ? { search: search() } : {}),
+    }),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       px().query("space.roomy.room.getThreads", {
         roomId: roomId(),
         limit: String(DEFAULT_LIMIT),
         cursor: pageParam,
+        ...(search() ? { search: search() } : {}),
       }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.cursor ?? undefined,
