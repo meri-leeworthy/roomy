@@ -10,7 +10,7 @@ import {
 } from "@roomy-space/sdk";
 import type { BridgeRepository } from "../db/repository.ts";
 import type { DiscordMessageData } from "../discord/data.ts";
-import { MsgType } from "../discord/data.ts";
+import { MESSAGE_FLAG_HAS_SNAPSHOT, MsgType } from "../discord/data.ts";
 import { createLogger } from "../logger.ts";
 import type { RoomyGateway } from "../roomy/gateway.ts";
 import {
@@ -140,11 +140,16 @@ export async function ingestDiscordMessage(
 		return handleThreadStarterMessage(message, repo, roomy);
 	}
 
-	// Forwarded message (type 26): forward the original message into the
-	// target channel's Roomy room. Forwards carry empty content and reference
-	// the original message via messageReference — they must not be treated as
-	// ordinary (empty) messages or as replies.
-	if (message.type === MsgType.MessageForward) {
+	// Forwarded message: forward the original message into the target
+	// channel's Roomy room. Discord has no dedicated forward message type —
+	// a forward is an ordinary DEFAULT message (type 0) carrying the
+	// HAS_SNAPSHOT flag (1 << 14) and a `messageSnapshots` array, with
+	// `messageReference` pointing at the original. Forwards must not be
+	// treated as ordinary (empty) messages or as replies.
+	const isForward =
+		((message.flags ?? 0) & MESSAGE_FLAG_HAS_SNAPSHOT) !== 0 ||
+		(message.messageSnapshots?.length ?? 0) > 0;
+	if (isForward) {
 		writeSkipRecord("forward", message);
 		return handleForwardMessage(message, repo, roomy);
 	}
@@ -506,13 +511,15 @@ async function handleThreadStarterMessage(
 }
 
 /**
- * Handle a Discord forwarded message (type 26): forward the original message
- * into the target channel's Roomy room.
+ * Handle a Discord forwarded message: forward the original message into the
+ * target channel's Roomy room.
  *
- * Discord represents a forward as a message with empty content whose
- * `messageReference` points at the original message (in the source channel).
- * `message.channelId` is the channel the user forwarded into. We mirror this
- * to Roomy with a `forwardMessages.v0` event targeting the destination room.
+ * Discord represents a forward as an ordinary DEFAULT message (type 0)
+ * carrying the HAS_SNAPSHOT flag (1 << 14) and a `messageSnapshots` array,
+ * whose `messageReference` points at the original message (in the source
+ * channel). `message.channelId` is the channel the user forwarded into. We
+ * mirror this to Roomy with a `forwardMessages.v0` event targeting the
+ * destination room.
  */
 async function handleForwardMessage(
 	message: DiscordMessageData,
