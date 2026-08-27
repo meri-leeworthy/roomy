@@ -44,6 +44,8 @@ let dbBackoffUntil = 0;
 
 // ─── Stats (for /health/search) ─────────────────────────────────────────
 let statsBackfilled = 0;
+/** Message of the most recent sweep error (null when none). */
+let statsLastError: string | null = null;
 
 // ─── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -91,10 +93,16 @@ export async function stopSearchBackfill(): Promise<void> {
 export function searchBackfillStats(): {
   backfilled: number;
   dbBackoffActive: boolean;
+  /** Consecutive DB/Qdrant errors (escalates backoff). */
+  errorCount: number;
+  /** Message of the most recent sweep error, or null when none. */
+  lastError: string | null;
 } {
   return {
     backfilled: statsBackfilled,
     dbBackoffActive: Date.now() < dbBackoffUntil,
+    errorCount: dbErrorCount,
+    lastError: statsLastError,
   };
 }
 
@@ -103,6 +111,7 @@ export function _resetSearchBackfill(): void {
   statsBackfilled = 0;
   dbErrorCount = 0;
   dbBackoffUntil = 0;
+  statsLastError = null;
 }
 
 // ─── Loop ───────────────────────────────────────────────────────────────
@@ -120,6 +129,7 @@ async function runBackfillLoop(): Promise<void> {
     } catch (err) {
       // Outer resilience (mirrors the embed sweeper): an unexpected throw
       // must not permanently kill the process-wide loop.
+      statsLastError = err instanceof Error ? err.message : String(err);
       log.error("[search-backfill] sweep threw (continuing):", err);
       await waitForId(IDLE_POLL_MS);
     }
@@ -207,6 +217,16 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
   if (rows.length > 0) {
     const lastId = rows[rows.length - 1]!.id;
     await setCursor(globalDb, spaceDid, lastId);
+  } else if (cursor === null) {
+    // No sweepable rows and no cursor yet (e.g. a space with entity_space
+    // entries but no messages). Without a cursor this space sorts first in
+    // `nextCursorSpace` (coalesce(updated_at, 0) = 0) and is picked on
+    // every cycle, starving every other space — the sweep never advances
+    // and `backfilled` stays 0 with no error or backoff. Stamp a cursor so
+    // the space is marked swept and the loop moves on. The cursor value is
+    // opaque (never compared), so a sentinel is safe. A space that already
+    // has a cursor and returns 0 rows is fully swept — leave it alone.
+    await setCursor(globalDb, spaceDid, "");
   }
 
   return rows.length >= SWEEP_BATCH;
@@ -272,6 +292,7 @@ function waitForId(ms: number): Promise<void> {
 function markDbError(err: unknown): void {
   dbErrorCount = Math.min(dbErrorCount + 1, 8);
   dbBackoffUntil = Date.now() + Math.min(60_000 * 2 ** (dbErrorCount - 1), 30 * 60_000);
+  statsLastError = err instanceof Error ? err.message : String(err);
   log.warn(
     `[search-backfill] error (#${dbErrorCount}); backing off ${Math.round((dbBackoffUntil - Date.now()) / 1000)}s:`,
     err,

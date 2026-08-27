@@ -14,15 +14,18 @@
  */
 
 import { describe, expect, test, beforeEach } from "bun:test";
+import type { Database } from "bun:sqlite";
 import { newUlid } from "@roomy-space/sdk";
 import {
   startAppserver,
   materializeSpace,
+  seedSpace,
   spaceDb,
   type E2eContext,
 } from "./helpers.ts";
 import { _setQdrantClientForTest, _resetQdrantClient, type QdrantClientLike } from "../search/qdrantSearch.ts";
 import { flushSearchQueue } from "../search/indexer.ts";
+import { startSearchBackfill, stopSearchBackfill, sweepCycle, _resetSearchBackfill, searchBackfillStats } from "../search/backfill.ts";
 import type { SparseVector } from "../search/bm25.ts";
 
 const USER = "did:plc:e2e-user";
@@ -375,5 +378,47 @@ describe("space.roomy.search.messages (Qdrant)", () => {
 
     const res = await get(ctx, `space.roomy.search.messages?spaceId=${SPACE}&q=hello`);
     expect(res.status).toBe(503);
+  });
+});
+
+describe("backfill sweeper (Qdrant)", () => {
+  beforeEach(() => {
+    _resetQdrantClient();
+  });
+
+  test("an empty space does not starve the backfill sweeper", async () => {
+    const { ctx, fake } = await newAppWithQdrant();
+    // Space A: entity_space entry + space entity, but NO messages. It sorts
+    // before the message space in nextCursorSpace (cursor-less = updated_at
+    // 0), so without the fix it is picked forever and the message space is
+    // never backfilled.
+    const EMPTY = "did:web:aaa-empty.example";
+    seedSpace(ctx.db as unknown as Database, EMPTY, USER, {
+      allowPublicJoin: 1,
+    });
+    // Space B: one message.
+    await materializeSpace(ctx, SPACE, USER, { messageText: "the quick brown fox jumps" });
+    await flushSearchQueue();
+    const pointsBefore = fake.points.length;
+
+    const globalDb = (ctx.db as unknown as {
+      global(): { query(sql: string): { get<T>(...p: unknown[]): Promise<T | null> } };
+    }).global();
+    _resetSearchBackfill();
+    startSearchBackfill({ globalDb: globalDb as never });
+    try {
+      // Cycle 0: picks the empty space (no rows → stamps a cursor).
+      // Cycle 1: picks the message space and indexes its message.
+      // The message was already indexed by the live indexer, so the sweep's
+      // upsert is idempotent (points don't grow) — what matters is that the
+      // sweeper REACHES the message space (backfilled > 0) instead of being
+      // stuck on the empty space forever.
+      await sweepCycle(globalDb as never);
+      await sweepCycle(globalDb as never);
+    } finally {
+      await stopSearchBackfill();
+    }
+
+    expect(searchBackfillStats().backfilled).toBeGreaterThan(0);
   });
 });
