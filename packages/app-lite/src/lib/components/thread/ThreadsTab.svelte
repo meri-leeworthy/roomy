@@ -11,14 +11,17 @@
 
   // Debounced search input: filters threads by name server-side (SQLite LIKE
   // on the thread name). 200ms matches the mention typeahead debounce.
+  // NOTE: the input value must be read synchronously inside the effect —
+  // Svelte 5 effects only track reads that happen during the effect run, so
+  // reading it inside the setTimeout callback would never re-trigger.
   let searchInput = $state("");
   let searchTerm = $state("");
-  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      searchTerm = searchInput.trim();
+    const value = searchInput;
+    const timer = setTimeout(() => {
+      searchTerm = value.trim();
     }, 200);
+    return () => clearTimeout(timer);
   });
 
   const threadsQuery = createSpaceThreadsQuery(() => spaceId, () => searchTerm);
@@ -84,14 +87,16 @@
   <ErrorMessage message={threadsQuery.error.message} class="h-full w-full justify-center" />
 {:else}
   <div class="flex flex-col h-full min-h-0">
-    <div class="relative shrink-0 px-3 pt-2">
-      <IconSearch class="absolute left-6 top-1/2 -translate-y-1/2 size-4 text-base-400" />
-      <input
-        type="text"
-        bind:value={searchInput}
-        placeholder="Search threads…"
-        class="w-full ring-1 ring-inset ring-base-300 dark:ring-base-700 focus:ring-2 focus:ring-accent-500 bg-base-100 dark:bg-base-800/50 focus:bg-accent-400/5 dark:focus:bg-accent-600/5 text-base-900 dark:text-base-100 placeholder:text-base-400 dark:placeholder:text-base-500 rounded-2xl pl-9 pr-3 py-1.5 text-sm font-medium outline-none border-0 transition-colors"
-      />
+    <div class="shrink-0 px-3 pt-2">
+      <div class="relative">
+        <IconSearch class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-base-400" />
+        <input
+          type="text"
+          bind:value={searchInput}
+          placeholder="Search threads…"
+          class="w-full ring-1 ring-inset ring-base-300 dark:ring-base-700 focus:ring-2 focus:ring-accent-500 bg-base-100 dark:bg-base-800/50 focus:bg-accent-400/5 dark:focus:bg-accent-600/5 text-base-900 dark:text-base-100 placeholder:text-base-400 dark:placeholder:text-base-500 rounded-2xl pl-9 pr-3 py-1.5 text-sm font-medium outline-none border-0 transition-colors"
+        />
+      </div>
     </div>
     <div class="flex-1 min-h-0">
       <BoardViewShell {threads} emptyMessage={searchTerm ? "No matching threads" : "No threads yet"} {hrefFor} {loadMore} {hasMore} />

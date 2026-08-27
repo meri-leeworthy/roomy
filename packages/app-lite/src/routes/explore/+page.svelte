@@ -19,12 +19,15 @@
 
   let searchInput = $state("");
   let searchTerm = $state("");
-  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  // NOTE: the input value must be read synchronously inside the effect —
+  // Svelte 5 effects only track reads that happen during the effect run, so
+  // reading it inside the setTimeout callback would never re-trigger.
   $effect(() => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      searchTerm = searchInput.trim();
+    const value = searchInput;
+    const timer = setTimeout(() => {
+      searchTerm = value.trim();
     }, 250);
+    return () => clearTimeout(timer);
   });
 
   const searchQuery = createSearchMessagesQuery(() => searchTerm);
@@ -94,9 +97,7 @@
           />
         </div>
 
-        {#if searchTerm.length === 0}
-          <p class="text-sm text-base-400">Search across all your spaces. Results link to the room the message lives in.</p>
-        {:else if searchTerm.length < 3}
+        {#if searchTerm.length > 0 && searchTerm.length < 3}
           <p class="text-sm text-base-400">Type at least 3 characters to search.</p>
         {:else if searchQuery.isPending}
           <p class="text-sm text-base-400">Searching…</p>

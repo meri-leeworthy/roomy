@@ -17,14 +17,17 @@
   // Debounced search input: the query refetches with the `search` param
   // (server-side substring filter on handle/name/DID). 200ms matches the
   // mention typeahead debounce.
+  // NOTE: the input value must be read synchronously inside the effect —
+  // Svelte 5 effects only track reads that happen during the effect run, so
+  // reading it inside the setTimeout callback would never re-trigger.
   let searchInput = $state("");
   let searchTerm = $state("");
-  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      searchTerm = searchInput.trim();
+    const value = searchInput;
+    const timer = setTimeout(() => {
+      searchTerm = value.trim();
     }, 200);
+    return () => clearTimeout(timer);
   });
 
   const membersQuery = createMembersQuery(() => spaceId, () => searchTerm);
