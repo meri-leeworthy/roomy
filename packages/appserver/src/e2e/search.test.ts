@@ -289,6 +289,34 @@ describe("space.roomy.search.messages (Qdrant)", () => {
     expect(new Set(ids).size).toBe(3);
   });
 
+  test("paginates one-at-a-time through all matches (limit=1)", async () => {
+    const { ctx } = await newAppWithQdrant();
+    const { roomId } = await materializeSpace(ctx, SPACE, USER, {
+      messageText: "alpha page test one",
+    });
+    await sendMessage(ctx, roomId, "alpha page test two");
+    await sendMessage(ctx, roomId, "alpha page test three");
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 5; i++) {
+      const url = `space.roomy.search.messages?spaceId=${SPACE}&q=page&limit=1${
+        cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+      }`;
+      const res = await get(ctx, url);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.messages).toHaveLength(1);
+      seen.push(body.messages[0].id);
+      if (body.cursor === undefined) break;
+      cursor = body.cursor;
+    }
+
+    // All three matches walked exactly once, in order.
+    expect(seen).toHaveLength(3);
+    expect(new Set(seen).size).toBe(3);
+  });
+
   test("empty result set returns 200 with no messages", async () => {
     const { ctx } = await newAppWithQdrant();
     await materializeSpace(ctx, SPACE, USER, { messageText: "the quick brown fox" });
