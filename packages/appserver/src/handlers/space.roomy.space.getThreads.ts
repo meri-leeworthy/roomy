@@ -58,6 +58,7 @@ export const getSpaceThreadsHandler: QueryHandler<
   const spaceId = requireString(params, "spaceId");
   const limit = optionalInt(params, "limit", { min: 1, max: 100, default: 50 })!;
   const cursor = optionalString(params, "cursor") ?? null;
+  const search = optionalString(params, "search") ?? null;
 
   if (userDid !== null) {
     await hydrateUserMembership(userDid);
@@ -71,7 +72,7 @@ export const getSpaceThreadsHandler: QueryHandler<
   const memo = createAccessMemo();
   await requireSpaceRead(db, spaceId, userDid, memo);
 
-  const { threads: all, cursor: nextCursor } = await listThreadActivity(db, { kind: "space", spaceId }, limit, cursor);
+  const { threads: all, cursor: nextCursor } = await listThreadActivity(db, { kind: "space", spaceId }, limit, cursor, search);
 
   // Collect all thread IDs for batch unread lookup
   const threadIds = all.map((t) => t.id);

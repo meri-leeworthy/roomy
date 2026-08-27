@@ -6,6 +6,7 @@ export { default as IconChevronUp } from "~icons/ph/caret-up-bold";
 export { default as IconChevronRight } from "~icons/ph/caret-right-bold";
 export { default as IconCornerDownRight } from "~icons/ph/arrow-bend-down-right-bold";
 export { default as IconHome } from "~icons/ph/house-bold";
+export { default as IconSearch } from "~icons/ph/magnifying-glass-bold";
 
 // Actions
 export { default as IconBell } from "~icons/ph/bell-bold";

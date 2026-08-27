@@ -10,10 +10,24 @@
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
   import ContextMenu from "@roomy/design/components/ui/context-menu/ContextMenu.svelte";
   import ContextMenuItem from "@roomy/design/components/ui/context-menu/ContextMenuItem.svelte";
-  import { IconEllipsisHorizontal } from "@roomy/design/icons";
+  import { IconEllipsisHorizontal, IconSearch } from "@roomy/design/icons";
 
   const spaceId = $derived(page.params.space!);
-  const membersQuery = createMembersQuery(() => spaceId);
+
+  // Debounced search input: the query refetches with the `search` param
+  // (server-side substring filter on handle/name/DID). 200ms matches the
+  // mention typeahead debounce.
+  let searchInput = $state("");
+  let searchTerm = $state("");
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      searchTerm = searchInput.trim();
+    }, 200);
+  });
+
+  const membersQuery = createMembersQuery(() => spaceId, () => searchTerm);
 
   const currentUserDid = $derived(auth.userDid);
 
@@ -94,6 +108,15 @@
 </script>
 
 <div class="max-w-2xl">
+  <div class="relative mb-4">
+    <IconSearch class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-base-400" />
+    <input
+      type="text"
+      bind:value={searchInput}
+      placeholder="Search members…"
+      class="w-full ring-1 ring-inset ring-base-300 dark:ring-base-700 focus:ring-2 focus:ring-accent-500 bg-base-100 dark:bg-base-800/50 focus:bg-accent-400/5 dark:focus:bg-accent-600/5 text-base-900 dark:text-base-100 placeholder:text-base-400 dark:placeholder:text-base-500 rounded-2xl pl-9 pr-3 py-1.5 text-sm font-medium outline-none border-0 transition-colors"
+    />
+  </div>
   {#if membersQuery.isPending}
     <p class="text-sm text-base-400">Loading…</p>
   {:else if membersQuery.isError}

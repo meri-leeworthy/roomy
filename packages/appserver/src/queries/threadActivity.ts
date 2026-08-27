@@ -72,6 +72,7 @@ export async function listThreadActivity(
   scope: ThreadScope,
   limit = 50,
   cursor?: string | null,
+  search?: string | null,
 ): Promise<{ threads: ThreadActivity[]; cursor: string | null }> {
   // Step 1: select the candidate threads in scope, with cursor pagination.
   // LEFT JOIN activity_item so we can order/filter by last_activity_at even
@@ -98,6 +99,14 @@ export async function listThreadActivity(
   }
   conditions.push("cr.label = 'space.roomy.thread'");
   conditions.push("coalesce(cr.deleted, 0) = 0");
+
+  // Optional case-insensitive substring filter on thread name. Applied in
+  // SQL (not JS) so cursor pagination stays correct — filtering after the
+  // page fetch would skip matches and misalign the cursor.
+  if (search && search.trim() !== "") {
+    conditions.push("ci.name like ?");
+    params.push(`%${search.trim()}%`);
+  }
 
   // Cursor: newest-first by last_activity_at, tiebreak by room_id.
   if (cursorTs !== null && cursorId !== null) {

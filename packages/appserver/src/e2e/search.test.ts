@@ -336,4 +336,40 @@ describe("space.roomy.search.messages (Qdrant)", () => {
     const res = await get(ctx, `space.roomy.search.messages?spaceId=${SPACE}&q=hello`);
     expect(res.status).toBe(503);
   });
+
+  test("cross-space search (spaceId omitted) searches all joined spaces", async () => {
+    const { ctx } = await newAppWithQdrant();
+    const SPACE2 = "did:web:search-e2e-two.example";
+    await materializeSpace(ctx, SPACE, USER, { messageText: "cross space alpha" });
+    await materializeSpace(ctx, SPACE2, USER, { messageText: "cross space beta" });
+    await flushSearchQueue();
+
+    // Without spaceId the handler searches every space the caller joined.
+    const res = await get(ctx, `space.roomy.search.messages?q=cross`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.messages.length).toBeGreaterThanOrEqual(2);
+
+    // Each result carries the room/space it was found in.
+    const spaceDids = new Set(body.messages.map((m: { spaceId: string }) => m.spaceId));
+    expect(spaceDids.has(SPACE)).toBe(true);
+    expect(spaceDids.has(SPACE2)).toBe(true);
+    for (const m of body.messages) {
+      expect(typeof m.roomId).toBe("string");
+      expect(typeof m.spaceId).toBe("string");
+    }
+  });
+
+  test("per-space search results carry roomId/spaceId context", async () => {
+    const { ctx } = await newAppWithQdrant();
+    await materializeSpace(ctx, SPACE, USER, { messageText: "contextual pineapple" });
+    await flushSearchQueue();
+
+    const res = await get(ctx, `space.roomy.search.messages?spaceId=${SPACE}&q=pineapple`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.messages.length).toBeGreaterThanOrEqual(1);
+    expect(body.messages[0].spaceId).toBe(SPACE);
+    expect(typeof body.messages[0].roomId).toBe("string");
+  });
 });

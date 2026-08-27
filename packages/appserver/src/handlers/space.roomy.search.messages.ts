@@ -37,7 +37,7 @@ import { log } from "../log.ts";
 const OVERFETCH = 3;
 
 interface SearchMessagesResult {
-  messages: MessageDto[];
+  messages: Array<MessageDto & { roomId?: string; spaceId?: string }>;
   cursor?: string;
 }
 
@@ -148,8 +148,10 @@ export const searchMessagesHandler: QueryHandler<
   }
 
   // Post-filter by per-room read access (membership alone is not enough —
-  // rooms may restrict access), then trim to the requested limit.
-  const results: MessageDto[] = [];
+  // rooms may restrict access), then trim to the requested limit. Each
+  // result carries the room/space it was found in so cross-space search
+  // clients can show context and link to the hit.
+  const results: Array<MessageDto & { roomId?: string; spaceId?: string }> = [];
   const memos = new Map<string, ReturnType<typeof createAccessMemo>>();
   for (const { message, roomId, spaceDid } of ranked) {
     if (results.length >= limit) break;
@@ -159,7 +161,7 @@ export const searchMessagesHandler: QueryHandler<
       memos.set(spaceDid, memo);
     }
     const acc = await roomAccess(openSpaceDb(spaceDid), roomId, userDid, memo);
-    if (acc.canRead) results.push(message);
+    if (acc.canRead) results.push({ ...message, roomId, spaceId: spaceDid });
   }
 
   const result: SearchMessagesResult = { messages: results };

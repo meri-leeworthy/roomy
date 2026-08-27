@@ -136,6 +136,9 @@
           },
           "limit": {
             "type": "string"
+          },
+          "search": {
+            "type": "string"
           }
         }
       },

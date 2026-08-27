@@ -7,10 +7,19 @@ const { queryKey } = cache;
 export type Member = typeof schemas.queries.getMembers.Member.infer;
 export type ExternalAdmin = typeof schemas.queries.getMembers.ExternalAdmin.infer;
 
-export function createMembersQuery(spaceId: () => string) {
+export function createMembersQuery(
+  spaceId: () => string,
+  search: () => string | undefined = () => undefined,
+) {
   return createQuery(() => ({
-    queryKey: queryKey("space.roomy.space.getMembers", { spaceId: spaceId() }),
+    queryKey: queryKey("space.roomy.space.getMembers", {
+      spaceId: spaceId(),
+      ...(search() ? { search: search() } : {}),
+    }),
     queryFn: () =>
-      px().query("space.roomy.space.getMembers", { spaceId: spaceId() }),
+      px().query("space.roomy.space.getMembers", {
+        spaceId: spaceId(),
+        ...(search() ? { search: search() } : {}),
+      }),
   }));
 }

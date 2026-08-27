@@ -419,4 +419,63 @@ describe("threadActivity", () => {
     // No more pages since 3 < 50.
     expect(cursor).toBeNull();
   });
+
+  // ── Search ───────────────────────────────────────────────────────────────
+  //
+  // The optional `search` param filters threads by a case-insensitive
+  // substring match on the thread name (comp_info.name), applied in SQL so
+  // cursor pagination stays correct.
+
+  test("search filters threads by name substring (case-insensitive)", async () => {
+    const { db, asyncDb } = freshDb();
+    seed(db);
+
+    postMessage(db, THREAD_A, ALICE, 1000);
+    postMessage(db, THREAD_B, BOB, 2000);
+    postMessage(db, THREAD_C, CAROL, 3000);
+
+    // Threads are named "Thread A", "Thread B", "Thread C".
+    const { threads: result } = await listThreadActivity(
+      asyncDb,
+      { kind: "space", spaceId: SPACE },
+      50,
+      null,
+      "thread b",
+    );
+    expect(result.map((t) => t.id)).toEqual([THREAD_B]);
+  });
+
+  test("search with no matches returns empty", async () => {
+    const { db, asyncDb } = freshDb();
+    seed(db);
+
+    const { threads: result } = await listThreadActivity(
+      asyncDb,
+      { kind: "space", spaceId: SPACE },
+      50,
+      null,
+      "zzz-no-such-thread",
+    );
+    expect(result).toEqual([]);
+  });
+
+  test("empty or whitespace search returns all threads", async () => {
+    const { db, asyncDb } = freshDb();
+    seed(db);
+
+    postMessage(db, THREAD_A, ALICE, 1000);
+    postMessage(db, THREAD_B, BOB, 2000);
+    postMessage(db, THREAD_C, CAROL, 3000);
+
+    const { threads: result } = await listThreadActivity(
+      asyncDb,
+      { kind: "space", spaceId: SPACE },
+      50,
+      null,
+      "   ",
+    );
+    expect(result.map((t) => t.id).sort()).toEqual(
+      [THREAD_A, THREAD_B, THREAD_C].sort(),
+    );
+  });
 });

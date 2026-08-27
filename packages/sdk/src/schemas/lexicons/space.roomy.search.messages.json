@@ -151,30 +151,7 @@
         }
       }
     },
-    "forwardedFrom": {
-      "type": "object",
-      "required": [
-        "messageId",
-        "name",
-        "roomId"
-      ],
-      "properties": {
-        "messageId": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "roomId": {
-          "type": "string"
-        },
-        "message": {
-          "type": "ref",
-          "ref": "#messages"
-        }
-      }
-    },
-    "messages": {
+    "message": {
       "type": "object",
       "required": [
         "authorDid",
@@ -247,6 +224,110 @@
         }
       }
     },
+    "forwardedFrom": {
+      "type": "object",
+      "required": [
+        "messageId",
+        "name",
+        "roomId"
+      ],
+      "properties": {
+        "messageId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "ref",
+          "ref": "#message"
+        }
+      }
+    },
+    "messages": {
+      "type": "object",
+      "required": [
+        "authorDid",
+        "authorName",
+        "content",
+        "id",
+        "linkEmbeds",
+        "media",
+        "reactions",
+        "roomId",
+        "spaceId",
+        "timestamp"
+      ],
+      "properties": {
+        "authorDid": {
+          "type": "string"
+        },
+        "authorName": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "linkEmbeds": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#linkEmbeds"
+          }
+        },
+        "media": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#media"
+          }
+        },
+        "reactions": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#reactions"
+          }
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "spaceId": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "authorAvatar": {
+          "type": "string"
+        },
+        "authorHandle": {
+          "type": "string"
+        },
+        "forwardedFrom": {
+          "type": "ref",
+          "ref": "#forwardedFrom"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "replyTo": {
+          "type": "string"
+        },
+        "sort_idx": {
+          "type": "string"
+        },
+        "system": {
+          "type": "boolean"
+        }
+      }
+    },
     "output": {
       "type": "object",
       "required": [
@@ -270,20 +351,19 @@
       "parameters": {
         "type": "params",
         "required": [
-          "q",
-          "spaceId"
+          "q"
         ],
         "properties": {
           "q": {
-            "type": "string"
-          },
-          "spaceId": {
             "type": "string"
           },
           "cursor": {
             "type": "string"
           },
           "limit": {
+            "type": "string"
+          },
+          "spaceId": {
             "type": "string"
           }
         }

@@ -9,14 +9,21 @@ export type RoomThread = typeof schemas.queries.getRoomThreads.RoomThread.infer;
 
 const DEFAULT_LIMIT = 20;
 
-export function createSpaceThreadsQuery(spaceId: () => string) {
+export function createSpaceThreadsQuery(
+  spaceId: () => string,
+  search: () => string | undefined = () => undefined,
+) {
   return createInfiniteQuery(() => ({
-    queryKey: queryKey("space.roomy.space.getThreads", { spaceId: spaceId() }),
+    queryKey: queryKey("space.roomy.space.getThreads", {
+      spaceId: spaceId(),
+      ...(search() ? { search: search() } : {}),
+    }),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       px().query("space.roomy.space.getThreads", {
         spaceId: spaceId(),
         limit: String(DEFAULT_LIMIT),
         cursor: pageParam,
+        ...(search() ? { search: search() } : {}),
       }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.cursor ?? undefined,

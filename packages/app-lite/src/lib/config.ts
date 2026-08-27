@@ -28,6 +28,7 @@ const APPSERVER_RPCS = [
   "space.roomy.space.getCalendarLink",
   "space.roomy.space.getCalendarEvents",
   "space.roomy.space.getActivityFeed",
+  "space.roomy.search.messages",
   // Channel federation
   "space.roomy.federation.getRequests",
   "space.roomy.federation.getIncoming",
