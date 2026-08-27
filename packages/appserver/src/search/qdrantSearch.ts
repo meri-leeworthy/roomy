@@ -21,6 +21,7 @@ import { QdrantClient } from "@qdrant/js-client-rest";
 import { createHash } from "node:crypto";
 import { getQdrant } from "../qdrant.ts";
 import type { SparseVector } from "./bm25.ts";
+import { log } from "../log.ts";
 
 /** Collection name for the global message index. */
 export const MESSAGES_COLLECTION = "messages";
@@ -95,6 +96,9 @@ let clientInstance: QdrantClientLike | null | undefined;
  * Get the process-wide Qdrant client, or `null` when Qdrant is not
  * configured (or was explicitly disabled via `_setQdrantClientForTest(null)`).
  * Constructs the real client lazily from the config singleton on first use.
+ * A config that fails to construct (e.g. a malformed URL) is treated as
+ * disabled: the constructor throw is caught, logged, and cached as null so
+ * the request path 503s instead of 500ing on every call.
  */
 export function getQdrantClient(): QdrantClientLike | null {
   if (clientInstance !== undefined) return clientInstance;
@@ -103,7 +107,12 @@ export function getQdrantClient(): QdrantClientLike | null {
     clientInstance = null;
     return null;
   }
-  clientInstance = new QdrantClient({ url: config.url, apiKey: config.apiKey });
+  try {
+    clientInstance = new QdrantClient({ url: config.url, apiKey: config.apiKey });
+  } catch (err) {
+    log.warn(`[qdrant] failed to construct client (${err instanceof Error ? err.message : String(err)}) — message search disabled`);
+    clientInstance = null;
+  }
   return clientInstance;
 }
 
