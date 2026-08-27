@@ -53,4 +53,10 @@ describe("getQdrantConfig", () => {
     expect(getQdrantConfig()?.url).toBe("https://search-staging.roomy.space:6333");
     expect(getQdrantConfig()?.port).toBe(6333);
   });
+
+  test("http internal URLs keep no port (client defaults to 6333)", () => {
+    process.env.QDRANT_URL = "http://qdrant.railway.internal";
+    expect(getQdrantConfig()?.url).toBe("http://qdrant.railway.internal");
+    expect(getQdrantConfig()?.port).toBeUndefined();
+  });
 });

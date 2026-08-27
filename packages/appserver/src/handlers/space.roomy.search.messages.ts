@@ -24,6 +24,7 @@ import { selectJoinedSpaceDids } from "../queries/userSpaceMembership.ts";
 import { selectMessages } from "../queries/selectMessages.ts";
 import { encodeSparse } from "../search/bm25.ts";
 import { getQdrantClient, searchMessages } from "../search/qdrantSearch.ts";
+import { getQdrant } from "../qdrant.ts";
 import { parseUserDid, requireSpaceRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { optionalInt, optionalString, requireString } from "../xrpc/params.ts";
@@ -70,7 +71,6 @@ export const searchMessagesHandler: QueryHandler<
   if (userDid !== null) {
     await hydrateUserMembership(userDid);
   }
-
   // Resolve the caller's readable space set. With spaceId the filter narrows
   // to that space (requireSpaceRead below enforces access); without it we
   // filter to the spaces the caller has joined.
@@ -90,12 +90,26 @@ export const searchMessagesHandler: QueryHandler<
 
   const offset = cursor !== null ? Number(cursor) : 0;
   const sparse = encodeSparse(q);
-  const hits = await searchMessages(client, {
-    sparse,
-    spaceDids,
-    limit: limit * OVERFETCH,
-    offset,
-  });
+  let hits;
+  try {
+    hits = await searchMessages(client, {
+      sparse,
+      spaceDids,
+      limit: limit * OVERFETCH,
+      offset,
+    });
+  } catch (err) {
+    // Surface the configured endpoint so a misconfigured QDRANT_URL is
+    // diagnosable from the response (Bun's "Unable to connect" is generic —
+    // it covers refused, TLS mismatch, and DNS failures alike).
+    const config = getQdrant();
+    const target = config ? `${config.url}${config.port !== undefined ? `:${config.port}` : ""}` : "unset";
+    throw new XrpcError(
+      500,
+      "InternalServerError",
+      `Qdrant search failed (target ${target}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   // Hydrate per-space, keeping the hits' rank order. Qdrant returns ids;
   // SQLite provides the full message DTOs.
