@@ -7,6 +7,7 @@ import SuggestionSelect from "@roomy/design/components/helper/SuggestionSelect.s
 import UserMentionList from "./UserMentionList.svelte";
 import type { TypeaheadUser } from "@roomy/design/components/ui/user-typeahead/UserTypeahead.svelte";
 import { Extension, mergeAttributes } from "@tiptap/core";
+import type { MarkdownNodeSpec } from "tiptap-markdown";
 import type {
   SuggestionKeyDownProps,
   SuggestionProps,
@@ -163,6 +164,18 @@ const UserMentionExtension = Mention.extend({
       `@${node.attrs.label}`,
     ];
   },
+  // Used by tiptap-markdown's `getMarkdown()` (the legacy text/markdown body).
+  // Emit clean `@label` instead of the renderHTML anchor so the wire body
+  // carries no raw HTML — the Discord bridge forwards it verbatim.
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          state.write(`@${node.attrs.label}`);
+        },
+      },
+    } satisfies { markdown: MarkdownNodeSpec };
+  },
 });
 
 /**
@@ -294,6 +307,18 @@ const SpaceContextMentionExtension = Mention.extend({
       ),
       node.attrs.label,
     ];
+  },
+  // Used by tiptap-markdown's `getMarkdown()` (the legacy text/markdown body).
+  // Emit clean `#label` instead of the renderHTML anchor so channel/thread
+  // mentions don't leak raw HTML into bridged messages.
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node) {
+          state.write(`#${node.attrs.label}`);
+        },
+      },
+    } satisfies { markdown: MarkdownNodeSpec };
   },
 });
 export const initSpaceContextMention = ({

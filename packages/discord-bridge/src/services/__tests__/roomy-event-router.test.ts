@@ -279,6 +279,58 @@ describe("RoomyEventRouter", () => {
 	});
 
 	/**
+	 * RER33: a legacy text/markdown body containing raw mention anchor HTML
+	 * (as produced by the composer's tiptap-markdown serializer before
+	 * TASK-59) is bridged as clean text — no `<a` tags, no `data-*`
+	 * attributes reach Discord.
+	 */
+	test("RER33: strips raw mention HTML from legacy text/markdown bodies", async () => {
+		const { roomy, discord, router } = setup();
+		await router.subscribeToSpace(SPACE_A);
+
+		const rawHtml =
+			'<a href="/user/did:plc:mmyj7mk7kh3jqhw6zs4prbuk" class="mention !no-underline" data-id="did:plc:mmyj7mk7kh3jqhw6zs4prbuk" data-label="Meri" data-mention-suggestion-char="@">@Meri</a>';
+		const event = makeCreateMessageEvent({
+			id: ROOMY_MESSAGE_ULID,
+			body: makeTextBody(rawHtml),
+		});
+
+		await roomy.fireEvent(SPACE_A, event);
+
+		expect(discord.sent).toHaveLength(1);
+		const content = discord.sent[0]?.content;
+		expect(content).toBe("@Meri");
+		expect(content).not.toContain("<a");
+		expect(content).not.toContain("data-");
+	});
+
+	/**
+	 * RER34: the same tag-stripping applies to legacy text/plain bodies, so
+	 * no producer-regressed body type can leak raw HTML into Discord.
+	 */
+	test("RER34: strips raw HTML from legacy text/plain bodies", async () => {
+		const { roomy, discord, router } = setup();
+		await router.subscribeToSpace(SPACE_A);
+
+		const event = makeCreateMessageEvent({
+			id: ROOMY_MESSAGE_ULID,
+			body: {
+				mimeType: "text/plain",
+				data: toBytes(
+					new TextEncoder().encode(
+						'<a href="/user/did:plc:abc" data-label="Meri">@Meri</a> hello',
+					),
+				),
+			},
+		});
+
+		await roomy.fireEvent(SPACE_A, event);
+
+		expect(discord.sent).toHaveLength(1);
+		expect(discord.sent[0]?.content).toBe("@Meri hello");
+	});
+
+	/**
 	 * RER02: editMessage updates the previously bridged Discord message.
 	 */
 	test("RER02: bridges editMessage to Discord", async () => {

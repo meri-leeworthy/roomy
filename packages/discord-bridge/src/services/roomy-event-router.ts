@@ -89,12 +89,24 @@ function filenameFromUri(uri: string, mimeType: string): string {
 }
 
 /**
+ * Strip HTML tags from a legacy body before it reaches Discord. The composer's
+ * tiptap-markdown serializer used to inline mention anchors (`<a …>@label</a>`)
+ * verbatim into `text/markdown` bodies; this guarantees no raw HTML is ever
+ * forwarded even if a producer regresses. Deliberately a small regex stripper
+ * (no DOM lib): it only removes `<…>` tag spans, keeping the text between them.
+ */
+function stripHtmlTags(text: string): string {
+	return text.replace(/<[^>]*>/g, "");
+}
+
+/**
  * Decode a message body from a Roomy event into a Discord-renderable string.
  *
  * - Rich text bodies (`application/vnd.roomy.richtext+json`) are parsed into
  *   blocks and rendered to Discord markdown via `blocksToDiscordMarkdown`.
  * - Legacy `text/markdown` / `text/plain` bodies are passed through as-is
- *   (Roomy markdown is largely Discord-compatible).
+ *   (Roomy markdown is largely Discord-compatible), after stripping any HTML
+ *   tags so mentions can't leak raw anchors into Discord.
  *
  * Uses the SDK's `fromBytes` to handle both BytesWrapper instances and the
  * `{ $bytes }` JSON form. Returns undefined for unsupported MIME types (or an
@@ -124,7 +136,7 @@ function decodeBody(body: {
 	}
 
 	try {
-		return new TextDecoder().decode(fromBytes(body.data));
+		return stripHtmlTags(new TextDecoder().decode(fromBytes(body.data)));
 	} catch {
 		return "";
 	}
