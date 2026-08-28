@@ -27,12 +27,18 @@ persistent DB state, so they are the cross-restart progress signals.
 
 ## Grafana timeseries panels
 
+> **Label vs field**: the Loki stream labels are only `service_name`, `level`,
+> `scope` (plus `replica_id`/`railway_service_name` on Railway). `msg` and the
+> progress fields are JSON **fields** inside the line — filter them with
+> `| json` + `| msg="..."` AFTER the label selector, never inside `{...}`.
+> `{...msg="progress"}` matches nothing.
+
 ### 1. Backfill progress (persists across restarts)
 
 Query (Loki data source, LogQL):
 
 ```logql
-{service_name="appserver", scope="search-backfill", msg="progress"}
+{service_name="appserver", scope="search-backfill"}
 | json
 | unwrap backfilled
 | rate($__rate_interval)
@@ -43,7 +49,7 @@ This shows the per-second backfill rate. `backfilled` resets per process; for
 an absolute progress view use the `cursor` field instead:
 
 ```logql
-{service_name="appserver", scope="search-backfill", msg="progress"}
+{service_name="appserver", scope="search-backfill"}
 | json
 | unwrap cursor
 ```
@@ -54,8 +60,9 @@ want a readable value; the trend, not the magnitude, is the signal.)
 ### 2. Materialisation throughput
 
 ```logql
-{service_name="appserver", scope="materialize", msg="done"}
+{service_name="appserver", scope="materialize"}
 | json
+| msg="done"
 | unwrap applied
 | rate($__rate_interval)
 ```
@@ -67,16 +74,18 @@ path with `| filter` or by adding `isBackfill` to the unwrap/label.
 Per-stream progress over time (the `applied` total for one stream):
 
 ```logql
-{service_name="appserver", scope="materialize", msg="done"}
+{service_name="appserver", scope="materialize"}
 | json
+| msg="done"
 | unwrap applied
 ```
 
 ### 3. Boot re-materialisation (per-deploy)
 
 ```logql
-{service_name="appserver", scope="re-materialize", msg="stream-done"}
+{service_name="appserver", scope="re-materialize"}
 | json
+| msg="stream-done"
 | unwrap applied
 | rate($__rate_interval)
 ```
@@ -84,8 +93,9 @@ Per-stream progress over time (the `applied` total for one stream):
 And the overall boot progress:
 
 ```logql
-{service_name="appserver", scope="re-materialize", msg="progress"}
+{service_name="appserver", scope="re-materialize"}
 | json
+| msg="progress"
 | unwrap done
 ```
 
@@ -101,8 +111,9 @@ And the overall boot progress:
    `{{spaceDid}}` if you want per-space series — add `| label_format` to the
    query to promote a field to a label, e.g.:
    ```logql
-   {service_name="appserver", scope="materialize", msg="done"}
+   {service_name="appserver", scope="materialize"}
    | json
+   | msg="done"
    | label_format stream=streamId
    | unwrap applied
    ```
@@ -115,4 +126,9 @@ And the overall boot progress:
 The most useful alert is a stall: `backfilled` rate near zero while
 `indexedOk` keeps growing (or while the pre-deploy corpus is still missing
 from search). Threshold: `rate(backfilled) < 0.001` for 30 minutes during an
-active backfill window.
+active backfill window. Use a literal window in the alert query (alert rules
+don't substitute `$__rate_interval`):
+
+```logql
+rate({service_name="appserver", scope="search-backfill"} | json | unwrap backfilled [15m]) < 0.001
+```
