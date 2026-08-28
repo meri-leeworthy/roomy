@@ -22,15 +22,19 @@
     fetchState,
     onForward,
     composer,
+    query = $bindable(""),
   }: {
     open: boolean;
     fetchState: ForwardFetchState;
     onForward: (roomIds: string[]) => void | Promise<void>;
     /** WYSIWYG message composer (the chat input). Renders below the room picker. */
     composer?: Snippet;
+    /** Room-name search term. The host owns the query (e.g. to drive a
+     *  server-side search) — this modal renders the input and filters
+     *  nothing; `fetchState.data` is the full list to display. */
+    query?: string;
   } = $props();
 
-  let query = $state("");
   let selected = $state<string[]>([]);
   let forwarding = $state(false);
   let errorMessage = $state<string | null>(null);
@@ -44,6 +48,11 @@
     }
   });
 
+  const selectedIds = $derived(new Set(selected));
+
+  // Local filter over the host-provided list. The host may already have
+  // server-filtered (room-name search); this is a pure client-side fallback
+  // so the modal stays usable standalone (e.g. design docs/tests).
   const results = $derived.by<ForwardTarget[]>(() => {
     if (fetchState.status !== "success") return [];
     const q = query.trim().toLowerCase();
@@ -52,8 +61,6 @@
       (t) => t.name?.toLowerCase().includes(q) ?? false,
     );
   });
-
-  const selectedIds = $derived(new Set(selected));
 
   function toggle(target: ForwardTarget) {
     if (forwarding) return;

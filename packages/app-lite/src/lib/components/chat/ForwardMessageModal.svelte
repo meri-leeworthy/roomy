@@ -6,6 +6,7 @@
     type ForwardTarget,
   } from "@roomy/design/components/modals/ForwardMessageModal.svelte";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
+  import { createSearchRoomsQuery } from "$lib/queries/search-rooms";
   import { forwardMessage } from "$lib/mutations/message";
   import ChatInput from "./ChatInput.svelte";
   import { toast } from "@foxui/core";
@@ -30,6 +31,13 @@
   let body = $state("");
   let bodyBlocks: Block[] | undefined = $state();
 
+  // Room-name search term typed into the modal's input. The design modal
+  // owns the input (bind:query); when non-empty we search the server for
+  // every matching channel/thread in the space instead of relying on the
+  // cached activeThreads list (which is capped at 8 and only includes
+  // recently-active threads).
+  let searchQuery = $state("");
+
   // Reset the composer each time the modal opens.
   $effect(() => {
     if (open) {
@@ -42,13 +50,19 @@
     enabled: open,
   });
 
-  const targets = $derived.by<ForwardTarget[]>(() => {
+  const roomsSearchQuery = createSearchRoomsQuery(
+    () => spaceId,
+    () => searchQuery,
+  );
+
+  // Candidate targets from the cached sidebar: channels the user can write
+  // to (with their recently active threads), plus writable active threads
+  // of unreadable channels. Readable channels' threads render under the
+  // channel as "suggested".
+  const sidebarTargets = $derived.by<ForwardTarget[]>(() => {
     const meta = metaQuery.data;
     if (!meta) return [];
 
-    // Candidate targets: channels the user can write to (with their recently
-    // active threads), plus writable active threads of unreadable channels.
-    // Readable channels' threads render under the channel as "suggested".
     const out: ForwardTarget[] = [];
     const seen = new Set<string>();
     const push = (id: string, name?: string) => {
@@ -87,8 +101,44 @@
     return out;
   });
 
+  // Searching: the server is authoritative. Search results already carry
+  // read-access filtering + names; dedupe channels and threads by id.
+  const searchTargets = $derived.by<ForwardTarget[]>(() => {
+    const rooms = roomsSearchQuery.data?.rooms ?? [];
+    const out: ForwardTarget[] = [];
+    const seen = new Set<string>();
+    for (const r of rooms) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      out.push({ id: r.id, name: r.name });
+    }
+    return out;
+  });
+
+  const searching = $derived(searchQuery.trim().length > 0);
+
   const fetchState = $derived.by((): ForwardFetchState => {
     if (!open) return { status: "idle" };
+
+    // Server search in flight: show the loading state for the first term
+    // only, so the initial open (no query) renders instantly from cache.
+    if (searching) {
+      if (roomsSearchQuery.isPending && !roomsSearchQuery.data) {
+        return { status: "loading" };
+      }
+      if (roomsSearchQuery.isError) {
+        return {
+          status: "error",
+          message:
+            roomsSearchQuery.error instanceof Error
+              ? roomsSearchQuery.error.message
+              : "Failed to search rooms",
+        };
+      }
+      const data = searchTargets.filter((t) => t.id !== fromRoomId);
+      return { status: "success", data };
+    }
+
     if (metaQuery.isPending) return { status: "loading" };
     if (metaQuery.isError)
       return {
@@ -98,7 +148,7 @@
             ? metaQuery.error.message
             : "Failed to load rooms",
       };
-    const data = targets.filter((t) => t.id !== fromRoomId);
+    const data = sidebarTargets.filter((t) => t.id !== fromRoomId);
     return { status: "success", data };
   });
 
@@ -114,7 +164,12 @@
   }
 </script>
 
-<ForwardMessageModal bind:open {fetchState} onForward={handleForward}>
+<ForwardMessageModal
+  bind:open
+  bind:query={searchQuery}
+  {fetchState}
+  onForward={handleForward}
+>
   {#snippet composer()}
     <ChatInput
       bind:content={body}

@@ -460,6 +460,91 @@ describe("space.roomy.room.getThreads", () => {
   });
 });
 
+// ─── space.roomy.search.rooms ───────────────────────────────────────────
+
+describe("space.roomy.search.rooms", () => {
+  test("name search finds channels and threads with parent context", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    seedSpace(db, SPACE, USER);
+    seedJoinedSpace(db, USER, SPACE);
+
+    // Channels: "lobby", "coordination" (matching "c")
+    const lobby = newUlid();
+    seedRoom(db, lobby, SPACE);
+    spaceDb(db, SPACE).run(
+      `insert into comp_info (entity, name) values (?, ?)`,
+      [lobby, "lobby"],
+    );
+    const coordination = newUlid();
+    seedRoom(db, coordination, SPACE);
+    spaceDb(db, SPACE).run(
+      `insert into comp_info (entity, name) values (?, ?)`,
+      [coordination, "coordination"],
+    );
+
+    // Thread under coordination, named "coordination thread"
+    const thread = newUlid();
+    seedRoom(db, thread, SPACE, "space.roomy.thread");
+    spaceDb(db, SPACE).run(
+      `insert into comp_info (entity, name) values (?, ?)`,
+      [thread, "coordination thread"],
+    );
+    spaceDb(db, SPACE).run(
+      `insert into edges (head, tail, label, payload) values (?, ?, 'link', ?)`,
+      [coordination, thread, JSON.stringify({ canonical_parent: 1 })],
+    );
+
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.search.rooms?spaceId=${SPACE}&q=coordination`,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveProperty("rooms");
+    // Channel first, then thread — both match "coordination".
+    const rooms = body.rooms as Array<{
+      id: string;
+      name: string;
+      kind: string;
+      canWrite: boolean;
+      channelId?: string;
+      channelName?: string;
+    }>;
+    expect(rooms.length).toBeGreaterThanOrEqual(2);
+    const channelHit = rooms.find((r) => r.id === coordination);
+    expect(channelHit).toBeDefined();
+    expect(channelHit!.kind).toBe("channel");
+    const threadHit = rooms.find((r) => r.id === thread);
+    expect(threadHit).toBeDefined();
+    expect(threadHit!.kind).toBe("thread");
+    expect(threadHit!.channelId).toBe(coordination);
+    expect(threadHit!.channelName).toBe("coordination");
+  });
+
+  test("empty query → 400", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    seedSpace(db, SPACE, USER);
+    seedJoinedSpace(db, USER, SPACE);
+
+    const res = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.search.rooms?spaceId=${SPACE}&q=`,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test("non-member of private space → 403", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    seedSpace(db, SPACE, USER, { allowPublicJoin: 0 });
+
+    const res = await ctx.authedFetch("did:plc:e2e-visitor")(
+      `${ctx.baseUrl}/xrpc/space.roomy.search.rooms?spaceId=${SPACE}&q=lobby`,
+    );
+    expect(res.status).toBe(403);
+  });
+});
+
 // ─── space.roomy.room.getMessages ────────────────────────────────────────
 
 describe("space.roomy.room.getMessages", () => {

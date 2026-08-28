@@ -1,0 +1,78 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.search.rooms",
+  "defs": {
+    "rooms": {
+      "type": "object",
+      "required": [
+        "canWrite",
+        "id",
+        "kind",
+        "name"
+      ],
+      "properties": {
+        "canWrite": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "knownValues": [
+            "channel",
+            "thread"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "channelId": {
+          "type": "string"
+        },
+        "channelName": {
+          "type": "string"
+        }
+      }
+    },
+    "main": {
+      "type": "query",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "q",
+          "spaceId"
+        ],
+        "properties": {
+          "q": {
+            "type": "string"
+          },
+          "spaceId": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "rooms"
+          ],
+          "properties": {
+            "rooms": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#rooms"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
