@@ -13,7 +13,7 @@
  * Run: bun test --cwd packages/appserver src/e2e/search.test.ts
  */
 
-import { describe, expect, test, beforeEach } from "bun:test";
+import { describe, expect, test, beforeEach, vi } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { newUlid } from "@roomy-space/sdk";
 import {
@@ -456,5 +456,48 @@ describe("backfill sweeper (Qdrant)", () => {
     }
 
     expect(searchBackfillStats().backfilled).toBeGreaterThan(0);
+  });
+
+  test("sweep cycles emit structured progress telemetry", async () => {
+    const { ctx } = await newAppWithQdrant();
+    // Capture the progress lines emitted by sweepCycle via the Loki sink.
+    // The e2e appserver replaces the sink? No — it doesn't. Capture stdout
+    // instead: the progress line is `[search-backfill] progress` at info
+    // level, one JSON object per line.
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    const EMPTY = "did:web:aaa-empty.example";
+    seedSpace(ctx.db as unknown as Database, EMPTY, USER, { allowPublicJoin: 1 });
+    await materializeSpace(ctx, SPACE, USER, { messageText: "the quick brown fox jumps" });
+    await flushSearchQueue();
+
+    const globalDb = (ctx.db as unknown as {
+      global(): { query(sql: string): { get<T>(...p: unknown[]): Promise<T | null> } };
+    }).global();
+    _resetSearchBackfill();
+    startSearchBackfill({ globalDb: globalDb as never });
+    let progressLines: string[] = [];
+    try {
+      await sweepCycle(globalDb as never);
+      await sweepCycle(globalDb as never);
+      // Snapshot BEFORE restore — mockRestore() wipes recorded calls.
+      progressLines = infoSpy.mock.calls
+        .map((c) => c[0] as string)
+        .filter((l) => typeof l === "string" && l.includes('"scope":"search-backfill"'));
+    } finally {
+      await stopSearchBackfill();
+      infoSpy.mockRestore();
+    }
+
+    expect(progressLines.length).toBeGreaterThanOrEqual(2);
+    const last = JSON.parse(progressLines[progressLines.length - 1]!);
+    expect(last.msg).toContain("progress");
+    expect(typeof last.spaceDid).toBe("string");
+    expect(typeof last.cursor).toBe("string");
+    expect(typeof last.rows).toBe("number");
+    expect(typeof last.indexed).toBe("number");
+    expect(typeof last.backfilled).toBe("number");
+    expect(typeof last.errorCount).toBe("number");
+    expect(typeof last.dbBackoffActive).toBe("boolean");
   });
 });

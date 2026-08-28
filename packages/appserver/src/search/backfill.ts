@@ -229,6 +229,20 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
     await setCursor(globalDb, spaceDid, "");
   }
 
+  // Progress telemetry (Loki): one structured line per cycle. `backfilled`
+  // is process-local (resets on restart), so `cursor` — which persists in
+  // the global DB — is the cross-restart progress signal. Query in Grafana
+  // with `{scope="search-backfill"} | json | unwrap backfilled`.
+  log.info("[search-backfill] progress", {
+    spaceDid,
+    cursor: cursor ?? "",
+    rows: rows.length,
+    indexed: indexedCount,
+    backfilled: statsBackfilled,
+    errorCount: dbErrorCount,
+    dbBackoffActive: Date.now() < dbBackoffUntil,
+  });
+
   return rows.length >= SWEEP_BATCH;
 }
 

@@ -249,15 +249,21 @@ export async function reMaterializeFromLocalEvents(
           }, globalDb);
 
           if (stats.materializerErrors > 0 || stats.applyErrors > 0) {
-            log.warn(
-              "startup",
-              `re-materialize ${streamDid}: ${stats.applied} applied, ${stats.materializerErrors} materializer errors, ${stats.applyErrors} apply errors`,
-            );
+            log.warn("[re-materialize] stream-done", {
+              streamId: streamDid,
+              applied: stats.applied,
+              materializerErrors: stats.materializerErrors,
+              applyErrors: stats.applyErrors,
+              rebuild,
+            });
           } else {
-            log.info(
-              "startup",
-              `re-materialize ${streamDid}: ${stats.applied} applied, 0 errors`,
-            );
+            log.info("[re-materialize] stream-done", {
+              streamId: streamDid,
+              applied: stats.applied,
+              materializerErrors: 0,
+              applyErrors: 0,
+              rebuild,
+            });
           }
         }
 
@@ -286,10 +292,13 @@ export async function reMaterializeFromLocalEvents(
 
       if ((succeeded + failed) % 25 === 0 || succeeded + failed === total) {
         const pct = Math.round(((succeeded + failed) / total) * 100);
-        log.info(
-          "startup",
-          `re-materialization progress [${succeeded + failed}/${total} ${pct}%]`,
-        );
+        log.info("[re-materialize] progress", {
+          done: succeeded + failed,
+          total,
+          pct,
+          succeeded,
+          failed,
+        });
       }
     }
   };
@@ -298,8 +307,5 @@ export async function reMaterializeFromLocalEvents(
 
   await finishGlobalMigrations();
 
-  log.info(
-    "startup",
-    `re-materialization complete: ${succeeded} succeeded, ${failed} failed`,
-  );
+  log.info("[re-materialize] complete", { succeeded, failed });
 }

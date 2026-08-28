@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { Database } from "bun:sqlite";
 import { ulid } from "ulidx";
 import {
@@ -148,6 +148,53 @@ describe("applyBatch", () => {
       .query("select backfilled_to from comp_space where entity = ?")
       .get<{ backfilled_to: number }>(STREAM);
     expect(cursor?.backfilled_to).toBe(5);
+  })
+
+  test("emits structured materialization progress + done telemetry", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    let lines: string[] = [];
+    try {
+      // 1500 events → chunked at 500, so the ~10% interval log fires for
+      // the first two chunks and the done line always fires.
+      const events: DecodedStreamEvent[] = [];
+      for (let i = 0; i < 1500; i++) {
+        events.push(decoded(createRoomEvent(`room-${i}`), i));
+      }
+      await applyBatch(asyncDb, STREAM, events, { isBackfill: true });
+      // Snapshot the captured lines BEFORE restore — mockRestore() wipes
+      // the recorded calls.
+      lines = infoSpy.mock.calls
+        .map((c) => c[0] as string)
+        .filter((l) => typeof l === "string" && l.includes('"scope":"materialize"'));
+    } finally {
+      infoSpy.mockRestore();
+    }
+
+    const doneLine = lines
+      .map((l) => JSON.parse(l))
+      .find((p) => p.msg.includes("done"));
+    const progressLine = lines
+      .map((l) => JSON.parse(l))
+      .find((p) => p.msg.includes("progress"));
+
+    // Progress fires while the batch is mid-flight (done < total).
+    expect(progressLine).toBeDefined();
+    expect(typeof progressLine.streamId).toBe("string");
+    expect(progressLine.total).toBe(1500);
+    expect(progressLine.applied).toBeGreaterThan(0);
+    expect(typeof progressLine.pct).toBe("number");
+    expect(typeof progressLine.isBackfill).toBe("boolean");
+
+    // Done fires once with the final count.
+    expect(doneLine).toBeDefined();
+    expect(doneLine.streamId).toBe(STREAM);
+    expect(doneLine.total).toBe(1500);
+    expect(doneLine.applied).toBe(1500);
+    expect(doneLine.materializerErrors).toBe(0);
+    expect(doneLine.applyErrors).toBe(0);
   })
 
   test("counts materialiser errors without aborting the batch", async () => {

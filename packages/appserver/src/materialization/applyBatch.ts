@@ -240,7 +240,19 @@ export async function applyBatch(
       if (done >= nextLogAt && done < total) {
         nextLogAt = done + logInterval;
         const pct = Math.round((done / total) * 100);
-        log.info("materialize", `${streamId}: ${done}/${total} events (${pct}%) — ${stats.applied} applied, ${stats.materializerErrors} materializer errors, ${stats.applyErrors} apply errors`);
+        // Structured progress telemetry (Loki): one line per ~10% of the
+        // batch. Query in Grafana with
+        // `{scope="materialize"} | json | unwrap applied`.
+        log.info("[materialize] progress", {
+          streamId,
+          done,
+          total,
+          pct,
+          applied: stats.applied,
+          materializerErrors: stats.materializerErrors,
+          applyErrors: stats.applyErrors,
+          isBackfill: opts.isBackfill,
+        });
       }
     }
 
@@ -420,6 +432,20 @@ export async function applyBatch(
       params: [latestIdx, streamId, latestIdx],
     },
   ]);
+
+  // Completion telemetry (Loki): one line per batch. The final applied count
+  // is the cross-restart progress signal for a stream (the per-space
+  // materialization_cursor persists), so a Grafana panel can track how far a
+  // space has materialized over time. Query with
+  // `{scope="materialize"} | json | unwrap applied`.
+  log.info("[materialize] done", {
+    streamId,
+    total,
+    applied: stats.applied,
+    materializerErrors: stats.materializerErrors,
+    applyErrors: stats.applyErrors,
+    isBackfill: opts.isBackfill,
+  });
 
   return stats;
 }
