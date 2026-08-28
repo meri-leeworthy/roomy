@@ -66,6 +66,7 @@ SCOPE+=" rpc:space.roomy.space.getCalendarLink?aud=*"
 SCOPE+=" rpc:space.roomy.space.getCalendarEvents?aud=*"
 SCOPE+=" rpc:space.roomy.space.getActivityFeed?aud=*"
 SCOPE+=" rpc:space.roomy.search.messages?aud=*"
+SCOPE+=" rpc:space.roomy.search.rooms?aud=*"
 SCOPE+=" rpc:space.roomy.user.getProfile?aud=*"
 SCOPE+=" rpc:space.roomy.embed.getLinkMetadata?aud=*"
 

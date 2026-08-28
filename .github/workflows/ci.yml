@@ -185,6 +185,8 @@ jobs:
         run: pnpm turbo run build-lib
       - name: Check App-lite
         run: pnpm --filter app-lite check
+      - name: Check OAuth scope drift (config.ts vs build-prod.sh)
+        run: node packages/app-lite/scripts/check-oauth-scopes.mjs
 
   check-sdk:
     name: Check SDK Lexicons
