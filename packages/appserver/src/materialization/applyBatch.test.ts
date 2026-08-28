@@ -578,14 +578,14 @@ function forwardMessageEvent(
 }
 
 describe("forwardMessages sort order", () => {
-  // Regression: forward-reference entities got no sort_idx, so selectMessages
-  // fell back to ordering by the forward event's own ULID. A thread-creation
-  // batch forwards several messages within the same millisecond, so those
-  // ULIDs differ only in their random suffixes and the original chronological
-  // order of the forwarded messages was scrambled (older forwarded messages
-  // could appear after newer ones). The fix copies the original message's
-  // sort_idx onto the forward-reference entity.
-  test("forwarded messages sort by the original's timestamp, not the forward event's", async () => {
+  // Regression: forward-reference entities copied the ORIGINAL message's
+  // sort_idx, so a forward of an old message was buried deep in the
+  // destination room's timeline — outside the first getMessages page (the
+  // room query returns the newest `limit` rows). The forward flashed in via
+  // the WS diff and vanished on the next refetch. The fix sorts the forward
+  // by the forward event's OWN time, so it appears at the top of the
+  // destination room, matching the modern forward-as-embed representation.
+  test("forwarded messages sort by the forward event's time, not the original's", async () => {
     const { db, asyncDb } = freshDb();
     seedSpace(db, STREAM);
 
@@ -600,12 +600,12 @@ describe("forwardMessages sort order", () => {
     const msgOld = createMessageEvent(channelId, msgOldId, "old msg");
     const msgNew = createMessageEvent(channelId, msgNewId, "new msg");
 
-    // Forward both into the thread. To reproduce the pre-fix scramble
-    // deterministically, give the NEWER original's forward an EARLIER forward
-    // event id than the OLDER original's forward. Before the fix the forward
-    // references sorted by event id, so the newer-original forward would come
-    // first (older-after-newer). After the fix they sort by the originals'
-    // sort_idx, restoring chronological order.
+    // Forward both into the thread. The forward events are created AFTER the
+    // originals (T_fwd > T_new), so both forwards sort above both originals
+    // in the thread. Give the NEWER original's forward an EARLIER forward
+    // event id than the OLDER original's forward: the forwards must order by
+    // their own event times (fwdNew first), NOT by the originals' times
+    // (which would put fwdOld first).
     const T_fwd = T_new + 120_000;
     const fwdNewId = ulid(T_fwd); // newer original, earlier forward id
     const fwdOldId = ulid(T_fwd + 5_000); // older original, later forward id
@@ -631,18 +631,19 @@ describe("forwardMessages sort order", () => {
       cursor: null,
     });
 
-    // Ascending: the older original's forward first, then the newer's.
-    // Legacy forward references carry no own content — the original is
-    // nested under `forwardedFrom.message` (never substituted into the row).
+    // Ascending: the earlier forward event first, then the later one —
+    // regardless of the originals' timestamps. Legacy forward references
+    // carry no own content — the original is nested under
+    // `forwardedFrom.message` (never substituted into the row).
     expect(messages).toHaveLength(2);
-    expect(messages[0]?.id).toBe(fwdOldId);
+    expect(messages[0]?.id).toBe(fwdNewId);
     expect(messages[0]?.content).toBe("");
-    expect(messages[0]?.forwardedFrom?.message?.id).toBe(msgOldId);
-    expect(messages[0]?.forwardedFrom?.message?.content).toBe("old msg");
-    expect(messages[1]?.id).toBe(fwdNewId);
+    expect(messages[0]?.forwardedFrom?.message?.id).toBe(msgNewId);
+    expect(messages[0]?.forwardedFrom?.message?.content).toBe("new msg");
+    expect(messages[1]?.id).toBe(fwdOldId);
     expect(messages[1]?.content).toBe("");
-    expect(messages[1]?.forwardedFrom?.message?.id).toBe(msgNewId);
-    expect(messages[1]?.forwardedFrom?.message?.content).toBe("new msg");
+    expect(messages[1]?.forwardedFrom?.message?.id).toBe(msgOldId);
+    expect(messages[1]?.forwardedFrom?.message?.content).toBe("old msg");
   });
 })
 

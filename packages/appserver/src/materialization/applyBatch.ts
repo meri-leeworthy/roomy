@@ -203,22 +203,22 @@ export async function applyBatch(
         });
       }
 
-      // forwardMessages sort_idx copy
-      if (
-        e.event.$type === "space.roomy.message.forwardMessages.v0" &&
-        "messageIds" in e.event &&
-        Array.isArray((e.event as Record<string, unknown>).messageIds)
-      ) {
-        const messageIds = (e.event as Record<string, unknown>).messageIds as string[];
-        const originalId = messageIds[0];
-        if (originalId) {
-          chunkSteps.push({
-            type: "run",
-            sql: "update entities set sort_idx = (select sort_idx from entities where id = ?) where id = ? and sort_idx is null",
-            params: [originalId, e.event.id],
-            derived: "space",
-          });
-        }
+      // forwardMessages sort_idx: the forward-reference entity sorts by the
+      // forward event's OWN time (its ULID), so a forward appears at the top
+      // of the destination room's timeline — matching the modern
+      // forward-as-embed representation (createMessage + forward attachment).
+      // Previously the original's sort_idx was copied, which buried a forward
+      // of an old message deep in history, outside the first getMessages page
+      // (the client's room query returns the newest `limit` rows), so the
+      // forward flashed in via the WS diff and vanished on the next refetch.
+      if (e.event.$type === "space.roomy.message.forwardMessages.v0") {
+        const sortIdx = ulid(decodeTime(e.event.id)) as Ulid;
+        chunkSteps.push({
+          type: "run",
+          sql: "update entities set sort_idx = ? where id = ? and sort_idx is null",
+          params: [sortIdx, e.event.id],
+          derived: "space",
+        });
       }
 
       chunkSteps.push({ type: "exec", sql: `release ${savepoint}`, derived: "none" });

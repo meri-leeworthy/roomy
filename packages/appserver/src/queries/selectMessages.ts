@@ -24,6 +24,7 @@ import type { DbLike } from "../db/types.ts";
 import { decodeContent } from "../db/content.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
 import { hydrateProfiles, resolveProfiles } from "./profileStore.ts";
+import { decodeTime } from "ulidx";
 
 export interface ReactionDto {
   emoji: string;
@@ -457,7 +458,18 @@ export async function selectMessages(
         authorDid != null && r.stream_id != null && authorDid === r.stream_id
           ? true
           : undefined,
-      timestamp: ts != null ? new Date(ts).toISOString() : "",
+      // Legacy forward-reference rows (forwardMessages.v0) carry no
+      // comp_content, so cc.timestamp is NULL. Fall back to the forward
+      // event's own ULID time — the entity id IS the forward event's ULID —
+      // so the forwarder's timestamp is real (the client renders it in the
+      // forward context line and sorts diffs by it; an empty string rendered
+      // as "Invalid Date" and NaN-sorted to the end of the cache).
+      timestamp:
+        ts != null
+          ? new Date(ts).toISOString()
+          : r.forward_target != null
+            ? new Date(decodeTime(r.id)).toISOString()
+            : "",
       replyTo: r.reply_to,
       forwardedFrom:
         r.forward_target != null

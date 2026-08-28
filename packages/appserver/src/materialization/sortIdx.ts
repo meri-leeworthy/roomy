@@ -40,37 +40,31 @@ export async function setMessageSortIdxByTimestamp(db: DbLike, event: Event): Pr
 
 /**
  * Set `entities.sort_idx` for a forward-reference entity created by a
- * `forwardMessages` event, by copying the original message's sort_idx.
+ * `forwardMessages` event, using the forward event's own ULID time.
  *
- * Without this the forward-reference entity has sort_idx = NULL and
- * selectMessages falls back to ordering by the forward event's own ULID. A
- * thread-creation batch forwards several messages within the same
- * millisecond, so those ULIDs differ only in their random suffixes and the
- * original chronological order of the forwarded messages is scrambled (older
- * forwarded messages can end up displayed after newer ones).
+ * The forward-reference entity has no comp_content of its own, so without
+ * this its sort_idx stays NULL and selectMessages falls back to ordering by
+ * the entity id — which is the forward event's ULID anyway, so the fallback
+ * would place it correctly. This explicit write keeps the sort_idx column
+ * populated (consistent with every other message) and makes the forward
+ * appear at the top of the destination room's timeline, matching the modern
+ * forward-as-embed representation (createMessage + forward attachment).
  *
- * Copying the original's sort_idx places the forwarded copy at the same
- * chronological position as the original, consistent with the embedded
- * original's timestamp (`selectMessages` nests the original's full message
- * under `forwardedFrom.message`). No-op if the original isn't materialised
- * yet (the forward edge was skipped — see the guarded insert in the SDK
- * materialiser) or has no sort_idx. forwardMessages is currently capped at
- * one message per event.
+ * Previously the original message's sort_idx was copied here, which placed a
+ * forward of an old message deep in history — outside the first getMessages
+ * page — so it flashed in via the WS diff and vanished on the next refetch.
+ * No-op if the entity row is missing (materialiser failed earlier in the
+ * batch) or if a sort_idx is already set.
  */
 export async function setMessageSortIdxByForward(db: DbLike, event: Event): Promise<void> {
   if (event.$type !== "space.roomy.message.forwardMessages.v0") return;
-  if (!("messageIds" in event) || !Array.isArray(event.messageIds)) return;
 
-  const originalId = event.messageIds[0] as Ulid | undefined;
-  if (!originalId) return;
-
-  const orig = await db
-    .query("select sort_idx from entities where id = ?")
-    .get<{ sort_idx: string | null }>(originalId);
-
-  if (!orig || !orig.sort_idx) return;
-
-  await db.run("update entities set sort_idx = ? where id = ?", orig.sort_idx, event.id);
+  const sortIdx = ulid(decodeTime(event.id)) as Ulid;
+  await db.run(
+    "update entities set sort_idx = ? where id = ? and sort_idx is null",
+    sortIdx,
+    event.id,
+  );
 }
 
 /**
