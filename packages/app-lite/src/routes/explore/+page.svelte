@@ -41,12 +41,50 @@
 
   const searchQuery = createSearchMessagesQuery(() => searchTerm);
 
+  // Flatten all pages into a single array.
+  const messages = $derived(
+    searchQuery.data?.pages.flatMap((p) => p.messages) ?? [],
+  );
+
+  let hasMore = $derived(searchQuery.hasNextPage ?? false);
+
+  function loadMore() {
+    searchQuery.fetchNextPage();
+  }
+
+  // Auto-pagination sentinel: when the sentinel scrolls into view (200px
+  // before the end), fetch the next page. Same pattern as BoardView.
+  let sentinel: HTMLElement | undefined = $state();
+
+  $effect(() => {
+    const el = sentinel;
+    if (!el || !hasMore) return;
+
+    let fetching = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && !fetching) {
+          fetching = true;
+          loadMore();
+          timer = setTimeout(() => { fetching = false; }, 500);
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  });
+
   // Space names for result context: one lightweight getSpaceSummary query
   // per distinct space in the results. createQueries is reactive — the
   // accessor re-runs as results change, and the results array updates as
   // each summary lands (getQueryData reads would be non-reactive).
   const spaceIds = $derived(
-    [...new Set((searchQuery.data?.messages ?? []).map((m) => m.spaceId).filter(Boolean))] as string[],
+    [...new Set(messages.map((m) => m.spaceId).filter(Boolean))] as string[],
   );
 
   const spaceSummaryQueries = createQueries(
@@ -139,11 +177,11 @@
         {:else if searchQuery.isError}
           <ErrorMessage message={searchQuery.error.message} class="py-8" />
         {:else if searchQuery.data}
-          {#if searchQuery.data.messages.length === 0}
+          {#if messages.length === 0}
             <p class="text-sm text-base-400">No messages found.</p>
           {:else}
             <ul class="space-y-2">
-              {#each searchQuery.data.messages as m (m.id)}
+              {#each messages as m (m.id)}
                 <li>
                   <a
                     href={hrefFor(m)}
@@ -168,6 +206,16 @@
                 </li>
               {/each}
             </ul>
+            {#if hasMore}
+              <div
+                bind:this={sentinel}
+                class="flex items-center justify-center py-4"
+              >
+                <div class="text-sm text-base-400">
+                  {searchQuery.isFetchingNextPage ? "Loading more…" : "Scroll for more"}
+                </div>
+              </div>
+            {/if}
           {/if}
         {/if}
       </div>
