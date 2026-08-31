@@ -10,6 +10,13 @@
 //   - GRAFANA_CLOUD_LOKI_TOKEN  Grafana Cloud access policy token (basic auth pass)
 //
 // Optional: ALLOY_LOG_LEVEL (default `info`).
+//
+// Faro browser-agent receiver (app-lite client-side logs):
+//   - FARO_CORS_ORIGINS  comma-separated allowed browser origins (default:
+//                         https://app.roomy.chat — the Caddyfile app origin)
+//   - FARO_API_KEY       shared secret the Faro agent must present; default
+//                        "bad_api_key" (matching compose.yaml dev) — set a
+//                        real secret in production.
 
 logging {
 	level = "info" // override via ALLOY_LOG_LEVEL at runtime if desired
@@ -23,6 +30,31 @@ loki.write "cloud" {
 			username = env("GRAFANA_CLOUD_LOKI_ID")
 			password = env("GRAFANA_CLOUD_LOKI_TOKEN")
 		}
+	}
+}
+
+// ── Receive browser logs from app-lite (Grafana Faro agent) ───────────
+// app-lite is a static SPA (adapter-static behind Caddy) with no server
+// stdout, so its logs arrive over HTTP from the browser. The Faro agent
+// POSTs console/error payloads here and they are forwarded to Loki (logs)
+// exactly like the Loki-push apps. No traces in prod — there is no Tempo.
+faro.receiver "frontend" {
+	server {
+		listen_address       = "0.0.0.0"
+		listen_port          = 12345
+		cors_allowed_origins = split(",", env("FARO_CORS_ORIGINS", "https://app.roomy.chat"))
+		api_key              = env("FARO_API_KEY", "bad_api_key")
+		max_allowed_payload_size = "10MiB"
+
+		rate_limiting {
+			rate = 10
+		}
+	}
+
+	sourcemaps { }
+
+	output {
+		logs = [loki.write.cloud.receiver]
 	}
 }
 

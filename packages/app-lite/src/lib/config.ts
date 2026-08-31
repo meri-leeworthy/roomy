@@ -70,6 +70,21 @@ export const CONFIG = {
   /** Test-mode app-password credentials (bake into env for headless E2E). */
   testIdentifier: dynamicEnv.PUBLIC_TEST_IDENTIFIER || null,
   testAppPassword: dynamicEnv.PUBLIC_TEST_APP_PASSWORD || null,
+  /**
+   * Grafana Faro browser-agent collector URL (app-lite log collection).
+   * When set, the browser pushes console/error logs here; unset by default
+   * (Faro disabled — zero network). Dev: http://127.0.0.1:12345 (compose
+   * alloy faro.receiver). Prod: the deployed Alloy service's Faro port.
+   */
+  faroUrl: dynamicEnv.PUBLIC_FARO_URL || null,
+  /**
+   * API key for the Faro receiver (faro.receiver `api_key`). The receiver
+   * rejects pushes without a matching `x-api-key`, so this MUST match the
+   * collector's configured key when PUBLIC_FARO_URL is set. It ships in the
+   * browser bundle by design (Faro client keys gate noise/abuse, not data
+   * access). Dev compose default: "bad_api_key".
+   */
+  faroApiKey: dynamicEnv.PUBLIC_FARO_API_KEY || null,
 };
 
 export const OAUTH_SCOPE = [

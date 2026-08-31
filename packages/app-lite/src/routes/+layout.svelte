@@ -13,10 +13,8 @@
   } from "$lib/push.svelte";
   import { startSync, stopSync } from "$lib/sync.svelte";
   import { restoreScrollPositionsFromStorage, saveScrollPositionsToStorage } from "$lib/components/chat/scroll-position.svelte";
-  import {
-    installGlobalErrorRecovery,
-    resetReloadBudget,
-  } from "$lib/error-recovery";
+  import { installGlobalErrorRecovery, resetReloadBudget } from "$lib/error-recovery";
+  import { initFaro } from "$lib/telemetry/faro";
   import { serverBar } from "$lib/components/layout/server-bar.svelte";
   import { settingsBar } from "$lib/components/layout/settings-bar.svelte";
   import { requireAuth } from "$lib/components/layout/auth-guard.svelte";
@@ -44,6 +42,10 @@
     // failures) that would otherwise leave the app unusable. In the PWA the
     // page cannot be manually refreshed, so this is the safety net.
     installGlobalErrorRecovery();
+    // Client-side log collection (Faro → Alloy → Loki). No-op unless
+    // PUBLIC_FARO_URL is set; must run before any app logging so the
+    // console+error instrumentation captures from bootstrap onward.
+    initFaro();
     console.log("[app-lite env debug] $env/dynamic/public:", {
       PUBLIC_PDS: dynamicEnv.PUBLIC_PDS,
       PUBLIC_PDS_HANDLE_SUFFIX: dynamicEnv.PUBLIC_PDS_HANDLE_SUFFIX,
