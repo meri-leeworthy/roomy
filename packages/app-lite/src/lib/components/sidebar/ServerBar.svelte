@@ -58,6 +58,7 @@
   let dragStarted = false;
   let longPressTimer: ReturnType<typeof setTimeout> | null = null;
   let longPressTarget: HTMLElement | null = null;
+  let suppressClickUntil = 0;
 
   const displaySpaces: (typeof joinedSpaces[number] & {
     [SHADOW_ITEM_MARKER_PROPERTY_NAME]?: boolean;
@@ -84,6 +85,19 @@
     longPressTarget = null;
   }
 
+  function handleGlobalPointerUp() {
+    // Released before the long-press elapsed → cancel the pending timer.
+    if (longPressTimer) {
+      clearLongPress();
+      return;
+    }
+    // Released after arming but before a drag started → disarm the zone so
+    // the next plain click doesn't start a drag.
+    if (dragArmed && !dragStarted) {
+      dragArmed = false;
+    }
+  }
+
   function handlePointerDown(e: PointerEvent) {
     if (e.pointerType === "touch") return; // touch uses delayTouchStart
     if (e.button !== 0) return;
@@ -103,7 +117,7 @@
       const el = longPressTarget;
       longPressTarget = null;
       requestAnimationFrame(() => {
-        // The user may have released before the frame; handlePointerUp
+        // The user may have released before the frame; handleGlobalPointerUp
         // already disarmed the zone, so the synthetic mousedown is a no-op.
         if (!dragArmed) return;
         el.dispatchEvent(
@@ -117,15 +131,9 @@
         );
       });
     }, 500);
-  }
-
-  function handlePointerUp() {
-    clearLongPress();
-    // The long-press armed the zone but no drag started (released without
-    // moving): disarm so the next plain click doesn't start a drag.
-    if (dragArmed && !dragStarted) {
-      dragArmed = false;
-    }
+    // One-shot release handler: covers both the pre-elapse cancel and the
+    // armed-but-no-drag disarm, regardless of where the pointer is.
+    window.addEventListener("pointerup", handleGlobalPointerUp, { once: true });
   }
 
   function handleConsider(e: CustomEvent<DndEvent<SpaceDndItem>>) {
@@ -140,6 +148,10 @@
     draftOrder = null;
     dragArmed = false;
     dragStarted = false;
+    // The browser fires a click after the drop mouseup; if the pointer is
+    // over another space's button that click would navigate. Suppress
+    // clicks briefly after a real drag.
+    suppressClickUntil = Date.now() + 300;
     const orderedIds = next.map((d) => d.id);
     const currentIds = joinedSpaces.map((s) => s.id);
     if (orderedIds.join(",") === currentIds.join(",")) return;
@@ -170,6 +182,9 @@
   const onExplore = $derived(page.url.pathname === "/explore");
 
   function navigateToSpace(spaceId: string) {
+    // A click right after a drag drop is the browser's synthetic click, not
+    // a navigation intent — ignore it.
+    if (Date.now() < suppressClickUntil) return;
     const destination = spaceNavigation.get(spaceId);
     if (destination?.kind === "room") {
       goto(`/${spaceId}/${destination.id}`);
@@ -290,9 +305,6 @@
         <button
           onclick={() => navigateToSpace(space.id)}
           onpointerdown={handlePointerDown}
-          onpointerup={handlePointerUp}
-          onpointerleave={handlePointerUp}
-          onpointercancel={handlePointerUp}
           class={[
             "transition-[opacity,background-color] cursor-pointer opacity-90 hover:opacity-100 my-0",
             wide
