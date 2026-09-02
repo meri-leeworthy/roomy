@@ -654,9 +654,9 @@ export async function createAppserver(
         );
       }
       if (url.pathname === "/health/pool") {
-        // Phase 4: per-worker pool stats (size + in-flight per worker) so an
-        // operator can see whether load is spreading across the pool or
-        // collapsing onto one worker.
+        // Per-worker pool stats (size + in-flight per worker) so an operator
+        // can see whether load is spreading across the pool and the three
+        // shared-DB workers, or collapsing onto one.
         const stats = poolStats();
         return new Response(
           JSON.stringify(stats ? { enabled: true, ...stats } : { enabled: false }),
