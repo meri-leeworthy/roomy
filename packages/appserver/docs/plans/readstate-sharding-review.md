@@ -5,6 +5,14 @@
 **Scope:** Evaluate the proposal to shard `data/roomy-readstate.sqlite` per-space
 as a mitigation for ongoing appserver performance degradation.
 
+> **Update (2026-09-02):** The two cheap wins in §6 were implemented in
+> commit `9da88c20` — (1) `space_did` on `user_thread_activity` (schema v7 +
+> backfill migration) so `getSpaceUnreadStats`/`queryActiveThreads` scan
+> per-space instead of across all of a user's threads, and (2) the query cache
+> extended to `space.getThreads`/`space.getActivityFeed` with the missing
+> invalidation coverage added. The per-space read-state shard itself remains
+> **not recommended** (see §5.1 replication/data-loss risk).
+
 ---
 
 ## 1. Executive summary
