@@ -582,6 +582,7 @@ export async function createAppserver(
     {
       openSpaceDbForEntity,
       openSpaceDb,
+      openGlobalDb,
     },
   );
   const router = buildRouter(authVerifier, syncSubscribeHandler);
