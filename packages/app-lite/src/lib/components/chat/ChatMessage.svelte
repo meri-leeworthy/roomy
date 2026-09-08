@@ -515,12 +515,15 @@
       () => isSelected,
       () => messagingState.toggleMessageSelection(message)
     }
-    class="flex flex-col w-full relative max-w-full isolate px-2 select-none"
+    class={`flex flex-col w-full relative max-w-full isolate px-2 select-none${highlighted ? " message-highlight" : ""}`}
   >
     {@render messageBox()}
   </Checkbox.Root>
 {:else}
-  <div class="flex flex-col w-full relative max-w-full isolate px-2">
+  <div
+    class="flex flex-col w-full relative max-w-full isolate px-2"
+    class:message-highlight={highlighted}
+  >
     {@render messageBox()}
   </div>
 {/if}
@@ -542,5 +545,36 @@
   }
   :global(.editing-message .tiptap > :last-child) {
     margin-bottom: 0;
+  }
+
+  /*
+    Deep-link highlight (`?message=<id>` / notification click). The row flashes
+    accent-tinted then fades to transparent; the class stays on the recycled
+    virtualizer row for the highlight window so the target stays identified.
+    Works in both themes via a translucent accent mix. Global: the class is
+    forwarded through Checkbox.Root (thread-selection row) whose root element
+    this component cannot scope.
+  */
+  :global(.message-highlight) {
+    border-radius: 0.75rem;
+    animation: message-highlight-flash 3s ease-out forwards;
+  }
+
+  :global {
+    @keyframes message-highlight-flash {
+      0% {
+        background-color: color-mix(
+          in oklab,
+          var(--color-accent-500) 30%,
+          transparent
+        );
+        box-shadow: inset 0 0 0 1.5px
+          color-mix(in oklab, var(--color-accent-500) 55%, transparent);
+      }
+      100% {
+        background-color: transparent;
+        box-shadow: none;
+      }
+    }
   }
 </style>

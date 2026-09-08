@@ -25,18 +25,22 @@
   import { RICHTEXT_MIME } from "@roomy-space/sdk";
   import type { Block } from "@roomy-space/sdk";
   import ForwardMessageModal from "./ForwardMessageModal.svelte";
+  import { goto } from "$app/navigation";
   const { queryKey } = cache;
 
   type Props = {
     spaceId: string;
     roomId: string;
     onSeen?: () => void;
-    /** Search deep-link target (`?message=`): scroll to and briefly highlight
-     *  this message on land, suppressing the normal scroll-position restore. */
-    highlightMessage?: string;
+    /**
+     * Message id to deep-link to (`?message=<id>` route param / push
+     * notification click). ChatArea pages backward until the message is in
+     * the loaded window, scrolls it to center, and briefly highlights it.
+     */
+    highlightMessage?: string | null;
   };
   
-  let { spaceId, roomId, onSeen, highlightMessage }: Props = $props();
+  let { spaceId, roomId, onSeen, highlightMessage = null }: Props = $props();
 
   const messagesQuery = createMessagesQuery(() => roomId);
 
@@ -277,6 +281,11 @@
     const currentRoomId = roomId;
     const data = messagesQuery.data;
 
+    // While a deep-link highlight is pending, don't restore or scroll to
+    // bottom — the highlight effect owns the viewport until it resolves
+    // (found or search budget exhausted), then positions us itself.
+    if (highlight && !highlight.found) return;
+
     // Only restore if we haven't restored for this specific roomId yet
     if (
       data &&
@@ -285,25 +294,6 @@
       lastRestoredRoomId !== currentRoomId
     ) {
       const savedPosition = scrollPositionState.get(currentRoomId);
-
-      // Search deep-link land (`?message=`): scroll to the hit directly and
-      // skip the saved-position restore so the target message is the anchor.
-      if (highlightMessage && timeline.some((m) => m.id === highlightMessage)) {
-        // Mark that we're attempting to land for this roomId BEFORE the
-        // timeout, mirroring the restore path below.
-        lastRestoredRoomId = currentRoomId;
-        isRestoring = true; // Block auto-scroll during landing
-        setTimeout(() => {
-          if (lastRestoredRoomId !== currentRoomId) {
-            isRestoring = false;
-            return;
-          }
-          const idx = timeline.findIndex((m) => m.id === highlightMessage);
-          if (idx >= 0) virtualizer?.scrollToIndex(idx);
-          isRestoring = false;
-        }, 200);
-        return; // Skip the normal restore path
-      }
 
       // Mark that we're attempting to restore for this roomId BEFORE the timeout
       lastRestoredRoomId = currentRoomId;
@@ -335,6 +325,88 @@
       }, 200);
     }
   });
+
+  // ── Deep-link message highlight (?message=<id> / push notification) ────
+  // `highlight` holds the active target + resolution: `found: false` while
+  // we're still searching backward through history, `true` once we've
+  // scrolled to it (or given up). The highlight visual then stays for a few
+  // seconds via a timer, clears, and strips the consumed `?message=` param
+  // so later room navigations in this session don't re-attempt it.
+  let highlight = $state<{ id: string; found: boolean } | null>(null);
+  /** Room the active highlight belongs to (`null` = none). */
+  let highlightRoom = $state<string | null>(null);
+  let highlightTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Pages to search backward before giving up (50 msgs each). */
+  let highlightPagesLeft = 8;
+
+  // Reset/restart the highlight when the requested message or the room
+  // changes (room navigation while `?message=` still lingers in the URL).
+  $effect(() => {
+    if (!highlightMessage) {
+      highlight = null;
+      highlightRoom = null;
+      return;
+    }
+    if (highlightRoom === roomId && highlight?.id === highlightMessage) {
+      return;
+    }
+    highlight = { id: highlightMessage, found: false };
+    highlightPagesLeft = 8;
+    highlightRoom = roomId;
+  });
+
+  // Resolve the highlight: scroll to center once the message is loaded,
+  // page backward until it shows up, then give up at the search budget.
+  $effect(() => {
+    const h = highlight;
+    const msgs = timeline;
+    if (!h || h.found) return;
+
+    const idx = msgs.findIndex((m) => m.id === h.id);
+    if (idx >= 0) {
+      h.found = true;
+      // Mark this room as restored so the generic restore effect never
+      // overrides our positioning with a bottom/saved-position scroll.
+      lastRestoredRoomId = roomId;
+      // Scroll after layout so the target row exists in the virtualizer.
+      queueMicrotask(() => {
+        virtualizer?.scrollToIndex(idx, { align: "center" });
+      });
+      scheduleHighlightEnd();
+      return;
+    }
+
+    // Not in the loaded window — page backward if there's more history.
+    if (hasMore && !isLoadingOlder && highlightPagesLeft > 0) {
+      highlightPagesLeft -= 1;
+      loadOlderMessages();
+      return;
+    }
+
+    // Search budget exhausted or full history loaded — land at the bottom
+    // like a normal visit.
+    h.found = true;
+    lastRestoredRoomId = roomId;
+    scrollToBottom();
+    scheduleHighlightEnd();
+  });
+
+  function scheduleHighlightEnd() {
+    clearTimeout(highlightTimer);
+    highlightTimer = setTimeout(() => {
+      highlight = null;
+      highlightRoom = null;
+      // Consume the deep-link param so later room navigations in this
+      // session don't re-attempt the highlight for unrelated rooms.
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        if (url.searchParams.has("message")) {
+          url.searchParams.delete("message");
+          goto(url.pathname + url.search, { replaceState: true });
+        }
+      }
+    }, 5000);
+  }
 
   // Auto-scroll when new messages arrive and already at bottom
   // Skip during initial restoration to prevent jumping back to bottom
@@ -398,24 +470,6 @@
       loadOlderMessages();
     }
   }
-
-  // Transient deep-link highlight: seeded from the `highlightMessage` prop
-  // and auto-cleared after a beat so the accent doesn't linger. The prop
-  // itself stays constant while this room is mounted, so clearing is local
-  // state — no URL rewrite.
-  let highlightedId = $state(highlightMessage);
-  let highlightTimer: ReturnType<typeof setTimeout> | undefined;
-  $effect(() => {
-    highlightedId = highlightMessage;
-    if (!highlightMessage) return;
-    if (highlightTimer) clearTimeout(highlightTimer);
-    highlightTimer = setTimeout(() => {
-      highlightedId = undefined;
-    }, 4000);
-    return () => {
-      if (highlightTimer) clearTimeout(highlightTimer);
-    };
-  });
 </script>
 
 <div class="grow min-h-0 relative">
@@ -479,7 +533,6 @@
                       {spaceId}
                       {roomId}
                       message={message}
-                      highlighted={highlightedId === message.id}
                       currentUserDid={currentUserDid}
                       {isAdmin}
                       editingMessageId={editingMessageId}
@@ -489,6 +542,7 @@
                       onRequestDelete={openDeleteConfirm}
                       onForward={openForward}
                       mergeWithPrevious={message.mergeWithPrevious}
+                      highlighted={highlight?.id === message.id}
                     />
                   {/if}
                 {/snippet}

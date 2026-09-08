@@ -204,7 +204,14 @@ async function handlePush(event: PushEvent): Promise<void> {
   // the same coalescing at the push-service level).
   const roomId = payload?.roomId ?? "";
   const spaceId = payload?.spaceId ?? "";
-  const data = { spaceId, roomId };
+  // Include the message id so a notification click can deep-link to and
+  // highlight the exact message (route `?message=<id>`). Digests carry no
+  // single message id — they land at the room's bottom.
+  const data = {
+    spaceId,
+    roomId,
+    ...(payload?.messageId ? { messageId: payload.messageId } : {}),
+  };
   const tag = roomId ? `room:${roomId}` : undefined;
 
   await self.registration.showNotification(title, {
@@ -231,9 +238,10 @@ async function handleNotificationClick(
   event: NotificationEvent,
 ): Promise<void> {
   event.notification.close();
-  const { spaceId, roomId } = (event.notification.data ?? {}) as {
+  const { spaceId, roomId, messageId } = (event.notification.data ?? {}) as {
     spaceId?: string;
     roomId?: string;
+    messageId?: string;
   };
 
   // Focus an existing tab if one is open.
@@ -247,14 +255,16 @@ async function handleNotificationClick(
   if (target) {
     target.focus();
     if (spaceId && roomId) {
-      target.postMessage({ type: "navigate", spaceId, roomId });
+      target.postMessage({ type: "navigate", spaceId, roomId, messageId });
     }
     return;
   }
 
   // No existing tab — open one at the room route (or root as fallback).
+  // `?message=<id>` deep-links to and highlights the exact message.
+  const query = messageId ? `?message=${encodeURIComponent(messageId)}` : "";
   const path =
-    spaceId && roomId ? `/${spaceId}/${roomId}` : "/";
+    spaceId && roomId ? `/${spaceId}/${roomId}${query}` : "/";
   await self.clients.openWindow(path);
 }
 

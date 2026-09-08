@@ -44,15 +44,20 @@
 
   export function onKeyDown(event: KeyboardEvent): boolean {
     if (event.repeat) return false;
-    if (items.length === 0) return false;
     switch (event.key) {
       case "ArrowUp":
+        if (items.length === 0) return false;
         activeIndex = activeIndex <= 0 ? items.length - 1 : activeIndex - 1;
         return true;
       case "ArrowDown":
+        if (items.length === 0) return false;
         activeIndex = activeIndex >= items.length - 1 ? 0 : activeIndex + 1;
         return true;
       case "Enter": {
+        // Always consume Enter while the suggestion popup is open. Selecting a
+        // mention must never send the message: if results haven't arrived yet
+        // (debounced server search) or there are none, swallow the key so the
+        // composer's send keymap doesn't fire mid-selection.
         const selected = items[activeIndex];
         if (selected) callback(selected);
         return true;

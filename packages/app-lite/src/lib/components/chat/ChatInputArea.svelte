@@ -46,10 +46,23 @@
   // child ChatInput's onMount runs and triggers focus.
   const isCoarsePointer = browser && matchMedia("(pointer: coarse)").matches;
 
-  // Blocks+facets form of the composer content, bound from ChatInput. The
-  // send path uses it when the composer produced blocks; the markdown string
-  // binding remains the source of truth for messaging-state.
+  // Blocks+facets form of the composer content. Binding happens against a
+  // LOCAL mirror: a function-form bind on module-level messagingState state
+  // wedges SvelteKit's navigation flush when the keyed ChatInputArea remounts
+  // (the bind getter runs mid-navigation; the room switch then never renders).
+  // Pull store → local on change; push local edits → store guarded by
+  // reference so the pull doesn't echo itself back.
   let blocks: Block[] | undefined = $state();
+
+  $effect(() => {
+    blocks = messagingState.blocks;
+  });
+
+  $effect(() => {
+    if (blocks && blocks !== messagingState.blocks) {
+      messagingState.blocks = blocks;
+    }
+  });
 
   // ── Client-side link embeds ────────────────────────────────────────────
   // The composer detects the URL being typed, fetches embed metadata directly
@@ -66,8 +79,8 @@
   // The first URL currently present in the composer (rich-text link facets
   // when the new schema is active, else a regex scan of the markdown).
   const composedUrl = $derived(
-    blocks && blocks.length > 0
-      ? extractFacetUrls(blocks)[0] ?? null
+    messagingState.blocks && messagingState.blocks.length > 0
+      ? extractFacetUrls(messagingState.blocks)[0] ?? null
       : extractUrls(messagingState.input)[0] ?? null,
   );
 
@@ -112,15 +125,22 @@
 
 
   let isSendingMessage = $state(false);
-  let previewImages: string[] = $state([]);
 
-  let shouldFocus = $derived(autoFocus && !isCoarsePointer && !isSendingMessage && previewImages.length === 0);
+  let shouldFocus = $derived(autoFocus && !isCoarsePointer && !isSendingMessage && messagingState.previewImages.length === 0);
 
   // Server-side member search for `@mention` in the chat input. Empty query →
   // recent-active preseed; non-empty → `getMembers?search=` on the appserver.
   // Shared with the edit-message editor and forward composer (see
   // `$lib/tiptap/mentions.ts`).
   const mentionSearch = createMentionSearch(spaceId, roomId);
+
+  // Activate this room's composer document BEFORE this component's subtree
+  // (re)mounts, so the ChatInput editor seeds from the recalled per-room
+  // draft (`{#key roomId}` remounts on room change). Pre-effects run ahead of
+  // this component's own DOM update, which precedes the ChatInput mount.
+  $effect.pre(() => {
+    messagingState.setActiveRoom(roomId);
+  });
 
   let fileInput: HTMLInputElement | undefined = $state();
   let actionMenuOpen = $state(false);
@@ -183,19 +203,23 @@
     if (messagingState.current.kind === "threading") return;
     messagingState.addFile(file);
 
+    // Preview URLs are stored on this room's draft (not the active one) so an
+    // async video thumbnail resolving after a room switch lands correctly.
     if (file.type.startsWith("video/")) {
       getVideoThumbnail(file).then((thumbnail) => {
-        previewImages.push(thumbnail);
+        messagingState.addPreviewImage(roomId, thumbnail);
       });
     } else {
-      previewImages.push(URL.createObjectURL(file));
+      messagingState.addPreviewImage(roomId, URL.createObjectURL(file));
     }
   }
 
   function removeImageFile(index: number) {
-    const previewImage = previewImages[index];
+    const previewImage = messagingState.previewImages[index];
     messagingState.removeFile(index);
-    previewImages = previewImages.filter((_, i) => i !== index);
+    messagingState.previewImages = messagingState.previewImages.filter(
+      (_, i) => i !== index,
+    );
     if (previewImage) URL.revokeObjectURL(previewImage);
   }
 
@@ -310,10 +334,9 @@
     } catch (e: unknown) {
       console.error("Failed to send message:", e);
     } finally {
-      messagingState.set({ kind: "normal", input: "", files: [] });
+      messagingState.set({ kind: "normal", input: "", files: [], blocks: [], mentions: [], previewImages: [] });
       clearInput();
       isSendingMessage = false;
-      previewImages = [];
       setInputFocus();
     }
   }
@@ -336,7 +359,7 @@
       messageIds: selectedIds,
     });
 
-    messagingState.set({ kind: "normal", input: "", files: [] });
+    messagingState.set({ kind: "normal", input: "", files: [], blocks: [], mentions: [], previewImages: [] });
     clearInput();
 
     goto(`/${page.params.space}/${threadId}?parent=${roomId}`);
@@ -346,7 +369,7 @@
 <ChatInputShell
   {canWrite}
   {isSendingMessage}
-  {previewImages}
+  previewImages={messagingState.previewImages}
   mode={shellMode}
   {actionMenuOpen}
   {disableUploads}
@@ -386,6 +409,7 @@
           }
         }
         bind:blocks
+        initialBlocks={messagingState.blocks}
         onEnter={handleSend}
         disabled={isSendingMessage}
         setFocus={shouldFocus}

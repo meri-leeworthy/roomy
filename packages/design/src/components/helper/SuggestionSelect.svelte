@@ -33,6 +33,7 @@
     }
     switch (event.key) {
       case "ArrowUp": {
+        if (items.length === 0) return false;
         if (activeIndex <= 0) {
           activeIndex = items.length - 1;
         } else {
@@ -41,6 +42,7 @@
         return true;
       }
       case "ArrowDown": {
+        if (items.length === 0) return false;
         if (activeIndex >= items.length - 1) {
           activeIndex = 0;
         } else {
@@ -49,8 +51,11 @@
         return true;
       }
       case "Enter": {
-        const selected = items[activeIndex]!;
-        callback({ id: selected.value, label: selected.label });
+        // Always consume Enter while the suggestion popup is open: with no
+        // matching items there is nothing to select, and the key must not fall
+        // through to the composer's send keymap (or crash on an empty list).
+        const selected = items[activeIndex];
+        if (selected) callback({ id: selected.value, label: selected.label });
         return true;
       }
     }
