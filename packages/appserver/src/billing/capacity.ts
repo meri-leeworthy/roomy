@@ -30,9 +30,12 @@ export interface GrantorCapacity {
  * - No valid state → capacity 0 (not an error; the caller decides what 0
  *   means — e.g. grant rejection "not a Pro member").
  * - Polar outage AND no cached state → 503.
+ *
+ * `force: true` bypasses the per-grantor TTL cache (post-checkout reads).
  */
 export async function resolveGrantorCapacity(
   grantorDid: string,
+  opts: { force?: boolean } = {},
 ): Promise<GrantorCapacity> {
   const config = getPolar();
   if (!config) {
@@ -42,19 +45,23 @@ export async function resolveGrantorCapacity(
       "Polar billing is not configured",
     );
   }
-  return resolveGrantorCapacityWith(config, grantorDid);
+  return resolveGrantorCapacityWith(config, grantorDid, opts);
 }
 
 /**
  * Same as `resolveGrantorCapacity`, but with an explicit config (unit
  * tests / callers that already hold the singleton).
+ *
+ * `force: true` bypasses the per-grantor TTL cache (used after a Polar
+ * checkout redirect so the new membership is visible immediately).
  */
 export async function resolveGrantorCapacityWith(
   config: PolarConfig,
   grantorDid: string,
+  opts: { force?: boolean } = {},
 ): Promise<GrantorCapacity> {
   try {
-    const { state, stale } = await getCachedCustomerState(grantorDid, config);
+    const { state, stale } = await getCachedCustomerState(grantorDid, config, opts);
     const { capacity } = resolveCapacity(
       state ?? { active_subscriptions: [], granted_benefits: [] },
       config,

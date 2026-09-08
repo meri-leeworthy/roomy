@@ -372,4 +372,70 @@ describe("getCachedCustomerState / resolveGrantorCapacityWith", () => {
       stale: false,
     });
   });
+
+  test("force:true bypasses a TTL-fresh cache entry (refetches)", async () => {
+    let fetches = 0;
+    stubFetch(() => {
+      fetches += 1;
+      return Response.json(
+        polarState({ active_subscriptions: [sub({ status: "active" })] }),
+        { status: 200 },
+      );
+    });
+
+    // Prime the cache (TTL-fresh).
+    await getCachedCustomerState(DID, CONFIG);
+    expect(fetches).toBe(1);
+
+    // A normal read hits the cache; a forced read refetches.
+    await getCachedCustomerState(DID, CONFIG);
+    expect(fetches).toBe(1);
+    const forced = await getCachedCustomerState(DID, CONFIG, { force: true });
+    expect(fetches).toBe(2);
+    expect(forced).toEqual({
+      state: expect.objectContaining({ active_subscriptions: expect.any(Array) }),
+      stale: false,
+    });
+  });
+
+  test("force:true on refresh failure → cached state with stale:true (fail-open)", async () => {
+    const state = polarState({
+      active_subscriptions: [sub({ status: "active" })],
+    });
+    let fetches = 0;
+    stubFetch(() => {
+      fetches += 1;
+      if (fetches === 1) return Response.json(state, { status: 200 });
+      return new Response("boom", { status: 500 });
+    });
+
+    await getCachedCustomerState(DID, CONFIG);
+    const forced = await getCachedCustomerState(DID, CONFIG, { force: true });
+    expect(fetches).toBe(2);
+    expect(forced).toEqual({ state, stale: true });
+  });
+
+  test("resolveGrantorCapacityWith force:true → fresh capacity after sub starts", async () => {
+    let fetches = 0;
+    stubFetch(() => {
+      fetches += 1;
+      if (fetches === 1) {
+        // First read: not a member (cached).
+        return Response.json(polarState(), { status: 200 });
+      }
+      // After checkout: Pro subscription active.
+      return Response.json(
+        polarState({ active_subscriptions: [sub({ status: "active" })] }),
+        { status: 200 },
+      );
+    });
+
+    const before = await resolveGrantorCapacityWith(CONFIG, DID);
+    expect(before).toEqual({ capacity: 0, stale: false });
+
+    // TTL-fresh cache would serve 0; force refetches and sees the sub.
+    const after = await resolveGrantorCapacityWith(CONFIG, DID, { force: true });
+    expect(after).toEqual({ capacity: ROOMY_PRO_CAPACITY, stale: false });
+    expect(fetches).toBe(2);
+  });
 });

@@ -9,8 +9,15 @@
   import RoomyMark from "$lib/components/RoomyMark.svelte";
   import { lastActiveSpaceIdState } from "$lib/components/layout/current-space.svelte";
   import { spaceNavigation } from "$lib/components/layout/last-room.svelte";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
 
   let { children } = $props();
+
+  // Roomy Pro subscription page is gated behind the pro-subscription flag.
+  const flagsQuery = createFeatureFlagsQuery();
+  const proEnabled = $derived(
+    flagsQuery.data?.flags.includes("pro-subscription") ?? false,
+  );
 
   // Derive the active settings page name from the route so the navbar shows
   // "General" or "Notifications" instead of a static "User settings".
@@ -21,6 +28,8 @@
     switch (parts[idx + 1]) {
       case "notifications":
         return "Notifications";
+      case "subscription":
+        return "Subscription";
       default:
         return "Settings";
     }
@@ -101,6 +110,16 @@
       >
         Notifications
       </Button>
+      {#if proEnabled}
+        <Button
+          variant="ghost"
+          class="w-full justify-start"
+          href="/user/settings/subscription"
+          data-current={page.url.pathname === "/user/settings/subscription"}
+        >
+          Subscription
+        </Button>
+      {/if}
     </div>
   </div>
 {/snippet}

@@ -317,15 +317,22 @@ export class PolarUnavailableError extends Error {
  *
  * `stale` in the result is `true` exactly when the served state came from
  * the cache because a refresh failed.
+ *
+ * `force: true` bypasses the TTL and always refetches (used by the
+ * subscription-status endpoint after a Polar checkout redirect, so the
+ * user sees their new membership immediately instead of up to 300s of
+ * cached "not a member"). On refresh failure the cached state is still
+ * served with `stale: true` — fail-open applies to forced reads too.
  */
 export async function getCachedCustomerState(
   externalId: string,
   config: PolarConfig,
+  opts: { force?: boolean } = {},
 ): Promise<{ state: PolarCustomerState | null; stale: boolean }> {
   const now = Date.now();
   const cached = cache.get(externalId);
 
-  if (cached && now - cached.fetchedAt < POLAR_CACHE_TTL_MS) {
+  if (!opts.force && cached && now - cached.fetchedAt < POLAR_CACHE_TTL_MS) {
     return { state: cached.state, stale: false };
   }
 

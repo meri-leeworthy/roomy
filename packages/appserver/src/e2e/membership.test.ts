@@ -352,3 +352,86 @@ describe("space.roomy.admin.getSpaceMembership", () => {
     expect((await regrant.json()).error).toBe("AlreadySpent");
   });
 });
+
+// ─── space.roomy.user.getProStatus ────────────────────────────────────────
+
+describe("space.roomy.user.getProStatus", () => {
+  function proStatusUrl(ctx: E2eContext, checkout?: string): string {
+    const q = checkout ? `?checkout=${encodeURIComponent(checkout)}` : "";
+    return `${ctx.baseUrl}/xrpc/space.roomy.user.getProStatus${q}`;
+  }
+
+  test("Pro member → isPro true, capacity 1000", async () => {
+    stubPolarState(proState());
+    const ctx = await startTest();
+    seedSpaceWithMember(ctx);
+
+    const res = await ctx.authedFetch(GRANTOR)(proStatusUrl(ctx));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.isPro).toBe(true);
+    expect(body.capacity).toBe(1000);
+    expect(body.stale).toBe(false);
+    expect(body.checkedAt).toBeTypeOf("number");
+  });
+
+  test("no customer → isPro false, capacity 0", async () => {
+    stubPolarState(noCustomer());
+    const ctx = await startTest();
+    seedSpaceWithMember(ctx);
+
+    const res = await ctx.authedFetch(GRANTOR)(proStatusUrl(ctx));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.isPro).toBe(false);
+    expect(body.capacity).toBe(0);
+  });
+
+  test("anonymous → 401", async () => {
+    const ctx = await startTest();
+    seedSpaceWithMember(ctx);
+    const res = await ctx.anonFetch(proStatusUrl(ctx));
+    expect(res.status).toBe(401);
+  });
+
+  test("Polar disabled → 503", async () => {
+    const ctx = await startTest();
+    seedSpaceWithMember(ctx);
+    setPolar(null);
+    const res = await ctx.authedFetch(GRANTOR)(proStatusUrl(ctx));
+    expect(res.status).toBe(503);
+  });
+
+  test("checkout param forces a non-cached refresh (sees new sub immediately)", async () => {
+    let fetches = 0;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/customers/external/")) {
+        fetches += 1;
+        return Response.json(
+          fetches === 1 ? noCustomer() : proState(),
+          { status: 200 },
+        );
+      }
+      return realFetch(input, init);
+    }) as typeof globalThis.fetch;
+
+    const ctx = await startTest();
+    seedSpaceWithMember(ctx);
+
+    // First read: not a member (cached).
+    const before = await ctx.authedFetch(GRANTOR)(proStatusUrl(ctx));
+    expect((await before.json()).isPro).toBe(false);
+
+    // TTL-fresh cache would still say 0; the checkout param forces a
+    // refetch that sees the new subscription.
+    const after = await ctx.authedFetch(GRANTOR)(
+      proStatusUrl(ctx, "checkout_abc"),
+    );
+    expect(after.status).toBe(200);
+    const body = await after.json();
+    expect(body.isPro).toBe(true);
+    expect(body.capacity).toBe(1000);
+    expect(fetches).toBe(2);
+  });
+});
