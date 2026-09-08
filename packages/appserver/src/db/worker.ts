@@ -428,6 +428,31 @@ const MIGRATIONS: Migration[] = [
         ).run();
       },
     },
+  {
+    // Roomy Pro bridge tokens. The schema file (readStateSchema.sql) also
+    // declares this with `create table if not exists` so a fresh DB gets it
+    // at exec time; this migration exists so an existing v8 readstate DB
+    // advances its version row to 9. Structural-only — no async task.
+    version: 9,
+    up(db: Database) {
+      db.exec(`
+        create table if not exists bridge_token_grants (
+          grantor_did        text primary key,
+          space_did          text not null,
+          granted_at         integer not null default (unixepoch() * 1000),
+          spent_at           integer,
+          capacity_snapshot  integer not null
+        ) strict
+      `);
+      db.exec(`
+        create index if not exists idx_bridge_token_grants_space
+          on bridge_token_grants(space_did)
+      `);
+      db.query(
+        "insert or ignore into readstate_schema_migrations (version, completed_at) values ('9', null)",
+      ).run();
+    },
+  },
 ];
 
 function initializeReadStateSchema(
