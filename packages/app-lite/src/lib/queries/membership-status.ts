@@ -11,13 +11,13 @@ const { queryKey } = cache;
  * Pass a `checkout` getter (from the Polar checkout redirect) to force a
  * non-cached refresh so the new membership is visible immediately.
  */
-export function createProStatusQuery(checkout: () => string | undefined) {
+export function createMembershipStatusQuery(checkout: () => string | undefined) {
   return createQuery(() => {
     const checkoutId = checkout();
     return {
-      queryKey: queryKey("space.roomy.user.getProStatus", { checkout: checkoutId }),
+      queryKey: queryKey("space.roomy.user.getMembershipStatus", { checkout: checkoutId }),
       queryFn: () =>
-        px().query("space.roomy.user.getProStatus", {
+        px().query("space.roomy.user.getMembershipStatus", {
           ...(checkoutId ? { checkout: checkoutId } : {}),
         }),
     };

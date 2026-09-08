@@ -1,5 +1,5 @@
 /**
- * Unit tests for the getProStatus handler (space.roomy.user.getProStatus).
+ * Unit tests for the getMembershipStatus handler (space.roomy.user.getMembershipStatus).
  *
  * The handler resolves the caller's Roomy Pro capacity from Polar
  * (TTL-cached, fail-open) and reports isPro/capacity/stale. The `checkout`
@@ -12,7 +12,7 @@ import { closeDb, openDb } from "../db/db.ts";
 import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { Router } from "../invalidation/router.ts";
 import { _clearPolarCache, setPolar, type PolarConfig } from "../billing/polar.ts";
-import { getProStatusHandler } from "./space.roomy.user.getProStatus.ts";
+import { getMembershipStatusHandler } from "./space.roomy.user.getMembershipStatus.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 
 const USER = "did:plc:pro-user";
@@ -76,10 +76,10 @@ afterEach(() => {
   Router.resetInstance();
 });
 
-describe("getProStatusHandler", () => {
+describe("getMembershipStatusHandler", () => {
   test("Pro member → isPro true, capacity 1000", async () => {
     stubPolar(proState());
-    const res = await getProStatusHandler({}, auth(USER));
+    const res = await getMembershipStatusHandler({}, auth(USER));
     expect(res.isPro).toBe(true);
     expect(res.capacity).toBe(1000);
     expect(res.stale).toBe(false);
@@ -88,7 +88,7 @@ describe("getProStatusHandler", () => {
 
   test("no customer → isPro false, capacity 0", async () => {
     stubPolar(noCustomer());
-    const res = await getProStatusHandler({}, auth(USER));
+    const res = await getMembershipStatusHandler({}, auth(USER));
     expect(res.isPro).toBe(false);
     expect(res.capacity).toBe(0);
     expect(res.stale).toBe(false);
@@ -96,7 +96,7 @@ describe("getProStatusHandler", () => {
 
   test("anonymous → 401", async () => {
     try {
-      await getProStatusHandler({}, auth(null));
+      await getMembershipStatusHandler({}, auth(null));
       expect.unreachable("should have thrown");
     } catch (err) {
       expect(err).toBeInstanceOf(XrpcError);
@@ -107,7 +107,7 @@ describe("getProStatusHandler", () => {
   test("Polar disabled → 503", async () => {
     setPolar(null);
     try {
-      await getProStatusHandler({}, auth(USER));
+      await getMembershipStatusHandler({}, auth(USER));
       expect.unreachable("should have thrown");
     } catch (err) {
       expect(err).toBeInstanceOf(XrpcError);
@@ -127,12 +127,12 @@ describe("getProStatusHandler", () => {
     }) as unknown as typeof globalThis.fetch;
 
     // First read: not a member (cached).
-    const before = await getProStatusHandler({}, auth(USER));
+    const before = await getMembershipStatusHandler({}, auth(USER));
     expect(before.isPro).toBe(false);
 
     // TTL-fresh cache would still say 0; the checkout param forces a
     // refetch that sees the new subscription.
-    const after = await getProStatusHandler({ checkout: "checkout_123" }, auth(USER));
+    const after = await getMembershipStatusHandler({ checkout: "checkout_123" }, auth(USER));
     expect(after.isPro).toBe(true);
     expect(after.capacity).toBe(1000);
     expect(fetches).toBe(2);
@@ -150,11 +150,11 @@ describe("getProStatusHandler", () => {
     }) as unknown as typeof globalThis.fetch;
 
     // Prime the cache with a valid Pro state.
-    const first = await getProStatusHandler({}, auth(USER));
+    const first = await getMembershipStatusHandler({}, auth(USER));
     expect(first.isPro).toBe(true);
 
     // Forced read hits the outage → fail-open on the cached state.
-    const second = await getProStatusHandler({ checkout: "checkout_456" }, auth(USER));
+    const second = await getMembershipStatusHandler({ checkout: "checkout_456" }, auth(USER));
     expect(second.isPro).toBe(true);
     expect(second.capacity).toBe(1000);
     expect(second.stale).toBe(true);

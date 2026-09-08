@@ -89,9 +89,9 @@ export const QUERY_SCHEMAS = {
     params: queries.getProfile.Params,
     response: queries.getProfile.Response,
   },
-  "space.roomy.user.getProStatus": {
-    params: queries.getProStatus.Params,
-    response: queries.getProStatus.Response,
+  "space.roomy.user.getMembershipStatus": {
+    params: queries.getMembershipStatus.Params,
+    response: queries.getMembershipStatus.Response,
   },
   "space.roomy.user.getProfiles": {
     params: queries.getProfiles.Params,

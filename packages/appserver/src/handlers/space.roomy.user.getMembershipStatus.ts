@@ -1,5 +1,5 @@
 /**
- * XRPC: space.roomy.user.getProStatus (query).
+ * XRPC: space.roomy.user.getMembershipStatus (query).
  *
  * Returns the caller's Roomy Pro membership status, resolved live from
  * Polar (per-grantor TTL-cached, fail-open on outage).
@@ -31,16 +31,16 @@ import { optionalString } from "../xrpc/params.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
 import { resolveGrantorCapacity } from "../billing/capacity.ts";
 
-export interface GetProStatusResult {
+export interface GetMembershipStatusResult {
   isPro: boolean;
   capacity: number;
   stale: boolean;
   checkedAt: number;
 }
 
-export const getProStatusHandler: QueryHandler<
+export const getMembershipStatusHandler: QueryHandler<
   QueryParams,
-  GetProStatusResult
+  GetMembershipStatusResult
 > = async (params: QueryParams, auth: AuthCtx) => {
   const userDid = parseUserDid(auth);
   if (userDid === null) {

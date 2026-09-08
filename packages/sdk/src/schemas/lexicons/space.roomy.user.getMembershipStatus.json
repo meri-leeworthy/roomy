@@ -1,6 +1,6 @@
 {
   "lexicon": 1,
-  "id": "space.roomy.user.getProStatus",
+  "id": "space.roomy.user.getMembershipStatus",
   "defs": {
     "main": {
       "type": "query",

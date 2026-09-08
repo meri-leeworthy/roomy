@@ -23,7 +23,7 @@ export * as getVapidPublicKey from "./getVapidPublicKey";
 export * as getPreferences from "./getPreferences";
 export * as getFlags from "./getFlags";
 export * as getProfile from "./getProfile";
-export * as getProStatus from "./getProStatus";
+export * as getMembershipStatus from "./getMembershipStatus";
 export * as getMentions from "./getMentions";
 export * as searchMessages from "./searchMessages";
 export * as searchRooms from "./searchRooms";

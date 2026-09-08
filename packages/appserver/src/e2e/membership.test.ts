@@ -353,12 +353,12 @@ describe("space.roomy.admin.getSpaceMembership", () => {
   });
 });
 
-// ─── space.roomy.user.getProStatus ────────────────────────────────────────
+// ─── space.roomy.user.getMembershipStatus ────────────────────────────────────────
 
-describe("space.roomy.user.getProStatus", () => {
+describe("space.roomy.user.getMembershipStatus", () => {
   function proStatusUrl(ctx: E2eContext, checkout?: string): string {
     const q = checkout ? `?checkout=${encodeURIComponent(checkout)}` : "";
-    return `${ctx.baseUrl}/xrpc/space.roomy.user.getProStatus${q}`;
+    return `${ctx.baseUrl}/xrpc/space.roomy.user.getMembershipStatus${q}`;
   }
 
   test("Pro member → isPro true, capacity 1000", async () => {

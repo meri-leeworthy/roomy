@@ -3,7 +3,7 @@
   import Button from "@roomy/design/components/ui/button/Button.svelte";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
   import { IconCheck, IconAlertCircle } from "@roomy/design/icons";
-  import { createProStatusQuery } from "$lib/queries/pro-status";
+  import { createMembershipStatusQuery } from "$lib/queries/membership-status";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
 
   // Polar checkout URL for Roomy Pro (billed via polar.sh).
@@ -22,7 +22,7 @@
   // Read once at mount: the param is fixed by the redirect and never
   // changes while this page is mounted.
   const checkoutId = $state(page.url.searchParams.get("checkout") ?? undefined);
-  const statusQuery = createProStatusQuery(() => checkoutId);
+  const statusQuery = createMembershipStatusQuery(() => checkoutId);
 
   const status = $derived(statusQuery.data);
   const error = $derived(

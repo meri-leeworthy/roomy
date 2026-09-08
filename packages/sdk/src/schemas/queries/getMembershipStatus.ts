@@ -1,5 +1,5 @@
 /**
- * Schema for `space.roomy.user.getProStatus` (query).
+ * Schema for `space.roomy.user.getMembershipStatus` (query).
  *
  * Returns the caller's Roomy Pro membership status, resolved live from
  * Polar (per-grantor TTL-cached, fail-open on outage). The optional
@@ -9,7 +9,7 @@
  */
 import { type } from "arktype";
 
-export const NSID = "space.roomy.user.getProStatus" as const;
+export const NSID = "space.roomy.user.getMembershipStatus" as const;
 
 export const Params = type({
   /** Polar checkout ID from the checkout redirect. Forces a non-cached refresh. */
