@@ -1,0 +1,44 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.grantBridgeToken",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "spaceId"
+          ],
+          "properties": {
+            "spaceId": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "capacity",
+            "status"
+          ],
+          "properties": {
+            "capacity": {
+              "type": "integer"
+            },
+            "status": {
+              "type": "string",
+              "knownValues": [
+                "pending"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

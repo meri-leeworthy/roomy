@@ -217,6 +217,10 @@ const READSTATE_MIGRATION_TASKS: Record<string, ReadStateMigrationTask> = {
   // runPendingReadStateMigrations stamps it complete instead of crashing the
   // boot loop with "No read-state post-migration task registered for schema 8".
   "8": async () => {},
+  // Schema v9 ("Roomy Pro bridge tokens", TASK-69) is structural-only: the
+  // bridge_token_grants table + index are created synchronously by the DB
+  // worker. Same no-op rationale as v8.
+  "9": async () => {},
 };
 
 /**

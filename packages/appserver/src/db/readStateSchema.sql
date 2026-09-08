@@ -164,3 +164,24 @@ create table if not exists feature_flag_assignments (
 ) strict;
 create index if not exists idx_ff_assignments_flag
   on feature_flag_assignments(flag_key);
+
+-- ── Roomy Pro bridge tokens (schema v9) ─────────────────────────────────
+-- A Roomy Pro subscriber (or negotiated custom-membership grant) may grant
+-- one bridge token to a space; the grant powers a guild-space bridge up to
+-- the granted capacity. One active grant per user (primary key = grantor
+-- DID). `spent_at` is set when the bridged guild's member count exceeds 100
+-- and is PERMANENT — a spent grant can neither be revoked nor re-granted.
+-- `capacity_snapshot` is the grant-time capacity (for display; live
+-- capacity is re-resolved from Polar at read time). The grant row persists
+-- across subscription lapses/cancellations — read-time validity is decided
+-- by the caller against Polar, and a resubscribed grantor revalidates
+-- automatically.
+create table if not exists bridge_token_grants (
+  grantor_did        text primary key,
+  space_did          text not null,
+  granted_at         integer not null default (unixepoch() * 1000),
+  spent_at           integer,             -- epoch ms; NULL = not spent
+  capacity_snapshot  integer not null
+) strict;
+create index if not exists idx_bridge_token_grants_space
+  on bridge_token_grants(space_did);

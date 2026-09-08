@@ -70,6 +70,10 @@ import { setHandleHandler } from "./handlers/space.roomy.space.setHandle.ts";
 import { updatePolicyHandler } from "./handlers/space.roomy.space.updatePolicy.ts";
 import { getActivityFeedHandler } from "./handlers/space.roomy.space.getActivityFeed.ts";
 import { getUserAccessHandler } from "./handlers/space.roomy.space.getUserAccess.ts";
+import { grantBridgeTokenHandler } from "./handlers/space.roomy.space.grantBridgeToken.ts";
+import { revokeBridgeTokenHandler } from "./handlers/space.roomy.space.revokeBridgeToken.ts";
+import { getBridgeTokensHandler } from "./handlers/space.roomy.space.getBridgeTokens.ts";
+import { adminGetSpaceMembershipHandler } from "./handlers/space.roomy.admin.getSpaceMembership.ts";
 import { getVapidPublicKeyHandler } from "./handlers/space.roomy.push.getVapidPublicKey.ts";
 import { getPreferencesHandler } from "./handlers/space.roomy.push.getPreferences.ts";
 import { registerSubscriptionHandler } from "./handlers/space.roomy.push.registerSubscription.ts";
@@ -81,6 +85,7 @@ import { startSearchBackfill, stopSearchBackfill, searchBackfillStats } from "./
 import { schemas } from "@roomy-space/sdk";
 import { initHappyView, type HappyViewConfig } from "./happyview.ts";
 import { initQdrant } from "./qdrant.ts";
+import { initPolar } from "./billing/polar.ts";
 import { getArbiterConfig, type ArbiterConfig } from "./arbiter/config.ts";
 import type { GetProfilesFn } from "./materialization/profiles.ts";
 
@@ -259,6 +264,9 @@ export function buildRouter(
     .query("space.roomy.admin.listSpaces", {
       handler: adminListSpacesHandler,
     })
+    .query("space.roomy.admin.getSpaceMembership", {
+      handler: adminGetSpaceMembershipHandler,
+    })
     .query("space.roomy.sync.getEvents", {
       handler: getEventsHandler,
     })
@@ -306,6 +314,21 @@ export function buildRouter(
       handler: getUserAccessHandler,
       paramsSchema: schemas.queries.getUserAccess.Params,
       outputSchema: schemas.queries.getUserAccess.Response,
+    })
+    .procedure("space.roomy.space.grantBridgeToken", {
+      handler: grantBridgeTokenHandler,
+      inputSchema: schemas.procedures.grantBridgeToken.Input,
+      outputSchema: schemas.procedures.grantBridgeToken.Output,
+    })
+    .procedure("space.roomy.space.revokeBridgeToken", {
+      handler: revokeBridgeTokenHandler,
+      inputSchema: schemas.procedures.revokeBridgeToken.Input,
+      outputSchema: schemas.procedures.revokeBridgeToken.Output,
+    })
+    .query("space.roomy.space.getBridgeTokens", {
+      handler: getBridgeTokensHandler,
+      paramsSchema: schemas.queries.getBridgeTokens.Params,
+      outputSchema: schemas.queries.getBridgeTokens.Response,
     })
     .query("space.roomy.federation.getRequests", {
       handler: getFederationRequestsHandler,
@@ -447,6 +470,12 @@ export async function createAppserver(
   // `QDRANT_API_KEY`). When unset, search is unavailable but the appserver
   // runs fine without it (the indexer queues nothing; the endpoint 503s).
   initQdrant();
+
+  // ─── Polar config ───────────────────────────────────────────────────
+  // Initialize the process-wide singleton from env (`POLAR_ACCESS_TOKEN` /
+  // `ROOMY_PRO_PRODUCT_ID` / `POLAR_ENDPOINT`). When unset, the bridge-token
+  // endpoints reject with 503 (Polar billing is unavailable).
+  initPolar();
 
   // ─── Arbiter config ────────────────────────────────────────────────
   // When `opts.arbiter` is unset, reads from env (`ARBITER_URL` /

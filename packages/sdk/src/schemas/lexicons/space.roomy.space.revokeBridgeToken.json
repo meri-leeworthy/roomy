@@ -1,0 +1,37 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.revokeBridgeToken",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "spaceId"
+          ],
+          "properties": {
+            "spaceId": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "revoked"
+          ],
+          "properties": {
+            "revoked": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -33,3 +33,4 @@ export * as getFederationIncoming from "./getFederationIncoming";
 export * as getFederationOutgoing from "./getFederationOutgoing";
 export * as getFederationGrants from "./getFederationGrants";
 export * as getUserAccess from "./getUserAccess";
+export * as getBridgeTokens from "./getBridgeTokens";
