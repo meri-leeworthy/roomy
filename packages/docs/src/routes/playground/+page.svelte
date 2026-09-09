@@ -666,6 +666,7 @@
         </div>
       </details>
     </section>
+    {/if}
 
     <!-- ─── Feature Flags (admin only) ─────────────────────────────────── -->
     {#if auth.isAdmin}
@@ -710,8 +711,9 @@
               </div>
 
               <div>
-                <label class="block text-xs mb-1">Assigned DIDs (one per line)</label>
+                <label for="flag-dids-{flag.key}" class="block text-xs mb-1">Assigned DIDs (one per line)</label>
                 <textarea
+                  id="flag-dids-{flag.key}"
                   class="w-full text-sm p-2 border border-base-200 dark:border-base-800 rounded-xl bg-white dark:bg-base-900/50 text-base-800 dark:text-base-200 font-mono"
                   rows="3"
                   placeholder="did:plc:abc..."

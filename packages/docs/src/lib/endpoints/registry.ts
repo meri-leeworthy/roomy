@@ -72,7 +72,8 @@ function buildEndpoint(entry: GeneratedNsid): Endpoint {
 
 export const endpoints: EndpointGroup[] = (() => {
   const groups = new Map<string, Endpoint[]>();
-  for (const entry of generated) {
+  // JSON import widens `kind` to string; the generator guarantees the union.
+  for (const entry of generated as GeneratedNsid[]) {
     const ep = buildEndpoint(entry);
     const list = groups.get(ep.group) ?? [];
     list.push(ep);

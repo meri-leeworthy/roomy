@@ -2,8 +2,7 @@
   import "../app.css";
   import { onMount } from "svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
-  import { auth, init } from "$lib/auth.svelte";
-  import { page } from "$app/stores";
+  import { init } from "$lib/auth.svelte";
 
   let { children } = $props();
 

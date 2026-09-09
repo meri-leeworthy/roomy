@@ -272,14 +272,17 @@
               <div class="flex items-center justify-center size-8 rounded-lg bg-accent-100 dark:bg-accent-900/30">
                 <IconSquaresPlus class="size-4 text-accent-600 dark:text-accent-400" />
               </div>
-              <span class="font-semibold text-sm">Appserver Admin</span>
+              <span class="font-semibold text-sm">Roomy Docs</span>
             </div>
             <nav class="hidden sm:flex items-center gap-1">
-              <a href="/" class="px-3 py-1.5 rounded-lg text-sm font-medium bg-accent-100 dark:bg-accent-900/30 text-accent-700 dark:text-accent-300">
+              <a href="/" class="px-3 py-1.5 rounded-lg text-sm font-medium text-base-500 dark:text-base-400 hover:text-base-700 dark:hover:text-base-200 hover:bg-base-100 dark:hover:bg-base-900/50 transition-colors">
+                Docs
+              </a>
+              <a href="/dashboard" class="px-3 py-1.5 rounded-lg text-sm font-medium bg-accent-100 dark:bg-accent-900/30 text-accent-700 dark:text-accent-300">
                 Dashboard
               </a>
               <a href="/playground" class="px-3 py-1.5 rounded-lg text-sm font-medium text-base-500 dark:text-base-400 hover:text-base-700 dark:hover:text-base-200 hover:bg-base-100 dark:hover:bg-base-900/50 transition-colors">
-                XRPC Playground
+                Playground
               </a>
             </nav>
           </div>
@@ -464,6 +467,12 @@
             <Button variant="secondary">
               <IconSettings class="size-4" />
               XRPC Playground
+            </Button>
+          </a>
+          <a href="/endpoints">
+            <Button variant="secondary">
+              <IconSettings class="size-4" />
+              Endpoint catalogue
             </Button>
           </a>
         </div>

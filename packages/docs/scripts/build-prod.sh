@@ -16,7 +16,7 @@ echo "OAuth Host URL: $target_url"
 # method gets an rpc:<nsid>?aud=* scope. Admin endpoints are included — the
 # appserver enforces its own admin allowlist, so non-admins get 403s.
 
-SCOPE="$(npx tsx scripts/gen-oauth-scope.ts)"
+SCOPE="$(node scripts/gen-oauth-scope.mjs)"
 
 # Build the OAuth client metadata JSON
 oauth_config=$(
