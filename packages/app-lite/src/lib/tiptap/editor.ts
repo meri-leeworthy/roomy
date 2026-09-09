@@ -150,6 +150,15 @@ function suggestion({
 type UserMentionProps = { search: (query: string) => Promise<TypeaheadUser[]> };
 const UserMentionExtension = Mention.extend({
   name: "userMention",
+  // Must outrank the composer's send keymap (`initKeyboardShortcutHandler`,
+  // priority 1000): prosemirror-view's `someProp("handleKeyDown")` iterates
+  // the plugin array in order, and TipTap sorts extensions by descending
+  // priority, so a lower-priority suggestion plugin would never see Enter —
+  // the keymap would send the message mid-selection. With the suggestion
+  // first, Enter selects the highlighted mention (or is swallowed while the
+  // popup is open) and only falls through to the send keymap when no
+  // suggestion is active.
+  priority: 1001,
   // Used by `generateHTML`
   renderHTML({ HTMLAttributes, node }) {
     return [
@@ -293,6 +302,10 @@ export const initUserMention = ({ search }: UserMentionProps) =>
 type SpaceContextMentionProps = { context: Item[] };
 const SpaceContextMentionExtension = Mention.extend({
   name: "channelThreadMention",
+  // Same rationale as `userMention`: must outrank the composer's send keymap
+  // (priority 1000) so Enter selects/swallows while the `#room` suggestion
+  // popup is open instead of sending the message.
+  priority: 1001,
   // Used by `generateHTML`
   renderHTML({ HTMLAttributes, node }) {
     const { id, space, type } = JSON.parse(node.attrs.id);
