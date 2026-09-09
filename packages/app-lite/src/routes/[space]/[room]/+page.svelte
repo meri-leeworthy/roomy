@@ -7,7 +7,7 @@
   import { setNavbar } from "$lib/components/layout/navbar.svelte";
   import { setCurrentRoom } from "$lib/components/layout/current-room.svelte";
   import { spaceNavigation } from "$lib/components/layout/last-room.svelte";
-  import { messagingState, closeToolbar } from "$lib/components/chat/messaging-state.svelte";
+  import { closeToolbar } from "$lib/components/chat/messaging-state.svelte";
   import ToggleTabs from "@roomy/design/components/layout/ToggleTabs.svelte";
   import { createRoomMetadataQuery } from "$lib/queries/room-metadata";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
@@ -32,11 +32,13 @@
   );
 
   $effect(() => {
-    // Reset any lingering reply/thread context from a previous room.
-    // Writes to module-level $state are wrapped in untrack() to avoid
-    // reactive cascades (effect_update_depth_exceeded).
+    // Composer document activation is owned by ChatInputArea ($effect.pre on
+    // roomId) so the editor always seeds from the recalled per-room draft
+    // before its subtree mounts. Here: drop the mobile toolbar from a
+    // previous room and point the sync connection at the new room. Writes to
+    // module-level $state are wrapped in untrack() to avoid reactive cascades
+    // (effect_update_depth_exceeded).
     untrack(() => {
-      messagingState.setNormal();
       closeToolbar();
       sync_.setActiveRoom(roomId);
     });
@@ -255,11 +257,19 @@
 
     <!-- Chat input area - only shown in chat view -->
     {#if showChatInput}
-      <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} />
+      <!-- Keyed per room: the Tiptap editor holds its document internally, so
+           without a remount an editor carried across room switches keeps the
+           previous room's text. Remounting re-seeds from the recalled per-room
+           composer document (draft string + blocks). -->
+      {#key roomId}
+        <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} />
+      {/key}
     {/if}
   {:else}
     <!-- Thread rooms only have chat view -->
     <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} />
-    <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} />
+    {#key roomId}
+      <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} />
+    {/key}
   {/if}
 </div>

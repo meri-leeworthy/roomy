@@ -241,4 +241,17 @@
   :global(.prose > .roomy-blocks > :last-child) {
     margin-bottom: 0;
   }
+
+  /*
+    Code blocks: the prose wrapper's light-mode `--tw-prose-pre-code` is a
+    light stone-200 (designed for a dark pre background), but our pre uses a
+    light base-100 background in light mode — light text on light bg. Pin the
+    code text color to the message text colors instead.
+  */
+  :global(.prose .roomy-blocks pre code) {
+    color: var(--color-base-800);
+  }
+  :global(.dark .prose .roomy-blocks pre code) {
+    color: var(--color-base-200);
+  }
 </style>
