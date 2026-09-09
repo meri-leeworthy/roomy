@@ -206,13 +206,21 @@
         <pre class="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 p-4 rounded-2xl whitespace-pre-wrap">{auth.initError}</pre>
       </div>
     </div>
-  {:else if auth.authError}
+  {:else if auth.authenticated && !auth.isAdmin}
     <div class="flex items-center justify-center min-h-screen">
       <div class="max-w-md text-center">
         <IconAlertCircle class="size-12 mx-auto mb-4 text-red-500" />
-        <h1 class="text-2xl font-bold mb-2">Access Denied</h1>
-        <p class="text-red-600 dark:text-red-400 mb-4">{auth.authError}</p>
-        <p class="text-sm text-base-500 mb-6">Only DIDs on the admin allowlist can access this dashboard.</p>
+        <h1 class="text-2xl font-bold mb-2">Admins Only</h1>
+        <p class="text-base-600 dark:text-base-400 mb-4">
+          The dashboard shows appserver health and per-space stats. It is
+          restricted to DIDs on the appserver's admin allowlist
+          (<code class="bg-base-200/50 dark:bg-base-800/50 px-1 rounded text-xs">PUBLIC_APPSERVER_ADMIN_DIDS</code>).
+        </p>
+        <p class="text-sm text-base-500 mb-6">
+          You're signed in as <span class="font-mono">{auth.session?.did}</span>.
+          Try the <a href="/endpoints" class="text-accent-600 dark:text-accent-400 hover:underline">endpoint catalogue</a>
+          or the <a href="/playground" class="text-accent-600 dark:text-accent-400 hover:underline">playground</a> instead.
+        </p>
         <Button onclick={handleLogout}>Sign out</Button>
       </div>
     </div>
@@ -224,15 +232,15 @@
           <div class="inline-flex items-center justify-center size-14 rounded-2xl bg-accent-100 dark:bg-accent-900/30 mb-4">
             <IconSquaresPlus class="size-7 text-accent-600 dark:text-accent-400" />
           </div>
-          <h1 class="text-2xl font-bold tracking-tight">Appserver Admin</h1>
-          <p class="text-base-500 dark:text-base-400 mt-1">Sign in to manage your appserver</p>
+          <h1 class="text-2xl font-bold tracking-tight">Roomy Docs</h1>
+          <p class="text-base-500 dark:text-base-400 mt-1">Sign in to explore the API</p>
         </div>
 
         <!-- Access notice -->
         <div class="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-2xl p-4 text-sm mb-6">
-          <p class="font-medium mb-1">Access control</p>
+          <p class="font-medium mb-1">Admin dashboard</p>
           <p class="text-base-600 dark:text-base-400">
-            Only DIDs listed in <code class="bg-base-200/50 dark:bg-base-800/50 px-1 rounded text-xs">PUBLIC_APPSERVER_ADMIN_DIDS</code> can access this dashboard.
+            Only DIDs listed in <code class="bg-base-200/50 dark:bg-base-800/50 px-1 rounded text-xs">PUBLIC_APPSERVER_ADMIN_DIDS</code> can access the dashboard. Anyone can sign in to browse the docs and try endpoints.
           </p>
         </div>
 

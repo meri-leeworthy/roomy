@@ -6,7 +6,9 @@
     "dev": "vite dev --host 127.0.0.1 --port 5300",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "generate:registry": "node --experimental-strip-types scripts/generate-registry.ts",
+    "check:registry": "node --experimental-strip-types scripts/check-registry.ts"
   },
   "dependencies": {
     "@atcute/cbor": "^2.2.8",

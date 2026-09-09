@@ -6,51 +6,24 @@ cd "$(dirname "$0")/.."
 
 pnpm build
 
-target_url=${OAUTH_HOST:?"OAUTH_HOST must be set (e.g. https://admin.roomy.space)"}
+target_url=${OAUTH_HOST:?"OAUTH_HOST must be set (e.g. https://docs.roomy.space)"}
 
 echo "Generating OAuth client configuration..."
 echo "OAuth Host URL: $target_url"
 
 # ── Scope string ──────────────────────────────────────────────────────────
-# Admin dashboard only needs read access to spaces/rooms/messages plus
-# admin endpoints. No repo scopes (no blob uploads, no handle writes).
+# Derived from the endpoint registry so it can't drift: every registered XRPC
+# method gets an rpc:<nsid>?aud=* scope. Admin endpoints are included — the
+# appserver enforces its own admin allowlist, so non-admins get 403s.
 
-SCOPE="atproto"
-SCOPE+=" rpc:app.bsky.actor.getProfile?aud=*"
-SCOPE+=" rpc:com.atproto.server.getServiceAuth?aud=${VITE_APPSERVER_DID:-did:web:appserver.roomy.chat}"
-
-# ── Appserver RPCs (read queries) ────────────────────────────────────────
-SCOPE+=" rpc:space.roomy.space.getSpaces?aud=*"
-SCOPE+=" rpc:space.roomy.space.getMetadata?aud=*"
-SCOPE+=" rpc:space.roomy.space.getThreads?aud=*"
-SCOPE+=" rpc:space.roomy.space.getRoles?aud=*"
-SCOPE+=" rpc:space.roomy.space.getMembers?aud=*"
-SCOPE+=" rpc:space.roomy.space.getInvites?aud=*"
-SCOPE+=" rpc:space.roomy.room.getMetadata?aud=*"
-SCOPE+=" rpc:space.roomy.room.getMessages?aud=*"
-SCOPE+=" rpc:space.roomy.room.getThreads?aud=*"
-SCOPE+=" rpc:space.roomy.message.getMessage?aud=*"
-SCOPE+=" rpc:space.roomy.auth.getConnectionTicket?aud=*"
-SCOPE+=" rpc:space.roomy.getFlags?aud=*"
-
-# ── Admin RPCs (write operations) ────────────────────────────────────────
-SCOPE+=" rpc:space.roomy.admin.connectSpace?aud=*"
-SCOPE+=" rpc:space.roomy.admin.materializeSpace?aud=*"
-SCOPE+=" rpc:space.roomy.admin.getFlags?aud=*"
-SCOPE+=" rpc:space.roomy.admin.setFlag?aud=*"
-SCOPE+=" rpc:space.roomy.admin.clearFlag?aud=*"
-SCOPE+=" rpc:space.roomy.admin.push.getSubscriptions?aud=*"
-SCOPE+=" rpc:space.roomy.admin.push.getStats?aud=*"
-SCOPE+=" rpc:space.roomy.admin.push.testSend?aud=*"
-SCOPE+=" rpc:space.roomy.admin.getDashboardStats?aud=*"
-SCOPE+=" rpc:space.roomy.admin.listSpaces?aud=*"
+SCOPE="$(npx tsx scripts/gen-oauth-scope.ts)"
 
 # Build the OAuth client metadata JSON
 oauth_config=$(
   cat <<EOF
 {
   "client_id": "$target_url/oauth-client-metadata.json",
-  "client_name": "Roomy Admin",
+  "client_name": "Roomy Docs",
   "client_uri": "$target_url",
   "logo_uri": "$target_url/favicon.png",
   "redirect_uris": ["$target_url/"],
