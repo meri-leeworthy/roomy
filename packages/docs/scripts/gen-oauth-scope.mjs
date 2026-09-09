@@ -23,7 +23,7 @@ const generated = JSON.parse(
   readFileSync(join(THIS_DIR, "..", "src", "lib", "endpoints", "nsids.generated.json"), "utf8"),
 );
 
-const appserverDid = process.env.VITE_APPSERVER_DID ?? "did:web:appserver.roomy.chat";
+const appserverDid = process.env.VITE_APPSERVER_DID ?? "did:web:api.roomy.space";
 
 const scopes = new Set([
   "atproto",

@@ -16,7 +16,7 @@ export const ADMIN_DIDS: ReadonlySet<string> = new Set(
 
 export const CONFIG = {
   appserverDid:
-    import.meta.env.VITE_APPSERVER_DID || "did:web:appserver.roomy.chat",
+    import.meta.env.VITE_APPSERVER_DID || "did:web:api.roomy.space",
   appserverWsOrigin: import.meta.env.VITE_APPSERVER_WS_ORIGIN || null,
   appserverHttpOrigin:
     (import.meta.env.VITE_APPSERVER_WS_ORIGIN || "")
