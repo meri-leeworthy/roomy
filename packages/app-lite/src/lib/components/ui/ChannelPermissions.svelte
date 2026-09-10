@@ -2,8 +2,6 @@
   import PermissionEditor, {
     type PermissionRole,
   } from "@roomy/design/components/ui/PermissionEditor.svelte";
-  import ToggleGroup from "@roomy/design/components/ui/toggle-group/ToggleGroup.svelte";
-  import { IconLoading } from "@roomy/design/icons";
   import { createQuery } from "@tanstack/svelte-query";
   import { cache } from "@roomy-space/sdk";
   import { px } from "$lib/auth.svelte";
