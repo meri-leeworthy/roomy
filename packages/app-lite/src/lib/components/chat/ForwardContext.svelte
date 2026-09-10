@@ -6,6 +6,7 @@
 
   let {
     name,
+    handle,
     did,
     avatar,
     timestamp,
@@ -15,6 +16,8 @@
   }: {
     /** The forwarding user's display name. */
     name?: string;
+    /** The forwarding user's handle (preferred over DID when no display name). */
+    handle?: string;
     /** The forwarding user's DID (used for the profile link). */
     did?: string;
     /** The forwarding user's avatar URL (blob or resolved). */
@@ -47,7 +50,7 @@
     <span class="w-4 h-4 rounded-full shrink-0">
       <UserAvatar
         src={resolveBlobUrl(avatar)}
-        name={did || name || "unknown"}
+        name={name || handle || did || "unknown"}
         size={16}
         class="w-4 h-4"
       />
@@ -58,11 +61,11 @@
       href={`/user/${did}`}
       class="font-medium text-accent-700 dark:text-accent-400 hover:underline truncate"
     >
-      {name || did.slice(0, 12)}
+      {name || (handle ? `@${handle}` : did.slice(0, 12))}
     </a>
   {:else}
     <span class="font-medium text-accent-700 dark:text-accent-400 truncate">
-      {name || did?.slice(0, 12)}
+      {name || (handle ? `@${handle}` : did?.slice(0, 12))}
     </span>
   {/if}
   {#if originalHref}

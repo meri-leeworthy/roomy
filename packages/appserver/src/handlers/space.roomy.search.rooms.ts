@@ -19,8 +19,10 @@
  */
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
-import { openSpaceDb } from "../db/db.ts";
+import { openReadStateDb, openSpaceDb } from "../db/db.ts";
 import { hydrateUserMembership } from "../hydration/userHydration.ts";
+import { fetchRoomActivity } from "../queries/threadActivity.ts";
+import { getEngagedThreadIds, getReadPositions } from "../queries/readPositions.ts";
 import { parseUserDid, requireSpaceRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { optionalInt, requireString } from "../xrpc/params.ts";
@@ -35,6 +37,32 @@ interface RoomSearchResult {
   channelId?: string;
   /** Canonical parent channel name (threads only). */
   channelName?: string;
+  unreadCount: number;
+  /**
+   * Honest unread flag for the board: true when the room has messages the
+   * user hasn't read. For threads this includes never-engaged threads (no
+   * read_positions row yet); for channels it's `unreadCount > 0`, matching
+   * the sidebar's per-channel unread counts.
+   */
+  unread: boolean;
+  activity: {
+    latestTimestamp?: string;
+    latestMembers: Array<{
+      did: string;
+      name: string | null;
+      avatar: string | null;
+    }>;
+    latestMessage?: {
+      id: string;
+      content: string;
+      author: {
+        did: string;
+        name: string | null;
+        avatar: string | null;
+      };
+      timestamp: string | null;
+    };
+  };
 }
 
 interface SearchRoomsResult {
@@ -95,8 +123,12 @@ export const searchRoomsHandler: QueryHandler<
       name: ch.name,
       kind: "channel",
       canWrite: acc.canWrite,
+      // Filled in by the batch activity pass below.
+      unreadCount: 0,
+      unread: false,
+      activity: { latestMembers: [] },
     });
-    if (rooms.length >= limit) return { rooms };
+    if (rooms.length >= limit) break;
   }
 
   // ── Threads (alphabetical), with canonical parent channel context ────
@@ -157,6 +189,10 @@ export const searchRoomsHandler: QueryHandler<
         name: t.name,
         kind: "thread",
         canWrite: acc.canWrite,
+        // Filled in by the batch activity pass below.
+        unreadCount: 0,
+        unread: false,
+        activity: { latestMembers: [] },
       };
       const parentId = parentByThread.get(t.id);
       if (parentId) {
@@ -165,6 +201,55 @@ export const searchRoomsHandler: QueryHandler<
         if (cn != null) item.channelName = cn;
       }
       rooms.push(item);
+    }
+  }
+
+  // ── Activity + unread (batch) ───────────────────────────────────────
+  // The board rows render activity columns (avatars, latest message, date)
+  // and unread state, so each result carries the same shape as
+  // `space.getThreads`. Fetched in one batched pass over the matched rooms.
+  if (rooms.length > 0) {
+    const roomIds = rooms.map((r) => r.id);
+    const activityByRoom = await fetchRoomActivity(db, roomIds);
+    const readStateDb = openReadStateDb();
+    const readPositions = userDid
+      ? await getReadPositions(readStateDb, userDid, roomIds)
+      : new Map();
+    const engagedThreadIds = userDid
+      ? await getEngagedThreadIds(readStateDb, userDid, roomIds)
+      : new Set<string>();
+
+    for (const room of rooms) {
+      const act = activityByRoom.get(room.id);
+      const activity: RoomSearchResult["activity"] = {
+        latestMembers: act?.latestMembers ?? [],
+      };
+      if (act?.latestTimestamp != null) {
+        activity.latestTimestamp = act.latestTimestamp;
+      }
+      if (act?.latestMessage != null) {
+        activity.latestMessage = {
+          id: act.latestMessage.id,
+          content: act.latestMessage.content,
+          author: {
+            did: act.latestMessage.author.did,
+            name: act.latestMessage.author.name,
+            avatar: act.latestMessage.author.avatar,
+          },
+          timestamp: act.latestMessage.timestamp,
+        };
+      }
+      room.activity = activity;
+
+      const pos = readPositions.get(room.id);
+      const unreadCount = pos?.unreadCount ?? 0;
+      room.unreadCount = unreadCount;
+      // Channels: plain unreadCount > 0 (matches the sidebar). Threads:
+      // honest flag — unread unless read and engaged.
+      room.unread =
+        act?.latestTimestamp != null &&
+        (unreadCount > 0 ||
+          (room.kind === "thread" && !engagedThreadIds.has(room.id)));
     }
   }
 

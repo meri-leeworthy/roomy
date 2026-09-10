@@ -34,6 +34,11 @@ export const FEATURE_FLAGS: readonly FeatureFlagDef[] = [
     description:
       "Arbiter-powered space account management: space handle settings and Bluesky profile integration",
   },
+  {
+    key: "pro-subscription",
+    description:
+      "Roomy Pro subscription page in user settings: Polar checkout link and membership status",
+  },
 ];
 export const FEATURE_FLAG_KEYS: ReadonlySet<string> = new Set(
   FEATURE_FLAGS.map((f) => f.key),

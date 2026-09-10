@@ -42,11 +42,13 @@
      */
     mentions?: string[];
     /**
-     * When editing a rich-text message, the decoded blocks that seeded this
-     * editor. When present, the editor initializes from
+     * The decoded blocks that seeded this editor — a rich-text message being
+     * re-edited, or the per-room composer document being recalled on return.
+     * When present, the editor initializes from
      * `blocksToProseMirrorDoc(initialBlocks)` instead of the markdown
      * `content` string, so structured messages open as their decoded text
-     * (not the base64-encoded wire body) and stay rich-text on save.
+     * (not the base64-encoded wire body) and stay rich-text on save. For the
+     * composer this keeps stored mentions re-rendering as chips.
      */
     initialBlocks?: Block[];
     /** Server-search fetcher for `@user` mentions (hits `getMembers?search=`). */
@@ -251,9 +253,10 @@
   onDestroy(() => {
     tiptap?.destroy();
     // Reset the shared module-level binding so deferred setInputFocus/clearInput
-    // calls (e.g. from messagingState.setNormal() in a route $effect) don't
-    // land on a destroyed editor whose commandManager is null. Only the
-    // composer owns this binding, and only if it's still the current editor.
+    // calls (e.g. from messagingState.setReplyTo()/clear-context or a route's
+    // setNormal) don't land on a destroyed editor whose commandManager is
+    // null. Only the composer owns this binding, and only if it's still the
+    // current editor.
     if (composer && editor === tiptap) editor = undefined;
   });
 

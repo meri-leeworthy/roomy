@@ -572,6 +572,22 @@ describe("space.roomy.search.rooms", () => {
       [coordination, thread, JSON.stringify({ canonical_parent: 1 })],
     );
 
+    // Activity on the channel: a message from USER with a recent timestamp,
+    // plus an unread count so the board row renders unread state.
+    const msgId = newUlid();
+    seedMessage(db, msgId, coordination, SPACE, "a");
+    spaceDb(db, SPACE).run(
+      "update comp_content set timestamp = ? where entity = ?",
+      [Date.now(), msgId],
+    );
+    spaceDb(db, SPACE).run(
+      "insert or ignore into edges (head, tail, label) values (?, ?, 'author')",
+      [msgId, USER],
+    );
+    seedUser(db, USER, "author.test");
+    seedActivityItem(db, coordination, SPACE, Date.now());
+    seedReadPosition(db, USER, coordination, "a", 2);
+
     const res = await ctx.authedFetch(USER)(
       `${ctx.baseUrl}/xrpc/space.roomy.search.rooms?spaceId=${SPACE}&q=coordination`,
     );
@@ -586,6 +602,13 @@ describe("space.roomy.search.rooms", () => {
       canWrite: boolean;
       channelId?: string;
       channelName?: string;
+      unreadCount?: number;
+      unread?: boolean;
+      activity?: {
+        latestTimestamp?: string;
+        latestMembers: Array<{ did: string; name: string | null; avatar: string | null }>;
+        latestMessage?: { id: string; content: string };
+      };
     }>;
     expect(rooms.length).toBeGreaterThanOrEqual(2);
     const channelHit = rooms.find((r) => r.id === coordination);
@@ -596,6 +619,21 @@ describe("space.roomy.search.rooms", () => {
     expect(threadHit!.kind).toBe("thread");
     expect(threadHit!.channelId).toBe(coordination);
     expect(threadHit!.channelName).toBe("coordination");
+
+    // The channel carries board-style activity + unread state.
+    expect(channelHit!.activity).toBeDefined();
+    expect(channelHit!.activity!.latestTimestamp).toBeDefined();
+    expect(channelHit!.activity!.latestMembers.length).toBeGreaterThanOrEqual(1);
+    expect(channelHit!.activity!.latestMembers[0]!.did).toBe(USER);
+    expect(channelHit!.activity!.latestMessage?.content).toContain("hello");
+    expect(channelHit!.unreadCount).toBe(2);
+    expect(channelHit!.unread).toBe(true);
+
+    // The thread has no messages — empty activity, not unread.
+    expect(threadHit!.activity).toBeDefined();
+    expect(threadHit!.activity!.latestMembers).toEqual([]);
+    expect(threadHit!.activity!.latestTimestamp).toBeUndefined();
+    expect(threadHit!.unread).toBe(false);
   });
 
   test("empty query → 400", async () => {

@@ -162,14 +162,58 @@ export async function listThreadActivity(
   const pageThreads = hasMore ? threads.slice(0, limit) : threads;
 
   const threadIds = pageThreads.map((t) => t.id);
-  const ph = threadIds.map(() => "?").join(",");
+  const activityByRoom = await fetchRoomActivity(db, threadIds);
 
-  // Step 2: batch-fetch latest timestamps for all threads at once.
-  //
-  // Forwarded messages are forward-reference entities with no comp_content of
-  // their own — their content/timestamp lives on the original message reached
-  // via the `forward` edge. We follow that edge so a thread created by
-  // forwarding messages still surfaces a latest timestamp (the original's).
+  const results: ThreadActivity[] = pageThreads.map((t) => {
+    const act = activityByRoom.get(t.id);
+    return {
+      id: t.id,
+      kind: t.label === "space.roomy.channel" ? "channel" : "thread",
+      name: t.name,
+      canonicalParent: act?.canonicalParent ?? null,
+      latestTimestamp: act?.latestTimestamp ?? null,
+      latestMembers: act?.latestMembers ?? [],
+      latestMessage: act?.latestMessage ?? null,
+    };
+  });
+
+  // Compute next cursor from the last visible thread.
+  let nextCursor: string | null = null;
+  if (hasMore) {
+    const last = pageThreads[pageThreads.length - 1]!;
+    nextCursor = `${last.sort_key}::${last.id}`;
+  }
+
+  return { threads: results, cursor: nextCursor };
+}
+
+/**
+ * Batch-fetch activity metadata for a set of rooms: latest message
+ * timestamp, up to 3 unique recent participants, canonical parent channel,
+ * and the latest message (content decoded to plaintext). Shared by
+ * `listThreadActivity` and `space.roomy.search.rooms` so search results
+ * render with the same activity columns as the board views.
+ *
+ * Forwarded messages are forward-reference entities with no own
+ * content/author — their timestamp and author live on the original message
+ * reached via the `forward` edge. We follow that edge (coalescing the
+ * message's own content with the forwarded original's) so a room created by
+ * forwarding messages still reports a latest timestamp, recent participants
+ * (the original authors), and a latest message.
+ *
+ * Rooms with no messages are absent from the map (or carry empty arrays) —
+ * callers treat that as "no activity".
+ */
+export async function fetchRoomActivity(
+  db: DbLike,
+  roomIds: string[],
+): Promise<Map<string, ThreadActivity>> {
+  const out = new Map<string, ThreadActivity>();
+  if (roomIds.length === 0) return out;
+
+  const ph = roomIds.map(() => "?").join(",");
+
+  // Latest timestamps for all rooms at once.
   const latestRows = await db
     .query(
       `select e.room as room,
@@ -183,16 +227,12 @@ export async function listThreadActivity(
           and (cc.entity is not null or forward_e.tail is not null)
         group by e.room`,
     )
-    .all<{ room: string; ts: number | null }>([...threadIds]);
+    .all<{ room: string; ts: number | null }>([...roomIds]);
   const latestMap = new Map(latestRows.map((r) => [r.room, r.ts]));
 
-  // Step 3: batch-fetch recent participants (up to 3 per thread).
-  // We fetch all and group in JS.
-  //
-  // For forwarded messages the author edge lives on the original (reached via
-  // the `forward` edge), so we coalesce the message's own author with the
-  // forwarded original's author. The original's author then counts as a
-  // recent participant of the thread it was forwarded into.
+  // Recent participants (up to 3 per room). For forwarded messages the
+  // author edge lives on the original (reached via the `forward` edge), so
+  // we coalesce the message's own author with the forwarded original's.
   const participantRows = await db
     .query(
       `select msg.room as room,
@@ -217,9 +257,8 @@ export async function listThreadActivity(
         group by msg.room, coalesce(author_e.tail, fwd_author_e.tail)
         order by msg.room, ts desc`,
     )
-    .all<{ room: string; did: string; name: string | null; avatar: string | null; ts: number | null }>([...threadIds]);
+    .all<{ room: string; did: string; name: string | null; avatar: string | null; ts: number | null }>([...roomIds]);
 
-  // Group participants by room, take top 3 per room.
   const participantsMap = new Map<string, ThreadMember[]>();
   for (const r of participantRows) {
     let arr = participantsMap.get(r.room);
@@ -232,7 +271,7 @@ export async function listThreadActivity(
     }
   }
 
-  // Step 4: batch-fetch canonical parent for all threads.
+  // Canonical parent per room.
   const parentRows = await db
     .query(
       `select tail, head from edges
@@ -240,16 +279,11 @@ export async function listThreadActivity(
           and label = 'link'
           and coalesce(json_extract(payload, '$.canonical_parent'), 0) = 1`,
     )
-    .all<{ tail: string; head: string }>([...threadIds]);
+    .all<{ tail: string; head: string }>([...roomIds]);
   const parentMap = new Map(parentRows.map((r) => [r.tail, r.head]));
 
-  // Step 5: batch-fetch latest message for all threads.
-  // SQLite doesn't support LIMIT per group, so we fetch all messages
-  // and pick the latest per thread in JS.
-  //
-  // Forwarded messages have no own content/author — follow the `forward` edge
-  // to the original and coalesce so a thread created solely by forwarding
-  // still reports a latest message (the original's content/author/timestamp).
+  // Latest message per room. SQLite doesn't support LIMIT per group, so we
+  // fetch all messages and pick the latest per room in JS.
   const latestMsgRows = await db
     .query(
       `select e.room as room,
@@ -286,9 +320,8 @@ export async function listThreadActivity(
         author_avatar: string | null;
         timestamp: number | null;
       }
-    >([...threadIds]);
+    >([...roomIds]);
 
-  // Pick the latest message per thread (highest timestamp).
   const latestMsgMap = new Map<
     string,
     {
@@ -308,11 +341,11 @@ export async function listThreadActivity(
     }
   }
 
-  const results: ThreadActivity[] = pageThreads.map((t) => {
-    const latest = latestMap.get(t.id);
-    const members = participantsMap.get(t.id) ?? [];
-    const parent = parentMap.get(t.id);
-    const latestMsgRow = latestMsgMap.get(t.id);
+  for (const roomId of roomIds) {
+    const latest = latestMap.get(roomId);
+    const members = participantsMap.get(roomId) ?? [];
+    const parent = parentMap.get(roomId);
+    const latestMsgRow = latestMsgMap.get(roomId);
 
     let latestMessage: ThreadMessage | null = null;
     if (latestMsgRow && latestMsgRow.author_did) {
@@ -341,18 +374,16 @@ export async function listThreadActivity(
       };
     }
 
-    return {
-      id: t.id,
-      kind: t.label === "space.roomy.channel" ? "channel" : "thread",
-      name: t.name,
+    out.set(roomId, {
+      id: roomId,
+      kind: "thread",
+      name: null,
       canonicalParent: parent ?? null,
-      latestTimestamp: latest
-        ? new Date(latest).toISOString()
-        : null,
+      latestTimestamp: latest ? new Date(latest).toISOString() : null,
       latestMembers: members,
       latestMessage,
-    };
-  });
+    });
+  }
 
   // Resolve participant + latest-message author profiles from the global
   // store (with an in-memory cache). A user's profile entity lives in their
@@ -360,7 +391,7 @@ export async function listThreadActivity(
   // above is null for cross-stream users. The global `profiles` table is
   // authoritative; the per-space value (if any) acts as a fallback.
   const membersToHydrate: ThreadMember[] = [];
-  for (const t of results) {
+  for (const t of out.values()) {
     membersToHydrate.push(...t.latestMembers);
     if (t.latestMessage?.author) membersToHydrate.push(t.latestMessage.author);
   }
@@ -373,12 +404,5 @@ export async function listThreadActivity(
     },
   );
 
-  // Compute next cursor from the last visible thread.
-  let nextCursor: string | null = null;
-  if (hasMore) {
-    const last = pageThreads[pageThreads.length - 1]!;
-    nextCursor = `${last.sort_key}::${last.id}`;
-  }
-
-  return { threads: results, cursor: nextCursor };
+  return out;
 }

@@ -10,25 +10,31 @@ export type RoomSearchResult =
 /**
  * Room name search (`space.roomy.search.rooms`): every channel and thread
  * in a space whose name matches, filtered by read access. Backs the
- * forward modal's room picker — the search term is required (the appserver
- * rejects empty), so the query stays disabled until the user types.
+ * forward modal's room picker and the "Rooms & threads" section of the
+ * search results page. The endpoint requires a spaceId and a non-empty
+ * term, so the query stays disabled until both are available (the
+ * directory search has no space to scope room results to).
  */
 export function createSearchRoomsQuery(
-  spaceId: () => string,
+  spaceId: () => string | undefined,
   q: () => string,
   limit = 20,
 ) {
   return createQuery(() => {
+    const sid = spaceId();
     const term = q().trim();
-    const enabled = term.length >= 1;
+    // The endpoint requires a spaceId and a non-empty term; the query stays
+    // disabled until both are available (the directory search has no space
+    // to scope room results to).
+    const enabled = sid !== undefined && term.length >= 1;
     return {
       queryKey: queryKey("space.roomy.search.rooms", {
-        spaceId: spaceId(),
+        spaceId: sid,
         q: term,
       }),
       queryFn: () =>
         px().query("space.roomy.search.rooms", {
-          spaceId: spaceId(),
+          spaceId: sid!,
           q: term,
           limit: String(limit),
         }),

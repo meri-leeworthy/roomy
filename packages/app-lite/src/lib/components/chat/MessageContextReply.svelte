@@ -66,14 +66,14 @@
       <span
         class="font-medium text-accent-700 dark:text-accent-300"
       >
-        {target.data.authorName || target.data.authorDid.slice(0, 12)}
+        {target.data.authorName || (target.data.authorHandle ? `@${target.data.authorHandle}` : target.data.authorDid.slice(0, 12))}
       </span>
     {:else}
       <a
         href={`/user/${target.data.authorDid}`}
         class="font-medium text-accent-700 dark:text-accent-300 hover:underline"
       >
-        {target.data.authorName || target.data.authorDid.slice(0, 12)}
+        {target.data.authorName || (target.data.authorHandle ? `@${target.data.authorHandle}` : target.data.authorDid.slice(0, 12))}
       </a>
     {/if}
   </div>

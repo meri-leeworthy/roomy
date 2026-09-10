@@ -7,7 +7,7 @@
   import { setNavbar } from "$lib/components/layout/navbar.svelte";
   import { setCurrentRoom } from "$lib/components/layout/current-room.svelte";
   import { spaceNavigation } from "$lib/components/layout/last-room.svelte";
-  import { messagingState, closeToolbar } from "$lib/components/chat/messaging-state.svelte";
+  import { closeToolbar } from "$lib/components/chat/messaging-state.svelte";
   import ToggleTabs from "@roomy/design/components/layout/ToggleTabs.svelte";
   import { createRoomMetadataQuery } from "$lib/queries/room-metadata";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
@@ -20,6 +20,11 @@
 
   const spaceId = $derived(page.params.space!);
   const roomId = $derived(page.params.room!);
+  // Search deep-link target (`?message=`), e.g. from search results or a
+  // forward context link — ChatArea scrolls to and briefly highlights it.
+  const highlightMessage = $derived(
+    page.url.searchParams.get("message") ?? undefined,
+  );
 
   useTopicSubscription(
     () => sync_.ctx?.topicManager ?? null,
@@ -27,11 +32,13 @@
   );
 
   $effect(() => {
-    // Reset any lingering reply/thread context from a previous room.
-    // Writes to module-level $state are wrapped in untrack() to avoid
-    // reactive cascades (effect_update_depth_exceeded).
+    // Composer document activation is owned by ChatInputArea ($effect.pre on
+    // roomId) so the editor always seeds from the recalled per-room draft
+    // before its subtree mounts. Here: drop the mobile toolbar from a
+    // previous room and point the sync connection at the new room. Writes to
+    // module-level $state are wrapped in untrack() to avoid reactive cascades
+    // (effect_update_depth_exceeded).
     untrack(() => {
-      messagingState.setNormal();
       closeToolbar();
       sync_.setActiveRoom(roomId);
     });
@@ -213,9 +220,12 @@
     {/if}
 
     {#if roomKind === "channel"}
-      <span class="grow sm:hidden"></span>
+      <!-- On narrow navbar containers the toggle floats right-aligned,
+           immediately left of the search icon; once the container is wide
+           enough for the searchbar it centers in the navbar. -->
+      <span class="grow @min-[40rem]:hidden"></span>
       <div
-        class="sm:absolute sm:left-1/2 sm:top-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2"
+        class="@min-[40rem]:absolute @min-[40rem]:left-1/2 @min-[40rem]:top-1/2 @min-[40rem]:-translate-x-1/2 @min-[40rem]:-translate-y-1/2"
       >
         <ToggleTabs
           items={channelTabList.map((x) => ({
@@ -236,7 +246,7 @@
     <div class="relative flex-1 min-h-0">
       <!-- Chat view - always rendered but visibility toggled -->
       <div class="absolute inset-0 flex flex-col" class:hidden={channelActiveTab !== "Chat"}>
-        <ChatArea spaceId={effectiveSpaceId} {roomId} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} />
+        <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} />
       </div>
 
       <!-- Threads view - always rendered but visibility toggled -->
@@ -247,11 +257,19 @@
 
     <!-- Chat input area - only shown in chat view -->
     {#if showChatInput}
-      <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} />
+      <!-- Keyed per room: the Tiptap editor holds its document internally, so
+           without a remount an editor carried across room switches keeps the
+           previous room's text. Remounting re-seeds from the recalled per-room
+           composer document (draft string + blocks). -->
+      {#key roomId}
+        <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} />
+      {/key}
     {/if}
   {:else}
     <!-- Thread rooms only have chat view -->
-    <ChatArea spaceId={effectiveSpaceId} {roomId} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} />
-    <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} />
+    <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} />
+    {#key roomId}
+      <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} />
+    {/key}
   {/if}
 </div>

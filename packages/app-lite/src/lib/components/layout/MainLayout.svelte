@@ -15,9 +15,15 @@
   import SearchBar from "./SearchBar.svelte";
   import ServerBar from "$lib/components/sidebar/ServerBar.svelte";
   import EnableNotificationsBanner from "./EnableNotificationsBanner.svelte";
+  import { page } from "$app/state";
   let searchExpanded = $state(false);
 
-let {
+  // On the search result pages the navbar searchbar takes over the navbar:
+  // the page-provided title slot is hidden (the title becomes the
+  // searchbar's placeholder) so the bar spans the full width.
+  const onSearchPage = $derived(page.url.pathname.endsWith("/search"));
+
+  let {
     children,
   }: {
     children: Snippet;
@@ -115,6 +121,7 @@ let {
       class="flex items-center min-w-0 grow basis-0"
       class:invisible={searchExpanded}
       class:pointer-events-none={searchExpanded}
+      class:hidden={onSearchPage}
     >
       {#if navbar.content}
         {@render navbar.content?.()}

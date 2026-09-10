@@ -300,17 +300,22 @@ export function installPushSubscriptionChangeListener(): () => void {
 /**
  * Listen for `navigate` messages from the service worker (sent when the user
  * clicks a push notification while an app tab is already open). The SW focuses
- * the existing tab and posts the originating room's `spaceId`/`roomId`; this
- * handler routes the tab into that room. Install once in the root layout.
+ * the existing tab and posts the originating room's `spaceId`/`roomId` (and
+ * `messageId` when the notification targeted a single message); this handler
+ * routes the tab into that room — deep-linking to the message when present so
+ * the room page scrolls to and highlights it. Install once in the root layout.
  */
 export function installNotificationNavigateListener(): () => void {
   if (!supportsPush()) return () => {};
   const handler = (event: MessageEvent) => {
-    const data = event.data as { type?: string; spaceId?: string; roomId?: string } | null;
+    const data = event.data as
+      | { type?: string; spaceId?: string; roomId?: string; messageId?: string }
+      | null;
     if (data?.type !== "navigate") return;
-    const { spaceId, roomId } = data;
+    const { spaceId, roomId, messageId } = data;
     if (!spaceId || !roomId) return;
-    goto(`/${spaceId}/${roomId}`);
+    const query = messageId ? `?message=${encodeURIComponent(messageId)}` : "";
+    goto(`/${spaceId}/${roomId}${query}`);
   };
   navigator.serviceWorker.addEventListener("message", handler);
   return () => navigator.serviceWorker.removeEventListener("message", handler);

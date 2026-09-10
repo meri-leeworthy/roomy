@@ -10,7 +10,8 @@
  * Each result carries `kind` so clients can render channels and threads
  * distinctly, plus `canWrite` so a picker can filter to forwardable
  * targets. Threads include their canonical parent channel id/name for
- * grouped display.
+ * grouped display. Results also carry the same `activity`/`unread` shape
+ * as `space.getThreads` so the search page can render board-style rows.
  */
 import { type } from "arktype";
 
@@ -24,6 +25,25 @@ export const Params = type({
   "limit?": "string",
 });
 
+export const ThreadMember = type({
+  did: "string",
+  "name?": "string | null",
+  "avatar?": "string | null",
+});
+
+export const ThreadMessage = type({
+  id: "string",
+  content: "string",
+  author: ThreadMember,
+  "timestamp?": "string",
+});
+
+export const ThreadActivity = type({
+  "latestTimestamp?": "string",
+  latestMembers: ThreadMember.array(),
+  "latestMessage?": ThreadMessage,
+});
+
 export const RoomSearchResult = type({
   id: "string",
   name: "string",
@@ -33,6 +53,15 @@ export const RoomSearchResult = type({
   "channelId?": "string",
   /** Canonical parent channel name (threads only). */
   "channelName?": "string",
+  "unreadCount?": "number",
+  /**
+   * Honest unread flag for the board: true when the room has messages the
+   * user hasn't read. For threads this includes never-engaged threads (no
+   * read_positions row yet); for channels it's `unreadCount > 0`, matching
+   * the sidebar's per-channel unread counts.
+   */
+  "unread?": "boolean",
+  activity: ThreadActivity,
 });
 
 export const Response = type({

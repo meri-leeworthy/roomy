@@ -15,6 +15,7 @@ const APPSERVER_RPCS = [
   "space.roomy.message.getMessage",
   "space.roomy.message.getReactions",
   "space.roomy.user.getProfile",
+  "space.roomy.user.getMembershipStatus",
   "space.roomy.embed.getLinkMetadata",
   "space.roomy.auth.getConnectionTicket",
   "space.roomy.getFlags",

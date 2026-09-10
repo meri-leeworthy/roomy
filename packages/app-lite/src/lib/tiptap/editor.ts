@@ -150,6 +150,11 @@ function suggestion({
 type UserMentionProps = { search: (query: string) => Promise<TypeaheadUser[]> };
 const UserMentionExtension = Mention.extend({
   name: "userMention",
+  // Must outrank the composer's send-on-Enter keymap (priority 1000) so the
+  // suggestion popup sees Enter first and confirms the selection instead of
+  // sending the message. ProseMirror checks handleKeyDown in plugin order
+  // (extension priority, descending) and stops at the first truthy handler.
+  priority: 1001,
   // Used by `generateHTML`
   renderHTML({ HTMLAttributes, node }) {
     return [
@@ -293,6 +298,11 @@ export const initUserMention = ({ search }: UserMentionProps) =>
 type SpaceContextMentionProps = { context: Item[] };
 const SpaceContextMentionExtension = Mention.extend({
   name: "channelThreadMention",
+  // Must outrank the composer's send-on-Enter keymap (priority 1000) so the
+  // suggestion popup sees Enter first and confirms the selection instead of
+  // sending the message. ProseMirror checks handleKeyDown in plugin order
+  // (extension priority, descending) and stops at the first truthy handler.
+  priority: 1001,
   // Used by `generateHTML`
   renderHTML({ HTMLAttributes, node }) {
     const { id, space, type } = JSON.parse(node.attrs.id);

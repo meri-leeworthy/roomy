@@ -4,7 +4,7 @@ import { READSTATE_SCHEMA_VERSION } from "./readStateDb.ts";
 
 describe("read-state schema", () => {
   test("READSTATE_SCHEMA_VERSION is exported", () => {
-    expect(READSTATE_SCHEMA_VERSION).toBe("8");
+    expect(READSTATE_SCHEMA_VERSION).toBe("9");
   });
 
   test("schema applies cleanly on a fresh database", () => {
@@ -342,6 +342,24 @@ describe("read-state schema", () => {
             db.exec(`
               create index if not exists idx_space_order_user_position
                 on space_order(user_did, position)
+            `);
+          },
+        },
+        {
+          version: 9,
+          up(db: Database) {
+            db.exec(`
+              create table if not exists bridge_token_grants (
+                grantor_did        text primary key,
+                space_did          text not null,
+                granted_at         integer not null default (unixepoch() * 1000),
+                spent_at           integer,
+                capacity_snapshot  integer not null
+              ) strict
+            `);
+            db.exec(`
+              create index if not exists idx_bridge_token_grants_space
+                on bridge_token_grants(space_did)
             `);
           },
         },
