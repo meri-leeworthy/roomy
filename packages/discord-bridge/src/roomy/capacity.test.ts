@@ -1,7 +1,8 @@
 /**
  * Unit tests for the capacity decision service (Roomy Pro bridge tokens).
  *
- * Covers: over/under limit decisions, stale-keeps-previous, TTL expiry,
+ * Covers: over/under limit decisions, unprovisioned spaces (no grants)
+ * failing open, ops kill switch, stale-keeps-previous, TTL expiry,
  * member-count/XRPC failure keeps previous, state-change callback, force
  * refresh, and the module-level gate singleton.
  */
@@ -16,10 +17,21 @@ import {
 	type MemberCountProvider,
 	type MembershipClient,
 	type SpaceMembership,
+	type SpaceMembershipToken,
 } from "./capacity.ts";
 
 const GUILD = "guild-1";
 const SPACE = "did:web:space-a.example";
+
+function token(over: Partial<SpaceMembershipToken> = {}): SpaceMembershipToken {
+	return {
+		grantorDid: "did:plc:grantor-1",
+		capacity: 100,
+		status: "pending",
+		live: true,
+		...over,
+	};
+}
 
 function membership(over: Partial<SpaceMembership> = {}): SpaceMembership {
 	return {
@@ -73,9 +85,15 @@ function makeService(
 }
 
 describe("CapacityService decisions", () => {
-	test("over limit → disabled", async () => {
+	test("over limit with grants → disabled", async () => {
 		const client = makeClient([
-			membership({ memberCount: 150, maxMembers: 100, overLimit: true }),
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
 		]);
 		const service = makeService(client, makeMemberCount(150));
 
@@ -100,9 +118,45 @@ describe("CapacityService decisions", () => {
 		expect(decision.overLimit).toBe(false);
 	});
 
+	test("over limit with no grants fails open (unprovisioned space)", async () => {
+		const client = makeClient([
+			membership({ memberCount: 150, maxMembers: 0, overLimit: true }),
+		]);
+		const service = makeService(client, makeMemberCount(150));
+
+		const decision = await service.check(GUILD, SPACE);
+
+		expect(decision.enabled).toBe(true);
+		expect(decision.overLimit).toBe(false);
+
+		// The fail-open decision is cached like any other: no re-query.
+		await service.check(GUILD, SPACE);
+		expect(client.calls.length).toBe(1);
+	});
+
+	test("kill switch forces enabled without consulting client or member count", async () => {
+		const client = makeClient([]);
+		const memberCount = makeMemberCount(150);
+		const service = new CapacityService(client, memberCount, {
+			killSwitch: true,
+		});
+
+		expect(await service.check(GUILD, SPACE)).toMatchObject({
+			enabled: true,
+		});
+		expect(client.calls.length).toBe(0);
+		expect(memberCount.calls).toBe(0);
+	});
+
 	test("isEnabled reflects the decision", async () => {
 		const client = makeClient([
-			membership({ memberCount: 150, maxMembers: 100, overLimit: true }),
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
 		]);
 		const service = makeService(client, makeMemberCount(150));
 
@@ -114,7 +168,14 @@ describe("CapacityService stale handling", () => {
 	test("stale keeps previous enabled decision", async () => {
 		const client = makeClient([
 			membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
-			membership({ memberCount: 150, maxMembers: 100, overLimit: true, stale: true }),
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				stale: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
 		]);
 		const service = makeService(client, makeMemberCount(150));
 
@@ -130,7 +191,13 @@ describe("CapacityService stale handling", () => {
 
 	test("stale keeps previous disabled decision", async () => {
 		const client = makeClient([
-			membership({ memberCount: 150, maxMembers: 100, overLimit: true }),
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
 			membership({ memberCount: 50, maxMembers: 100, overLimit: false, stale: true }),
 		]);
 		const service = makeService(client, makeMemberCount(50));
@@ -144,7 +211,14 @@ describe("CapacityService stale handling", () => {
 
 	test("stale with no previous decision uses the stale data", async () => {
 		const client = makeClient([
-			membership({ memberCount: 150, maxMembers: 100, overLimit: true, stale: true }),
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				stale: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
 		]);
 		const service = makeService(client, makeMemberCount(150));
 
@@ -172,7 +246,13 @@ describe("CapacityService TTL", () => {
 	test("re-queries after TTL expiry", async () => {
 		const client = makeClient([
 			membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
-			membership({ memberCount: 150, maxMembers: 100, overLimit: true }),
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
 		]);
 		const service = new CapacityService(client, makeMemberCount(150), {
 			ttlMs: 1,
@@ -279,7 +359,13 @@ describe("CapacityService state-change callback", () => {
 	test("fires on enabled→disabled and disabled→enabled transitions", async () => {
 		const client = makeClient([
 			membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
-			membership({ memberCount: 150, maxMembers: 100, overLimit: true }),
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
 			membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
 		]);
 		const service = makeService(client, makeMemberCount(50), (d, p) => {
@@ -314,7 +400,13 @@ describe("CapacityService state-change callback", () => {
 
 	test("callback throw does not break the decision flow", async () => {
 		const client = makeClient([
-			membership({ memberCount: 150, maxMembers: 100, overLimit: true }),
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
 		]);
 		const service = makeService(client, makeMemberCount(150), () => {
 			throw new Error("callback boom");

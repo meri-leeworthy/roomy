@@ -29,6 +29,7 @@ import {
 	APPSERVER_WS_URL,
 	BRIDGE_DATA_DIR,
 	BRIDGE_DB_PATH,
+	BRIDGE_CAPACITY_KILL_SWITCH,
 	DISCORD_TOKEN,
 	ENABLE_GUILD_MEMBERS_INTENT,
 } from "./env.ts";
@@ -182,6 +183,7 @@ async function main() {
 						new XrpcMembershipClient(spaceManager.xrpc),
 						new DiscordMemberCountProvider(bot),
 						{
+							killSwitch: BRIDGE_CAPACITY_KILL_SWITCH(),
 							onStateChange: (decision) => {
 								if (!decision.enabled) {
 									void dmGuildOwner(bot, decision);

@@ -111,6 +111,10 @@ export function resetCapacityGate(): void {
 export interface CapacityServiceOptions {
 	/** Decision cache TTL in ms. Default 300s. */
 	ttlMs?: number;
+	/** Ops kill switch (BRIDGE_CAPACITY_KILL_SWITCH): when true, capacity
+	 *  enforcement is disabled globally — every (guild, space) passes.
+	 *  Emergency manual re-enable; no XRPC checks are performed. */
+	killSwitch?: boolean;
 	/** Called on every decision whose `enabled` differs from the previous
 	 *  decision (including the first decision for a tuple). Used for the
 	 *  owner DM and structured state-change logging. */
@@ -124,6 +128,8 @@ export class CapacityService implements CapacityGate {
 	#client: MembershipClient;
 	#memberCount: MemberCountProvider;
 	#ttlMs: number;
+	#killSwitch: boolean;
+	#killSwitchLogged = false;
 	#onStateChange?: CapacityServiceOptions["onStateChange"];
 	#cache = new Map<
 		string,
@@ -138,6 +144,7 @@ export class CapacityService implements CapacityGate {
 		this.#client = client;
 		this.#memberCount = memberCount;
 		this.#ttlMs = opts.ttlMs ?? CAPACITY_TTL_MS;
+		this.#killSwitch = opts.killSwitch ?? false;
 		this.#onStateChange = opts.onStateChange;
 	}
 
@@ -152,6 +159,25 @@ export class CapacityService implements CapacityGate {
 		spaceDid: string,
 		opts: { force?: boolean } = {},
 	): Promise<CapacityDecision> {
+		if (this.#killSwitch) {
+			if (!this.#killSwitchLogged) {
+				this.#killSwitchLogged = true;
+				log.warn(
+					"capacity: BRIDGE_CAPACITY_KILL_SWITCH is set — capacity enforcement disabled globally; every bridged space passes",
+				);
+			}
+			return {
+				guildId,
+				spaceDid,
+				memberCount: 0,
+				maxMembers: 0,
+				overLimit: false,
+				stale: false,
+				checkedAt: Date.now(),
+				enabled: true,
+			};
+		}
+
 		const key = `${guildId}:${spaceDid}`;
 		const cached = this.#cache.get(key);
 		if (!opts.force && cached && cached.expiresAt > Date.now()) {
@@ -189,6 +215,18 @@ export class CapacityService implements CapacityGate {
 				spaceDid,
 				fallbackDecision(guildId, spaceDid, "membership query failed"),
 			);
+		}
+
+		// No grants → no capacity provisioned for the space: nothing to
+		// enforce. Fail open so bridges set up before Roomy Pro checkout
+		// flows existed keep running; enforcement begins as soon as the
+		// first grant ships (the periodic sweep re-checks).
+		if (membership.overLimit && membership.tokens.length === 0) {
+			log.warn(
+				`capacity: ${spaceDid} has no bridge-token grants; no capacity to enforce — failing open`,
+				{ guildId, spaceDid, memberCount: membership.memberCount },
+			);
+			membership = { ...membership, overLimit: false };
 		}
 
 		if (membership.stale) {
