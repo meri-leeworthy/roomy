@@ -279,11 +279,20 @@ program
   .option("--description <desc>", "Profile description")
   .option("--pronouns <pronouns>", "Pronouns")
   .option("--website <url>", "Website URL")
-  .action(async (options: { displayName?: string; description?: string; pronouns?: string; website?: string }) => {
+  .option("--avatar-file <path>", "Path to an image file (png/jpeg, ≤1MB) to set as the profile avatar")
+  .option("--banner-file <path>", "Path to an image file (png/jpeg, ≤1MB) to set as the profile banner")
+  .action(async (options: { displayName?: string; description?: string; pronouns?: string; website?: string; avatarFile?: string; bannerFile?: string }) => {
     try {
       const config = loadConfig();
       const { agent } = await authenticate(config);
-      await setProfile(agent, options);
+      await setProfile(agent, {
+        displayName: options.displayName,
+        description: options.description,
+        pronouns: options.pronouns,
+        website: options.website,
+        avatarPath: options.avatarFile,
+        bannerPath: options.bannerFile,
+      });
       console.log("Profile updated");
     } catch (error) {
       console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
