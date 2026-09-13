@@ -12,6 +12,7 @@ import {
   sendReply,
   type MessageInfo,
 } from "./messages.js";
+import { FileLock, QueueStore, type QueueJob } from "./queue.js";
 
 type DirectXrpcClient = InstanceType<typeof transport.DirectXrpcClient>;
 
@@ -77,6 +78,14 @@ export interface RespondOptions extends Omit<OmpOptions, "resume"> {
   /** Route thinking traces to a dedicated 💭 thread room when the triggering
    *  message landed in a channel (not a thread). Default true. */
   traceThreads?: boolean;
+  /** Path to the durable job queue file. Defaults to ~/.roomy/queue.json. */
+  queueFile?: string;
+  /** Path to the lock file guarding queue processing. Defaults to
+   *  `<queueFile>.lock`. */
+  lockFile?: string;
+  /** How long a lock may go without a heartbeat before it is considered
+   *  stale and taken over (ms). Default 120000. */
+  lockTtlMs?: number;
   /** Approx char threshold for each streamed thinking chunk. Default 2000. */
   thinkingChunkSize?: number;
   /** Path to a file whose contents are appended to omp's system prompt on every
@@ -125,6 +134,12 @@ interface StoredSession {
  * conversation chain's root; a "reply" continues the chain's session. Thinking
  * traces for channel-initiated sessions stream into a dedicated 💭 thread room
  * (created per fresh session); thread-initiated sessions keep traces in-room.
+ *
+ * Concurrency: every event is appended to a durable queue file and processed
+ * by a single global worker loop, one job at a time, under a file-based lock.
+ * Two responder processes on the same machine (duplicate bridge pipelines)
+ * therefore cannot run omp concurrently, and a future cron job can append to
+ * the same queue (state visible on disk) instead of racing the responder.
  */
 export async function respond(
   xrpc: DirectXrpcClient,
@@ -140,20 +155,90 @@ export async function respond(
   const sessionFile = opts.sessionFile ?? path.join(os.homedir(), ".roomy", "omp-sessions.json");
   const sessions = continuity ? new SessionStore(sessionFile) : undefined;
 
-  // Serialize omp runs per conversation chain so simultaneous events in the
-  // same chain can't race on the same resumed omp session (each turn appends
-  // to the session file in order). Room-level serialization is insufficient
-  // once sessions are keyed per chain (a room holds many chains). The chain
-  // key is resolved (walkChain) before enqueueing, so concurrent events on
-  // the same chain always land on the same queue entry.
-  const chainQueues = new Map<string, Promise<unknown>>();
-  const enqueue = (chainKey: string, task: () => Promise<unknown>) => {
-    const prev = chainQueues.get(chainKey) ?? Promise.resolve();
-    const next = prev.then(task, task);
-    // Log task failures instead of swallowing them: a rejected handler
-    // previously vanished silently, making the agent quietly ignore mentions.
-    chainQueues.set(chainKey, next.catch((e) => log(`[task error] ${e instanceof Error ? e.stack ?? e.message : String(e)}`)));
+  const queueFile = opts.queueFile ?? path.join(os.homedir(), ".roomy", "queue.json");
+  const lockFile = opts.lockFile ?? `${queueFile}.lock`;
+  const queue = new QueueStore(queueFile);
+  const lock = new FileLock(lockFile, opts.lockTtlMs);
+
+  // Lock holder identity is the PROCESS, not the agent DID: duplicate bridge
+  // pipelines on one machine run under the SAME account and must still
+  // exclude each other. Restarts get a new pid (and the stale-takeover after
+  // the heartbeat TTL reclaims a dead holder's lock).
+  const holder = `${os.hostname()}:${process.pid}`;
+  const pid = process.pid;
+  const heartbeat = () => { lock.heartbeat(holder, pid); };
+  /**
+   * Acquire the processing lock, healing the queue on takeover: if a
+   * previous process died mid-job (stale lock / absent lock), its `active`
+   * job goes back to the queue head so it is retried exactly once.
+   * `requeueStaleActive` is a no-op when no job is stuck active, so the heal
+   * is safe to run on every acquisition (including the startup one).
+   */
+  const acquire = (): boolean => {
+    const info = lock.info();
+    if (info && info.holder !== holder) {
+      if (!info.stale) {
+        log(`another responder holds the lock (${info.holder}) — waiting for it to release`);
+        return false;
+      }
+      // Foreign but stale (holder died): take over and heal its orphaned
+      // `active` job back to the queue head so it is retried exactly once.
+      lock.tryAcquire(holder, pid);
+      queue.requeueStaleActive(true);
+      return true;
+    }
+    // Free, or our own lock (re-entrant) — (re)acquire refreshes the
+    // heartbeat. The heal is a no-op when nothing is stuck active, so it is
+    // safe on every grant.
+    lock.tryAcquire(holder, pid);
+    queue.requeueStaleActive(true);
+    return true;
   };
+  acquire();
+
+  // Drain the queue: claim the head job under the lock, run it to
+  // completion (or failure), release, and continue — one job at a time.
+  let running = false;
+  const pump = async () => {
+    if (running) return;
+    running = true;
+    try {
+      for (;;) {
+        if (!acquire()) break;
+        const job = queue.peek();
+        if (!job) break;
+        const active = queue.claim(job.id);
+        if (!active) continue;
+        log(`run job ${active.id} (${active.kind}, ${queue.status().enqueued.length} queued)`);
+        try {
+          if (active.kind === "mention") {
+            await runMentionJob(xrpc, agentDid, active, opts, sessions, log);
+          } else {
+            await runCronJob(xrpc, active, log);
+          }
+          queue.finish(active.id, "done");
+        } catch (error) {
+          const message = error instanceof Error ? error.stack ?? error.message : String(error);
+          log(`job ${active.id} failed: ${message}`);
+          queue.finish(active.id, "failed", message);
+        }
+        heartbeat();
+        lock.release(holder);
+      }
+    } finally {
+      lock.release(holder);
+      running = false;
+    }
+  };
+  const heartbeatTimer = setInterval(heartbeat, Math.floor((opts.lockTtlMs ?? 120_000) / 3));
+  heartbeatTimer.unref();
+  // Drain work enqueued by other processes (cron `queue push`): without
+  // this, a job pushed while the responder is idle would sit until the next
+  // stdin event. 5s poll keeps lock churn negligible (peek is one tiny read).
+  const drainTimer = setInterval(() => {
+    if (queue.status().enqueued.length > 0) void pump();
+  }, 5_000);
+  drainTimer.unref();
 
   const rl = createInterface({ input: process.stdin });
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -175,23 +260,33 @@ export async function respond(
       return;
     }
     if (evt.message.authorDid === agentDid && !opts.includeSelf) return;
-    // Fire-and-forget into the per-chain queue (see enqueue above): the chain
-    // root is resolved before the task runs, then serialized by chain key.
-    void handleEvent(xrpc, agentDid, evt, opts, sessions, log, enqueue);
+    // Persist the event as a job, then let the pump process it in FIFO order.
+    queue.enqueue("mention", { kind: "mention", evt });
+    void pump();
   });
   rl.on("close", resolve);
   await promise;
+  clearInterval(heartbeatTimer);
+  clearInterval(drainTimer);
+  lock.release(holder);
 }
 
-async function handleEvent(
+/**
+ * One queued mention/reply job: run omp and post the reply exactly like the
+ * pre-queue responder. The job was enqueued before the chain walk, so the
+ * walk happens here (under the running-job window) — fine, it just extends
+ * the job duration slightly.
+ */
+async function runMentionJob(
   xrpc: DirectXrpcClient,
   agentDid: string,
-  evt: MentionEvent,
+  job: QueueJob,
   opts: RespondOptions,
   sessions: SessionStore | undefined,
   log: (m: string) => void,
-  enqueue: (chainKey: string, task: () => Promise<unknown>) => void,
 ): Promise<void> {
+  if (job.payload.kind !== "mention") return;
+  const evt = job.payload.evt;
   const { spaceId, roomId, kind } = evt;
   const msg = evt.message;
   const message: MessageInfo = {
@@ -206,98 +301,100 @@ async function handleEvent(
   const recent = opts.recent ?? 100;
   const chain = await walkChain(xrpc, roomId, agentDid, msg.id, recent);
   const chainKey = `${spaceId}:${chain.rootId}`;
+  const prompt = buildPrompt(message, roomId, agentDid, opts.prefix, chain.context, chain.roomName);
+  const parent = chain.parent;
+  const isContinuation = kind === "reply";
+  const prior = isContinuation ? sessions?.get(chainKey) : undefined;
+  const resume = prior?.sessionId;
+  if (resume) log(`continuing omp session ${resume} (chain ${chain.rootId})`);
+  else if (isContinuation) log(`reply with no stored session — starting fresh (chain ${chain.rootId})`);
+  log(`${kind} from ${msg.authorName || msg.authorDid}: ${truncate(plaintextOf(message), 80)}`);
 
-  enqueue(chainKey, async () => {
-    const prompt = buildPrompt(message, roomId, agentDid, opts.prefix, chain.context, chain.roomName);
-    const parent = chain.parent;
-    const isContinuation = kind === "reply";
-    const prior = isContinuation ? sessions?.get(chainKey) : undefined;
-    const resume = prior?.sessionId;
-    if (resume) log(`continuing omp session ${resume} (chain ${chain.rootId})`);
-    else if (isContinuation) log(`reply with no stored session — starting fresh (chain ${chain.rootId})`);
-    log(`${kind} from ${msg.authorName || msg.authorDid}: ${truncate(plaintextOf(message), 80)}`);
+  // Trace placement: fresh mentions in channels get a dedicated 💭 thread
+  // room; everything else (thread-room mentions, and all continuations)
+  // streams traces into the conversation itself.
+  let traceRoomId: string | undefined = prior?.traceThreadId;
+  if (kind === "mention" && !traceRoomId && (opts.traceThreads ?? true)) {
+    traceRoomId = (await ensureTraceThread(xrpc, spaceId, roomId, msg)) ?? undefined;
+  }
 
-    try {
-      // Trace placement: fresh mentions in channels get a dedicated 💭 thread
-      // room; everything else (thread-room mentions, and all continuations)
-      // streams traces into the conversation itself.
-      let traceRoomId: string | undefined = prior?.traceThreadId;
-      if (kind === "mention" && !traceRoomId && (opts.traceThreads ?? true)) {
-        traceRoomId = (await ensureTraceThread(xrpc, spaceId, roomId, msg)) ?? undefined;
-      }
-
-      const streamThinking = opts.streamThinking ?? true;
-      // Serialize streamed thinking-chunk posts so they land in order, and so
-      // the final answer is posted only after every chunk has been sent.
-      // Chunks posted to a trace room chain under the room's first chunk.
-      let thinkingChain: Promise<unknown> = Promise.resolve();
-      let streamedThinking = false;
-      let lastTraceChunkId: string | undefined;
-      const reply = await runOmp(prompt, { ...opts, resume }, {
-        onThinking: (chunk) => {
-          streamedThinking = true;
-          // Each sendReply is chained onto thinkingChain, which is later
-          // awaited at `await thinkingChain`. But onThinking fires
-          // synchronously while runOmp is still streaming, so a rejected
-          // sendReply (e.g. a transient 5xx) would leave this link with no
-          // rejection handler in that window — an unhandled rejection that
-          // crashed the responder and, via the broken pipe, killed the bridge.
-          // Attach a handler immediately so rejections are handled here.
-          thinkingChain = thinkingChain
-            .then(async () => {
-              if (traceRoomId) {
-                const { messageId } = await sendReply(xrpc, spaceId, traceRoomId, chunk, buildThinkingBlocks(chunk), lastTraceChunkId);
-                lastTraceChunkId = messageId;
-              } else {
-                await sendReply(xrpc, spaceId, roomId, chunk, buildThinkingBlocks(chunk), parent);
-              }
-            })
-            .catch((e) => {
-              log(`thinking-chunk post failed: ${e instanceof Error ? e.message : String(e)}`);
-              return Promise.reject(e);
-            });
-        },
-      });
-      if (reply.sessionId) {
-        sessions?.set(chainKey, { sessionId: reply.sessionId, traceThreadId: traceRoomId });
-      }
-      if (!reply || !reply.answer.trim()) {
-        log("empty reply — not posting");
-        return;
-      }
-      await thinkingChain;
-
-      const traceLink = traceRoomId ? `\n\n---\n💭 trace: ${ROOMY_APP_URL}/${spaceId}/${traceRoomId}` : "";
-      if (streamThinking && streamedThinking) {
-        const { messageId } = await sendReply(xrpc, spaceId, roomId, `${reply.answer}${traceLink}`, undefined, parent);
-        log(`replied ${messageId} (answer; thinking ${traceRoomId ? `in trace thread ${traceRoomId}` : "streamed in room"})`);
-        return;
-      }
-
-      const thinking = reply.thinking?.trim();
-      const postThinking = (opts.thinking ?? true) && !!thinking;
-      if (postThinking && traceRoomId) {
-        // Traces go to the trace room even when not streamed: post the trace
-        // there and the clean answer (with a link) in the channel.
-        await sendReply(xrpc, spaceId, traceRoomId, thinking, buildThinkingBlocks(thinking));
-        const { messageId } = await sendReply(xrpc, spaceId, roomId, `${reply.answer}${traceLink}`, undefined, parent);
-        log(`replied ${messageId} (answer; thinking in trace thread ${traceRoomId})`);
-        return;
-      }
-      const blocks = buildReplyBlocks(reply.answer, postThinking ? thinking : undefined);
-      const { messageId } = await sendReply(
-        xrpc,
-        spaceId,
-        roomId,
-        reply.answer,
-        blocks.length > 0 ? blocks : undefined,
-        parent,
-      );
-      log(`replied ${messageId}${postThinking ? " (with thinking)" : ""}`);
-    } catch (error) {
-      log(`error: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  const streamThinking = opts.streamThinking ?? true;
+  // Serialize streamed thinking-chunk posts so they land in order, and so
+  // the final answer is posted only after every chunk has been sent.
+  // Chunks posted to a trace room chain under the room's first chunk.
+  let thinkingChain: Promise<unknown> = Promise.resolve();
+  let streamedThinking = false;
+  let lastTraceChunkId: string | undefined;
+  const reply = await runOmp(prompt, { ...opts, resume }, {
+    onThinking: (chunk) => {
+      streamedThinking = true;
+      // Each sendReply is chained onto thinkingChain, which is later
+      // awaited at `await thinkingChain`. But onThinking fires
+      // synchronously while runOmp is still streaming, so a rejected
+      // sendReply (e.g. a transient 5xx) would leave this link with no
+      // rejection handler in that window — an unhandled rejection that
+      // crashed the responder and, via the broken pipe, killed the bridge.
+      // Attach a handler immediately so rejections are handled here.
+      thinkingChain = thinkingChain
+        .then(async () => {
+          if (traceRoomId) {
+            const { messageId } = await sendReply(xrpc, spaceId, traceRoomId, chunk, buildThinkingBlocks(chunk), lastTraceChunkId);
+            lastTraceChunkId = messageId;
+          } else {
+            await sendReply(xrpc, spaceId, roomId, chunk, buildThinkingBlocks(chunk), parent);
+          }
+        })
+        .catch((e) => {
+          log(`thinking-chunk post failed: ${e instanceof Error ? e.message : String(e)}`);
+          return Promise.reject(e);
+        });
+    },
   });
+  if (reply.sessionId) {
+    sessions?.set(chainKey, { sessionId: reply.sessionId, traceThreadId: traceRoomId });
+  }
+  if (!reply || !reply.answer.trim()) {
+    log("empty reply — not posting");
+    return;
+  }
+  await thinkingChain;
+
+  const traceLink = traceRoomId ? `\n\n---\n💭 trace: ${ROOMY_APP_URL}/${spaceId}/${traceRoomId}` : "";
+  if (streamThinking && streamedThinking) {
+    const { messageId } = await sendReply(xrpc, spaceId, roomId, `${reply.answer}${traceLink}`, undefined, parent);
+    log(`replied ${messageId} (answer; thinking ${traceRoomId ? `in trace thread ${traceRoomId}` : "streamed in room"})`);
+    return;
+  }
+
+  const thinking = reply.thinking?.trim();
+  const postThinking = (opts.thinking ?? true) && !!thinking;
+  if (postThinking && traceRoomId) {
+    // Traces go to the trace room even when not streamed: post the trace
+    // there and the clean answer (with a link) in the channel.
+    await sendReply(xrpc, spaceId, traceRoomId, thinking, buildThinkingBlocks(thinking));
+    const { messageId } = await sendReply(xrpc, spaceId, roomId, `${reply.answer}${traceLink}`, undefined, parent);
+    log(`replied ${messageId} (answer; thinking in trace thread ${traceRoomId})`);
+    return;
+  }
+  const blocks = buildReplyBlocks(reply.answer, postThinking ? thinking : undefined);
+  const { messageId } = await sendReply(
+    xrpc,
+    spaceId,
+    roomId,
+    reply.answer,
+    blocks.length > 0 ? blocks : undefined,
+    parent,
+  );
+  log(`replied ${messageId}${postThinking ? " (with thinking)" : ""}`);
+}
+
+/** One queued cron job: post the prompt text to the room (threaded under
+ *  `parent` when set). This is the seam a future scheduler drives. */
+async function runCronJob(xrpc: DirectXrpcClient, job: QueueJob, log: (m: string) => void): Promise<void> {
+  if (job.payload.kind !== "cron") return;
+  const { spaceId, roomId, text, parent } = job.payload.cron;
+  const { messageId } = await sendReply(xrpc, spaceId, roomId, text, undefined, parent);
+  log(`cron job ${job.id} posted ${messageId}`);
 }
 
 /**

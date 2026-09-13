@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc --project tsconfig.json",
     "dev": "tsx watch src/cli.ts",
-    "start": "tsx src/cli.ts"
+    "start": "tsx src/cli.ts",
+    "test": "bun test --isolate"
   },
   "dependencies": {
     "@atproto/api": "^0.14.22",

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import * as os from "node:os";
+import * as path from "node:path";
 import { Command } from "commander";
 import { loadConfig } from "./config.js";
 import { authenticate } from "./auth.js";
@@ -7,6 +9,7 @@ import { listRooms, findLobbyRoom } from "./rooms.js";
 import { sendMessage, readMessages, buildMentionBlocks } from "./messages.js";
 import { setProfile } from "./profile.js";
 import { respond } from "./respond.js";
+import { FileLock, QueueStore, type CronJobPayload, type QueueJob } from "./queue.js";
 
 const program = new Command();
 export { program };
@@ -310,6 +313,9 @@ program
   .option("--thinking-chunk <n>", "Approx char threshold for each streamed thinking chunk (default 2000)", "2000")
   .option("--system-prompt-file <path>", "File appended to omp's system prompt (default: $OMP_SYSTEM_PROMPT_FILE)")
   .option("--recent <n>", "Recent room messages to load into context when mentioned (default 20; 0 disables)", "20")
+  .option("--queue-file <path>", "Path for the durable job queue (default ~/.roomy/queue.json)")
+  .option("--lock-file <path>", "Path for the queue processing lock (default <queue-file>.lock)")
+  .option("--lock-ttl-ms <n>", "Lock heartbeat TTL in ms (default 120000)", "120000")
   .action(async (options: {
     mentionOnly: boolean;
     includeSelf?: boolean;
@@ -324,6 +330,9 @@ program
     thinkingChunk: string;
     systemPromptFile?: string;
     recent: string;
+    queueFile?: string;
+    lockFile?: string;
+    lockTtlMs: string;
   }) => {
     try {
       const config = loadConfig();
@@ -342,11 +351,74 @@ program
         thinkingChunkSize: Number(options.thinkingChunk),
         systemPromptFile: options.systemPromptFile ?? process.env.OMP_SYSTEM_PROMPT_FILE,
         recent: Number(options.recent),
+        queueFile: options.queueFile,
+        lockFile: options.lockFile,
+        lockTtlMs: Number(options.lockTtlMs),
       });
     } catch (error) {
       console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
       process.exit(1);
     }
+  });
+
+// ── queue ──────────────────────────────────────────────────────────────────
+
+/**
+ * Default queue file, matching respond.ts (the responder and these commands
+ * must address the same store, or a cron script can pass --queue-file to
+ * target a specific responder instance).
+ */
+const defaultQueueFile = () =>
+  process.env.ROOMY_QUEUE_FILE ?? path.join(os.homedir(), ".roomy", "queue.json");
+
+const queueCmd = program
+  .command("queue")
+  .description("Agent job queue operations (state readable by cron scripts)");
+
+queueCmd
+  .command("status")
+  .description("Show the agent job queue state (lock, in-flight, backlog)")
+  .option("--queue-file <path>", "Path to the queue file")
+  .action(async (options: { queueFile?: string }) => {
+    const queueFile = options.queueFile ?? defaultQueueFile();
+    const queue = new QueueStore(queueFile);
+    const lock = new FileLock(`${queueFile}.lock`);
+    const state = queue.status();
+    const lockInfo = lock.info();
+    const row = (j: QueueJob) =>
+      `${j.status}\t${j.kind}\t${new Date(j.enqueuedAt).toISOString()}\t${j.id}`;
+    console.log(`# queue: ${state.enqueued.length} queued, ${state.active ? 1 : 0} active, ${state.done.length} recent done`);
+    console.log(`# lock: ${lockInfo ? `${lockInfo.holder} pid ${lockInfo.pid}${lockInfo.stale ? " (STALE)" : ""}` : "free"}`);
+    for (const job of state.enqueued) console.log(row(job));
+    if (state.active) console.log(row(state.active));
+  });
+
+queueCmd
+  .command("push")
+  .description("Enqueue a scheduled prompt job (for cron). Posts to the room when the responder drains it.")
+  .requiredOption("--space <id>", "Space id")
+  .requiredOption("--room <id>", "Room id")
+  .requiredOption("--text <text>", "Prompt text to post")
+  .option("--parent <id>", "Thread the post under this message id")
+  .option("--only-if-empty", "Skip enqueueing when the queue is not empty (cron: never stack behind a backlog)")
+  .option("--queue-file <path>", "Path to the queue file")
+  .action(async (options: { space: string; room: string; text: string; parent?: string; onlyIfEmpty?: boolean; queueFile?: string }) => {
+    const queue = new QueueStore(options.queueFile ?? defaultQueueFile());
+    const cron: CronJobPayload = {
+      spaceId: options.space,
+      roomId: options.room,
+      text: options.text,
+      ...(options.parent ? { parent: options.parent } : {}),
+    };
+    const job = options.onlyIfEmpty
+      ? queue.enqueueIfIdle("cron", { kind: "cron", cron })
+      : queue.enqueue("cron", { kind: "cron", cron });
+    if (!job) {
+      console.log("queue busy — job not enqueued (--only-if-empty)");
+      process.exitCode = 0;
+      return;
+    }
+    console.log(`queued ${job.id} (${job.kind})`);
   });
 
 // ── parse ─────────────────────────────────────────────────────────────────
