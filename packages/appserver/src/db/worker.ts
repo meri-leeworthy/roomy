@@ -453,6 +453,24 @@ const MIGRATIONS: Migration[] = [
       ).run();
     },
   },
+  {
+    // Roomy Pro members-area role grants. The schema file (readStateSchema.sql)
+    // also declares this with `create table if not exists` so a fresh DB gets
+    // it at exec time; this migration exists so an existing v9 readstate DB
+    // advances its version row to 10. Structural-only — no async task.
+    version: 10,
+    up(db: Database) {
+      db.exec(`
+        create table if not exists pro_role_grants (
+          did         text primary key,
+          granted_at  integer not null default (unixepoch() * 1000)
+        ) strict
+      `);
+      db.query(
+        "insert or ignore into readstate_schema_migrations (version, completed_at) values ('10', null)",
+      ).run();
+    },
+  },
 ];
 
 function initializeReadStateSchema(

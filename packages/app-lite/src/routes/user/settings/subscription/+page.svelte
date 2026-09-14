@@ -167,11 +167,21 @@
       <div class="mt-6 flex flex-col items-center justify-center gap-3">
         {#if status?.isPro}
           <span
-            class="inline-flex items-center gap-1.5 rounded-full border border-green-600/30 bg-green-50 dark:bg-green-950/30 px-3 py-1.5 text-sm font-medium text-green-800 dark:text-green-300"
+            class="inline-flex items-center gap-1.5 rounded-full border border-green-600/30 bg-green-50 dark:bg-green-950/30 px-3 py-1.5 text-sm font-medium text-green-800 dark:text-green-400"
           >
             <IconCheck class="size-4" />
             You're a Roomy Pro member
           </span>
+          <Button
+            href="https://roomy.space/did:plc:gnwy2zbm3hu4gfdawzxmpb2s/01M2EQKCWRQ2M0BTNK5SD8864S"
+            target="_blank"
+            rel="noopener noreferrer"
+            variant="primary"
+            size="lg"
+          >
+            Open the Members area
+            <IconArrowRight class="size-5" />
+          </Button>
         {:else}
           <Button
             onclick={startCheckout}

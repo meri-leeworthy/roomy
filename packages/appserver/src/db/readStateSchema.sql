@@ -185,3 +185,14 @@ create table if not exists bridge_token_grants (
 ) strict;
 create index if not exists idx_bridge_token_grants_space
   on bridge_token_grants(space_did);
+
+-- ── Roomy Pro members-area role grants (schema v10) ─────────────────────
+-- Tracks the DIDs the Roomy Pro members-role reconcile sweep has granted
+-- the 'Members' role in the Roomy Space. This is the sweep's ownership
+-- record so it can remove a lapsed subscriber WITHOUT clobbering a
+-- manually-assigned member who is not a subscriber. Removal only applies
+-- to a tracked DID whose subscription has lapsed.
+create table if not exists pro_role_grants (
+  did         text primary key,
+  granted_at  integer not null default (unixepoch() * 1000)
+) strict;

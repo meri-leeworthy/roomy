@@ -14,6 +14,7 @@ import {
   getCachedCustomerState,
   getCustomerState,
   getPolarConfig,
+  listProSubscribers,
   resolveCapacity,
   ROOMY_PRO_CAPACITY,
   PolarUnavailableError,
@@ -521,5 +522,116 @@ describe("createCheckoutSession", () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PolarUnavailableError);
     }
+  });
+});
+
+// ─── subscriptions list (Roomy Pro subscribers enumeration) ──────────────
+
+describe("listProSubscribers", () => {
+  const DID1 = "did:plc:sub-1";
+  const DID2 = "did:plc:sub-2";
+
+  function subItem(partial?: Partial<{ status: string; product_id: string; external_id: string | null }>) {
+    const ext =
+      partial?.external_id === undefined ? "did:plc:x" : partial.external_id;
+    const { external_id: _omit, ...rest } = partial ?? {};
+    return {
+      status: "active",
+      product_id: CONFIG.roomyProProductId,
+      customer: { external_id: ext },
+      ...rest,
+    };
+  }
+
+  function listResponse(items: unknown[], maxPage = 1) {
+    return Response.json(
+      { items, pagination: { total_count: items.length, max_page: maxPage } },
+      { status: 200 },
+    );
+  }
+
+  test("returns external_ids of active/trialing Pro subscriptions", async () => {
+    stubFetch(() =>
+      listResponse([
+        subItem({ status: "active", external_id: DID1 }),
+        subItem({ status: "trialing", external_id: DID2 }),
+      ]),
+    );
+
+    const set = await listProSubscribers(CONFIG);
+    expect(set.has(DID1)).toBe(true);
+    expect(set.has(DID2)).toBe(true);
+  });
+
+  test("excludes inactive/canceled/lapsed statuses", async () => {
+    stubFetch(() =>
+      listResponse([
+        subItem({ status: "active", external_id: DID1 }),
+        subItem({ status: "canceled", external_id: DID2 }),
+        subItem({ status: "revoked", external_id: "did:plc:revoked" }),
+        subItem({ status: "incomplete", external_id: "did:plc:incomplete" }),
+      ]),
+    );
+
+    const set = await listProSubscribers(CONFIG);
+    expect(set.size).toBe(1);
+    expect(set.has(DID1)).toBe(true);
+  });
+
+  test("ignores items without a customer external_id", async () => {
+    stubFetch(() =>
+      listResponse([
+        subItem({ status: "active", external_id: null }),
+        subItem({ status: "active", external_id: DID1 }),
+      ]),
+    );
+
+    const set = await listProSubscribers(CONFIG);
+    expect(set.size).toBe(1);
+    expect(set.has(DID1)).toBe(true);
+  });
+
+  test("paginates via page/limit until max_page", async () => {
+    const seenPages: string[] = [];
+    stubFetch((url) => {
+      const page = new URL(url).searchParams.get("page") ?? "1";
+      seenPages.push(page);
+      if (page === "1") {
+        return listResponse(
+          [subItem({ status: "active", external_id: DID1 })],
+          2,
+        );
+      }
+      return listResponse(
+        [subItem({ status: "active", external_id: DID2 })],
+        2,
+      );
+    });
+
+    const set = await listProSubscribers(CONFIG);
+    expect(seenPages).toEqual(["1", "2"]);
+    expect(set.has(DID1)).toBe(true);
+    expect(set.has(DID2)).toBe(true);
+  });
+
+  test("non-200 (e.g. 403 missing subscriptions:read scope) → PolarUnavailableError", async () => {
+    stubFetch(() => new Response("Forbidden", { status: 403 }));
+    await expect(listProSubscribers(CONFIG)).rejects.toBeInstanceOf(
+      PolarUnavailableError,
+    );
+  });
+
+  test("malformed body → PolarUnavailableError", async () => {
+    stubFetch(() => Response.json({ nope: true }, { status: 200 }));
+    await expect(listProSubscribers(CONFIG)).rejects.toBeInstanceOf(
+      PolarUnavailableError,
+    );
+  });
+
+  test("network failure → PolarUnavailableError", async () => {
+    stubFetch(() => Promise.reject(new TypeError("fetch failed")));
+    await expect(listProSubscribers(CONFIG)).rejects.toBeInstanceOf(
+      PolarUnavailableError,
+    );
   });
 });

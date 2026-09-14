@@ -115,6 +115,11 @@
     "group": "Admin"
   },
   {
+    "nsid": "space.roomy.admin.reconcileProMembers",
+    "kind": "procedure",
+    "group": "Admin"
+  },
+  {
     "nsid": "space.roomy.sync.getEvents",
     "kind": "query",
     "group": "Sync"

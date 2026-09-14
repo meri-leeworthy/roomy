@@ -78,6 +78,7 @@ import { revokeBridgeTokenHandler } from "./handlers/space.roomy.space.revokeBri
 import { getBridgeTokensHandler } from "./handlers/space.roomy.space.getBridgeTokens.ts";
 import { createProCheckoutHandler } from "./handlers/space.roomy.pro.createCheckout.ts";
 import { adminGetSpaceMembershipHandler } from "./handlers/space.roomy.admin.getSpaceMembership.ts";
+import { adminReconcileProMembersHandler } from "./handlers/space.roomy.admin.reconcileProMembers.ts";
 import { getVapidPublicKeyHandler } from "./handlers/space.roomy.push.getVapidPublicKey.ts";
 import { getPreferencesHandler } from "./handlers/space.roomy.push.getPreferences.ts";
 import { registerSubscriptionHandler } from "./handlers/space.roomy.push.registerSubscription.ts";
@@ -90,6 +91,10 @@ import { schemas } from "@roomy-space/sdk";
 import { initHappyView, type HappyViewConfig } from "./happyview.ts";
 import { initQdrant } from "./qdrant.ts";
 import { initPolar } from "./billing/polar.ts";
+import {
+  runProMembersReconcile,
+  PRO_MEMBERS_RECONCILE_INTERVAL_MS,
+} from "./billing/proMembersReconcile.ts";
 import { getArbiterConfig, type ArbiterConfig } from "./arbiter/config.ts";
 import type { GetProfilesFn } from "./materialization/profiles.ts";
 
@@ -276,6 +281,9 @@ export function buildRouter(
     })
     .query("space.roomy.admin.getSpaceMembership", {
       handler: adminGetSpaceMembershipHandler,
+    })
+    .procedure("space.roomy.admin.reconcileProMembers", {
+      handler: adminReconcileProMembersHandler,
     })
     .query("space.roomy.sync.getEvents", {
       handler: getEventsHandler,
@@ -628,6 +636,24 @@ export async function createAppserver(
     // (deliveries just find no subscriptions).
     startPushDispatcher({ db: openReadStateDb() });
   }
+  // ─── Roomy Pro members-role reconciliation (periodic sweep) ───────────
+  // Every 10 minutes, reconcile the Roomy Space's 'Members' role against
+  // Polar's live Pro-subscriber set (add paying subscribers, remove lapsed
+  // tracked ones). Unref'd alongside the maintenance/metrics timers. No-op
+  // when Polar isn't configured; fail-safe (writes nothing) on a Polar
+  // outage. Disabled in tests via `disableBackgroundWorkers`.
+  let proMembersTimer: ReturnType<typeof setInterval> | undefined;
+  if (backgroundWorkers) {
+    proMembersTimer = setInterval(() => {
+      runProMembersReconcile().catch((err) => {
+        log.error(
+          "[pro-members] periodic sweep crashed",
+          err instanceof Error ? err : undefined,
+        );
+      });
+    }, PRO_MEMBERS_RECONCILE_INTERVAL_MS);
+    proMembersTimer.unref();
+  }
 
   // ─── XRPC routes ──────────────────────────────────────────────────────
   const authVerifier = opts.authVerifier ?? selectAuthVerifier();
@@ -897,6 +923,7 @@ export async function createAppserver(
         try {
           clearInterval(maintenanceTimer);
           clearInterval(metricsTimer);
+          clearInterval(proMembersTimer);
           closeDb();
         } catch (e) {
           log.error("appserver close: closeDb failed", e);

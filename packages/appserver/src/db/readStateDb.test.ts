@@ -4,7 +4,7 @@ import { READSTATE_SCHEMA_VERSION } from "./readStateDb.ts";
 
 describe("read-state schema", () => {
   test("READSTATE_SCHEMA_VERSION is exported", () => {
-    expect(READSTATE_SCHEMA_VERSION).toBe("9");
+    expect(READSTATE_SCHEMA_VERSION).toBe("10");
   });
 
   test("schema applies cleanly on a fresh database", () => {
@@ -360,6 +360,17 @@ describe("read-state schema", () => {
             db.exec(`
               create index if not exists idx_bridge_token_grants_space
                 on bridge_token_grants(space_did)
+            `);
+          },
+        },
+        {
+          version: 10,
+          up(db: Database) {
+            db.exec(`
+              create table if not exists pro_role_grants (
+                did         text primary key,
+                granted_at  integer not null default (unixepoch() * 1000)
+              ) strict
             `);
           },
         },

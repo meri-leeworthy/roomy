@@ -809,6 +809,15 @@ export const prose: Record<string, EndpointProse> = {
       "Per-grant processing (read-time validity): Polar validity check per grantor (300s TTL cache).",
     ],
   },
+  "space.roomy.admin.reconcileProMembers": {
+    description:
+      "On-demand Roomy Pro members-role reconciliation: sweeps the Roomy Space's 'Members' role against Polar's live Pro-subscriber set — adding paying subscribers and removing lapsed tracked ones — then reports what changed. This is the operator-triggered companion to the periodic sweep; both share the same fail-safe semantics (a Polar outage aborts with no role mutation rather than guessing a subscriber set).",
+    auth: "Admin allowlist (APPSERVER_ADMIN_DIDS). Requires the Polar organization access token to carry the `subscriptions:read` scope.",
+    notes: [
+      "Only removes DIDs the sweep itself previously granted and tracked (see pro_role_grants); a manually-assigned member who is not a subscriber is left untouched.",
+      "Idempotent: a run with no desync writes nothing.",
+    ],
+  },
 
   // ── Federation ───────────────────────────────────────────────────────────
   "space.roomy.federation.getRequests": {

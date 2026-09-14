@@ -14,6 +14,16 @@
  * `customers:read`). `external_id` is the Roomy user DID. A 404 means the
  * customer does not exist — a valid "capacity 0" answer, NOT an error.
  *
+ * The Roomy Pro members-role reconcile sweep additionally needs the
+ * organization token to enumerate live subscribers via the subscriptions
+ * list endpoint:
+ *
+ *   GET {endpoint}/subscriptions/?product_id={ROOMY_PRO_PRODUCT_ID}
+ *
+ * which requires the `subscriptions:read` scope (separate from
+ * `customers:read` / `checkouts:write`). A token without it receives 403
+ * and the sweep aborts with no writes rather than guessing a user set.
+ *
  * Response shape (typed in `PolarCustomerState`):
  *   - active_subscriptions[].status        (active | trialing)
  *   - active_subscriptions[].current_period_end
@@ -377,6 +387,124 @@ export async function createCheckoutSession(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * List live Roomy Pro subscribers across the whole organization.
+ *
+ * Used by the Roomy Pro members-area reconcile sweep to compute the desired
+ * set of DIDs that should hold the 'Members' role in the Roomy Space.
+ *
+ * Calls the Polar subscriptions list endpoint:
+ *
+ *   GET {endpoint}/subscriptions/?product_id={ROOMY_PRO_PRODUCT_ID}
+ *
+ * filtered to the Roomy Pro product, with the organization access token.
+ * NOTE: this endpoint requires the `subscriptions:read` scope on the token,
+ * which is separate from `customers:read` / `checkouts:write`. If the token
+ * lacks it, Polar returns 403 and this throws `PolarUnavailableError` — the
+ * caller must not fall back to guessing a user set (see the sweep module).
+ *
+ * Pagination mirrors Polar's `page`/`limit` window model (limit max 100).
+ * We request the Roomy Pro product filter so the response only contains
+ * subscriptions relevant to the members role.
+ *
+ * Returns the set of `external_id`s (Roomy DID — the customer external ID)
+ * whose current subscription status is one of `active` / `trialing`
+ * (the live, paying states the appserver already treats as Pro).
+ *
+ * Fail-safe semantics (match the customer-state client): a non-2xx status,
+ * network failure, or malformed body throws `PolarUnavailableError` — the
+ * sweep must never interpret an unreachable/malformed Polar as "no one is
+ * paying" and mass-remove grants.
+ */
+export interface PolarSubscriptionItem {
+  status: string;
+  product_id?: string;
+  /** Expanded customer — carries the external_id (Roomy DID). */
+  customer?: { external_id?: string | null } | null;
+}
+
+function isPolarSubscriptionList(
+  v: unknown,
+): v is { items: PolarSubscriptionItem[] } {
+  if (typeof v !== "object" || v === null) return false;
+  const s = v as Record<string, unknown>;
+  return Array.isArray(s.items);
+}
+
+export const POLAR_SUBSCRIPTIONS_PAGE_SIZE = 100;
+export const MAX_SUBSCRIPTION_PAGES = 10;
+
+export async function listProSubscribers(
+  config: PolarConfig,
+): Promise<Set<string>> {
+  const subscribers = new Set<string>();
+  let page = 1;
+  let totalPages = 1;
+  do {
+    const url =
+      `${config.endpoint}/subscriptions/` +
+      `?product_id=${encodeURIComponent(config.roomyProProductId)}` +
+      `&limit=${POLAR_SUBSCRIPTIONS_PAGE_SIZE}&page=${page}`;
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      POLAR_FETCH_TIMEOUT_MS,
+    );
+    try {
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${config.accessToken}`,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      });
+      if (res.status !== 200) {
+        throw new PolarUnavailableError(
+          `Polar subscriptions list returned HTTP ${res.status}`,
+        );
+      }
+      const body: unknown = await res.json();
+      if (!isPolarSubscriptionList(body)) {
+        throw new PolarUnavailableError(
+          "Polar subscriptions list response did not match expected shape",
+        );
+      }
+      for (const item of body.items) {
+        const status = item.status;
+        if (status !== "active" && status !== "trialing") continue;
+        const externalId = item.customer?.external_id;
+        if (externalId && externalId.length > 0) {
+          subscribers.add(externalId);
+        }
+      }
+      let newTotalPages = 1;
+      if ("pagination" in body && typeof body.pagination === "object" && body.pagination !== null) {
+        const pagination = body.pagination as Record<string, unknown>;
+        if (typeof pagination.max_page === "number") {
+          newTotalPages = pagination.max_page;
+        }
+      }
+      // Defensive cap so a malformed `max_page` can't drive an unbounded
+      // loop against the Polar API.
+      if (newTotalPages > MAX_SUBSCRIPTION_PAGES || newTotalPages < 1) {
+        newTotalPages = 1;
+      }
+      totalPages = newTotalPages;
+      page += 1;
+    } catch (err) {
+      if (err instanceof PolarUnavailableError) throw err;
+      throw new PolarUnavailableError(
+        err instanceof Error
+          ? err.message
+          : "Polar subscriptions list fetch failed",
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  } while (page <= totalPages);
+  return subscribers;
 }
 
 /**
