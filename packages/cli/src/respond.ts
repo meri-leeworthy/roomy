@@ -354,6 +354,10 @@ async function runMentionJob(
   let lastTraceChunkId: string | undefined;
   const reply = await runOmp(prompt, { ...opts, resume }, {
     onThinking: (chunk) => {
+      // Self-triggered ticks post no thinking at all: dropping the callback
+      // here (not just the flags below) is what prevents the chunks, since
+      // omp streams them regardless of the streamThinking/postThinking flags.
+      if (selfTriggered) return;
       streamedThinking = true;
       thinkingPosts.push(async () => {
         if (traceRoomId) {
