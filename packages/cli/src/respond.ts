@@ -329,9 +329,16 @@ async function runMentionJob(
   else if (isContinuation) log(`reply with no stored session — starting fresh (chain ${chain.rootId})`);
   log(`${kind} from ${msg.authorName || msg.authorDid}: ${truncate(plaintextOf(message), 80)}`);
 
-  // Trace placement: fresh mentions in channels get a dedicated 💭 thread
-  // room; everything else (thread-room mentions, and all continuations)
-  // streams traces into the conversation itself.
+  // Trace placement: a session in a CHANNEL gets a dedicated 💭 thread room and
+  // streams its thinking there; a session already in a thread room keeps its
+  // traces in that room. `ensureTraceThread` returns undefined for thread rooms,
+  // so the same call handles both.
+  //
+  // Continuations need this as much as fresh mentions do. A chain whose root was
+  // a self-triggered tick has no stored 💭 room — self-triggers persist no
+  // session (so `prior.traceThreadId` is absent) — and a reply to it would
+  // otherwise stream its thinking straight into the channel, which is exactly
+  // the clutter a trace thread exists to prevent.
   //
   // Self-triggered sessions (the scheduled self-check posts a facet mention of
   // the agent itself) are exempt entirely: they fire on a timer, so a 💭 room
@@ -339,7 +346,7 @@ async function runMentionJob(
   // unattended check. Their answer is the whole deliverable.
   const selfTriggered = msg.authorDid === agentDid;
   let traceRoomId: string | undefined = selfTriggered ? undefined : prior?.traceThreadId;
-  if (!selfTriggered && kind === "mention" && !traceRoomId && (opts.traceThreads ?? true)) {
+  if (!selfTriggered && !traceRoomId && (opts.traceThreads ?? true)) {
     traceRoomId = (await ensureTraceThread(xrpc, spaceId, roomId, msg)) ?? undefined;
   }
 
