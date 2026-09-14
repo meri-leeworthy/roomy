@@ -44,6 +44,79 @@ import { log } from "../log.ts";
  * Once the handle resolves to something valid, it stops being re-checked.
  */
 const STALE_HANDLE_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Negative cache: how long a DID that resolved to no profile at all is kept
+ * out of the fetch path.
+ *
+ * Both fetch paths only ever suppressed a retry *after a success*, because a
+ * cache row is written from the fetch result. A DID that neither HappyView nor
+ * the Bluesky appview can resolve — a brand-new DID, a `did:web`, an appview
+ * hiccup — therefore had no row to find, so `filterMissing` returned it again
+ * and the write path re-ran the full pipeline (HappyView + Bluesky, two HTTP
+ * round-trips) on *every single event* by that author, forever. N concurrent
+ * writes by the same unresolved author each issued their own copy: this is
+ * what put 48 requests on one worker in production.
+ *
+ * Keyed by DID and shared by both callers of this pipeline: materialisation's
+ * `ensureProfilesForBatch`/`ensureProfilesRoomyFirst` and the read path's
+ * on-demand hydration, so a failure in one is not repeated by the other.
+ *
+ * The TTL is deliberately short (a minute, not the stale-handle cooldown's
+ * hour): a DID that resolves nowhere *today* may be a user whose Roomy profile
+ * record HappyView has simply not indexed yet, and backing that off for long
+ * would leave their messages authored by a blank name long after the record
+ * exists. One minute bounds that staleness while still collapsing the
+ * per-event stampede — the fetch cost becomes one lookup per DID per minute
+ * instead of one per event and per reader.
+ */
+const NEGATIVE_CACHE_TTL_MS = 60 * 1000; // 1 minute
+/** DIDs whose last fetch resolved nothing, mapped to when it happened. */
+const negativeCache = new Map<string, number>();
+
+/**
+ * True when a recent lookup for `did` resolved to nothing and the backoff has
+ * not elapsed. Exported so callers that reach a fetch *outside* this
+ * pipeline's guards (the read path decides on-demand hydration for itself)
+ * can skip the work rather than rediscovering the failure.
+ */
+export function isProfileFetchBackedOff(did: string): boolean {
+  const at = negativeCache.get(did);
+  if (at === undefined) return false;
+  if (Date.now() - at >= NEGATIVE_CACHE_TTL_MS) {
+    negativeCache.delete(did);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Record the DIDs a fetch left unresolved, for `NEGATIVE_CACHE_TTL_MS`.
+ * Only successful lookups are re-fetched sooner (see `isProfileFetchBackedOff`).
+ *
+ * The read path also calls this: in tests its fetcher stub replaces the
+ * pipeline, so the backoff has to be applied at that seam too.
+ */
+export function recordUnresolvedProfiles(
+  requested: readonly string[],
+  resolved: ReadonlySet<string>,
+): void {
+  const now = Date.now();
+  // Drop stale entries first, so the map cannot grow without bound on a
+  // process that sees many one-off DIDs.
+  for (const [did, at] of negativeCache) {
+    if (now - at >= NEGATIVE_CACHE_TTL_MS) negativeCache.delete(did);
+  }
+  for (const did of requested) {
+    if (!resolved.has(did)) negativeCache.set(did, now);
+  }
+}
+
+/** Test helper: clear the negative cache. */
+export function _resetProfileNegativeCache(): void {
+  negativeCache.clear();
+}
+
 /** Event $types that signal a user we may not yet have a profile for. */
 const NEW_USER_SIGNALS: EventType[] = [
   "space.roomy.space.addAdmin.v0",
@@ -59,16 +132,23 @@ export type GetProfilesFn = (dids: UserDid[]) => Promise<ProfileViewDetailed[]>;
  * The appview's `app.bsky.actor.getProfiles` takes `actors` as an *array*
  * (repeated `actors=` query keys, NOT a comma-joined string) and caps at 25
  * actors per request — exceeding either yields HTTP 400
- * `InvalidRequest: Invalid AT identifier`. Backfill batches can reference far
- * more than 25 users, so we chunk into groups of 25 and concatenate.
+ * `Invalid AT identifier`. Backfill batches can reference far more than 25
+ * users, so we chunk into groups of 25 and concatenate.
+ *
+ * Every outbound profile lookup in the appserver funnels through here (the
+ * materialisation pipeline and the read path's on-demand hydration both call
+ * it), which makes it the one place where a failed resolution can be
+ * remembered for all of them.
  */
 export const defaultGetProfiles: GetProfilesFn = async (dids: UserDid[]) => {
   if (dids.length === 0) return [];
+  const fetchable = dids.filter((d) => !isProfileFetchBackedOff(d));
+  if (fetchable.length === 0) return [];
   const MAX_ACTORS = 25;
   const out: ProfileViewDetailed[] = [];
   try {
-    for (let i = 0; i < dids.length; i += MAX_ACTORS) {
-      const chunk = dids.slice(i, i + MAX_ACTORS);
+    for (let i = 0; i < fetchable.length; i += MAX_ACTORS) {
+      const chunk = fetchable.slice(i, i + MAX_ACTORS);
       try {
         const params = new URLSearchParams();
         for (const d of chunk) params.append("actors", d);
@@ -85,9 +165,8 @@ export const defaultGetProfiles: GetProfilesFn = async (dids: UserDid[]) => {
         if (data.profiles) out.push(...data.profiles);
       } catch (err) {
         // Per-chunk isolation: a network/parse failure on one chunk must not
-        // abort the remaining chunks. Affected DIDs self-heal on the next
-        // backfill (profile still missing from the global store →
-        // filterMissing returns them).
+        // abort the remaining chunks. Affected DIDs are backed off below and
+        // retried after `NEGATIVE_CACHE_TTL_MS`.
         const message = err instanceof Error ? err.message : String(err);
         log.warn(
           `[materialize] defaultGetProfiles: chunk failed (${chunk.length} DIDs): ${message}`,
@@ -101,6 +180,9 @@ export const defaultGetProfiles: GetProfilesFn = async (dids: UserDid[]) => {
       `[materialize] defaultGetProfiles: aborted for ${dids.length} DIDs: ${message}`,
     );
   }
+  // `getProfile` calls this directly as a last resort, so the backoff is
+  // enforced here too — not only in the pipeline that normally calls it.
+  recordUnresolvedProfiles(fetchable, new Set(out.map((p) => p.did)));
   return out;
 };
 
@@ -124,38 +206,46 @@ export async function getProfilesRoomyFirst(
 ): Promise<{ profiles: ProfileViewDetailed[]; extras: Map<string, RoomyProfileExtras> }> {
   if (dids.length === 0) return { profiles: [], extras: new Map() };
 
+  // DIDs that recently resolved to nothing are skipped entirely — no
+  // HappyView call, no Bluesky call — until the backoff elapses.
+  const requested = dids.filter((d) => !isProfileFetchBackedOff(d));
+
   const profiles: ProfileViewDetailed[] = [];
   const extras = new Map<string, RoomyProfileExtras>();
 
   // Step 1: query HappyView for Roomy profile records (batched).
-  let missingDids = dids;
+  let missingDids = requested;
   if (happyView) {
-    const happyViewResults = await getProfilesFromHappyView(dids, happyView);
-    for (const did of dids) {
+    const happyViewResults = await getProfilesFromHappyView(requested, happyView);
+    for (const did of requested) {
       const hp = happyViewResults.get(did);
       if (hp) {
         profiles.push(happyViewToProfileView(hp));
         extras.set(did, happyViewExtras(hp));
       }
     }
-    missingDids = dids.filter((d) => !happyViewResults.has(d));
+    missingDids = requested.filter((d) => !happyViewResults.has(d));
   }
 
-  // Step 2: fall back to Bluesky for DIDs HappyView didn't have (or all
-  // DIDs when HappyView is not configured).
-  if (missingDids.length > 0) {
-    // Under `bun test` (NODE_ENV=test) skip the live Bluesky appview fetch.
-    // Unit tests that exercise materialization/read paths don't assert on
-    // profile rows, and live fetches pile up under parallel load and blow
-    // the 5s per-test timeout (see the `_setTestGetProfiles` comment in
-    // src/e2e/helpers.ts). Tests that DO exercise the fetcher mock
-    // `globalThis.fetch` and call `defaultGetProfiles` directly.
-    if (process.env.NODE_ENV === "test") {
-      return { profiles, extras };
-    }
+  // Step 2: fall back to Bluesky for the DIDs HappyView didn't have (or all
+  // of them when HappyView is not configured). Under `bun test`
+  // (NODE_ENV=test) the live appview fetch is skipped: unit tests that
+  // exercise materialization/read paths don't assert on profile rows, and
+  // live fetches pile up under parallel load and blow the 5s per-test timeout
+  // (see the `_setTestGetProfiles` comment in src/e2e/helpers.ts). Tests that
+  // DO exercise the fetcher mock `globalThis.fetch` and call
+  // `defaultGetProfiles` directly.
+  if (missingDids.length > 0 && process.env.NODE_ENV !== "test") {
     const bskyProfiles = await defaultGetProfiles(missingDids);
     profiles.push(...bskyProfiles);
   }
+
+  // Every source has now been asked (or, under `bun test`, the only source
+  // that exists in this environment has been). Anything still absent is
+  // unresolvable, so back it off instead of re-running both lookups on the
+  // next event or read — the failure that made production re-fetch the same
+  // author forever.
+  recordUnresolvedProfiles(requested, new Set(profiles.map((p) => p.did)));
 
   return { profiles, extras };
 }

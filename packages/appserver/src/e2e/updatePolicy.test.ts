@@ -18,6 +18,7 @@ import { _resetRateLimit } from "../xrpc/rateLimit.ts";
 import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import { _resetProfileStoreCache } from "../queries/profileStore.ts";
+import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
 import type { ArbiterConfig } from "../arbiter/config.ts";
 import { REFERENCE_ARBITER_CONFIG } from "../arbiter/provision.ts";
 import type { Database } from "bun:sqlite";
@@ -77,6 +78,7 @@ describe("space.roomy.space.updatePolicy", () => {
       _resetHydrationInflight();
       _resetEmbedSweeper();
       _resetProfileStoreCache();
+  _resetProfileNegativeCache();
       const db = openDb({ path: ":memory:" }) as unknown as Database;
       seedSpace(db, SPACE, USER);
       seedAdmin(db, SPACE, ADMIN);
@@ -128,6 +130,7 @@ describe("space.roomy.space.updatePolicy", () => {
       _resetHydrationInflight();
       _resetEmbedSweeper();
       _resetProfileStoreCache();
+  _resetProfileNegativeCache();
       const db = openDb({ path: ":memory:" }) as unknown as Database;
       seedSpace(db, SPACE, USER);
       seedAdmin(db, SPACE, ADMIN);

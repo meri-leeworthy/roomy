@@ -23,6 +23,7 @@ import { closeDb, openDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
 import type { DbLike } from "../db/types.ts";
 import { selectActivityFeed } from "./activityFeed.ts";
 import { _setTestGetProfiles } from "./profileStore.ts";
+import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
 import { setUserSpaceMembership } from "./userSpaceMembership.ts";
 
 const SPACE = "did:web:space.example";
@@ -64,6 +65,7 @@ function ulidForTimestamp(ts: number): string {
 function setup(): { readState: DbLike } {
   closeDb();
   openDb({ path: ":memory:" });
+  _resetProfileNegativeCache();
   // Hermetic: without a stub, on-demand profile hydration in
   // selectActivityFeed hits live api.bsky.app fetches.
   _setTestGetProfiles(async () => []);

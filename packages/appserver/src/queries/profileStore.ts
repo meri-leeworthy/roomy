@@ -27,8 +27,9 @@
  * To make reads as reliable as the profile page, DIDs that aren't in the
  * global store are hydrated on demand (HappyView-first, Bluesky fallback) and
  * written back, so a profile never needs to already be present for the read
- * path to return it. Failed/missing lookups are cached (short TTL) so a user
- * with no profile anywhere isn't re-fetched on every read.
+ * path to return it. A DID that resolves nowhere is not re-fetched on every
+ * read — the hydration pipeline's negative cache (materialization/profiles.ts)
+ * backs it off after the first failure.
  */
 
 import { tryOpenGlobalDb } from "../db/db.ts";
@@ -37,6 +38,8 @@ import { getHappyView } from "../happyview.ts";
 import {
   getProfilesRoomyFirst,
   insertProfilesWithExtras,
+  isProfileFetchBackedOff,
+  recordUnresolvedProfiles,
 } from "../materialization/profiles.ts";
 import type { UserDid } from "@roomy-space/sdk";
 import { log } from "../log.ts";
@@ -54,7 +57,10 @@ interface CacheEntry {
   fetchedAt: number;
 }
 
-/** How long a resolved profile (or a miss) is cached before re-querying. */
+/**
+ * How long a *resolved* profile is served from the in-memory cache. A resolved
+ * row is authoritative until its TTL, so reads stay off the global DB.
+ */
 const CACHE_TTL_MS = 60_000;
 
 const cache = new Map<string, CacheEntry>();
@@ -65,11 +71,12 @@ const cache = new Map<string, CacheEntry>();
  * pipeline. E2E tests set a no-op stub to keep runs hermetic (no
  * api.bsky.app calls under parallel load).
  */
-let testGetProfiles: ((dids: string[]) => Promise<unknown[]>) | null = null;
+let testGetProfiles: ((dids: string[]) => Promise<{ did?: string }[]>) | null =
+  null;
 
 /** Set a test-only profile fetcher override (or null to clear). */
 export function _setTestGetProfiles(
-  fn: ((dids: string[]) => Promise<unknown[]>) | null,
+  fn: ((dids: string[]) => Promise<{ did?: string }[]>) | null,
 ): void {
   testGetProfiles = fn;
 }
@@ -111,9 +118,10 @@ export async function resolveProfiles(
       if (fields) {
         result.set(did, fields);
       } else {
-        // Cached miss: re-check the global DB (cheap indexed lookups) in case
-        // the profile was populated by another path (e.g. the profile page)
-        // since we cached the miss.
+        // Miss cached by the *global DB read*, not by a fetch: the row can
+        // appear at any time (the profile page, materialisation), so re-check
+        // the indexed global store rather than serving the miss. The backoff
+        // on network fetches is the negative cache's job, not this cache's.
         missing.push(did);
       }
     } else {
@@ -181,13 +189,17 @@ async function resolveFromGlobalDb(
     // On-demand hydration mirroring the getProfile handler: fetch Roomy
     // records from HappyView (batch) and fall back to Bluesky, then write
     // back to the global store. This is what makes reads as reliable as the
-    // profile page even when the store was cleared or never populated.
+    // profile page even when the store was cleared or never populated — and
+    // it is the same pipeline the write path uses, so a DID that resolves
+    // nowhere (`getProfilesRoomyFirst` backs it off) is not re-fetched here
+    // either.
     await hydrateMissingProfiles(globalDb, notInDb);
   }
 
   // Re-read the global store to pick up whatever hydration wrote, and cache
-  // the outcome. DIDs hydration couldn't resolve are cached as a miss so we
-  // don't hit the network on every read.
+  // the outcome. A DID the fetch left unresolved is remembered by the shared
+  // backoff (materialization/profiles.ts), so the next read skips the fetch
+  // entirely rather than relying on this cache's TTL.
   const recheck = [...notInDb, ...stillMissing];
   if (recheck.length > 0) {
     const ph = recheck.map(() => "?").join(",");
@@ -214,8 +226,8 @@ async function resolveFromGlobalDb(
     }
     for (const did of recheck) {
       if (!result.has(did)) {
-        // Still unresolvable — cache as a miss (short TTL) so we don't
-        // re-fetch on every read.
+        // No row yet. Cached only to keep the *global DB re-read* cheap; the
+        // network backoff is the negative cache's job.
         cache.set(did, { name: null, handle: null, avatar: null, fetchedAt: now });
       }
     }
@@ -228,23 +240,38 @@ async function resolveFromGlobalDb(
  * Mirrors the `getProfile` handler: query HappyView (batched) for Roomy
  * profile records, fall back to the Bluesky appview, and write whatever is
  * found into the global `profiles` table (idempotent upsert). Failures are
- * swallowed — the caller returns its existing fallback and the profile is
- * retried on a later read (after the miss cache TTL) or by the event
+ * swallowed — the caller returns its existing fallback and the DID is backed
+ * off, then retried after the negative cache's TTL or by the event
  * materialisation path.
+ *
+ * The backoff lives in this function rather than inside the pipeline it calls,
+ * so it applies identically whether the fetch is the real pipeline or a test
+ * stub. `getProfilesRoomyFirst` also consults it, which is what keeps the write
+ * path and the read path from retrying each other's failures.
  */
 async function hydrateMissingProfiles(
   globalDb: AsyncDatabase,
   dids: string[],
 ): Promise<void> {
   if (dids.length === 0) return;
+  const fetchable = dids.filter((d) => !isProfileFetchBackedOff(d));
+  if (fetchable.length === 0) return;
   try {
     if (testGetProfiles) {
-      await testGetProfiles(dids);
+      const stubbed = await testGetProfiles(fetchable);
+      recordUnresolvedProfiles(
+        fetchable,
+        new Set(
+          stubbed
+            .map((p) => p.did)
+            .filter((did): did is string => did !== undefined),
+        ),
+      );
       return;
     }
     const happyView = getHappyView();
     const { profiles, extras } = await getProfilesRoomyFirst(
-      dids as UserDid[],
+      fetchable as UserDid[],
       happyView,
     );
     if (profiles.length > 0) {

@@ -8,7 +8,8 @@ import type { DbLike } from "../db/types.ts";
 import { toAsyncDb } from "../db/syncAdapter.ts";
 import { closeDb, openDb, openGlobalDb } from "../db/db.ts";
 import { selectMessages } from "./selectMessages.ts";
-import { _resetProfileStoreCache } from "./profileStore.ts";
+import { _resetProfileStoreCache, _setTestGetProfiles } from "./profileStore.ts";
+import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -21,6 +22,7 @@ beforeEach(() => {
   closeDb();
   openDb({ path: ":memory:" });
   _resetProfileStoreCache();
+  _resetProfileNegativeCache();
 });
 afterEach(() => closeDb());
 
@@ -402,5 +404,69 @@ describe("selectMessages room ordering", () => {
     // of this test is that ordering follows sort_idx (canonical timestamp),
     // NOT the entity id — msg-a has the newest sort_idx but the oldest id.
     expect(messages.map((m) => m.content)).toEqual(["oldest", "middle", "newest"]);
+  });
+});
+
+describe("selectMessages missing-author hydration", () => {
+  /**
+   * A cross-stream author with no global `profiles` row makes the read path
+   * self-heal: it hydrates on demand. That lookup must not be repeated for the
+   * same DID on every subsequent read — the backoff the write path uses
+   * applies to readers too.
+   */
+  async function seedMessageByUnknownAuthor(): Promise<{ db: DbLike; roomId: string }> {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    const msgId = newUlid();
+    const author = "did:plc:read-path-ghost";
+
+    // The author entity itself is not in the global `profiles` table — that
+    // absence is what triggers hydration.
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [STREAM, STREAM]);
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [author, author]);
+    await db.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
+      msgId,
+      STREAM,
+      roomId,
+    ]);
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      msgId,
+      author,
+    ]);
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit) values (?, 'text/markdown', ?, ?)",
+      [msgId, Buffer.from("hello"), msgId],
+    );
+    return { db, roomId };
+  }
+
+  test("hydrates an unknown author once, then stops retrying it", async () => {
+    // The stub stands in for the network leg; the observable is how often the
+    // read path decides to attempt hydration at all.
+    let attempts = 0;
+    _setTestGetProfiles(async () => {
+      attempts++;
+      return [];
+    });
+
+    try {
+      const { db, roomId } = await seedMessageByUnknownAuthor();
+
+      const { messages } = await selectMessages(db, {
+        kind: "room",
+        roomId,
+        limit: 50,
+        cursor: null,
+      });
+      expect(attempts).toBe(1);
+      // The message still renders, with the author's own fallback fields.
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.authorDid).toBe("did:plc:read-path-ghost");
+
+      await selectMessages(db, { kind: "room", roomId, limit: 50, cursor: null });
+      expect(attempts).toBe(1);
+    } finally {
+      _setTestGetProfiles(null);
+    }
   });
 });

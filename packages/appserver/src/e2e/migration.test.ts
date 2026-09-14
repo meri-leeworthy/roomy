@@ -25,6 +25,7 @@ import { _resetSearchIndexer } from "../search/indexer.ts";
 import { _resetSearchBackfill } from "../search/backfill.ts";
 import { _resetQdrantClient, _resetMessagesCollection } from "../search/qdrantSearch.ts";
 import { _resetProfileStoreCache, _setTestGetProfiles } from "../queries/profileStore.ts";
+import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
 import { newUlid } from "@roomy-space/sdk";
 import { seedSpace, seedJoinedSpace, seedRoom, readStateDb } from "./helpers.ts";
 
@@ -74,6 +75,7 @@ describe("e2e: read-state schema migration on an existing DB", () => {
     _resetQdrantClient();
     _resetMessagesCollection();
     _resetProfileStoreCache();
+  _resetProfileNegativeCache();
     _setTestGetProfiles(null);
     if (prevDataDir === undefined) delete process.env.DATA_DIR;
     else process.env.DATA_DIR = prevDataDir;

@@ -15,6 +15,7 @@ import { toAsyncDb } from "../db/syncAdapter.ts";
 import type { DbLike } from "../db/types.ts";
 import { closeDb, openDb, openGlobalDb } from "../db/db.ts";
 import { _resetProfileStoreCache, _setTestGetProfiles } from "./profileStore.ts";
+import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
 import { selectMembers } from "./members.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -288,6 +289,7 @@ describe("selectMembers cross-stream search (global store)", () => {
     closeDb();
     openDb({ path: ":memory:" });
     _resetProfileStoreCache();
+  _resetProfileNegativeCache();
   });
   afterEach(() => {
     closeDb();

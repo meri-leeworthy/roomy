@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, mock, setSystemTime } from "bun:test";
 import {
   StreamIndex,
   UserDid,
@@ -9,7 +9,7 @@ import {
 import type { ProfileViewDetailed } from "@atproto/api/dist/client/types/app/bsky/actor/defs";
 
 import { closeDb, openDb, openGlobalDb } from "../db/db.ts";
-import { defaultGetProfiles, ensureProfilesForBatch } from "./profiles.ts";
+import { defaultGetProfiles, ensureProfilesForBatch, _resetProfileNegativeCache } from "./profiles.ts";
 import type { DbLike } from "../db/types.ts";
 
 const ALICE = UserDid.assert("did:plc:alice");
@@ -267,10 +267,18 @@ describe("ensureProfilesForBatch", () => {
 describe("defaultGetProfiles", () => {
   const realFetch = globalThis.fetch;
 
+  // The fetcher backs off DIDs it cannot resolve, so each test starts from a
+  // clean cache — otherwise an earlier test's misses suppress a later test's
+  // expected request.
+  beforeEach(() => {
+    _resetProfileNegativeCache();
+  });
+
   // Restore the real fetch after each test so we never leak the mock into
   // other tests in the same file/process.
   afterEach(() => {
     globalThis.fetch = realFetch;
+    _resetProfileNegativeCache();
   });
 
   test("uses the XRPC path with repeated actors= keys (not comma-joined)", async () => {
@@ -432,5 +440,121 @@ describe("global profile store (Phase 2)", () => {
       .get(ALICE);
     expect(row?.handle).toBe("alice.test");
     expect(row?.name).toBe("Alice Roomy");
+  });
+});
+
+describe("profile fetch negative cache", () => {
+  // The appview fetch is what a DID with no Roomy record and no Bluesky
+  // profile costs. Under `bun test` the pipeline's Bluesky leg is skipped, so
+  // these tests drive `defaultGetProfiles` — the one function every profile
+  // lookup goes through — against a mocked `fetch`.
+  const realFetch = globalThis.fetch;
+  beforeEach(() => {
+    _resetProfileNegativeCache();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    _resetProfileNegativeCache();
+  });
+
+  /** A mocked appview that resolves ALICE only; `calls` counts requests. */
+  function mockAppview(): { calls: number } {
+    const counter = { calls: 0 };
+    globalThis.fetch = (async (_url: string | URL | Request) => {
+      counter.calls++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ profiles: [profileFor(ALICE, "alice.test")] }),
+      } as unknown as Response;
+    }) as unknown as typeof globalThis.fetch;
+    return counter;
+  }
+
+  test("an unresolved DID is not re-fetched, a resolved one still is", async () => {
+    const appview = mockAppview();
+
+    await defaultGetProfiles([ALICE, BOB]);
+    expect(appview.calls).toBe(1);
+
+    // BOB resolved to nothing, so this fetch is skipped outright — the
+    // regression: it used to be issued again on every single event.
+    const second = await defaultGetProfiles([BOB]);
+    expect(second).toEqual([]);
+    expect(appview.calls).toBe(1);
+
+    // ALICE resolved, so she is not backed off.
+    await defaultGetProfiles([ALICE]);
+    expect(appview.calls).toBe(2);
+  });
+
+  test("a DID with no profile is retried once the backoff elapses", async () => {
+    const appview = mockAppview();
+    await defaultGetProfiles([BOB]);
+    expect(appview.calls).toBe(1);
+
+    setSystemTime(Date.now() + 61 * 1000);
+    try {
+      await defaultGetProfiles([BOB]);
+    } finally {
+      setSystemTime();
+    }
+    expect(appview.calls).toBe(2);
+  });
+
+  test("backs off an appview error, not just an empty result", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return { ok: false, status: 503 } as unknown as Response;
+    }) as unknown as typeof globalThis.fetch;
+
+    await defaultGetProfiles([BOB]);
+    await defaultGetProfiles([BOB]);
+    expect(calls).toBe(1);
+  });
+
+  test("materialisation skips a backed-off author instead of re-running the pipeline", async () => {
+    const { globalDb } = freshGlobal();
+    const appview = mockAppview();
+
+    // First event from BOB: the pipeline runs and resolves nothing.
+    await ensureProfilesForBatch(globalDb, [decodedAs(joinSpaceEvent(), 1, BOB)], defaultGetProfiles);
+    expect(appview.calls).toBe(1);
+
+    // Second event from BOB: no fetch at all.
+    await ensureProfilesForBatch(globalDb, [decodedAs(joinSpaceEvent(), 2, BOB)], defaultGetProfiles);
+    expect(appview.calls).toBe(1);
+  });
+
+  test("a backed-off DID recovers once its profile becomes resolvable", async () => {
+    const { globalDb } = freshGlobal();
+    let resolvable = false;
+    globalThis.fetch = (async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () =>
+          resolvable ? { profiles: [profileFor(BOB, "bob.test")] } : { profiles: [] },
+      } as unknown as Response;
+    }) as unknown as typeof globalThis.fetch;
+
+    await ensureProfilesForBatch(globalDb, [decodedAs(joinSpaceEvent(), 1, BOB)], defaultGetProfiles);
+    expect(
+      await globalDb.query("select did from profiles where did = ?").get(BOB),
+    ).toBeNull();
+
+    resolvable = true;
+    setSystemTime(Date.now() + 61 * 1000);
+    try {
+      await ensureProfilesForBatch(globalDb, [decodedAs(joinSpaceEvent(), 2, BOB)], defaultGetProfiles);
+    } finally {
+      setSystemTime();
+    }
+    expect(
+      (await globalDb
+        .query("select handle from profiles where did = ?")
+        .get<{ handle: string }>(BOB))?.handle,
+    ).toBe("bob.test");
   });
 });

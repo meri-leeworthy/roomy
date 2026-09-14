@@ -5,6 +5,7 @@ import { closeDb } from "./db/db.ts";
 import { _resetHydrationInflight } from "./hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "./embed/sweeper.ts";
 import { _resetProfileStoreCache } from "./queries/profileStore.ts";
+import { _resetProfileNegativeCache } from "./materialization/profiles.ts";
 
 // Pick a free port by letting the OS assign one (port 0).
 function ephemeralPort(): number {
@@ -20,6 +21,7 @@ beforeEach(() => {
   _resetHydrationInflight();
   _resetEmbedSweeper();
   _resetProfileStoreCache();
+  _resetProfileNegativeCache();
   // Use a temp data dir so the DID-doc test's signing key lands in /tmp,
   // not the real data dir.
   process.env.DATA_DIR = "/tmp/appserver-test-data";

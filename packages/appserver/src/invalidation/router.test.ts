@@ -11,6 +11,7 @@ import {
   _resetProfileStoreCache,
   _setTestGetProfiles,
 } from "../queries/profileStore.ts";
+import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
 
 const STREAM_DID = "did:web:space.example.com" as StreamDid;
 const USER_DID = "did:plc:alice" as UserDid;
@@ -428,6 +429,7 @@ describe("Router write-path purity", () => {
     // the condition that makes hydration fire.
     const hydrated: string[][] = [];
     _resetProfileStoreCache();
+  _resetProfileNegativeCache();
     _setTestGetProfiles(async (dids) => {
       hydrated.push([...dids]);
       return [];

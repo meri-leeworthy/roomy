@@ -29,6 +29,7 @@ import { stopSearchIndexer, _resetSearchIndexer } from "../search/indexer.ts";
 import { stopSearchBackfill, _resetSearchBackfill } from "../search/backfill.ts";
 import { _resetQdrantClient, _resetMessagesCollection } from "../search/qdrantSearch.ts";
 import { _resetProfileStoreCache, _setTestGetProfiles } from "../queries/profileStore.ts";
+import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
 import { newUlid } from "@roomy-space/sdk";
 import type { Database } from "bun:sqlite";
 
@@ -71,6 +72,7 @@ export async function startAppserver(): Promise<E2eContext> {
   _resetQdrantClient();
   _resetMessagesCollection();
   _resetProfileStoreCache();
+  _resetProfileNegativeCache();
   // Hermetic: without stubs, profile hydration falls back to live
   // api.bsky.app fetches, which pile up under parallel load and blow the
   // 5s per-test timeout. Tests don't assert on profile materialization, so
@@ -133,6 +135,7 @@ export async function startAppserver(): Promise<E2eContext> {
     _resetQdrantClient();
     _resetMessagesCollection();
     _resetProfileStoreCache();
+    _resetProfileNegativeCache();
     _setTestGetProfiles(null);
   });
 

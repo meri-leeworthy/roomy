@@ -134,6 +134,59 @@ free and keeps the diff close to what `roomy.room.getMessages` returns (the
 client validates the diff against that schema). Only the network half is
 removed. The client resolves an unknown author on its next normal read.
 
+## Follow-up: the negative cache
+
+Removing the fetch from the *snapshot* read was necessary but not sufficient —
+the write path still made **one** network fetch per event, from
+`StreamManager.sendEvents` step 4 (`ensureProfilesRoomyFirst`, the
+blank-profile protection). The probe with `--production-profiles` (which
+exercises the real pipeline instead of a stubbed fetcher) measured exactly
+that: 20 writes, 20 outbound Bluesky calls, **p50 450.9 ms**.
+
+Both fetch caches only ever suppressed a retry *after a success*, because a
+cache row is written from the fetch result. A DID that neither HappyView nor
+the Bluesky appview can resolve — a brand-new DID, a `did:web`, an appview
+hiccup — therefore had no row to find, so `filterMissing` returned it again on
+every event and the pipeline re-ran both lookups forever. Under concurrency the
+same author's N simultaneous writes each issued their own copy.
+
+### Change
+
+A module-level backoff (`NEGATIVE_CACHE_TTL_MS`, 1 minute) in
+`materialization/profiles.ts`, keyed by DID:
+
+- `isProfileFetchBackedOff(did)` — consulted by `getProfilesRoomyFirst` (skips
+  both its HappyView and Bluesky legs) and by the read path's
+  `hydrateMissingProfiles`, so one failed lookup suppresses every later event
+  **and** every later reader.
+- `recordUnresolvedProfiles(requested, resolved)` — called by the pipeline once
+  every source it consults has been asked, and by `defaultGetProfiles`, which
+  `space.roomy.user.getProfile` calls directly as a last resort.
+
+A TTL of one minute (rather than the stale-handle cooldown's hour) keeps the
+staleness bounded: a DID that resolves nowhere today may be a user whose Roomy
+profile record HappyView has simply not indexed yet, and messages should not
+render with a blank name long after the record exists.
+
+**Tradeoff, stated plainly:** for one minute after a failed lookup, a profile
+that becomes resolvable in that window is not re-fetched. The fetch cost
+becomes one lookup per DID per minute instead of one per event and per reader.
+
+### Measured (probe, `--production-profiles`, same machine)
+
+| config | before | after |
+|---|---|---|
+| batch 1, concurrency 1 | p50 **450.9 ms**, 2.2 req/s, 20 fetches | p50 **5.0 ms**, 145 req/s, **0 fetches** |
+| batch 1, concurrency 8 | p50 **1957 ms**, 2.1 req/s | p50 **25.3 ms**, 190 req/s |
+
+The `outbound (non-local) fetches` line is the regression signal, and it is now
+zero with the real profile pipeline enabled — not merely with a stub.
+
+Blank profiles are not made worse. Step 4 runs *before* the invalidation router
+in the same `sendEvents` call, so it has already attempted its fetch and written
+whatever it could resolve; the snapshot read was a re-read by construction. The
+backoff only stops the *retry* of a lookup that just failed.
+
 ## Remaining wins (not done — listed for triage)
 
 Ordered by value/effort. None of these are the current bottleneck; #1 and #2
@@ -145,17 +198,18 @@ matter as write volume grows.
    by the read handlers; the write path never adopted it. A batch of 50
    messages to one room re-resolves the same room 50 times. This is the
    `sendEvents.authorize 11449ms` span shape under load.
-2. **Collapse round-trips per event.** ~39/call at batch=1 is a lot for a
+2. **Collapse round-trips per event.** ~38/call at batch=1 is a lot for a
    single insert. The per-event `isSpaceRebuilding` probe and the per-event
    `applyBatch` transaction are the obvious targets (both could be one
    transaction / one read per batch).
-3. **Profile-hydration stampede coalescing.** `profileStore.ts` has no
-   in-flight coalescing at all — unlike `hydration/userHydration.ts`, which
-   dedupes concurrent calls for the same user via an in-flight map. N
-   concurrent readers of the same unknown author therefore issue N parallel
-   Bluesky fetches. This is the amplifier that turned one slow author into a
-   48-deep worker backlog in production. An in-flight map keyed by DID is a
-   direct port of the pattern already used in `userHydration.ts`.
+3. **In-flight coalescing for concurrent readers of the same DID.**
+   `profileStore.ts` has no in-flight coalescing — unlike
+   `hydration/userHydration.ts`, which dedupes concurrent calls for the same
+   user via an in-flight map. The negative cache removes the *steady-state*
+   stampede (N events by one unresolved author now cost one lookup, not N), but
+   N *simultaneous* first-time lookups for the same DID still issue N parallel
+   fetches before any of them records a result. An in-flight map keyed by DID
+   is a direct port of the pattern already used in `userHydration.ts`.
 4. **Radical redesign.** The write path materializes inline (event log write →
    decode → profiles → `applyBatch` → invalidation → DB). That is what makes
    writes slow and reads cheap, which is the stated trade. If writes become the
@@ -178,6 +232,12 @@ outbound fetch with its stack.
 APPSERVER_TEST_MODE=true RATE_LIMIT_DISABLED=true \
   bun run packages/appserver/perf/probe-sendevents.ts --batch 1 --iterations 30
 ```
+
+Add `--production-profiles` to leave `getProfiles` unset so materialisation uses
+the real HappyView-first / Bluesky pipeline. Without it the probe stubs the
+fetcher, which also stubs out the pipeline's own network behaviour — the stub
+hides exactly the fetches this review is about, and a write path that looks
+network-free under it can still be issuing one HTTP call per event.
 
 The `outbound (non-local) fetches` line is the regression signal: the write
 path is supposed to be local-only, so any non-zero value is a defect.
