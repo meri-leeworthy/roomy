@@ -12,7 +12,7 @@ import {
   sendReply,
   type MessageInfo,
 } from "./messages.js";
-import { FileLock, QueueStore, type QueueJob } from "./queue.js";
+import { FileLock, QueueStore, bootHeal, type QueueJob } from "./queue.js";
 import { PostChain, errorText } from "./postChain.js";
 
 type DirectXrpcClient = InstanceType<typeof transport.DirectXrpcClient>;
@@ -173,7 +173,7 @@ export async function respond(
    * previous process died mid-job (stale lock / absent lock), its `active`
    * job goes back to the queue head so it is retried exactly once.
    * `requeueStaleActive` is a no-op when no job is stuck active, so the heal
-   * is safe to run on every acquisition (including the startup one).
+   * is safe to run on every acquisition.
    */
   const acquire = (): boolean => {
     const info = lock.info();
@@ -189,13 +189,20 @@ export async function respond(
       return true;
     }
     // Free, or our own lock (re-entrant) — (re)acquire refreshes the
-    // heartbeat. The heal is a no-op when nothing is stuck active, so it is
-    // safe on every grant.
+    // heartbeat. The heal is a no-op when nothing is stuck active.
     lock.tryAcquire(holder, pid);
     queue.requeueStaleActive(true);
     return true;
   };
-  acquire();
+  // Startup heal, then RELEASE. The pump takes the lock per job and releases
+  // it after each, so mutual exclusion between duplicate pipelines is
+  // unchanged; holding it while idle would make lock freshness (the "job in
+  // flight" signal for self-check.sh, `cli queue status`, and the cron
+  // only-if-idle contract) read as permanently busy. See bootHeal.
+  const heldOnBoot = bootHeal(queue, lock, holder, pid);
+  if (heldOnBoot) {
+    log(`another responder holds the lock (${heldOnBoot.holder}) — waiting for it to release`);
+  }
 
   // Drain the queue: claim the head job under the lock, run it to
   // completion (or failure), release, and continue — one job at a time.

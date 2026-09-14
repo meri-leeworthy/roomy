@@ -298,3 +298,39 @@ export class FileLock {
     }
   }
 }
+
+/**
+ * Responder boot heal. Takes the queue lock, requeues a job left `active` by
+ * a crashed holder, and RELEASES the lock before returning.
+ *
+ * The heal must run at boot: a job orphaned in `active` by a dead responder
+ * is otherwise never requeued, because the pump only runs when something is
+ * `enqueued` — with an empty queue the drain timer has nothing to trigger on,
+ * so the orphan would sit invisible forever.
+ *
+ * The release is the important half. Lock freshness is the "job in flight"
+ * signal every external reader relies on (`self-check.sh queue_busy`,
+ * `cli queue status`, the cron only-if-idle contract). A responder that takes
+ * the lock at boot and heartbeats it while sitting idle therefore reads as
+ * permanently busy, and every scheduled tick skips until a job happens to
+ * arrive — which on an idle worker may be never. Mutual exclusion is
+ * unaffected: the pump acquires the lock per job and releases it after each.
+ *
+ * Returns the lock info observed before the heal (null when the lock was
+ * free), so the caller can report a live foreign holder. When a live foreign
+ * holder exists nothing is touched and the lock is left exactly as found.
+ */
+export function bootHeal(
+  queue: QueueStore,
+  lock: FileLock,
+  holder: string,
+  pid: number,
+): LockInfo | null {
+  const before = lock.info();
+  if (before && before.holder !== holder && !before.stale) return before;
+  if (lock.tryAcquire(holder, pid)) {
+    queue.requeueStaleActive(true);
+    lock.release(holder);
+  }
+  return before;
+}

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { FileLock, QueueStore, DONE_CAP } from "./queue.js";
+import { FileLock, QueueStore, bootHeal, DONE_CAP } from "./queue.js";
 
 const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), "roomy-queue-"));
 const mentionPayload = (id: string) => ({
@@ -146,5 +146,58 @@ describe("FileLock", () => {
     l1.tryAcquire("holder-a", 111);
     l1.release("someone-else");
     expect(l1.info()?.holder).toBe("holder-a");
+  });
+});
+
+describe("bootHeal", () => {
+  test("releases the lock when it boots idle (no squat)", () => {
+    // Regression: the responder took the lock in its startup acquire() and
+    // only ever released it from inside the pump, which never runs while the
+    // queue is empty. The lock heartbeat timer then kept it fresh forever, so
+    // every lock-freshness reader (self-check.sh queue_busy, `cli queue
+    // status`, the cron only-if-idle contract) saw "job in flight" on a
+    // permanently idle host. Observed live on bramble: 73 min held, 0 active.
+    const dir = tmpdir();
+    const q = new QueueStore(path.join(dir, "queue.json"));
+    const lock = new FileLock(path.join(dir, "queue.json.lock"));
+
+    expect(bootHeal(q, lock, "host:1", 1)).toBeNull();
+    expect(lock.info()).toBeNull();
+  });
+
+  test("requeues a job orphaned in active by a dead holder", () => {
+    // The heal this must not lose: a crashed responder leaves `active` set,
+    // and with nothing `enqueued` the drain timer never triggers the pump, so
+    // the orphan would otherwise never be retried.
+    const dir = tmpdir();
+    const file = path.join(dir, "queue.json");
+    const q = new QueueStore(file);
+    const job = q.enqueue("mention", mentionPayload("orphan"));
+    q.claim(job.id);
+    expect(q.status().active?.id).toBe(job.id);
+
+    const lock = new FileLock(path.join(dir, "queue.json.lock"));
+    bootHeal(q, lock, "host:1", 1);
+
+    expect(q.status().active).toBeNull();
+    expect(q.status().enqueued.map((j) => j.id)).toEqual([job.id]);
+    expect(lock.info()).toBeNull();
+  });
+
+  test("leaves a live foreign holder alone and reports it", () => {
+    const dir = tmpdir();
+    const q = new QueueStore(path.join(dir, "queue.json"));
+    const lockFile = path.join(dir, "queue.json.lock");
+    const other = new FileLock(lockFile);
+    other.tryAcquire("other-host:9", 9);
+    const job = q.enqueue("mention", mentionPayload("held"));
+    q.claim(job.id);
+
+    const info = bootHeal(q, new FileLock(lockFile), "host:1", 1);
+
+    expect(info?.holder).toBe("other-host:9");
+    // Untouched: the live holder keeps the lock and its job stays active.
+    expect(other.info()?.holder).toBe("other-host:9");
+    expect(q.status().active?.id).toBe(job.id);
   });
 });
