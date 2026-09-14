@@ -1,4 +1,4 @@
-import { newUlid, toBytes } from "@roomy-space/sdk";
+import { newUlid, serializeBlocks, toBytes } from "@roomy-space/sdk";
 import { sendEvents } from "./send-events";
 import { createRoom } from "./room";
 
@@ -45,15 +45,13 @@ export async function createThread({
   // Forward each selected message into the thread. The original message stays
   // in the parent room; a forward message (empty body + forward attachment)
   // is created in the thread, embedding the original.
+  const emptyBody = serializeBlocks([]);
   for (const msgId of messageIds) {
     events.push({
       id: newUlid(),
       room: threadId,
       $type: "space.roomy.message.createMessage.v0",
-      body: {
-        mimeType: "text/markdown",
-        data: toBytes(new TextEncoder().encode("")),
-      },
+      body: { mimeType: emptyBody.mimeType, data: toBytes(emptyBody.data) },
       extensions: {
         "space.roomy.extension.attachments.v0": {
           $type: "space.roomy.extension.attachments.v0",

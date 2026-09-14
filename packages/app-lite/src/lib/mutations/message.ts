@@ -1,61 +1,59 @@
-import { newUlid, toBytes } from "@roomy-space/sdk";
+import { newUlid, serializeBlocks, toBytes } from "@roomy-space/sdk";
 import type { Block } from "@roomy-space/sdk";
 import { sendEvents } from "./send-events";
 
+/**
+ * Send a message.
+ *
+ * Every client-authored message body is blocks+facets
+ * (`application/vnd.roomy.richtext+json`) — there is no markdown body path.
+ * Legacy `text/markdown` bodies still exist on the wire and are rendered and
+ * edited as markdown (see {@link editMessage}), but nothing authors new ones.
+ *
+ * The composer's Send button and its Enter key both route through this
+ * function (via `ChatInput.submit()`), so a message encodes identically
+ * however it was submitted.
+ */
 export async function sendMessage(
   spaceId: string,
   roomId: string,
-  body: string,
   opts: {
-    mimeType?: string;
+    /** Blocks+facets body. */
+    blocks: Block[];
+    /** Attachments to attach (uploaded media). A reply is added on top. */
+    attachments?: Record<string, unknown>[];
+    /** Reply-to message id, encoded as a reply attachment. */
     replyTo?: string;
-    mentions?: string[];
-    /** Blocks+facets body (new format). When set, `body` is ignored and the
-     *  wire body is `serializeBlocks(blocks)`; the mentions sidecar is
-     *  dropped (mentions fold into `#didMention` facets). */
-    blocks?: Block[];
-  } = {},
+  },
 ): Promise<string> {
   const id = newUlid();
-  const attachments = opts.replyTo
-    ? [
-        {
-          $type: "space.roomy.attachment.reply.v0",
-          target: opts.replyTo,
-        },
-      ]
-    : undefined;
+  const attachments = [
+    ...(opts.attachments ?? []),
+    ...(opts.replyTo
+      ? [
+          {
+            $type: "space.roomy.attachment.reply.v0",
+            target: opts.replyTo,
+          },
+        ]
+      : []),
+  ];
 
-  const extensions: Record<string, unknown> = {};
-  if (opts.blocks) {
-    // New format: mentions live in `#didMention` facets — no sidecar.
-  } else if (opts.mentions && opts.mentions.length > 0) {
-    extensions["space.roomy.extension.mentions.v0"] = {
-      $type: "space.roomy.extension.mentions.v0",
-      mentions: opts.mentions,
-    };
-  }
-
-  const wireBody = opts.blocks
-    ? {
-        mimeType: "application/vnd.roomy.richtext+json",
-        data: toBytes(new TextEncoder().encode(JSON.stringify({
-          $type: "space.roomy.richtext.document",
-          blocks: opts.blocks,
-        }))),
-      }
-    : {
-        mimeType: opts.mimeType || "text/markdown",
-        data: toBytes(new TextEncoder().encode(body)),
-      };
-
+  const serialized = serializeBlocks(opts.blocks);
   const event: Record<string, unknown> = {
     id,
     room: roomId,
     $type: "space.roomy.message.createMessage.v0",
-    body: wireBody,
-    extensions,
-    ...(attachments ? { attachments } : {}),
+    body: { mimeType: serialized.mimeType, data: toBytes(serialized.data) },
+    extensions:
+      attachments.length > 0
+        ? {
+            "space.roomy.extension.attachments.v0": {
+              $type: "space.roomy.extension.attachments.v0",
+              attachments,
+            },
+          }
+        : {},
   };
 
   await sendEvents(spaceId, [event]);
@@ -174,59 +172,42 @@ export async function removeLinkEmbed(
   });
 }
 
+/**
+ * Forward a message into another room as an embed, with an optional
+ * blocks+facets commentary body.
+ *
+ * Like {@link sendMessage}, the commentary is always blocks+facets — an
+ * empty `blocks` array means "forward with no commentary".
+ */
 export async function forwardMessage(
   spaceId: string,
   fromRoomId: string,
   messageId: string,
   toRoomId: string,
-  body = "",
   opts: {
-    /** Blocks+facets commentary body (new format). When set, `body` is
-     *  ignored and the wire body is the serialized blocks; the mentions
-     *  sidecar is dropped (mentions fold into `#didMention` facets). */
-    blocks?: Block[];
-    /** Mentions sidecar for legacy markdown commentary bodies. */
-    mentions?: string[];
-  } = {},
+    /** Blocks+facets commentary body. Omit/empty for a bare forward. */
+    blocks: Block[];
+  },
 ): Promise<string> {
   const id = newUlid();
-  const extensions: Record<string, unknown> = {
-    "space.roomy.extension.attachments.v0": {
-      $type: "space.roomy.extension.attachments.v0",
-      attachments: [
-        {
-          $type: "space.roomy.attachment.forward.v0",
-          target: messageId,
-          fromRoomId,
-        },
-      ],
-    },
-  };
-  if (opts.blocks) {
-    // New format: mentions live in `#didMention` facets — no sidecar.
-  } else if (opts.mentions && opts.mentions.length > 0) {
-    extensions["space.roomy.extension.mentions.v0"] = {
-      $type: "space.roomy.extension.mentions.v0",
-      mentions: opts.mentions,
-    };
-  }
+  const serialized = serializeBlocks(opts.blocks);
   const event: Record<string, unknown> = {
     id,
     room: toRoomId,
     $type: "space.roomy.message.createMessage.v0",
-    body: opts.blocks
-      ? {
-          mimeType: "application/vnd.roomy.richtext+json",
-          data: toBytes(new TextEncoder().encode(JSON.stringify({
-            $type: "space.roomy.richtext.document",
-            blocks: opts.blocks,
-          }))),
-        }
-      : {
-          mimeType: "text/markdown",
-          data: toBytes(new TextEncoder().encode(body)),
-        },
-    extensions,
+    body: { mimeType: serialized.mimeType, data: toBytes(serialized.data) },
+    extensions: {
+      "space.roomy.extension.attachments.v0": {
+        $type: "space.roomy.extension.attachments.v0",
+        attachments: [
+          {
+            $type: "space.roomy.attachment.forward.v0",
+            target: messageId,
+            fromRoomId,
+          },
+        ],
+      },
+    },
   };
 
   await sendEvents(spaceId, [event]);

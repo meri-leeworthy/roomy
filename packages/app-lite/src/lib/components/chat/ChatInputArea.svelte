@@ -5,7 +5,7 @@
     type ChatInputShellMode,
   } from "@roomy/design/components/content/thread/ChatInputShell.svelte";
   import { messagingState } from "./messaging-state.svelte";
-  import { newUlid, toBytes, extractFacetUrls } from "@roomy-space/sdk";
+  import { extractFacetUrls } from "@roomy-space/sdk";
   import type { schemas, Block } from "@roomy-space/sdk";
   import ChatInput, {
     clearInput,
@@ -15,7 +15,6 @@
   import { createMentionSearch } from "$lib/tiptap/mentions";
   import { sendMessage as sendMessageMutation } from "$lib/mutations/message";
   import { uploadFile } from "$lib/mutations/upload";
-  import { sendEvents } from "$lib/mutations/send-events";
   import { createThread } from "$lib/mutations/thread";
   import MessageContext from "./MessageContext.svelte";
   import LinkCard from "./embeds/LinkCard.svelte";
@@ -24,6 +23,11 @@
   import { IconX } from "@roomy/design/icons";
 
   type LinkEmbedData = typeof schemas.queries.getMessage.LinkEmbedData.infer;
+
+  /** Instance API exported by `ChatInput.svelte` (`<script module>` + instance exports). */
+  type ChatInputInstance = {
+    submit: () => Promise<void>;
+  };
 
   type Props = {
     spaceId: string;
@@ -154,6 +158,9 @@
 
   let fileInput: HTMLInputElement | undefined = $state();
   let actionMenuOpen = $state(false);
+  /** The composer editor, so the Send button can submit through the exact
+   *  same path as Enter (see `handleSendClick`). */
+  let composer: ChatInputInstance | undefined = $state();
 
   let stateKind = $derived(messagingState.current.kind);
   let shellMode = $derived(stateKind as ChatInputShellMode);
@@ -286,22 +293,28 @@
     messagingState.setNormal();
   }
 
-  async function handleSend(_message = "", mentions: string[] = [], submittedBlocks: Block[] = []) {
+  /**
+   * Send button. Delegates to the composer's `submit()` rather than calling
+   * `handleSend` directly: `submit()` is the Enter-key path, which flushes a
+   * trailing autolinked URL and serializes the editor's *current* document.
+   * Calling `handleSend()` bare passes no blocks, which silently downgraded
+   * the message to the legacy markdown body.
+   */
+  async function handleSendClick() {
+    await composer?.submit();
+  }
+
+  async function handleSend(content = "", _mentions: string[] = [], submittedBlocks: Block[] = []) {
     const state = messagingState.current;
     if (state.kind === "threading" || state.kind === "selecting") return;
     if (!("input" in state)) return;
-    if (!state.input && state.files.length === 0) return;
+    // Presence check only (the editor's text is still mirrored into
+    // `messagingState.input`); the body itself is always the blocks.
+    if (!content && state.files.length === 0) return;
 
     isSendingMessage = true;
 
-    const message = state.input;
     const filesToUpload = [...state.files];
-
-    // New-format send path: when the composer produced blocks, the wire body
-    // is serializeBlocks(blocks) and the mentions sidecar is dropped (mentions
-    // fold into `#didMention` facets). When blocks are absent, the legacy
-    // markdown path is used.
-    const useRichText = !!submittedBlocks && submittedBlocks.length > 0;
 
     try {
       const attachments: Record<string, unknown>[] = [];
@@ -321,58 +334,15 @@
         }
       }
 
-      // Reply attachment
-      if (state.kind === "replying" && state.replyTo) {
-        attachments.push({
-          $type: "space.roomy.attachment.reply.v0",
-          target: state.replyTo.id,
-        });
-      }
-
-      // Build mentions extension if any DIDs were mentioned (legacy path
-      // only — the new format folds mentions into `#didMention` facets).
-      const mentionsExt = !useRichText && mentions.length > 0
-        ? { "space.roomy.extension.mentions.v0": { $type: "space.roomy.extension.mentions.v0", mentions } }
-        : undefined;
-
-      // If we have attachments, send with extensions; otherwise use the simple path
-      if (attachments.length > 0) {
-        const id = newUlid();
-        const extensions: Record<string, unknown> = {
-          "space.roomy.extension.attachments.v0": { attachments },
-        };
-        if (mentionsExt) Object.assign(extensions, mentionsExt);
-        const event: Record<string, unknown> = {
-          id,
-          room: roomId,
-          $type: "space.roomy.message.createMessage.v0",
-          body: useRichText
-            ? {
-                mimeType: "application/vnd.roomy.richtext+json",
-                data: toBytes(new TextEncoder().encode(JSON.stringify({
-                  $type: "space.roomy.richtext.document",
-                  blocks: submittedBlocks,
-                }))),
-              }
-            : {
-                mimeType: "text/markdown",
-                data: toBytes(new TextEncoder().encode(message)),
-              },
-          extensions,
-        };
-        await sendEvents(spaceId, [event]);
-      } else {
-        await sendMessageMutation(spaceId, roomId, message, {
-          replyTo:
-            state.kind === "replying" ? state.replyTo.id : undefined,
-          mentions,
-          ...(useRichText ? { blocks: submittedBlocks } : {}),
-        });
-      }
+      await sendMessageMutation(spaceId, roomId, {
+        blocks: submittedBlocks,
+        ...(attachments.length > 0 ? { attachments } : {}),
+        replyTo: state.kind === "replying" ? state.replyTo.id : undefined,
+      });
     } catch (e: unknown) {
       console.error("Failed to send message:", e);
     } finally {
-      messagingState.set({ kind: "normal", input: "", files: [], blocks: [], mentions: [], previewImages: [] });
+      messagingState.set({ kind: "normal", input: "", files: [], blocks: [], previewImages: [] });
       clearInput();
       isSendingMessage = false;
       setInputFocus();
@@ -397,7 +367,7 @@
       messageIds: selectedIds,
     });
 
-    messagingState.set({ kind: "normal", input: "", files: [], blocks: [], mentions: [], previewImages: [] });
+    messagingState.set({ kind: "normal", input: "", files: [], blocks: [], previewImages: [] });
     clearInput();
 
     goto(`/${page.params.space}/${threadId}?parent=${roomId}`);
@@ -418,7 +388,7 @@
   {canSend}
   {showContextPreview}
   onClearContext={handleClearContext}
-  onSend={handleSend}
+  onSend={handleSendClick}
   onUploadMedia={handleUploadMedia}
   onCreateThreadFromMenu={handleCreateThreadFromMenu}
   onCreateThread={handleCreateThread}
@@ -444,6 +414,7 @@
     {#if messagingState.current.kind === "normal" || messagingState.current.kind === "replying"}
       <ChatInput
         composer
+        bind:this={composer}
         bind:content={
           () =>
             "input" in messagingState.current ? messagingState.current.input : "",

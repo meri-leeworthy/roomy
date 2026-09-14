@@ -11,8 +11,6 @@ export type Normal = {
   /** Rich-text blocks of the composer content (mention facets included), so a
    *  stashed draft restores mentions as chips, not plain text. */
   blocks: Block[];
-  /** DIDs mentioned in the composer, mirrored from the editor on every update. */
-  mentions: string[];
   /** Object URLs for attached-file previews, kept in sync with `files`. */
   previewImages: string[];
 };
@@ -23,7 +21,6 @@ export type Replying = {
   replyTo: Message | { id: Ulid };
   files: File[];
   blocks: Block[];
-  mentions: string[];
   previewImages: string[];
 };
 
@@ -41,7 +38,7 @@ export type Selecting = {
 export type MessagingState = Normal | Replying | Threading | Selecting;
 
 function emptyDraft(): Normal {
-  return { kind: "normal", input: "", files: [], blocks: [], mentions: [], previewImages: [] };
+  return { kind: "normal", input: "", files: [], blocks: [], previewImages: [] };
 }
 
 class MessagingStateManager {
@@ -133,16 +130,6 @@ class MessagingStateManager {
     }
   }
 
-  get mentions(): string[] {
-    return "mentions" in this.state ? this.state.mentions : [];
-  }
-
-  set mentions(value: string[]) {
-    if ("mentions" in this.state) {
-      this.state.mentions = value;
-    }
-  }
-
   get previewImages(): string[] {
     return "previewImages" in this.state ? this.state.previewImages : [];
   }
@@ -171,7 +158,6 @@ class MessagingStateManager {
       files: "files" in this.state ? this.state.files : [],
       input: "input" in this.state ? this.state.input : "",
       blocks: "blocks" in this.state ? this.state.blocks : [],
-      mentions: "mentions" in this.state ? this.state.mentions : [],
       previewImages: "previewImages" in this.state ? this.state.previewImages : [],
     });
     setInputFocus();
@@ -183,7 +169,6 @@ class MessagingStateManager {
       input: "input" in this.state ? this.state.input : "",
       files: "files" in this.state ? this.state.files : [],
       blocks: "blocks" in this.state ? this.state.blocks : [],
-      mentions: "mentions" in this.state ? this.state.mentions : [],
       previewImages: "previewImages" in this.state ? this.state.previewImages : [],
     });
     setInputFocus();

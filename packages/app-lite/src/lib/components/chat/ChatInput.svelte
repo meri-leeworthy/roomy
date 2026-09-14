@@ -113,6 +113,34 @@
   }
 
   /**
+   * Submit the editor's current content, exactly as the Enter key does.
+   *
+   * The composer's Send button calls this instead of going through its own
+   * path: the two entry points must produce byte-identical bodies, including
+   * the trailing-autolink flush that `wrappedOnEnter` performs before
+   * serializing. Any second entry point that serializes independently
+   * reintroduces the divergence this exists to prevent.
+   */
+  export async function submit() {
+    if (disabled) return;
+    await wrappedOnEnter();
+  }
+
+  /**
+   * The editor's current content as blocks+facets, flushed the same way a
+   * submit would flush it (trailing autolink committed first).
+   *
+   * Callers that build their own message (e.g. the forward modal, which
+   * sends one commentary body to several rooms) must read the body through
+   * this rather than the `blocks` binding, which stays `undefined` until the
+   * first edit.
+   */
+  export function getBlocks(): Block[] {
+    flushTrailingAutolink();
+    return tiptap ? proseMirrorDocToBlocks(tiptap.getJSON()) : (blocks ?? []);
+  }
+
+  /**
    * When re-editing a rich-text message, `blocksToProseMirrorDoc` reconstructs
    * `#didMention` / `#roomRef` facets as `userMention` / `channelThreadMention`
    * MARKS on text nodes. The composer schema registers those names as NODES
