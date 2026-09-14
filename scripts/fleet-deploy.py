@@ -126,7 +126,7 @@ layer_responder() { layer_git "$ROOMY"; }
 # been built from the src that is checked out. mtimes are useless here — a
 # checkout/pull rewrites them — so the build is stamped with the source tree
 # hash at build time (scripts/fleet-deploy.py writes it) and re-verified here.
-SDK_STAMP="$ROOMY/packages/sdk/.fleet-build"
+SDK_STAMP="/home/exedev/.roomy/fleet-sdk-build"
 sdk_src_hash() {
   ( cd "$ROOMY/packages/sdk" && find src -type f \
       \( -name '*.ts' -o -name '*.json' -o -name '*.svelte' \) -print0 2>/dev/null \
