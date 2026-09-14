@@ -787,6 +787,11 @@ export const prose: Record<string, EndpointProse> = {
       "Re-indexes the whole search corpus synchronously: clears every search_backfill_cursor row, then tight-loops the backfill sweeper until the sparse backlog and all dense hotspots are drained. Unlike resetSearchBackfill (which waits on the background loop's idle cadence), this drives the sweep back-to-back so an operator can force a full re-index on demand. Returns this run's backfilled/failed deltas.",
     auth: "Admin allowlist (APPSERVER_ADMIN_DIDS).",
   },
+  "space.roomy.admin.reindexSpace": {
+    description:
+      "Re-indexes ONE space into Qdrant synchronously, resetting only that space's search_backfill_cursor. Targeted repair for a cursor that has advanced PAST unindexed messages (which the background sweeper therefore never revisits) without re-indexing every other space, as runSearchBackfill does. Idempotent (point ids are deterministic UUIDv5). Returns this run's indexed/failed counts and whether the space was walked to its end.",
+    auth: "Admin allowlist (APPSERVER_ADMIN_DIDS).",
+  },
   "space.roomy.admin.push.getSubscriptions": {
     description:
       "Lists all push subscriptions for diagnostic purposes.",

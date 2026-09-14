@@ -105,6 +105,11 @@
     "group": "Admin"
   },
   {
+    "nsid": "space.roomy.admin.reindexSpace",
+    "kind": "procedure",
+    "group": "Admin"
+  },
+  {
     "nsid": "space.roomy.admin.listSpaces",
     "kind": "query",
     "group": "Admin"
