@@ -991,3 +991,46 @@ describe("SyncConnection — concurrent connect() calls", () => {
     }
   });
 });
+
+describe("SyncConnection — attempt lifecycle edge cases", () => {
+  // Sharing the in-flight attempt must not make connect() sticky: once an
+  // attempt settles, the next call has to start a fresh one (callers
+  // legitimately retry after a failure).
+  it("starts a fresh attempt after the previous one settled", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const conn = new SyncConnection({
+        fetchTicket: async () => {
+          calls++;
+          throw new Error("nope");
+        },
+        wsUrl: "wss://srv/",
+        reconnectDelay: () => 0,
+      });
+      await conn.connect().catch(() => {});
+      const after1 = calls;
+      await conn.connect().catch(() => {});
+      expect(calls).toBeGreaterThan(after1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // close() during a pending ticket fetch must settle the caller's promise.
+  it("settles a pending connect when close() is called", async () => {
+    vi.useFakeTimers();
+    try {
+      const conn = new SyncConnection({
+        fetchTicket: () => new Promise<string>(() => {}),
+        wsUrl: "wss://srv/",
+      });
+      const p = conn.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      conn.close();
+      await expect(p).rejects.toThrow(/closed/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
