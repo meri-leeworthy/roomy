@@ -33,6 +33,24 @@ export const BM25_VECTOR_NAME = "bm25";
 const NS_NAMESPACE_UUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
 /**
+ * True when a Qdrant error means "this write can never succeed until an
+ * operator adds space" — HTTP 507 Insufficient Storage.
+ *
+ * Such a failure is SYSTEMIC, not per-message: every point fails, so treating
+ * it as a per-row error amplifies it (the sweep retries all 100 points of a
+ * batch one-by-one against a full disk and reports a bare `failed: 200` that
+ * looks like 200 bad messages; the indexer drops each message individually).
+ * Callers use this to back off and report the real cause instead.
+ *
+ * Qdrant phrases it as `Insufficient Storage`; the SDK surfaces the status
+ * inside the message, so match both.
+ */
+export function isStorageFullError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /insufficient storage|\b507\b/i.test(message);
+}
+
+/**
  * Structural slice of the QdrantClient that the search/index/backfill code
  * uses. The real `QdrantClient` satisfies it; tests inject a fake.
  */

@@ -151,9 +151,15 @@ class FailingQdrant extends FakeQdrant {
 }
 
 /**
- * FakeQdrant that fails upserts of one specific message id. Deterministic
- * under concurrent sweep cycles (unlike a call counter, which the
- * background loop and an explicit sweepCycle would race on).
+ * FakeQdrant that fails upserts of one specific message id, with a
+ * NON-systemic error. Deterministic under concurrent sweep cycles (unlike a
+ * call counter, which the background loop and an explicit sweepCycle would
+ * race on).
+ *
+ * The message deliberately does not resemble a 507: `isStorageFullError`
+ * treats "Insufficient Storage" as SYSTEMIC (whole-batch backoff, no
+ * per-point fan-out), which is a different path from the per-message
+ * fallback this fixture exists to exercise.
  */
 class FailOnMessageId extends FakeQdrant {
   constructor(private readonly failMessageId: string) {
@@ -164,7 +170,7 @@ class FailOnMessageId extends FakeQdrant {
       points: Array<{ payload: { messageId?: unknown } }>;
     };
     if (points.some((p) => p.payload.messageId === this.failMessageId)) {
-      throw new Error("Insufficient Storage");
+      throw new Error("simulated per-message upsert rejection");
     }
     return super.upsert(name, args);
   }
@@ -747,6 +753,51 @@ describe("backfill sweeper (Qdrant)", () => {
     // Both cycles failed every upsert.
     expect(searchBackfillStats().failed).toBeGreaterThanOrEqual(2);
     expect(searchBackfillStats().backfilled).toBe(0);
+  });
+
+  test("a storage-full (507) batch is not retried point-by-point", async () => {
+    const { ctx } = await newAppWithQdrant();
+    const { roomId } = await materializeSpace(ctx, SPACE, USER, {
+      messageText: "alpha first message",
+    });
+    // Several messages so a per-point fallback would be observable.
+    await sendMessage(ctx, roomId, "beta second message");
+    await sendMessage(ctx, roomId, "gamma third message");
+    await flushSearchQueue();
+
+    // Qdrant out of storage: every write fails, and the batch is rejected as a
+    // whole. Count the upsert ATTEMPTS — a systemic failure must not fan out
+    // into one doomed HTTP call per point.
+    let upsertCalls = 0;
+    _setQdrantClientForTest(new (class extends FakeQdrant {
+      override async upsert(): Promise<unknown> {
+        upsertCalls++;
+        throw new Error("Insufficient Storage");
+      }
+    })());
+
+    const globalDb = globalDbOf(ctx);
+    _resetSearchBackfill();
+    // The background loop may also sweep a cycle (as in the sibling tests),
+    // so assert on the SHAPE of the calls rather than an exact count: a
+    // systemic failure must never fan out to one call per message.
+    startSearchBackfill({ globalDb: globalDb as never });
+    try {
+      await sweepCycle(globalDb as never);
+    } finally {
+      await stopSearchBackfill();
+    }
+    // A systemic failure must not fan out to one doomed call per message: the
+    // batch had 3 points, so a per-point fallback would show >= 3 calls per
+    // cycle. Two cycles (loop + explicit) => at most 2 batched attempts.
+    expect(upsertCalls).toBeLessThanOrEqual(2);
+    // The cause is reported as storage, not a bare per-message count.
+    expect(searchBackfillStats().lastRowError).toContain("storage full");
+    // And the cursor stayed put, so the batch is retried once capacity returns.
+    const cursorRow = await globalDb
+      .query("select cursor from search_backfill_cursor where space_did = ?")
+      .get<{ cursor: string }>(SPACE);
+    expect(cursorRow?.cursor ?? "").toBe("");
   });
 
   test("cursor advances only past the last successful upsert in a batch", async () => {

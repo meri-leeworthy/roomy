@@ -23,7 +23,7 @@
 
 import type { DbLike } from "../db/types.ts";
 import { openSpaceDb } from "../db/db.ts";
-import { getQdrantClient, upsertMessage, deleteMessage, ensureMessagesCollection, type QdrantClientLike } from "./qdrantSearch.ts";
+import { getQdrantClient, upsertMessage, deleteMessage, ensureMessagesCollection, isStorageFullError, type QdrantClientLike } from "./qdrantSearch.ts";
 import { encodeSparse, type SparseVector } from "./bm25.ts";
 import { extractMessageText } from "./text.ts";
 import { log } from "../log.ts";
@@ -76,6 +76,8 @@ let activeDrains = 0;
 // ─── Stats (for /health/search) ─────────────────────────────────────────
 let statsIndexedOk = 0;
 let statsIndexedFailed = 0;
+/** Message of the most recent indexer failure (systemic or per-job). */
+let statsLastError: string | null = null;
 
 // ─── Enqueue (called from applyChunkSideEffects) ────────────────────────
 
@@ -142,11 +144,14 @@ export function searchIndexerStats(): {
   queueLength: number;
   indexedOk: number;
   indexedFailed: number;
+  /** Message of the most recent failure, or null. */
+  lastError: string | null;
 } {
   return {
     queueLength: queue.length,
     indexedOk: statsIndexedOk,
     indexedFailed: statsIndexedFailed,
+    lastError: statsLastError,
   };
 }
 
@@ -157,6 +162,7 @@ export function _resetSearchIndexer(): void {
   statsIndexedFailed = 0;
   nextErrors = 0;
   lastBackoffUntil = 0;
+  statsLastError = null;
 }
 
 // ─── Loop ───────────────────────────────────────────────────────────────
@@ -208,7 +214,15 @@ async function drainJobs(jobs: SearchJob[]): Promise<void> {
     }
     markOk();
 
+    // Process with bounded concurrency, but stop the batch on the first
+    // SYSTEMIC failure (Qdrant out of storage / down). Every remaining job
+    // would fail identically, and marking them failed DROPS the messages —
+    // they are then only recoverable by the backfill sweep. Instead, back
+    // off and re-queue the untouched remainder so nothing is lost and the
+    // next cycle retries once capacity is restored.
+    let systemic: unknown = null;
     await mapWithConcurrency(jobs, 4, async (job) => {
+      if (systemic !== null) return;
       try {
         if (job.kind === "delete") {
           await deleteMessage(client!, job.messageId);
@@ -217,10 +231,21 @@ async function drainJobs(jobs: SearchJob[]): Promise<void> {
         }
         statsIndexedOk++;
       } catch (err) {
+        if (isStorageFullError(err)) {
+          systemic = err;
+          statsLastError = `Qdrant storage full (507): ${err instanceof Error ? err.message : String(err)}`;
+          log.error("[search-indexer] Qdrant is out of storage; backing off:", err);
+          return;
+        }
         statsIndexedFailed++;
+        statsLastError = `job ${job.messageId}: ${err instanceof Error ? err.message : String(err)}`;
         log.warn(`[search-indexer] job failed (${job.messageId}):`, err);
       }
     });
+    if (systemic !== null) {
+      markError(systemic);
+      queue.unshift(...jobs);
+    }
   } finally {
     activeDrains--;
   }

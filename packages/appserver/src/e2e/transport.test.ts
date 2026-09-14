@@ -59,6 +59,23 @@ describe("Transport-level edge cases", () => {
     expect(body).toHaveProperty("pending");
   });
 
+  test("GET /health/search → 200 with indexer + backfill stats", async () => {
+    const ctx = await startAppserver()
+    const res = await ctx.anonFetch(`${ctx.baseUrl}/health/search`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // `lastError` on both sides is what makes a wedged space diagnosable from
+    // the API rather than only from the Loki stream — pin it so a refactor
+    // cannot silently drop it.
+    expect(body).toHaveProperty("indexer.queueLength");
+    expect(body).toHaveProperty("indexer.indexedOk");
+    expect(body).toHaveProperty("indexer.indexedFailed");
+    expect(body).toHaveProperty("indexer.lastError");
+    expect(body).toHaveProperty("backfill.failed");
+    expect(body).toHaveProperty("backfill.lastError");
+    expect(body).toHaveProperty("backfill.lastRowError");
+  });
+
   test("non-existent path → 404", async () => {
     const ctx = await startAppserver()
     const res = await ctx.anonFetch(

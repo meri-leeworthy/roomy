@@ -19,7 +19,7 @@
 
 import type { DbLike } from "../db/types.ts";
 import { openSpaceDb } from "../db/db.ts";
-import { getQdrantClient, ensureMessagesCollection, upsertMessages, upsertMessage, type QdrantClientLike, type QueuedMessageUpsert } from "./qdrantSearch.ts";
+import { getQdrantClient, ensureMessagesCollection, upsertMessages, upsertMessage, isStorageFullError, type QdrantClientLike, type QueuedMessageUpsert } from "./qdrantSearch.ts";
 import { encodeSparse } from "./bm25.ts";
 import { extractMessageText } from "./text.ts";
 import { log } from "../log.ts";
@@ -309,24 +309,44 @@ async function sweepOneSpace(
       // were already marked Ok above — `batchFailed` is still false here).
       if (!batchFailed) lastOkId = rows[rows.length - 1]!.id;
     } catch (err) {
-      // A batch-wide failure (e.g. a Qdrant 507 / payload-index hiccup). We
-      // must NOT lose the per-message failure granularity: individually
-      // upsert each so a genuinely-failed message keeps the cursor before
-      // it (retried next cycle) while the others still make progress and
-      // advance. One batched Qdrant call that errored is opaque — it
-      // doesn't tell us WHICH point failed — so we retry point-by-point to
-      // preserve the never-skip-past-a-failure guarantee.
-      log.warn(`[search-backfill] batched upsert failed for ${spaceDid} (falling back per-message):`, err);
-      for (const q of toUpsert) {
-        try {
-          await upsertMessage(client, q.messageId, q.sparse, q.payload);
-          indexedCount++;
-          if (!batchFailed) lastOkId = q.messageId;
-        } catch (perErr) {
-          failedCount++;
-          batchFailed = true;
-          statsLastRowError = `upsert ${q.messageId}: ${perErr instanceof Error ? perErr.message : String(perErr)}`;
-          log.warn(`[search-backfill] upsert failed for ${q.messageId}:`, perErr);
+      // Systemic failure (Qdrant out of storage / unreachable): every point
+      // would fail, so do NOT fan out per-point retries — that turns one
+      // batch failure into 100 doomed HTTP calls and reports a bare
+      // `failed: 100` that reads as 100 bad messages. Count the batch, record
+      // the real cause, and leave the cursor put so the whole batch is
+      // retried once the operator restores capacity.
+      if (isStorageFullError(err)) {
+        failedCount += toUpsert.length;
+        batchFailed = true;
+        statsLastRowError = `Qdrant storage full (507): ${err instanceof Error ? err.message : String(err)}`;
+        log.error(
+          `[search-backfill] Qdrant is out of storage; not retrying ${toUpsert.length} points for ${spaceDid}:`,
+          err,
+        );
+        // No markDbError here: that would make the NEXT sweepCycle block on
+        // the backoff (a 60s sleep inside an admin request / a cycle). The
+        // background loop's own IDLE_POLL_MS cadence is already the throttle,
+        // and `statsLastRowError` is what reports the condition.
+      } else {
+        // A possibly per-message failure. We must NOT lose the per-message
+        // failure granularity: individually upsert each so a genuinely-failed
+        // message keeps the cursor before it (retried next cycle) while the
+        // others still make progress and advance. One batched Qdrant call that
+        // errored is opaque — it doesn't tell us WHICH point failed — so we
+        // retry point-by-point to preserve the never-skip-past-a-failure
+        // guarantee.
+        log.warn(`[search-backfill] batched upsert failed for ${spaceDid} (falling back per-message):`, err);
+        for (const q of toUpsert) {
+          try {
+            await upsertMessage(client, q.messageId, q.sparse, q.payload);
+            indexedCount++;
+            if (!batchFailed) lastOkId = q.messageId;
+          } catch (perErr) {
+            failedCount++;
+            batchFailed = true;
+            statsLastRowError = `upsert ${q.messageId}: ${perErr instanceof Error ? perErr.message : String(perErr)}`;
+            log.warn(`[search-backfill] upsert failed for ${q.messageId}:`, perErr);
+          }
         }
       }
     }
@@ -334,7 +354,10 @@ async function sweepOneSpace(
 
   if (indexedCount > 0) statsBackfilled += indexedCount;
   if (failedCount > 0) statsFailed += failedCount;
-  if (indexedCount > 0 || rows.length > 0) markDbOk();
+  // Don't clear the backoff for a batch that produced no successful writes —
+  // a storage-full cycle "read rows" but accomplished nothing, and clearing
+  // the backoff would make the sweep hammer a full disk every cycle.
+  if (indexedCount > 0) markDbOk();
 
   if (lastOkId !== null) {
     // Advance only past the last non-failed row. A failed upsert (e.g. a
