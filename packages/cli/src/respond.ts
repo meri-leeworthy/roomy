@@ -281,6 +281,10 @@ export async function respond(
       log(`skipping event without space/room: ${JSON.stringify(evt).slice(0, 120)}`);
       return;
     }
+    // Self-authored events are only emitted by the bridge with --include-self,
+    // and only for an explicit #didMention facet of the agent (the bridge's
+    // isTrigger guard), so the agent's own reports cannot re-trigger it. This
+    // filter is the second gate for a responder running without that flag.
     if (evt.message.authorDid === agentDid && !opts.includeSelf) return;
     // Persist the event as a job, then let the pump process it in FIFO order.
     queue.enqueue("mention", { kind: "mention", evt });
@@ -332,15 +336,28 @@ async function runMentionJob(
   else if (isContinuation) log(`reply with no stored session — starting fresh (chain ${chain.rootId})`);
   log(`${kind} from ${msg.authorName || msg.authorDid}: ${truncate(plaintextOf(message), 80)}`);
 
-  // Trace placement: fresh mentions in channels get a dedicated 💭 thread
-  // room; everything else (thread-room mentions, and all continuations)
-  // streams traces into the conversation itself.
-  let traceRoomId: string | undefined = prior?.traceThreadId;
-  if (kind === "mention" && !traceRoomId && (opts.traceThreads ?? true)) {
+  // Trace placement: a session in a CHANNEL gets a dedicated 💭 thread room and
+  // streams its thinking there; a session already in a thread room keeps its
+  // traces in that room. `ensureTraceThread` returns undefined for thread rooms,
+  // so the same call handles both.
+  //
+  // Continuations need this as much as fresh mentions do. A chain whose root was
+  // a self-triggered tick has no stored 💭 room — self-triggers persist no
+  // session (so `prior.traceThreadId` is absent) — and a reply to it would
+  // otherwise stream its thinking straight into the channel, which is exactly
+  // the clutter a trace thread exists to prevent.
+  //
+  // Self-triggered sessions (the scheduled self-check posts a facet mention of
+  // the agent itself) are exempt entirely: they fire on a timer, so a 💭 room
+  // and streamed thinking chunks per tick would be pure clutter for an
+  // unattended check. Their answer is the whole deliverable.
+  const selfTriggered = msg.authorDid === agentDid;
+  let traceRoomId: string | undefined = selfTriggered ? undefined : prior?.traceThreadId;
+  if (!selfTriggered && !traceRoomId && (opts.traceThreads ?? true)) {
     traceRoomId = (await ensureTraceThread(xrpc, spaceId, roomId, msg)) ?? undefined;
   }
 
-  const streamThinking = opts.streamThinking ?? true;
+  const streamThinking = !selfTriggered && (opts.streamThinking ?? true);
   // Serialize streamed thinking-chunk posts so they land in order, and so
   // the final answer is posted only after every chunk has been sent.
   // PostChain contains per-chunk failures (logged + counted, chain carries
@@ -351,6 +368,10 @@ async function runMentionJob(
   let lastTraceChunkId: string | undefined;
   const reply = await runOmp(prompt, { ...opts, resume }, {
     onThinking: (chunk) => {
+      // Self-triggered ticks post no thinking at all: dropping the callback
+      // here (not just the flags below) is what prevents the chunks, since
+      // omp streams them regardless of the streamThinking/postThinking flags.
+      if (selfTriggered) return;
       streamedThinking = true;
       thinkingPosts.push(async () => {
         if (traceRoomId) {
@@ -362,7 +383,9 @@ async function runMentionJob(
       });
     },
   });
-  if (reply.sessionId) {
+  // Self-triggered ticks are independent (each is a fresh root id), so
+  // persisting an entry per tick would only grow the session file forever.
+  if (reply.sessionId && !selfTriggered) {
     sessions?.set(chainKey, { sessionId: reply.sessionId, traceThreadId: traceRoomId });
   }
   if (!reply || !reply.answer.trim()) {
@@ -386,9 +409,8 @@ async function runMentionJob(
     log(`replied ${messageId} (answer; thinking ${traceRoomId ? `in trace thread ${traceRoomId}` : "streamed in room"})`);
     return;
   }
-
   const thinking = reply.thinking?.trim();
-  const postThinking = (opts.thinking ?? true) && !!thinking;
+  const postThinking = !selfTriggered && (opts.thinking ?? true) && !!thinking;
   if (postThinking && traceRoomId) {
     // Traces go to the trace room even when not streamed: post the trace
     // there and the clean answer (with a link) in the channel.
