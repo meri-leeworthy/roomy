@@ -7,6 +7,10 @@ import type { StreamDid, UserDid, EventType, Ulid } from "@roomy-space/sdk";
 import { Router } from "./router.ts";
 import { openDb, closeDb } from "../db/db.ts";
 import type { AppliedEvent, InvalidationEvent } from "./types.ts";
+import {
+  _resetProfileStoreCache,
+  _setTestGetProfiles,
+} from "../queries/profileStore.ts";
 
 const STREAM_DID = "did:web:space.example.com" as StreamDid;
 const USER_DID = "did:plc:alice" as UserDid;
@@ -382,5 +386,71 @@ describe("Router singleton", () => {
 
     Router.resetInstance();
     expect(Router.getInstance()).toBeUndefined();
+  });
+});
+
+// ─── Write-path purity ──────────────────────────────────────────────────
+
+describe("Router write-path purity", () => {
+  /**
+   * `onEventsApplied` runs inline in `StreamManager.sendEvents`, so it must
+   * not attempt profile resolution: an author missing from the global store
+   * triggers an on-demand HappyView/Bluesky fetch, which puts a third-party
+   * HTTP round-trip inside the caller's write (~450ms, measured in
+   * production; see perf/probe-sendevents.ts).
+   *
+   * Observed through the profile store's test seam rather than the network:
+   * under `bun test` the real fetch is short-circuited by a NODE_ENV guard,
+   * so the observable that matters is *whether hydration was attempted at
+   * all*, which is exactly what the seam reports.
+   */
+  it("builds message diffs without attempting profile hydration", async () => {
+    const MESSAGE_ID = "01WRITEPATHMSGAAAAAAAAAA";
+    const AUTHOR_DID = "did:plc:write-path-author";
+    closeDb();
+    const db = openDb({ path: ":memory:" }).forSpace(STREAM_DID);
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", AUTHOR_DID, AUTHOR_DID);
+    await db.run(
+      "insert into entities (id, stream_id, room, sort_idx) values (?, ?, ?, ?)",
+      MESSAGE_ID, STREAM_DID, "01ROOM1AAAAAAAAAAAAAA000", MESSAGE_ID,
+    );
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit, timestamp) " +
+        "values (?, 'text/plain', ?, ?, ?)",
+      MESSAGE_ID, Buffer.from("hello"), MESSAGE_ID, Date.now(),
+    );
+    await db.run(
+      "insert into edges (head, tail, label) values (?, ?, 'author')",
+      MESSAGE_ID, AUTHOR_DID,
+    );
+
+    // The author deliberately has no row in the global `profiles` table —
+    // the condition that makes hydration fire.
+    const hydrated: string[][] = [];
+    _resetProfileStoreCache();
+    _setTestGetProfiles(async (dids) => {
+      hydrated.push([...dids]);
+      return [];
+    });
+
+    try {
+      const router = new Router();
+      router.subscribe(() => {});
+      await router.onEventsApplied(
+        STREAM_DID,
+        [
+          makeEvent("space.roomy.message.createMessage.v0", {
+            id: MESSAGE_ID as Ulid,
+            user: AUTHOR_DID as UserDid,
+            roomId: "01ROOM1AAAAAAAAAAAAAA000" as Ulid,
+          }),
+        ],
+        { isBackfill: false },
+      );
+    } finally {
+      _setTestGetProfiles(null);
+    }
+
+    expect(hydrated).toEqual([]);
   });
 });

@@ -145,9 +145,16 @@ export class Router implements IInvalidationRouter {
       }
     }
     if (ids.size === 0) return new Map();
+    // Internal read: the diff handlers need the message's own fields, not a
+    // rendered message, so skip the profile-hydration pass. This runs inside
+    // `StreamManager.sendEvents` (via `onEventsApplied`), and hydration can
+    // issue an on-demand Bluesky/HappyView fetch — a network round-trip
+    // inside the write path. The client receives the author via the WS diff
+    // and resolves the profile itself.
     const { messages } = await selectMessages(db ?? openSpaceDb(streamDid), {
       kind: "ids",
       ids: [...ids],
+      skipProfileHydration: true,
     });
     return new Map(messages.map((m) => [m.id as Ulid, m] as const));
   }

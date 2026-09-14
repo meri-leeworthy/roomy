@@ -97,6 +97,7 @@ function entryToFields(entry: CacheEntry): ProfileFields | null {
  */
 export async function resolveProfiles(
   dids: string[],
+  opts: { allowNetworkFetch?: boolean } = {},
 ): Promise<Map<string, ProfileFields>> {
   const result = new Map<string, ProfileFields>();
   if (dids.length === 0) return result;
@@ -121,20 +122,27 @@ export async function resolveProfiles(
   }
 
   if (missing.length > 0) {
-    await resolveFromGlobalDb(missing, result, now);
+    await resolveFromGlobalDb(missing, result, now, opts.allowNetworkFetch !== false);
   }
 
   return result;
 }
 
 /**
- * Look up a set of DIDs in the global `profiles` table, then self-heal any
- * that are still missing via on-demand HappyView-first hydration.
+ * Look up a set of DIDs in the global `profiles` table, then — when
+ * `allowNetworkFetch` — self-heal any that are still missing via on-demand
+ * HappyView-first hydration.
+ *
+ * `allowNetworkFetch: false` keeps the global-store read (an indexed SQLite
+ * lookup) but skips the fetch. Callers on the write path pass it: reading
+ * local rows is free, whereas a fetch is a third-party HTTP round-trip
+ * parked inside someone's write.
  */
 async function resolveFromGlobalDb(
   dids: string[],
   result: Map<string, ProfileFields>,
   now: number,
+  allowNetworkFetch: boolean,
 ): Promise<void> {
   const globalDb = tryOpenGlobalDb();
   // No worker-backed global DB (e.g. a raw in-memory Database in tests) —
@@ -166,7 +174,9 @@ async function resolveFromGlobalDb(
     else stillMissing.push(row.did);
   }
 
-  const notInDb = dids.filter((d) => !rows.some((r) => r.did === d));
+  const notInDb = allowNetworkFetch
+    ? dids.filter((d) => !rows.some((r) => r.did === d))
+    : [];
   if (notInDb.length > 0) {
     // On-demand hydration mirroring the getProfile handler: fetch Roomy
     // records from HappyView (batch) and fall back to Bluesky, then write
@@ -258,9 +268,10 @@ export async function hydrateProfiles<T>(
   items: T[],
   getDid: (item: T) => string,
   apply: (item: T, fields: ProfileFields) => void,
+  opts: { allowNetworkFetch?: boolean } = {},
 ): Promise<void> {
   if (items.length === 0) return;
-  const profiles = await resolveProfiles(items.map(getDid));
+  const profiles = await resolveProfiles(items.map(getDid), opts);
   for (const item of items) {
     const p = profiles.get(getDid(item));
     if (p) apply(item, p);

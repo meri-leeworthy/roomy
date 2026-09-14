@@ -96,6 +96,15 @@ export type SelectScope =
       kind: "ids";
       ids: string[];
       /**
+       * Skip the global-profile hydration pass (and its on-demand Bluesky /
+       * HappyView fetch). Set by internal callers that read message rows for
+       * their own purposes — the invalidation router, which only needs the
+       * fields that drive a diff — rather than to render a message to a
+       * client. Without this, a single live event drags a profile fetch onto
+       * the write path (see `hydrateProfiles` below).
+       */
+      skipProfileHydration?: boolean;
+      /**
        * Internal: ids already on the current forward-resolution chain. A
        * forward never re-resolves an id already seen, bounding pathological
        * cycles (A forwards B, B forwards A) to one pass instead of
@@ -497,6 +506,14 @@ export async function selectMessages(
   // space's stream, so the per-space comp_user/comp_info join above is null
   // for cross-stream authors. The global `profiles` table is authoritative;
   // the per-space value (if any) acts as a fallback.
+  //
+  // Internal readers (`skipProfileHydration`) still get the global-store
+  // lookup — a local indexed read — but not the on-demand fetch that an
+  // unresolved author would otherwise trigger. They ask for message *rows*,
+  // not rendered messages; on the write path (the invalidation router) that
+  // fetch is a third-party HTTP round-trip inside `sendEvents`, and the
+  // client resolves the author's profile from the same global store when it
+  // applies the diff.
   await hydrateProfiles(
     messages,
     (m) => m.authorDid,
@@ -505,6 +522,7 @@ export async function selectMessages(
       if (p.handle != null) m.authorHandle = p.handle;
       if (p.avatar != null) m.authorAvatar = p.avatar;
     },
+    { allowNetworkFetch: !(scope.kind === "ids" && scope.skipProfileHydration) },
   );
 
   // System messages are authored by the space and reference a *different*
