@@ -365,6 +365,45 @@ describe("space.roomy.admin.reindexSpace", () => {
     }
   });
 
+  test("reports why a row failed instead of a bare count", async () => {
+    const ctx = await startAppserver();
+    await materializeSpace(ctx, SPACE, USER, { messageText: "the quick brown fox" });
+    await flushSearchQueue();
+
+    // Every upsert fails, so the space never drains. The response must say
+    // WHY — a bare `failed: N` with `lastRowError: null` leaves an operator
+    // with no signal beyond the Loki stream (the gap that made the prod
+    // wedge undiagnosable from the API).
+    _setQdrantClientForTest(new (class extends FakeQdrant {
+      override async upsert(): Promise<unknown> {
+        throw new Error("simulated Qdrant write failure");
+      }
+    })());
+    const globalDb = globalDbOf(ctx);
+    await globalDb.run("delete from search_backfill_cursor where space_did = ?", [SPACE]);
+    await globalDb.run(
+      "insert into search_backfill_cursor (space_did, cursor, updated_at) values (?, ?, ?)",
+      [SPACE, "01ZZZZZZZZZZZZZZZZZZZZZZZZ", Date.now()],
+    );
+
+    try {
+      const res = await ctx.authedFetch(ADMIN)(
+        `${ctx.baseUrl}/xrpc/space.roomy.admin.reindexSpace`,
+        { method: "POST", body: JSON.stringify({ spaceId: SPACE }) },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.failed).toBeGreaterThan(0);
+      // `drained` means "walked to the end of the row set", not "all indexed"
+      // — a single-row space is a partial batch even when that row fails.
+      expect(body.drained).toBe(true);
+      expect(typeof body.lastRowError).toBe("string");
+      expect(body.lastRowError).toContain("simulated Qdrant write failure");
+    } finally {
+      _resetQdrantClient();
+    }
+  });
+
   test("unknown space → 404", async () => {
     const ctx = await startAppserver();
     _setQdrantClientForTest(new FakeQdrant());

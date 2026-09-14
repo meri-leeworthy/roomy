@@ -49,6 +49,8 @@ export const adminReindexSpaceHandler: ProcedureHandler<
     dbBackoffActive: boolean;
     errorCount: number;
     lastError: string | null;
+    /** Why the last per-row upsert/encode failed (null when none). */
+    lastRowError: string | null;
   }
 > = async (_params: QueryParams, auth: AuthCtx, body: ReindexSpaceBody) => {
   requireAdmin(auth);
@@ -97,5 +99,6 @@ export const adminReindexSpaceHandler: ProcedureHandler<
     dbBackoffActive: stats.dbBackoffActive,
     errorCount: stats.errorCount,
     lastError: stats.lastError,
+    lastRowError: result.lastRowError,
   };
 };

@@ -48,6 +48,16 @@ let wake: (() => void) | null = null;
 let dbErrorCount = 0;
 /** Timestamp (ms) until which the sweeper should skip cycles. */
 let dbBackoffUntil = 0;
+/**
+ * Message of the most recent per-message upsert/encode failure. Kept separately
+ * from {@link statsLastError} (which is the loop-level error): a per-row
+ * failure is only logged today, so `/health/search` reported `failed: N` with
+ * `lastError: null` — an operator could see a space wedged with no reason
+ * exposed anywhere but Loki. Surfacing the last one makes the failure
+ * diagnosable from the API. Never reset by the loop; cleared by
+ * `_resetSearchBackfill`.
+ */
+let statsLastRowError: string | null = null;
 
 // ─── Stats (for /health/search) ─────────────────────────────────────────
 let statsBackfilled = 0;
@@ -107,6 +117,13 @@ export function searchBackfillStats(): {
   errorCount: number;
   /** Message of the most recent sweep error, or null when none. */
   lastError: string | null;
+  /**
+   * Message of the most recent PER-ROW upsert/encode failure, or null when
+   * none. Distinct from `lastError` (loop-level): rows that fail are retried
+   * forever behind the cursor, so this is the signal that a specific message
+   * is wedging a space.
+   */
+  lastRowError: string | null;
 } {
   return {
     backfilled: statsBackfilled,
@@ -114,6 +131,7 @@ export function searchBackfillStats(): {
     dbBackoffActive: Date.now() < dbBackoffUntil,
     errorCount: dbErrorCount,
     lastError: statsLastError,
+    lastRowError: statsLastRowError,
   };
 }
 
@@ -124,6 +142,7 @@ export function _resetSearchBackfill(): void {
   dbErrorCount = 0;
   dbBackoffUntil = 0;
   statsLastError = null;
+  statsLastRowError = null;
 }
 
 // ─── Loop ───────────────────────────────────────────────────────────────
@@ -277,6 +296,7 @@ async function sweepOneSpace(
     } catch (err) {
       failedCount++;
       batchFailed = true;
+      statsLastRowError = `encode ${row.id}: ${err instanceof Error ? err.message : String(err)}`;
       log.warn(`[search-backfill] encode failed for ${row.id}:`, err);
     }
   }
@@ -305,6 +325,7 @@ async function sweepOneSpace(
         } catch (perErr) {
           failedCount++;
           batchFailed = true;
+          statsLastRowError = `upsert ${q.messageId}: ${perErr instanceof Error ? perErr.message : String(perErr)}`;
           log.warn(`[search-backfill] upsert failed for ${q.messageId}:`, perErr);
         }
       }
@@ -394,6 +415,12 @@ export interface SpaceBackfillResult {
   drained: boolean;
   /** Sweep cycles executed. */
   cycles: number;
+  /**
+   * Message of the last per-row failure seen during THIS run, or null when
+   * none. Without it a caller sees `failed: N` with no reason (`lastError`
+   * tracks only loop-level errors, and per-row failures are logged to Loki).
+   */
+  lastRowError: string | null;
 }
 
 /**
@@ -467,6 +494,7 @@ export async function runSpaceBackfill(
     failed: statsFailed - startFailed,
     drained,
     cycles,
+    lastRowError: statsLastRowError,
   };
 }
 
