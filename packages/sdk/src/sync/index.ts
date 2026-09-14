@@ -14,6 +14,7 @@ export {
   decodeCborFrame,
   type ConnectionLogger,
   type ConnectionStatus,
+  type GiveUpInfo,
   type CloseEventInfo,
   type SyncConnectionOptions,
   type SyncFrame,

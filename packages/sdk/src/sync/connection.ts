@@ -69,6 +69,11 @@ export interface ConnectionLogger {
   (msg: string): void;
 }
 
+export interface GiveUpInfo {
+  /** 1-based number of the reconnect attempt that was given up on. */
+  attempt: number;
+}
+
 export interface SyncConnectionOptions {
   /**
    * Mints a fresh connection ticket. Called on every connect attempt
@@ -107,6 +112,45 @@ export interface SyncConnectionOptions {
    * Default: 30000 (30 seconds).
    */
   backoffMaxMs?: number;
+  /**
+   * How long an in-flight connect attempt may stay pending before it is
+   * considered failed and routed into the reconnect path, in ms.
+   *
+   * This is a correctness guard, not just a nicety: a WebSocket
+   * implementation is only required to fire `close` once the connection has
+   * been *established*. When the handshake itself fails (bad ticket, origin
+   * 502, DNS failure, TLS reset), Node's undici-based `WebSocket` fires
+   * `error` and then leaves the socket in CONNECTING forever — no `close`, so
+   * a state machine that schedules its reconnect from `close` alone wedges
+   * permanently with zero open sockets.
+   *
+   * Every connect attempt therefore arms a watchdog; if neither `open` nor
+   * `close` arrives in time, the attempt is aborted and a reconnect is
+   * scheduled exactly as an abnormal close would. Set to 0 to disable.
+   *
+   * Default: 30_000 (30s).
+   */
+  connectTimeoutMs?: number;
+  /**
+   * Maximum number of consecutive reconnect attempts before giving up.
+   * When the connection has failed to (re)establish this many times in a
+   * row it stops reconnecting, transitions to `closed` (intentional:
+   * false), and invokes {@link onGiveUp} so the caller can take corrective
+   * action (e.g. exit so a supervisor restarts it fresh).
+   *
+   * The counter resets on a successful open, so this bounds only
+   * *consecutive* failures.
+   *
+   * Default: unlimited (preserving prior behaviour).
+   */
+  maxReconnectAttempts?: number;
+  /**
+   * Called once when the connection gives up after
+   * {@link maxReconnectAttempts} consecutive failed attempts. The
+   * connection has already transitioned to `closed` (intentional: false)
+   * by the time this fires. Not called when the cap is unset.
+   */
+  onGiveUp?: (info: GiveUpInfo) => void;
   /**
    * Heartbeat configuration. When set, the connection sends a WebSocket
    * protocol-level `ping` frame on an interval and reconnects if no `pong`
@@ -162,6 +206,15 @@ interface PingableWebSocket {
 const TOPIC_KEY = (t: Topic) => `${t.kind}:${t.id}`;
 
 /**
+ * How long to wait after an `error` on a still-CONNECTING socket before
+ * abandoning the attempt. Browsers fire `error` then `close` back to
+ * back; Node's WebSocket fires `error` alone. This grace lets the former
+ * take its normal path while keeping the latter's recovery to seconds
+ * rather than the full connect timeout.
+ */
+const ERROR_ABANDON_GRACE_MS = 1000;
+
+/**
  * A framework-agnostic appserver sync connection.
  *
  * Lifecycle:
@@ -203,6 +256,26 @@ export class SyncConnection {
   #pongTimer: ReturnType<typeof setTimeout> | null = null;
   /** Listener unsubscribe for the WS impl's pong event. */
   #pongUnsubscribe: (() => void) | null = null;
+  readonly #connectTimeoutMs: number;
+  readonly #maxReconnectAttempts: number;
+  /**
+   * Watchdog for the in-flight connect attempt. Armed on every attempt and
+   * cleared on open/close. Fires when a failed handshake produced `error`
+   * without the `close` that the reconnect logic depends on.
+   */
+  #connectTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Monotonic id for the in-flight connect attempt. Bumped whenever an
+   * attempt is abandoned, so a `fetchTicket` that eventually resolves can
+   * detect that its attempt is stale and must not build a socket.
+   */
+  #connectEpoch = 0;
+  /**
+   * Settles (rejects) the promise of the in-flight attempt. Without this,
+   * abandoning an attempt that produced neither `open` nor `close` would
+   * leave its `connect()` promise pending forever on every retry.
+   */
+  #failAttempt: ((err: Error) => void) | null = null;
 
   constructor(opts: SyncConnectionOptions) {
     this.#opts = opts;
@@ -216,6 +289,8 @@ export class SyncConnection {
     this.#WS = WS;
     this.#backoffBaseMs = opts.backoffBaseMs ?? 1000;
     this.#backoffMaxMs = opts.backoffMaxMs ?? 30_000;
+    this.#connectTimeoutMs = opts.connectTimeoutMs ?? 30_000;
+    this.#maxReconnectAttempts = opts.maxReconnectAttempts ?? Infinity;
     this.#reconnectDelay = opts.reconnectDelay ?? ((attempt: number) => {
       const cap = Math.min(this.#backoffBaseMs * 2 ** attempt, this.#backoffMaxMs);
       // Full jitter: random value in [0, cap]
@@ -386,6 +461,96 @@ export class SyncConnection {
     }
   }
 
+  /**
+   * Arm the connect watchdog for a fresh attempt. See `connectTimeoutMs`:
+   * a handshake that fails at the transport level may emit `error` without
+   * ever emitting `close`, and `close` is what drives our reconnect path.
+   * The watchdog is the backstop that keeps the state machine live.
+   */
+  #startConnectTimer(): void {
+    this.#armConnectWatchdog(this.#connectTimeoutMs);
+  }
+
+  /** (Re)arm the watchdog to abandon the in-flight attempt after `ms`. */
+  #armConnectWatchdog(ms: number): void {
+    this.#clearConnectTimer();
+    if (ms <= 0) return;
+    this.#connectTimer = setTimeout(() => {
+      this.#connectTimer = null;
+      this.#onConnectTimeout(ms);
+    }, ms);
+  }
+
+  #clearConnectTimer(): void {
+    if (this.#connectTimer) {
+      clearTimeout(this.#connectTimer);
+      this.#connectTimer = null;
+    }
+  }
+
+  /**
+   * The attempt never opened and never closed — abandon it and re-enter the
+   * reconnect path. `connect()` treats a socket in CONNECTING as "already
+   * connecting" and returns early, so the stale socket must be detached and
+   * discarded before rescheduling, otherwise every subsequent attempt would
+   * no-op forever. Detaching the handlers also guarantees the late
+   * `close`/`error` a real socket may still deliver cannot feed a second
+   * (double) reconnect into the state machine.
+   */
+  #onConnectTimeout(waitedMs: number): void {
+    if (this.#intentionalClose) return;
+    // Invalidate this attempt first: a `fetchTicket` still in flight when
+    // the watchdog fires must not create a socket after we reschedule,
+    // or the retry and the straggler would both hold a live connection.
+    this.#connectEpoch++;
+    const ws = this.#ws;
+    if (!ws) {
+      // No socket yet — the ticket fetch (or DNS, before the constructor
+      // returned) is what is hanging. Still reschedule, or we wedge.
+      this.#log(
+        `connect attempt aborted after ${waitedMs}ms before a socket was created — abandoning`,
+      );
+      this.#settleAttempt(new Error("connect timed out before socket"));
+      this.#emitError(new Error("connect timed out"));
+      this.#handleAbnormalClose(0, "connect-timeout");
+      return;
+    }
+    this.#log(
+      `connect attempt aborted after ${waitedMs}ms with no open/close — abandoning`,
+    );
+    this.#detachSocket(ws);
+    if (this.#ws === ws) this.#ws = null;
+    this.#settleAttempt(new Error("connect timed out"));
+    try {
+      ws.close();
+    } catch {
+      // Best effort: the socket is already unusable.
+    }
+    this.#emitError(new Error("connect timed out"));
+    this.#handleAbnormalClose(0, "connect-timeout");
+  }
+
+  /**
+   * Settle the in-flight attempt's promise, if it is still pending. The
+   * stored callback is a no-op once the attempt has resolved or rejected.
+   */
+  #settleAttempt(err: Error): void {
+    const fail = this.#failAttempt;
+    this.#failAttempt = null;
+    fail?.(err);
+  }
+
+  /**
+   * Strip our handlers from a socket we are abandoning, so a later event on
+   * it can't re-enter the reconnect state machine.
+   */
+  #detachSocket(ws: AnyWebSocket): void {
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+  }
+
   // ── Status ──────────────────────────────────────────────────────────
 
   get status(): ConnectionStatus {
@@ -426,22 +591,60 @@ export class SyncConnection {
    * connecting or open. Resolves once the socket is open (or rejects if
    * the ticket fetch fails / the initial connect errors before opening).
    */
-  async connect(): Promise<void> {
+  connect(): Promise<void> {
     const ws = this.#ws;
     if (ws && (ws.readyState === this.#WS.OPEN || ws.readyState === this.#WS.CONNECTING)) {
-      return;
+      return Promise.resolve();
     }
+    // The deferred is created up front (and stored as #failAttempt) so the
+    // watchdog can settle this promise even while fetchTicket is hanging —
+    // before any socket exists to observe an event on.
+    let resolveAttempt!: () => void;
+    let rejectAttempt!: (err: unknown) => void;
+    const attempt = {
+      promise: new Promise<void>((res, rej) => {
+        resolveAttempt = () => res();
+        rejectAttempt = rej;
+      }),
+      resolve: () => resolveAttempt(),
+      reject: (err: unknown) => rejectAttempt(err),
+    };
+    this.#failAttempt = (err) => attempt.reject(err);
+    void this.#runConnect(attempt).catch((err) => attempt.reject(err));
+    return attempt.promise;
+  }
 
+  /** One connect attempt; settles `attempt` on open (or on error/close). */
+  async #runConnect(attempt: {
+    resolve: (v?: void) => void;
+    reject: (e: unknown) => void;
+  }): Promise<void> {
     this.#intentionalClose = false;
     this.#setStatus({ state: "connecting" });
     this.#log("Requesting ticket…");
+    // Arm the watchdog before the socket exists: a failed handshake can
+    // otherwise leave us pending forever with no close event to recover from.
+    this.#startConnectTimer();
+    const epoch = ++this.#connectEpoch;
 
     let ticket: string;
     try {
       ticket = await this.#opts.fetchTicket();
+      if (epoch !== this.#connectEpoch) {
+        // Abandoned while we waited (watchdog fired, or a reconnect
+        // superseded us). A newer attempt owns the connection now.
+        this.#log("ticket fetch resolved after the attempt was abandoned; discarding");
+        throw new Error("connect attempt abandoned");
+      }
     } catch (err) {
       this.#log(`Ticket fetch failed: ${describeError(err)}`);
       this.#emitError(err);
+      this.#clearConnectTimer();
+      if (epoch !== this.#connectEpoch) {
+        // A newer attempt has already taken over; it owns the retry, so
+        // scheduling another here would fork the state machine.
+        throw err;
+      }
       // Treat as abnormal close so reconnect logic still runs.
       this.#handleAbnormalClose(0, "ticket-fetch-failed");
       throw err;
@@ -456,6 +659,7 @@ export class SyncConnection {
     } catch (err) {
       this.#log(`WebSocket constructor threw: ${describeError(err)}`);
       this.#emitError(err);
+      this.#clearConnectTimer();
       this.#handleAbnormalClose(0, "constructor-threw");
       throw err;
     }
@@ -464,8 +668,18 @@ export class SyncConnection {
 
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      // Bridge the per-socket promise into the shared attempt deferred.
+      // The attempt was already registered with #failAttempt in connect().
+      this.#failAttempt = (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      };
 
       socket.onopen = () => {
+        this.#clearConnectTimer();
+        this.#failAttempt = null;
+        attempt.resolve();
         this.#setStatus({ state: "open" });
         this.#log("Connected.");
         // Reset reconnect attempt counter on successful connection.
@@ -515,12 +729,23 @@ export class SyncConnection {
         this.#emitError(err);
         if (!settled) {
           settled = true;
+          this.#failAttempt = null;
           reject(err);
+        }
+        // A failed *handshake* may never be followed by `close` (Node's
+        // WebSocket leaves the socket in CONNECTING), so `close` — our only
+        // reconnect trigger — never runs and the connection wedges. Give
+        // `close` a short grace period, then abandon the attempt ourselves.
+        // A genuine `close` clears this timer in `onclose`.
+        if (socket.readyState === this.#WS.CONNECTING) {
+          this.#armConnectWatchdog(ERROR_ABANDON_GRACE_MS);
         }
       };
 
       socket.onclose = (event: CloseEvent) => {
         const intentional = this.#intentionalClose;
+        this.#clearConnectTimer();
+        this.#failAttempt = null;
         this.#ws = null;
         // Heartbeat timers belong to this socket; tear them down before
         // scheduling reconnect so a stray ping doesn't fire on a dead ws.
@@ -570,6 +795,11 @@ export class SyncConnection {
     this.#intentionalClose = true;
     this.#reconnectAttempt = 0;
     this.#stopHeartbeatTimers();
+    this.#clearConnectTimer();
+    // Discard any in-flight attempt so its ticket fetch cannot open a
+    // socket after the caller asked us to stop.
+    this.#connectEpoch++;
+    this.#settleAttempt(new Error("connection closed"));
     if (this.#reconnectTimer) {
       clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = null;
@@ -646,6 +876,18 @@ export class SyncConnection {
     if (this.#intentionalClose) return;
     const attempt = this.#reconnectAttempt;
     this.#reconnectAttempt++;
+    // Safety net: don't retry forever. A permanently unreachable
+    // appserver (or a stale credential that fails every ticket fetch)
+    // would otherwise spin silently until a human noticed.
+    if (this.#reconnectAttempt > this.#maxReconnectAttempts) {
+      this.#log(
+        `Giving up after ${attempt} consecutive reconnect failures `
+          + `(max ${this.#maxReconnectAttempts})`,
+      );
+      this.#setStatus({ state: "closed", intentional: false });
+      this.#opts.onGiveUp?.({ attempt: attempt + 1 });
+      return;
+    }
     const delay = this.#reconnectDelay(attempt);
     if (!Number.isFinite(delay) || delay <= 0) {
       this.#setStatus({ state: "closed", intentional: false });
