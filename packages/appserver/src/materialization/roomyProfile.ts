@@ -187,13 +187,20 @@ export async function getProfileFromHappyView(
  * that `insertProfilesWithExtras` expects. Blob ref strings (`atblob://…` or
  * `https://…`) are passed through as-is — HappyView serves them in the same
  * format the materializer stores.
+ *
+ * Roomy profile records carry no handle, so `handle` is left `undefined`
+ * rather than coerced to `""`. An empty string is a *present* value on the
+ * wire — `stripNulls` drops null/undefined but passes `""` through — so
+ * coercing here made handle-less users return `handle: ""` from `getProfile`
+ * and poisoned the global `profiles` row on first insert. Callers treat an
+ * absent handle as "fetch it" (see `backfillHandles`).
  */
 export function happyViewToProfileView(
   p: HappyViewProfile,
 ): ProfileViewDetailed {
   return {
     did: p.did,
-    handle: p.handle ?? "",
+    handle: p.handle,
     displayName: p.displayName,
     description: p.description,
     avatar: p.avatar,
@@ -218,14 +225,22 @@ export function happyViewExtras(
   };
 }
 
-/** Convert a PDS-fetched Roomy record into a ProfileViewDetailed. */
+/**
+ * Convert a PDS-fetched Roomy record into a ProfileViewDetailed.
+ *
+ * Like `happyViewToProfileView`, the handle is left `undefined`: a Roomy
+ * record has no handle, and `""` would be indistinguishable from a real one.
+ */
 export function roomyRecordToProfileView(
   did: string,
   record: RoomyProfileRecord,
 ): ProfileViewDetailed {
   return {
     did,
-    handle: "",
+    // A Roomy record has no handle; annotate so this widens to the optional
+    // `string | undefined` rather than the literal `undefined` that the
+    // ProfileViewDetailed cast would reject.
+    handle: undefined as string | undefined,
     displayName: record.displayName,
     description: record.description,
     avatar: record.avatar ? blobRefToAtblob(did, record.avatar) : undefined,

@@ -194,6 +194,12 @@ export const defaultGetProfiles: GetProfilesFn = async (dids: UserDid[]) => {
  * When HappyView is not configured (`null`), skips straight to Bluesky —
  * the original fast batched path, no per-DID PDS round-trips.
  *
+ * Roomy profile records carry no handle, so a HappyView hit supplies display
+ * fields but not the handle. Those DIDs also go to Bluesky, whose handle is
+ * merged onto the Roomy profile — the Roomy record stays authoritative for
+ * name/avatar/description, and the handle (which only the ATProto profile
+ * knows) gets filled in.
+ *
  * Returns `{ profiles, extras }` where `profiles` is the
  * `ProfileViewDetailed[]` for `insertProfilesWithExtras` and `extras` maps
  * DIDs to Roomy-specific fields (pronouns, website, banner) that
@@ -214,30 +220,52 @@ export async function getProfilesRoomyFirst(
   const extras = new Map<string, RoomyProfileExtras>();
 
   // Step 1: query HappyView for Roomy profile records (batched).
+  let roomyProfiles: { did: UserDid; pv: ProfileViewDetailed }[] = [];
   let missingDids = requested;
   if (happyView) {
     const happyViewResults = await getProfilesFromHappyView(requested, happyView);
     for (const did of requested) {
       const hp = happyViewResults.get(did);
       if (hp) {
-        profiles.push(happyViewToProfileView(hp));
+        const pv = happyViewToProfileView(hp);
+        roomyProfiles.push({ did, pv });
+        profiles.push(pv);
         extras.set(did, happyViewExtras(hp));
       }
     }
     missingDids = requested.filter((d) => !happyViewResults.has(d));
   }
 
-  // Step 2: fall back to Bluesky for the DIDs HappyView didn't have (or all
-  // of them when HappyView is not configured). Under `bun test`
-  // (NODE_ENV=test) the live appview fetch is skipped: unit tests that
-  // exercise materialization/read paths don't assert on profile rows, and
-  // live fetches pile up under parallel load and blow the 5s per-test timeout
-  // (see the `_setTestGetProfiles` comment in src/e2e/helpers.ts). Tests that
-  // DO exercise the fetcher mock `globalThis.fetch` and call
-  // `defaultGetProfiles` directly.
-  if (missingDids.length > 0 && process.env.NODE_ENV !== "test") {
-    const bskyProfiles = await defaultGetProfiles(missingDids);
-    profiles.push(...bskyProfiles);
+  // Step 2: query Bluesky for the DIDs HappyView didn't have (or all of them
+  // when HappyView is not configured), plus the Roomy records that carry no
+  // handle — only the ATProto profile knows it — then merge those handles onto
+  // the Roomy profiles. Under `bun test` (NODE_ENV=test) the live appview
+  // fetch is skipped: unit tests that exercise materialization/read paths
+  // don't assert on profile rows, and live fetches pile up under parallel load
+  // and blow the 5s per-test timeout (see the `_setTestGetProfiles` comment in
+  // src/e2e/helpers.ts). Tests that DO exercise the fetcher mock
+  // `globalThis.fetch` and call `defaultGetProfiles` directly.
+  const handlelessDids = roomyProfiles
+    .filter((r) => !r.pv.handle)
+    .map((r) => r.did);
+  const bskyDids = [...new Set([...missingDids, ...handlelessDids])];
+  if (bskyDids.length > 0 && process.env.NODE_ENV !== "test") {
+    const bskyProfiles = await defaultGetProfiles(bskyDids);
+    const handleByDid = new Map(
+      bskyProfiles
+        .filter((p) => p.handle)
+        .map((p) => [p.did, p.handle] as const),
+    );
+    const missing = new Set(missingDids);
+    for (const { did, pv } of roomyProfiles) {
+      if (pv.handle) continue;
+      const bskyHandle = handleByDid.get(did);
+      if (bskyHandle) pv.handle = bskyHandle;
+    }
+    // Only the DIDs HappyView had no record for become their own rows; the
+    // handle-less Roomy ones were already merged above, and writing them a
+    // second time would be redundant.
+    profiles.push(...bskyProfiles.filter((p) => missing.has(p.did as UserDid)));
   }
 
   // Every source has now been asked (or, under `bun test`, the only source
@@ -392,9 +420,15 @@ async function filterMissing(db: DbLike, candidates: Set<UserDid>): Promise<User
  * overwrites all fields *except the handle* — Roomy profile records
  * (`space.roomy.user.profile/self`) don't carry a handle, so the handle is
  * preserved from the existing row (populated by a prior Bluesky fetch /
- * hydration) rather than being clobbered with an empty string. A Bluesky
- * fallback is first-writer-wins for display fields but always refreshes the
- * handle.
+ * hydration) rather than being clobbered. A Bluesky fallback is
+ * first-writer-wins for display fields but always refreshes the handle.
+ *
+ * The handle is normalized on both sides of the merge: `""` from the incoming
+ * profile is treated as absent (so it can't overwrite a real handle), and a
+ * legacy `''` already in the column is healed to the incoming handle. Both
+ * sides go through `nullif(..., '')` for exactly that reason — `''` and "no
+ * handle" are the same state as far as every reader is concerned, so rows
+ * poisoned by the old conversion recover without a migration.
  */
 async function writeGlobalProfile(
   p: ProfileViewDetailed,
@@ -406,7 +440,7 @@ async function writeGlobalProfile(
   if (!globalDb) return;
   const isRoomy = ex !== undefined;
   const did = p.did;
-  const handle = p.handle ?? null;
+  const handle = p.handle || null;
   const name = p.displayName ?? null;
   const avatar = p.avatar ?? null;
   const description = p.description ?? null;
@@ -419,7 +453,7 @@ async function writeGlobalProfile(
       `insert into profiles (did, handle, name, avatar, description, banner, pronouns, website, updated_at)
        values (?, ?, ?, ?, ?, ?, ?, ?, unixepoch() * 1000)
        on conflict(did) do update set
-         handle = coalesce(nullif(excluded.handle, ''), profiles.handle),
+         handle = coalesce(nullif(excluded.handle, ''), nullif(profiles.handle, '')),
          name = excluded.name,
          avatar = excluded.avatar,
          description = excluded.description,
@@ -434,7 +468,7 @@ async function writeGlobalProfile(
       `insert into profiles (did, handle, name, avatar, description, updated_at)
        values (?, ?, ?, ?, ?, unixepoch() * 1000)
        on conflict(did) do update set
-         handle = coalesce(excluded.handle, profiles.handle),
+         handle = coalesce(nullif(excluded.handle, ''), nullif(profiles.handle, '')),
          updated_at = unixepoch() * 1000`,
       [did, handle, name, avatar, description],
     );
@@ -445,7 +479,9 @@ async function writeGlobalProfile(
  * Write a `space.roomy.user.updateProfile.v0` (SetUserProfile) event to the
  * global `profiles` table. Called from the materialiser so bridged-user
  * profile updates (which don't go through HappyView) stay fresh in the
- * global store. Only the fields the event carries are updated (coalesce).
+ * global store. Only the fields the event carries are updated (coalesce), and
+ * an absent/empty Discord-origin handle is treated the same as no handle —
+ * see `writeGlobalProfile`.
  */
 export async function writeSetUserProfileToGlobal(event: {
   did: string;
@@ -459,7 +495,7 @@ export async function writeSetUserProfileToGlobal(event: {
   const discordOrigin = event.extensions?.[
     "space.roomy.extension.discordUserOrigin.v0"
   ] as { handle?: string } | undefined;
-  const handle = discordOrigin?.handle ?? null;
+  const handle = discordOrigin?.handle || null;
   const name = typeof event.name === "string" ? event.name : null;
   const avatar = typeof event.avatar === "string" ? event.avatar : null;
   const description =
@@ -468,7 +504,7 @@ export async function writeSetUserProfileToGlobal(event: {
     `insert into profiles (did, handle, name, avatar, description, updated_at)
      values (?, ?, ?, ?, ?, unixepoch() * 1000)
      on conflict(did) do update set
-       handle = coalesce(excluded.handle, profiles.handle),
+      handle = coalesce(nullif(excluded.handle, ''), nullif(profiles.handle, '')),
        name = coalesce(excluded.name, profiles.name),
        avatar = coalesce(excluded.avatar, profiles.avatar),
        description = coalesce(excluded.description, profiles.description),

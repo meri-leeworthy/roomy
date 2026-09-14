@@ -82,12 +82,17 @@ export function _setTestGetProfiles(
 }
 
 function entryToFields(entry: CacheEntry): ProfileFields | null {
-  if (entry.name === null && entry.handle === null && entry.avatar === null) {
+  // `''` is not a handle: it's what an older revision of the profile write
+  // path stored for Roomy-record users (whose records carry no handle). Treat
+  // it as absent so consumers fall back to name/did instead of rendering an
+  // empty `@`, and so the row is eligible for handle hydration below.
+  const handle = entry.handle || null;
+  if (entry.name === null && handle === null && entry.avatar === null) {
     return null;
   }
   return {
     ...(entry.name != null ? { name: entry.name } : {}),
-    ...(entry.handle != null ? { handle: entry.handle } : {}),
+    ...(handle != null ? { handle } : {}),
     ...(entry.avatar != null ? { avatar: entry.avatar } : {}),
   };
 }
@@ -185,7 +190,15 @@ async function resolveFromGlobalDb(
   const notInDb = allowNetworkFetch
     ? dids.filter((d) => !rows.some((r) => r.did === d))
     : [];
-  if (notInDb.length > 0) {
+  // Rows that exist but carry no usable handle — the `''` an older revision
+  // of the profile write path left behind. Hydrate them too, so the row heals
+  // rather than being pinned to a handle-less profile forever (the write path
+  // treats `''` as absent, so a successful fetch replaces it).
+  const handleless = allowNetworkFetch
+    ? rows.filter((r) => !r.handle).map((r) => r.did)
+    : [];
+  const toHydrate = [...new Set([...notInDb, ...handleless])];
+  if (toHydrate.length > 0) {
     // On-demand hydration mirroring the getProfile handler: fetch Roomy
     // records from HappyView (batch) and fall back to Bluesky, then write
     // back to the global store. This is what makes reads as reliable as the
@@ -193,14 +206,14 @@ async function resolveFromGlobalDb(
     // it is the same pipeline the write path uses, so a DID that resolves
     // nowhere (`getProfilesRoomyFirst` backs it off) is not re-fetched here
     // either.
-    await hydrateMissingProfiles(globalDb, notInDb);
+    await hydrateMissingProfiles(globalDb, toHydrate);
   }
 
   // Re-read the global store to pick up whatever hydration wrote, and cache
   // the outcome. A DID the fetch left unresolved is remembered by the shared
   // backoff (materialization/profiles.ts), so the next read skips the fetch
   // entirely rather than relying on this cache's TTL.
-  const recheck = [...notInDb, ...stillMissing];
+  const recheck = [...toHydrate, ...stillMissing];
   if (recheck.length > 0) {
     const ph = recheck.map(() => "?").join(",");
     const afterRows = await globalDb

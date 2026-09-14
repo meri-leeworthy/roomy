@@ -426,9 +426,8 @@ describe("global profile store (Phase 2)", () => {
     // previously-fetched handle.
     const roomyProfile = {
       did: ALICE,
-      handle: "", // happyViewToProfileView yields "" when the record has no handle
       displayName: "Alice Roomy",
-    } as ProfileViewDetailed;
+    } as unknown as ProfileViewDetailed;
     await insertProfilesWithExtras(
       openDb(),
       [roomyProfile],
@@ -440,6 +439,135 @@ describe("global profile store (Phase 2)", () => {
       .get(ALICE);
     expect(row?.handle).toBe("alice.test");
     expect(row?.name).toBe("Alice Roomy");
+  });
+
+  test("an empty-string handle from a Roomy record never lands in the column", async () => {
+    // Regression: `happyViewToProfileView` coerced a missing handle to `""`,
+    // so a Roomy-sourced profile reached this writer with `handle: ""`. That
+    // landed in the column on first insert, and because `""` is a *present*
+    // value it then survived every `coalesce(..., profiles.handle)` merge —
+    // the row could never pick up a real handle, and `getProfile` returned
+    // `handle: ""` forever. The writer must normalize `""` to NULL.
+    const { insertProfilesWithExtras } = await import("./profiles.ts");
+    const { globalDb } = freshGlobal();
+
+    await insertProfilesWithExtras(
+      openDb(),
+      [{ did: ALICE, handle: "", displayName: "Alice Roomy" } as ProfileViewDetailed],
+      new Map([[ALICE, { pronouns: "she/her" }]]),
+    );
+
+    const row = await globalDb
+      .query("select handle, name from profiles where did = ?")
+      .get<{ handle: string | null; name: string | null }>(ALICE);
+    expect(row?.handle).toBeNull();
+    expect(row?.name).toBe("Alice Roomy");
+  });
+
+  test("a legacy '' handle self-heals to the next real handle", async () => {
+    // Regression: rows already poisoned with `''` by the old conversion must
+    // recover on the next write without a migration.
+    const { insertProfilesWithExtras } = await import("./profiles.ts");
+    const { globalDb } = freshGlobal();
+
+    await globalDb.run(
+      "insert into profiles (did, handle, name) values (?, ?, ?)",
+      [ALICE, "", "Alice Roomy"],
+    );
+
+    await insertProfilesWithExtras(
+      openDb(),
+      [profileFor(ALICE, "alice.test")],
+      new Map(),
+    );
+
+    const row = await globalDb
+      .query("select handle from profiles where did = ?")
+      .get<{ handle: string | null }>(ALICE);
+    expect(row?.handle).toBe("alice.test");
+  });
+
+  test("a Roomy record leaves a legacy '' as NULL rather than keeping ''", async () => {
+    const { insertProfilesWithExtras } = await import("./profiles.ts");
+    const { globalDb } = freshGlobal();
+
+    await globalDb.run(
+      "insert into profiles (did, handle, name) values (?, ?, ?)",
+      [ALICE, "", "Alice Old"],
+    );
+
+    await insertProfilesWithExtras(
+      openDb(),
+      [{ did: ALICE, displayName: "Alice Roomy" } as unknown as ProfileViewDetailed],
+      new Map([[ALICE, {}]]),
+    );
+
+    const row = await globalDb
+      .query("select handle, name from profiles where did = ?")
+      .get<{ handle: string | null; name: string | null }>(ALICE);
+    expect(row?.handle).toBeNull();
+    expect(row?.name).toBe("Alice Roomy");
+  });
+});
+
+describe("handle-less HappyView profiles", () => {
+  test("happyViewToProfileView leaves a missing handle undefined, not ''", async () => {
+    const { happyViewToProfileView } = await import("./roomyProfile.ts");
+    const pv = happyViewToProfileView({
+      did: ALICE,
+      displayName: "Alice Roomy",
+      avatar: "atblob://x/y",
+    });
+    expect(pv.handle).toBeUndefined();
+    expect(pv.displayName).toBe("Alice Roomy");
+  });
+
+  test("getProfilesRoomyFirst merges the Bluesky handle onto the Roomy record", async () => {
+    // Regression: a Roomy-record user's handle is publicly resolvable but
+    // HappyView can't supply it (Roomy records carry no handle), and the
+    // Bluesky fallback only covered DIDs HappyView did NOT have. The handle
+    // has to be merged onto the Roomy profile.
+    const realFetch = globalThis.fetch;
+    const prevNodeEnv = process.env.NODE_ENV;
+    delete process.env.NODE_ENV; // defeat the test-mode short-circuit
+    const { getProfilesRoomyFirst } = await import("./profiles.ts");
+    const { setHappyView } = await import("../happyview.ts");
+    try {
+      setHappyView({
+        endpoint: "https://happyview.test",
+        clientKey: "hvc_test",
+      });
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        if (String(url).includes("happyview.test")) {
+          // HappyView has the Roomy record — display fields, no handle.
+          return Response.json({
+            profiles: [
+              { did: ALICE, displayName: "Alice Roomy", pronouns: "she/her" },
+            ],
+          });
+        }
+        // Bluesky knows the handle.
+        return Response.json({
+          profiles: [{ did: ALICE, handle: "alice.test" }],
+        });
+      }) as unknown as typeof globalThis.fetch;
+
+      const { profiles, extras } = await getProfilesRoomyFirst(
+        [ALICE],
+        { endpoint: "https://happyview.test", clientKey: "hvc_test" },
+      );
+
+      expect(profiles).toHaveLength(1);
+      expect(profiles[0]?.did).toBe(ALICE);
+      expect(profiles[0]?.handle).toBe("alice.test");
+      expect(profiles[0]?.displayName).toBe("Alice Roomy");
+      expect(extras.get(ALICE)).toEqual({ pronouns: "she/her" });
+    } finally {
+      globalThis.fetch = realFetch;
+      setHappyView(null);
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+    }
   });
 });
 

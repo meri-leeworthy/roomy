@@ -4,13 +4,93 @@
  * authoritative Roomy profile store). Seed a row there and assert it's
  * returned.
  *
+ * The last two tests configure HappyView and stub `globalThis.fetch` so they
+ * exercise the Roomy-record branch of the handler (which is where the
+ * `handle: ""` bug lived) without touching the network.
+ *
  * Run: bun test --cwd packages/appserver src/e2e/profileEndpoints.test.ts
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { startAppserver, type E2eContext } from "./helpers.ts";
+import { setHappyView } from "../happyview.ts";
 
 const USER = "did:plc:e2e-user";
+const HAPPYVIEW = { endpoint: "https://happyview.test", clientKey: "hvc_test" };
+
+const realFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+  setHappyView(null);
+});
+
+/**
+ * Stub the two outbound profile sources in-process, passing everything else
+ * (in particular the test's own HTTP calls to the appserver) through to the
+ * real transport.
+ */
+function stubProfileSources(opts: {
+  happyView?: Record<string, unknown>[];
+  bluesky?: Record<string, unknown>[];
+}): void {
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("happyview.test")) {
+      return Response.json({ profiles: opts.happyView ?? [] });
+    }
+    if (url.includes("bsky.app")) {
+      return Response.json({ profiles: opts.bluesky ?? [] });
+    }
+    return realFetch(input, init);
+  }) as typeof globalThis.fetch;
+}
+
+/** The routed handle `startAppserver` returns, narrowed to the global DB. */
+type GlobalWriter = {
+  global(): { run(sql: string, ...params: unknown[]): Promise<unknown> };
+};
+
+function seedProfile(
+  ctx: E2eContext,
+  did: string,
+  handle: string | null,
+): Promise<unknown> {
+  // The E2eContext types `db` as bun:sqlite's Database; at runtime it is the
+  // pool router that exposes `global()` (see helpers.ts).
+  const writer = ctx.db as unknown as GlobalWriter;
+  return writer
+    .global()
+    .run("insert or replace into profiles (did, handle, name) values (?, ?, ?)", [
+      did,
+      handle,
+      "Roomy Name",
+    ]);
+}
+
+async function readStoredHandle(
+  ctx: E2eContext,
+  did: string,
+): Promise<string | null> {
+  const reader = ctx.db as unknown as {
+    global(): {
+      query(sql: string): { get<T>(...p: unknown[]): Promise<T | null> };
+    };
+  };
+  const row = await reader
+    .global()
+    .query("select handle from profiles where did = ?")
+    .get<{ handle: string | null }>(did);
+  return row?.handle ?? null;
+}
+
+async function getProfile(ctx: E2eContext, actor: string) {
+  const res = await ctx.authedFetch(USER)(
+    `${ctx.baseUrl}/xrpc/space.roomy.user.getProfile?actor=${actor}`,
+  );
+  expect(res.status).toBe(200);
+  return (await res.json()) as Record<string, unknown>;
+}
 
 describe("space.roomy.user.getProfile", () => {
   test("returns a seeded global profile for a DID", async () => {
@@ -44,5 +124,55 @@ describe("space.roomy.user.getProfile", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toHaveProperty("did", unknown);
+  });
+
+  test("resolves the handle when only a Roomy record exists (no stored handle)", async () => {
+    // Regression: this is the live `handle: ""` bug. The user's only profile
+    // source is a Roomy record (HappyView), which carries no handle, and the
+    // global row is either absent or holds the `''` an older revision of the
+    // write path left there. Bluesky knows the handle — it must be resolved
+    // startAppserver() initialises the HappyView singleton from the env, so
+    // the test config and fetch stub must be installed *after* it starts.
+    const ctx = await startAppserver();
+    setHappyView(HAPPYVIEW);
+    stubProfileSources({
+      happyView: [
+        {
+          did: USER,
+          displayName: "Little Fox",
+          avatar: `atblob://${USER}/bafy`,
+        },
+      ],
+      bluesky: [{ did: USER, handle: "meri-little-fox.roomy.chat" }],
+    });
+    await seedProfile(ctx, USER, "");
+
+    const body = await getProfile(ctx, USER);
+
+    expect(body.did).toBe(USER);
+    expect(body.handle).toBe("meri-little-fox.roomy.chat");
+    // The Roomy record stays authoritative for display fields.
+    expect(body.displayName).toBe("Little Fox");
+    // Persisted: the poisoned `''` is gone from the row.
+    expect(await readStoredHandle(ctx, USER)).toBe("meri-little-fox.roomy.chat");
+  });
+
+  test("never returns an empty-string handle", async () => {
+    // Same shape, but Bluesky doesn't know the DID either: the handle must be
+    // *absent* from the response, never `""` (which the lexicon models as a
+    // present string and renders as a blank `@`).
+    const ctx = await startAppserver();
+    setHappyView(HAPPYVIEW);
+    stubProfileSources({
+      happyView: [{ did: USER, displayName: "Little Fox" }],
+      bluesky: [],
+    });
+    await seedProfile(ctx, USER, "");
+
+    const body = await getProfile(ctx, USER);
+
+    expect(body.did).toBe(USER);
+    expect(body.handle).toBeUndefined();
+    expect("handle" in body).toBe(false);
   });
 });
