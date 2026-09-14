@@ -24,6 +24,9 @@ export interface OmpOptions {
   resume?: string;
   /** Approx char threshold at which a streaming thinking chunk is flushed. Default 2000. */
   thinkingChunkSize?: number;
+  /** Cap (UTF-16 units) on the raw stdout/stderr tail retained for the
+   *  last-resort fallback reply. Defaults to 64 KiB. */
+  maxRawTail?: number;
   /** Path to a file whose contents are appended to omp's system prompt on every
    *  run (unified workflow context for each new session). */
   systemPromptFile?: string;
@@ -33,6 +36,75 @@ export interface OmpOptions {
 export interface OmpCallbacks {
   /** Fired with a message-sized chunk of the thinking trace as it streams. */
   onThinking?: (chunk: string) => void | Promise<void>;
+}
+
+/**
+ * A string buffer that never exceeds `cap` UTF-16 units: appending keeps only
+ * the most recent `cap` characters, so an arbitrarily long stream cannot grow
+ * the retained tail (or the process) without bound.
+ */
+export class BoundedTail {
+  #text = "";
+  constructor(readonly cap: number) {}
+  append(chunk: string): void {
+    if (chunk.length >= this.cap) {
+      this.#text = chunk.slice(chunk.length - this.cap);
+      return;
+    }
+    // Both operands are < cap, so the concatenation is < 2*cap before the trim.
+    const combined = this.#text + chunk;
+    this.#text =
+      combined.length <= this.cap ? combined : combined.slice(combined.length - this.cap);
+  }
+  get text(): string {
+    return this.#text;
+  }
+}
+
+/** Incremental NDJSON accumulator: consume omp's events as they stream. */
+export interface OmpEventSink {
+  push(evt: OmpJsonEvent): void;
+  result(): OmpReply;
+}
+
+/**
+ * Reduce omp's NDJSON events to exactly what `parseOmpJson` returns for the
+ * whole stream — the last assistant `message_end` content and the last session
+ * id — without retaining the raw stream.
+ *
+ * A long-running job can emit far more stdout than V8's maximum string length.
+ * The previous implementation accumulated the entire stream (`out += chunk`)
+ * and parsed it at exit; when a run crossed that limit the `data` handler threw
+ * `RangeError: Invalid string length`, which is an uncaught exception in a
+ * stream callback — it killed the responder process mid-job (bramble,
+ * 2026-09-14) rather than failing the one job. Reducing per event makes
+ * retained memory O(largest single message), independent of run length.
+ */
+export function createOmpEventSink(): OmpEventSink {
+  let thinking: string | undefined;
+  let answer = "";
+  let sessionId: string | undefined;
+  return {
+    push(evt: OmpJsonEvent): void {
+      if (evt.type === "session" && evt.id) sessionId = evt.id;
+      if (evt.type === "message_end" && evt.message?.role === "assistant") {
+        const thinkingParts: string[] = [];
+        const answerParts: string[] = [];
+        for (const block of evt.message.content ?? []) {
+          if (block.type === "thinking") {
+            if (block.thinking) thinkingParts.push(block.thinking);
+          } else if (block.type === "text") {
+            if (block.text) answerParts.push(block.text);
+          }
+        }
+        thinking = thinkingParts.length ? thinkingParts.join("\n\n") : undefined;
+        answer = answerParts.join("\n");
+      }
+    },
+    result(): OmpReply {
+      return { thinking, answer, sessionId };
+    },
+  };
 }
 
 /**
@@ -61,62 +133,72 @@ export function runOmp(
   if (opts.resume) args.push("--resume", opts.resume);
   if (opts.systemPromptFile) args.push("--append-system-prompt", opts.systemPromptFile);
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (d) => (out += d.toString()));
-    child.stderr.on("data", (d) => (err += d.toString()));
-
-    // Streaming state: buffer thinking deltas and flush them in message-sized
-    // chunks via the onThinking callback as they arrive (omp streams these as
-    // message_update events live over the pipe).
-    let thinkingBuf = "";
-    const flushThinking = () => {
-      const chunk = thinkingBuf;
-      thinkingBuf = "";
-      if (chunk.trim()) callbacks?.onThinking?.(chunk);
-    };
-
-    const rl = createInterface({ input: child.stdout });
-    rl.on("line", (line) => {
-      if (!line.trim()) return;
-      let evt: OmpJsonEvent;
-      try {
-        evt = JSON.parse(line) as OmpJsonEvent;
-      } catch {
-        return;
-      }
-      if (evt.type === "message_update") {
-        const u = evt.assistantMessageEvent;
-        if (!u) return;
-        if (u.type === "thinking_delta" && typeof u.delta === "string") {
-          thinkingBuf += u.delta;
-          if (utf8ByteLength(thinkingBuf) >= chunkSize) flushThinking();
-        } else if (u.type === "thinking_end") {
-          flushThinking();
-        }
-      }
-    });
-
-    child.on("error", (e) => reject(new Error(`Failed to spawn ${bin}: ${e.message}`)));
-    child.on("close", (code) => {
-      rl.close();
-      if (code !== 0) {
-        reject(new Error(`omp exited ${code}: ${err.slice(-500)}`));
-        return;
-      }
-      const reply = parseOmpJson(out);
-      if (!reply.answer.trim()) {
-        // Nothing in the structured output; fall back to raw stdout (and stderr
-        // tail) so the user isn't left with a silent failure.
-        const fallback = (out.trim() || err.trim() || "").slice(-2000);
-        resolve({ answer: fallback, sessionId: reply.sessionId });
-        return;
-      }
-      resolve(reply);
-    });
+  const { promise, resolve, reject } = Promise.withResolvers<OmpReply>();
+  const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+  // Only bounded tails of raw stdout/stderr are retained, for the last-resort
+  // fallback reply; the structured result is reduced event by event through the
+  // sink. See createOmpEventSink for why unbounded accumulation here was a crash.
+  const tailCap = opts.maxRawTail ?? 64 * 1024;
+  const outTail = new BoundedTail(tailCap);
+  const errTail = new BoundedTail(tailCap);
+  const sink = createOmpEventSink();
+  child.stdout.on("data", (d) => {
+    outTail.append(d.toString());
   });
+  child.stderr.on("data", (d) => {
+    errTail.append(d.toString());
+  });
+
+  // Streaming state: buffer thinking deltas and flush them in message-sized
+  // chunks via the onThinking callback as they arrive (omp streams these as
+  // message_update events live over the pipe).
+  let thinkingBuf = "";
+  const flushThinking = () => {
+    const chunk = thinkingBuf;
+    thinkingBuf = "";
+    if (chunk.trim()) callbacks?.onThinking?.(chunk);
+  };
+
+  const rl = createInterface({ input: child.stdout });
+  rl.on("line", (line) => {
+    if (!line.trim()) return;
+    let evt: OmpJsonEvent;
+    try {
+      evt = JSON.parse(line) as OmpJsonEvent;
+    } catch {
+      return;
+    }
+    sink.push(evt);
+    if (evt.type === "message_update") {
+      const u = evt.assistantMessageEvent;
+      if (!u) return;
+      if (u.type === "thinking_delta" && typeof u.delta === "string") {
+        thinkingBuf += u.delta;
+        if (utf8ByteLength(thinkingBuf) >= chunkSize) flushThinking();
+      } else if (u.type === "thinking_end") {
+        flushThinking();
+      }
+    }
+  });
+
+  child.on("error", (e) => reject(new Error(`Failed to spawn ${bin}: ${e.message}`)));
+  child.on("close", (code) => {
+    rl.close();
+    if (code !== 0) {
+      reject(new Error(`omp exited ${code}: ${errTail.text.slice(-500)}`));
+      return;
+    }
+    const reply = sink.result();
+    if (!reply.answer.trim()) {
+      // Nothing in the structured output; fall back to the raw output tail (and
+      // stderr tail) so the user isn't left with a silent failure.
+      const fallback = (outTail.text.trim() || errTail.text.trim() || "").slice(-2000);
+      resolve({ answer: fallback, sessionId: reply.sessionId });
+      return;
+    }
+    resolve(reply);
+  });
+  return promise;
 }
 
 interface OmpJsonEvent {
@@ -134,9 +216,7 @@ interface OmpJsonEvent {
 
 /** Parse omp's NDJSON output into { thinking, answer, sessionId }. */
 export function parseOmpJson(raw: string): OmpReply {
-  const thinkingParts: string[] = [];
-  const answerParts: string[] = [];
-  let sessionId: string | undefined;
+  const sink = createOmpEventSink();
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let evt: OmpJsonEvent;
@@ -145,27 +225,9 @@ export function parseOmpJson(raw: string): OmpReply {
     } catch {
       continue;
     }
-    if (evt.type === "session" && evt.id) {
-      sessionId = evt.id;
-    }
-    if (evt.type === "message_end" && evt.message?.role === "assistant") {
-      const content = evt.message.content ?? [];
-      thinkingParts.length = 0;
-      answerParts.length = 0;
-      for (const block of content) {
-        if (block.type === "thinking") {
-          if (block.thinking) thinkingParts.push(block.thinking);
-        } else if (block.type === "text") {
-          if (block.text) answerParts.push(block.text);
-        }
-      }
-    }
+    sink.push(evt);
   }
-  return {
-    thinking: thinkingParts.length ? thinkingParts.join("\n\n") : undefined,
-    answer: answerParts.join("\n"),
-    sessionId,
-  };
+  return sink.result();
 }
 
 /** Build the prompt sent to omp from an incoming message. */
