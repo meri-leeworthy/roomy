@@ -16,7 +16,6 @@
  * Polar disabled (no POLAR_ACCESS_TOKEN) → 503.
  */
 
-import { getStreamManager } from "../streams/StreamManager.ts";
 import { openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { getPolar } from "../billing/polar.ts";
@@ -42,12 +41,5 @@ export const adminReconcileProMembersHandler: ProcedureHandler<
     );
   }
 
-  const writerDid = getStreamManager()
-    .ownDid;
-
-  return await reconcileProMembers(
-    openReadStateDb(),
-    config,
-    writerDid,
-  );
+  return await reconcileProMembers(openReadStateDb(), config);
 };

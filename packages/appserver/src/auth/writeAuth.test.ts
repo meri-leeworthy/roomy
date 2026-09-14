@@ -622,3 +622,122 @@ describe("auth/writeAuth — allow list coverage", () => {
     }
   });
 });
+
+describe("auth/writeAuth — service self-write", () => {
+  const SERVICE = "did:web:api.roomy.space";
+
+  /** A space the service DID has no edge of any kind in. */
+  async function seedStrandedSpace(db: DbLike): Promise<void> {
+    await seedSpace(db);
+    await seedUser(db, SERVICE);
+  }
+
+  test("service DID may grant a role without membership or admin", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedStrandedSpace(db);
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      SERVICE,
+      { $type: "space.roomy.role.addMemberRole.v0", id: newUlid(), userDid: USER, roleId: ROLE },
+      undefined,
+      undefined,
+      undefined,
+      SERVICE,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  test("service DID may revoke a role without membership or admin", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedStrandedSpace(db);
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      SERVICE,
+      { $type: "space.roomy.role.removeMemberRole.v0", id: newUlid(), userDid: USER, roleId: ROLE },
+      undefined,
+      undefined,
+      undefined,
+      SERVICE,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  test("service DID may self-write even while banned in the space", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedStrandedSpace(db);
+    await db.run("insert into comp_bans (entity, user_did) values (?, ?)", [
+      SPACE,
+      SERVICE,
+    ]);
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      SERVICE,
+      { $type: "space.roomy.role.addMemberRole.v0", id: newUlid(), userDid: USER, roleId: ROLE },
+      undefined,
+      undefined,
+      undefined,
+      SERVICE,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  test("the relaxation covers only role grants — not admin or ban events", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedStrandedSpace(db);
+
+    for (const $type of [
+      "space.roomy.space.addAdmin.v0",
+      "space.roomy.space.removeAdmin.v0",
+      "space.roomy.space.banAccount.v0",
+    ]) {
+      const result = await checkWriteAuth(
+        db,
+        SPACE,
+        SERVICE,
+        { $type, id: newUlid(), userDid: USER },
+        undefined,
+        undefined,
+        undefined,
+        SERVICE,
+      );
+      expect(result?.status).toBe(403);
+    }
+  });
+
+  test("a DID that is not the configured service DID gets no self-write", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedStrandedSpace(db);
+    await seedUser(db, OTHER);
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      OTHER,
+      { $type: "space.roomy.role.addMemberRole.v0", id: newUlid(), userDid: USER, roleId: ROLE },
+      undefined,
+      undefined,
+      undefined,
+      SERVICE,
+    );
+    expect(result?.status).toBe(403);
+  });
+
+  test("without a configured service DID the rule is inert", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedStrandedSpace(db);
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      SERVICE,
+      { $type: "space.roomy.role.addMemberRole.v0", id: newUlid(), userDid: USER, roleId: ROLE },
+    );
+    expect(result?.status).toBe(403);
+  });
+});

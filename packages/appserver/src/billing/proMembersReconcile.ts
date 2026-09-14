@@ -15,7 +15,6 @@
  */
 
 import { openReadStateDb } from "../db/db.ts";
-import { getStreamManager } from "../streams/StreamManager.ts";
 import { getPolar } from "./polar.ts";
 import { reconcileProMembers } from "./proRoleReconcile.ts";
 import { log } from "../log.ts";
@@ -37,13 +36,8 @@ export async function runProMembersReconcile(): Promise<{
   if (!config) {
     return null;
   }
-  const writerDid = getStreamManager().ownDid;
   try {
-    const result = await reconcileProMembers(
-      openReadStateDb(),
-      config,
-      writerDid,
-    );
+    const result = await reconcileProMembers(openReadStateDb(), config);
     return {
       failed: result.failed,
       added: result.added.length,

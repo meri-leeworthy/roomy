@@ -69,10 +69,12 @@ Every known event type falls into one of four categories. A new module `src/auth
 | **Space manage** | Space admin | `updateSpaceInfo`, `updateSidebar` (v0/v1), `setHandleProvider`, `addAdmin`, `removeAdmin`, `banAccount`, `unbanAccount`, `createRole`, `deleteRole`, `updateRole`, `addMemberRole`, `removeMemberRole`, `setRoleRoomPermission`, `createInvite`, `revokeInvite`, `editPage`, `openmeet.configure` |
 | **Space member** | Space membership (not banned) | `joinSpace`, `leaveSpace`, `updateProfile` |
 | **Bridged** | Space admin (these carry their own user identity in the payload) | `addBridgedReaction`, `removeBridgedReaction` |
+| **Service self-write** | Caller is the appserver's own DID (`APPSERVER_DID`) | `addMemberRole`, `removeMemberRole` |
 
 **Notes:**
 - `roomAccess()` from `access.ts` already computes `canWrite` as: admin OR (member AND (default_access=readwrite OR role grant 'readwrite')). This is exactly what we need.
 - Room write events carry a `room` field on the envelope. The auth check resolves the room → space → membership + canWrite.
+- **Service self-write** (`SERVICE_SELF_WRITE_TYPES` in `auth/writeAuth.ts`) is checked before every category rule: the appserver is the root of trust for Roomy spaces — it owns the space stream and evaluates every other caller's write — so it does not need membership or admin in a space it is writing to. It is deliberately narrow: only the listed `$type`s, only the configured service DID (the same DID the auth verifier enforces as its JWT audience), and it grants nothing else (`addAdmin`, `banAccount`, `updateSpaceInfo` remain admin-only, so the path cannot be used to escalate). The Roomy Pro members-role sweep is the first user of it.
 - `editMessage` and `deleteMessage` additionally check that the caller is the author, *unless* the caller is a space admin (admins can moderate).
 - Room manage events (`createRoom`, `updateRoom`, etc.) reference a room via `roomId` or create one at the event's own `id`. Admin check is on the parent space.
 
@@ -247,6 +249,7 @@ Category dispatch table:
 | `space.roomy.user.updateProfile.v0` | Space member | `requireMembership(db, spaceId, did)` |
 | All other `space.roomy.space.*` | Space manage | `requireSpaceAdmin(db, spaceId, did)` |
 | All `space.roomy.role.*` | Space manage | `requireSpaceAdmin(db, spaceId, did)` |
+| `space.roomy.role.addMemberRole.v0` / `removeMemberRole.v0` | Service self-write, else Space manage | `did === APPSERVER_DID`, else `requireSpaceAdmin(db, spaceId, did)` |
 | `space.roomy.space.createInvite.v0` | Space member | `requireMembership(db, spaceId, did)` + invite permission check |
 | `space.roomy.space.revokeInvite.v0` | Space manage | `requireSpaceAdmin(db, spaceId, did)` |
 | `space.roomy.page.*` | Space manage | `requireSpaceAdmin(db, spaceId, did)` |

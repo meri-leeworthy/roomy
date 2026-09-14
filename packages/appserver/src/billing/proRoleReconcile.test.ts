@@ -35,7 +35,7 @@ const CONFIG: PolarConfig = {
   appOrigin: "https://roomy.space",
 };
 
-const WRITER = "did:web:api.roomy.space";
+const SERVICE_DID = "did:web:api.roomy.space";
 const ROOMY_SPACE = StreamDid.assert(ROOMY_SPACE_DID);
 
 const SUB_A = "did:plc:sub-a";
@@ -109,6 +109,9 @@ beforeEach(async () => {
     new StreamManager(db, {
       appserverUrl: "http://test.example",
       getProfiles: undefined,
+      // The sweep writes as the StreamManager's own DID; supply the service
+      // DID here so it matches the DID the sendEvents endpoint authorizes.
+      ownDid: SERVICE_DID,
     }),
   );
   setPolar(CONFIG);
@@ -127,7 +130,7 @@ describe("reconcileProMembers", () => {
   test("new subscribers → added to Members role + tracked", async () => {
     stubSubscribers([SUB_A, SUB_B]);
 
-    const res = await reconcileProMembers(openReadStateDb(), CONFIG, WRITER);
+    const res = await reconcileProMembers(openReadStateDb(), CONFIG);
 
     expect(res.failed).toBe(false);
     expect(new Set(res.added)).toEqual(new Set([SUB_A, SUB_B]));
@@ -146,7 +149,7 @@ describe("reconcileProMembers", () => {
     // Only SUB_A is currently subscribed.
     stubSubscribers([SUB_A]);
 
-    const res = await reconcileProMembers(openReadStateDb(), CONFIG, WRITER);
+    const res = await reconcileProMembers(openReadStateDb(), CONFIG);
 
     expect(res.removed).toEqual([LAPSED]);
     expect(res.added).toEqual([SUB_A]);
@@ -162,13 +165,13 @@ describe("reconcileProMembers", () => {
   test("no-op run writes no events", async () => {
     // First run adds SUB_A and tracks it.
     stubSubscribers([SUB_A]);
-    await reconcileProMembers(openReadStateDb(), CONFIG, WRITER);
+    await reconcileProMembers(openReadStateDb(), CONFIG);
 
     // Second identical run → nothing to do.
     const before = await db
       .query("select count(*) as n from stream_events")
       .get<{ n: number }>();
-    const res = await reconcileProMembers(openReadStateDb(), CONFIG, WRITER);
+    const res = await reconcileProMembers(openReadStateDb(), CONFIG);
     const after = await db
       .query("select count(*) as n from stream_events")
       .get<{ n: number }>();
@@ -188,7 +191,7 @@ describe("reconcileProMembers", () => {
 
     stubPolarOutage();
 
-    const res = await reconcileProMembers(openReadStateDb(), CONFIG, WRITER);
+    const res = await reconcileProMembers(openReadStateDb(), CONFIG);
 
     expect(res.failed).toBe(true);
     expect(res.added).toEqual([]);

@@ -194,6 +194,45 @@ const FEDERATION_TYPES = new Set([
   "space.roomy.federation.setReceiverPermission.v0",
 ]);
 
+// ── Service self-write (root of trust) ───────────────────────────────────
+
+/**
+ * Event types the appserver's own DID may write to ANY space without
+ * holding membership or admin there.
+ *
+ * The appserver is the root of trust for Roomy spaces: it owns the space
+ * stream's event log and it is what evaluates every other caller's write
+ * against `writeAuth`. It nonetheless authors some events itself — the
+ * Roomy Pro members-role reconciliation sweep is the first — and requiring
+ * the service to be a *space admin* to do so would mean granting a host
+ * process membership it does not need and cannot meaningfully hold (it is
+ * `did:web`, not a space participant).
+ *
+ * The relaxation is deliberately narrow:
+ *   - only the exact event types listed here,
+ *   - only when the caller IS the configured service DID (the same DID the
+ *     auth verifier enforces as its JWT audience, so it cannot be forged
+ *     without the appserver's signing key),
+ *   - additive: every other rule still applies to the service DID, so a
+ *     deployment that has made it a space admin keeps working.
+ *
+ * `addAdmin`, `removeAdmin`, `banAccount` and `updateSpaceInfo` are
+ * deliberately ABSENT: a compromised or repurposed reconciliation path must
+ * not be able to escalate anyone's authority through this endpoint.
+ */
+const SERVICE_SELF_WRITE_TYPES = {
+  "space.roomy.role.addMemberRole.v0": true,
+  "space.roomy.role.removeMemberRole.v0": true,
+} as const satisfies Record<string, true>;
+
+/**
+ * The exact `$type` values the service DID may self-write. Internal writers
+ * (the Pro members-role sweep) type their event constructors as this union,
+ * so widening what the service writes past what this endpoint authorizes is
+ * a compile error rather than a silent authorization gap.
+ */
+export type ServiceSelfWriteType = keyof typeof SERVICE_SELF_WRITE_TYPES;
+
 // ── Helper: denial constructors ──────────────────────────────────────────
 
 function denied(
@@ -556,6 +595,10 @@ async function checkSetReceiverPermission(
  * `dbResolver`, when provided, returns the DB handle for another space by
  * DID — used only for the federation-request cross-space admin-of-B check.
  *
+ * `serviceDid` is the appserver's own DID. When the caller matches it and the
+ * event is a `SERVICE_SELF_WRITE_TYPES` member, the event is allowed without
+ * space membership or admin — see that constant for the rule and its limits.
+ *
  * @returns `undefined` if allowed, or a denial object.
  */
 export async function checkWriteAuth(
@@ -566,6 +609,7 @@ export async function checkWriteAuth(
   access?: SpaceAccess,
   dbResolver?: (spaceDid: string) => DbLike,
   globalDb?: DbLike,
+  serviceDid?: string,
 ): Promise<WriteAuthResult> {
   const { $type } = event;
 
@@ -585,6 +629,19 @@ export async function checkWriteAuth(
       "InvalidRequest",
       `Unknown event type: ${$type}`,
     );
+  }
+
+  // ── Service self-write (root of trust) ──
+  // Checked before every category rule: the service is the authority those
+  // rules are evaluated *by*, so it does not need standing in the space it
+  // is writing to (and a ban edge on the service DID must not disable it).
+  if (
+    serviceDid !== undefined &&
+    serviceDid !== "" &&
+    callerDid === serviceDid &&
+    $type in SERVICE_SELF_WRITE_TYPES
+  ) {
+    return undefined;
   }
 
   // ── Room write ──

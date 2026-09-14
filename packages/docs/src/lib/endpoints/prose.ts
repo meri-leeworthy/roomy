@@ -334,10 +334,11 @@ export const prose: Record<string, EndpointProse> = {
   "space.roomy.space.sendEvents": {
     description:
       "Sends a batch of Roomy events to a space stream. The appserver validates authorization per-event, then writes events directly to the events DB and materializes inline. This is the write path behind every client action (messages, reactions, room changes, …).",
-    auth: "Authenticated; per-event authorization via writeAuth (admin, membership, and room write rules).",
+    auth: "Authenticated; per-event authorization via writeAuth (admin, membership, and room write rules, plus a narrow service self-write set for the appserver's own DID).",
     notes: [
       "Events are CBOR payloads appended to the stream's event log in a single transaction.",
       "Materialization happens inline: the batch is applied to the view tables and invalidation signals are emitted before the response returns.",
+      "The appserver's own DID (APPSERVER_DID) may write addMemberRole/removeMemberRole without space membership or admin — it is the root of trust for the space stream. Every other event type still follows the normal rules.",
       "See the sendEvents procedure plan in packages/appserver/docs/plans for the full event catalogue.",
     ],
   },

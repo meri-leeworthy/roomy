@@ -23,6 +23,8 @@ import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 
 const SPACE = "did:web:send-events-test.example";
 const USER = UserDid.assert("did:plc:send-events-user");
+const SERVICE_DID = "did:web:api.roomy.space";
+const ROLE = newUlid();
 const CHANNEL = newUlid();
 
 let handle: AppserverHandle | null = null;
@@ -118,6 +120,9 @@ beforeEach(async () => {
     readStateDbPath: ":memory:",
     quiet: true,
     disableBackgroundWorkers: true,
+    // Pin the service DID so the self-write tests below don't depend on the
+    // ambient APPSERVER_DID.
+    ownDid: SERVICE_DID,
     // Hermetic: without a stub, materialization hits live api.bsky.app
     // profile fetches, which pile up under parallel load and blow the
     // 5s per-test timeout.
@@ -277,6 +282,83 @@ describe("space.roomy.space.sendEvents", () => {
     for (let i = 0; i < rows.length; i++) {
       expect(rows[i]!.idx).toBe(i);
     }
+  });
+
+  test("the service DID may self-write a role event without space standing", async () => {
+    // SERVICE_DID is not seeded as a member or admin of SPACE — it is only
+    // the appserver's own identity.
+    const res = await authedFetch(SERVICE_DID)(
+      `${baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          spaceId: SPACE,
+          events: [
+            {
+              id: newUlid(),
+              $type: "space.roomy.role.addMemberRole.v0",
+              userDid: USER,
+              roleId: ROLE,
+            },
+          ],
+        }),
+      },
+    );
+    expect(res.status).toBe(200);
+
+    // The event landed and materialized into the role table.
+    const space = openDb().forSpace!(SPACE);
+    const rows = await space
+      .query("select user_id from member_roles where role_id = ?")
+      .all<{ user_id: string }>(ROLE);
+    expect(rows.map((r) => r.user_id)).toEqual([USER]);
+
+    // Attributed to the service DID, not to a space participant.
+    const logged = await openDb()
+      .query("select user from stream_events where stream_id = ?")
+      .all<{ user: string }>(SPACE);
+    expect(logged.map((r) => r.user)).toEqual([SERVICE_DID]);
+  });
+
+  test("an ordinary DID gets no self-write relaxation", async () => {
+    const res = await authedFetch(USER)(
+      `${baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          spaceId: SPACE,
+          events: [
+            {
+              id: newUlid(),
+              $type: "space.roomy.role.addMemberRole.v0",
+              userDid: USER,
+              roleId: ROLE,
+            },
+          ],
+        }),
+      },
+    );
+    expect(res.status).toBe(403);
+  });
+
+  test("the service DID still cannot write other users' admin events", async () => {
+    const res = await authedFetch(SERVICE_DID)(
+      `${baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          spaceId: SPACE,
+          events: [
+            {
+              id: newUlid(),
+              $type: "space.roomy.space.addAdmin.v0",
+              userDid: SERVICE_DID,
+            },
+          ],
+        }),
+      },
+    );
+    expect(res.status).toBe(403);
   });
 
   test("P2/P8: write to a rebuilding space is rejected with SpaceRematerializing and not logged", async () => {

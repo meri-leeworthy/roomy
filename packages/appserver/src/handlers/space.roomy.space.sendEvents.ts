@@ -62,6 +62,7 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
     throw new XrpcError(401, "AuthRequired", "Authentication required");
   }
   log.info("sendEvents", { spaceId, callerDid, count: body.events.length });
+  const streamManager = getStreamManager();
   const db = openSpaceDb(spaceId);
   // Space access is resolved here (for writeAuth + to reject banned callers)
   // but NOT treated as a hard gate: a caller who is not a member/admin of the
@@ -70,7 +71,12 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
   // authority on what the caller may send — it denies events that require
   // membership/admin and allows federated room writes.
   const access = await spaceAccess(db, spaceId, callerDid);
-  if (access.isBanned) {
+  // A ban is a space-level gate on ordinary participants. The service DID is
+  // not a participant: it is the authority that evaluates bans. Exempting it
+  // here is what lets it emit its own events (the Pro members-role sweep)
+  // even if an admin of the target space has banned it; `checkWriteAuth`
+  // still refuses every event type outside SERVICE_SELF_WRITE_TYPES.
+  if (access.isBanned && callerDid !== streamManager.ownDid) {
     throw new XrpcError(403, "Forbidden", "Caller is banned from this space");
   }
 
@@ -102,6 +108,10 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
       access,
       openSpaceDb,
       openGlobalDb(),
+      // The service's own DID is allowed to author a narrow set of events
+      // (the Pro members-role sweep) without holding space membership or
+      // admin — see SERVICE_SELF_WRITE_TYPES in auth/writeAuth.ts.
+      streamManager.ownDid,
     );
     if (denial) {
       throw new XrpcError(
@@ -115,7 +125,6 @@ export const sendEventsHandler: ProcedureHandler<SendEventsBody, void> = async (
   log.debug("sendEvents", "validated", { spaceId, count: parsedEvents.length });
 
   // 4. Write to events DB + materialize inline
-  const streamManager = getStreamManager();
   log.info("sendEvents", "writing to events DB", { spaceId, count: parsedEvents.length });
   const streamDid = StreamDid.assert(spaceId);
   try {

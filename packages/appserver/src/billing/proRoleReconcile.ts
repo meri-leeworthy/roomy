@@ -28,6 +28,7 @@
 
 import { StreamDid, UserDid, newUlid, parseEvent, type Event } from "@roomy-space/sdk";
 import type { DbLike } from "../db/types.ts";
+import type { ServiceSelfWriteType } from "../auth/writeAuth.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import { log } from "../log.ts";
 import {
@@ -56,7 +57,7 @@ export interface ReconcileResult {
 }
 
 function buildRoleEvent(
-  $type: "space.roomy.role.addMemberRole.v0" | "space.roomy.role.removeMemberRole.v0",
+  $type: ServiceSelfWriteType,
   userDid: string,
   roleId: string,
 ): Event | null {
@@ -73,8 +74,10 @@ function buildRoleEvent(
  *
  * Role mutations are written via `StreamManager.sendEvents`, so they land in
  * the event log and materialize inline — identical to a client-issued
- * sendEvents batch. The writer attribution is `writerDid` (the appserver's
- * own DID). Writes are chunked to `RECONCILE_BATCH_SIZE` events each.
+ * sendEvents batch. The writer is the appserver's own DID, read from the
+ * StreamManager rather than passed in: it is the same DID the sendEvents
+ * endpoint recognizes as the service self-writer, so the two can't drift.
+ * Writes are chunked to `RECONCILE_BATCH_SIZE` events each.
  *
  * A Polar failure (outage / non-200 / malformed / missing `subscriptions:read`
  * scope) throws — the caller (the periodic timer / admin endpoint) decides
@@ -84,7 +87,6 @@ function buildRoleEvent(
 export async function reconcileProMembers(
   readStateDb: DbLike,
   config: PolarConfig,
-  writerDid: string,
 ): Promise<ReconcileResult> {
   const result: ReconcileResult = { added: [], removed: [], failed: false };
 
@@ -108,7 +110,10 @@ export async function reconcileProMembers(
   const streamDid = StreamDid.assert(ROOMY_SPACE_DID);
   const roleId = MEMBERS_ROLE_ID;
   const streamManager = getStreamManager();
-  const writer = UserDid.assert(writerDid);
+  // The sweep writes as the appserver's own DID — the one identity the
+  // sendEvents endpoint authorizes for these events without space standing.
+  // Resolved here (not injected) so the writer can never diverge from it.
+  const writer = UserDid.assert(streamManager.ownDid);
 
   // ── Adds: subscriber not yet tracked by this sweep ─────────────────────
   const toAdd: string[] = [];
@@ -129,7 +134,11 @@ export async function reconcileProMembers(
   }
 
   // ── Write role events in bounded batches ───────────────────────────────
-  const allMutations = [
+  const allMutations: Array<{
+    $type: ServiceSelfWriteType;
+    userDid: string;
+    roleId: string;
+  }> = [
     ...toAdd.map((did) => ({
       $type: "space.roomy.role.addMemberRole.v0" as const,
       userDid: did,
