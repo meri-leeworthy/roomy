@@ -1,8 +1,10 @@
 import { createQuery } from "@tanstack/svelte-query";
 import { cache, schemas } from "@roomy-space/sdk";
 import { px } from "$lib/auth.svelte";
+import { queryClient } from "$lib/client";
 
 const { queryKey } = cache;
+const GET_MESSAGES_NSID = "space.roomy.room.getMessages" as const;
 
 export type Message = typeof schemas.queries.getMessages.Message.infer;
 
@@ -14,13 +16,39 @@ export type Message = typeof schemas.queries.getMessages.Message.infer;
  */
 export function createMessagesQuery(roomId: () => string, limit = 50) {
   return createQuery<Message[]>(() => ({
-    queryKey: queryKey("space.roomy.room.getMessages", { roomId: roomId() }),
+    queryKey: queryKey(GET_MESSAGES_NSID, { roomId: roomId() }),
     queryFn: async () => {
-      const res = await px().query("space.roomy.room.getMessages", {
+      const res = await px().query(GET_MESSAGES_NSID, {
         roomId: roomId(),
         limit: String(limit),
       });
-      return res.messages;
+      const fetched = res.messages;
+
+      // The `getMessages` read path is slow (production p50 73 ms, spikes to
+      // seconds when the per-space worker is backed up). So a refetch started
+      // *before* a message materialized can resolve *after* the WS `#messageDiff`
+      // frame patched that message into the cache. TanStack's `setQueryData`
+      // (triggered by the refetch) would then REPLACE the cache with the stale
+      // snapshot and the just-delivered message vanishes until a hard refresh.
+      //
+      // Guard by re-merging any WS-delivered message the snapshot doesn't yet
+      // include. Read the cache AFTER the await so a patch landing mid-fetch is
+      // seen here; a patch landing after this synchronous read is applied on top
+      // of the returned value and wins anyway.
+      const cached = queryClient.getQueryData<Message[]>(
+        queryKey(GET_MESSAGES_NSID, { roomId: roomId() }) as unknown[],
+      );
+      if (cached && cached.length > 0) {
+        const fetchedIds = new Set(fetched.map((m) => m.id));
+        const extra = cached.filter((m) => !fetchedIds.has(m.id));
+        if (extra.length > 0) {
+          return [...fetched, ...extra].sort(
+            (a, b) =>
+              new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+          );
+        }
+      }
+      return fetched;
     },
   }));
 }
