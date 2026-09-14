@@ -233,6 +233,57 @@ describe("derivations", () => {
     ]);
   });
 
+  // `deserializeBody` validates only that the document has a `blocks` array —
+  // individual blocks are `unknown` at runtime, so a stored message can carry
+  // a malformed one. The derivations must degrade, never throw: a throw mid-
+  // derivation escapes callers that treat them as infallible (the appserver
+  // search indexer drops the message from the index; the push evaluator fails
+  // the whole notification).
+  test("blocksToPlaintext tolerates a malformed list block", () => {
+    const malformed = [
+      { $type: "space.roomy.richtext.blocks#unorderedList" },
+      { $type: "space.roomy.richtext.blocks#orderedList", items: null },
+      { $type: "space.roomy.richtext.blocks#unorderedList", items: "oops" },
+    ] as unknown as Parameters<typeof blocksToPlaintext>[0];
+    for (const block of malformed) {
+      expect(() => blocksToPlaintext([block])).not.toThrow();
+    }
+    expect(blocksToPlaintext(malformed)).toBe("");
+  });
+
+  test("blocksToPlaintext tolerates blocks with missing text", () => {
+    const blocks = [
+      { $type: "space.roomy.richtext.blocks#text" },
+      { $type: "space.roomy.richtext.blocks#code" },
+      { $type: "space.roomy.richtext.blocks#unorderedList", items: [{ text: "kept" }] },
+    ] as unknown as Parameters<typeof blocksToPlaintext>[0];
+    // Must not emit the literal "undefined" for the missing text fields.
+    expect(blocksToPlaintext(blocks)).toBe("kept");
+  });
+
+  test("facet derivations tolerate malformed list blocks", () => {
+    const malformed = [
+      { $type: "space.roomy.richtext.blocks#unorderedList" },
+      { $type: "space.roomy.richtext.blocks#orderedList", items: null },
+      { $type: "space.roomy.richtext.blocks#text", facets: "oops" },
+    ] as unknown as Parameters<typeof blocksToPlaintext>[0];
+    expect(extractFacetUrls(malformed)).toEqual([]);
+    expect(extractMentionDids(malformed)).toEqual([]);
+    expect(extractInternalLinkTargets(malformed)).toEqual([]);
+  });
+
+  test("facet derivations still collect from well-formed lists", () => {
+    const blocks = [{
+      $type: "space.roomy.richtext.blocks#unorderedList",
+      items: [
+        { text: "one", facets: [{ index: { byteStart: 0, byteEnd: 3 }, features: [{ $type: "space.roomy.richtext.facet#link", uri: "https://a.example" }] }] },
+        { text: "two", facets: [{ index: { byteStart: 0, byteEnd: 3 }, features: [{ $type: "space.roomy.richtext.facet#didMention", did: "did:plc:alice" }] }] },
+      ],
+    }] as unknown as Parameters<typeof blocksToPlaintext>[0];
+    expect(extractFacetUrls(blocks)).toEqual(["https://a.example"]);
+    expect(extractMentionDids(blocks)).toEqual(["did:plc:alice"]);
+  });
+
   test("parseInternalLinkHref accepts DID space + ULID room", () => {
     expect(
       parseInternalLinkHref("/did:plc:space/01KZBRQMEP2FTE079YRVDFKGTA"),

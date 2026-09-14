@@ -605,6 +605,52 @@ export function blocksToProseMirrorDoc(blocks: Block[]): ProseMirrorDoc {
 
 // ─── Derivations ─────────────────────────────────────────────────────────
 
+
+/**
+ * Text of a single block, or `""` when it has no string `text`.
+ *
+ * `deserializeBody` validates only that the decoded document has a `blocks`
+ * array — individual blocks are `unknown` at runtime. A stored message can
+ * therefore carry a malformed block (e.g. a `#text` block with no `text`
+ * field). Pushing that straight into the joined output would coerce
+ * `undefined` to the literal "undefined" and corrupt the derived plaintext.
+ */
+function blockText(block: { text?: unknown }): string {
+  return typeof block.text === "string" ? block.text : "";
+}
+
+/**
+ * Item text of a list block, or `[]` when `items` is missing / not an array.
+ *
+ * List blocks are the one derivation shape whose items are traversed, so a
+ * malformed one (`items: null`, or absent) would otherwise throw a
+ * `TypeError: list.items.map is not a function` mid-derivation. That throw
+ * escapes every caller that treats derivation as infallible — the search
+ * indexer and backfill sweep catch it per-message and drop the message from
+ * the index, and the push evaluator fails the whole notification. Rich text
+ * is untrusted stored input, so degrading to "no item text" is correct.
+ */
+function listItemTexts(block: { items?: unknown }): string[] {
+  if (!Array.isArray(block.items)) return [];
+  return block.items.map((item) => {
+    const text = (item as { text?: unknown } | null)?.text;
+    return typeof text === "string" ? text : "";
+  });
+}
+
+/** Facets of a single block, or `[]` when malformed. */
+function blockFacets(block: { facets?: unknown }): Facet[] {
+  return Array.isArray(block.facets) ? (block.facets as Facet[]) : [];
+}
+
+/** Facets of a list block's items, flattened. `[]` when malformed. */
+function listItemFacets(block: { items?: unknown }): Facet[] {
+  if (!Array.isArray(block.items)) return [];
+  const out: Facet[] = [];
+  for (const item of block.items) out.push(...blockFacets((item ?? {}) as { facets?: unknown }));
+  return out;
+}
+
 /** Concatenate all block text (for push bodies, character counting). */
 export function blocksToPlaintext(blocks: Block[]): string {
   const parts: string[] = [];
@@ -613,20 +659,14 @@ export function blocksToPlaintext(blocks: Block[]): string {
       case "space.roomy.richtext.blocks#text":
       case "space.roomy.richtext.blocks#header":
       case "space.roomy.richtext.blocks#blockquote":
-      case "space.roomy.richtext.blocks#small": {
-        const textBlock = block as { text: string };
-        parts.push(textBlock.text);
-        break;
-      }
+      case "space.roomy.richtext.blocks#small":
       case "space.roomy.richtext.blocks#code": {
-        const code = block as { text: string };
-        parts.push(code.text);
+        parts.push(blockText(block as { text?: unknown }));
         break;
       }
       case "space.roomy.richtext.blocks#orderedList":
       case "space.roomy.richtext.blocks#unorderedList": {
-        const list = block as { items: { text: string }[] };
-        parts.push(...list.items.map((i) => i.text));
+        parts.push(...listItemTexts(block as { items?: unknown }));
         break;
       }
       default:
@@ -654,14 +694,12 @@ export function extractFacetUrls(blocks: Block[]): string[] {
       case "space.roomy.richtext.blocks#header":
       case "space.roomy.richtext.blocks#blockquote":
       case "space.roomy.richtext.blocks#small": {
-        const textBlock = block as { facets?: Facet[] };
-        collect(textBlock.facets);
+        collect(blockFacets(block as { facets?: unknown }));
         break;
       }
       case "space.roomy.richtext.blocks#orderedList":
       case "space.roomy.richtext.blocks#unorderedList": {
-        const list = block as { items: { facets?: Facet[] }[] };
-        for (const item of list.items) collect(item.facets);
+        collect(listItemFacets(block as { items?: unknown }));
         break;
       }
       default:
@@ -690,14 +728,12 @@ export function extractMentionDids(blocks: Block[]): string[] {
       case "space.roomy.richtext.blocks#header":
       case "space.roomy.richtext.blocks#blockquote":
       case "space.roomy.richtext.blocks#small": {
-        const textBlock = block as { facets?: Facet[] };
-        collect(textBlock.facets);
+        collect(blockFacets(block as { facets?: unknown }));
         break;
       }
       case "space.roomy.richtext.blocks#orderedList":
       case "space.roomy.richtext.blocks#unorderedList": {
-        const list = block as { items: { facets?: Facet[] }[] };
-        for (const item of list.items) collect(item.facets);
+        collect(listItemFacets(block as { items?: unknown }));
         break;
       }
       default:
@@ -740,14 +776,12 @@ export function extractInternalLinkTargets(
       case "space.roomy.richtext.blocks#header":
       case "space.roomy.richtext.blocks#blockquote":
       case "space.roomy.richtext.blocks#small": {
-        const textBlock = block as { facets?: Facet[] };
-        collect(textBlock.facets);
+        collect(blockFacets(block as { facets?: unknown }));
         break;
       }
       case "space.roomy.richtext.blocks#orderedList":
       case "space.roomy.richtext.blocks#unorderedList": {
-        const list = block as { items: { facets?: Facet[] }[] };
-        for (const item of list.items) collect(item.facets);
+        collect(listItemFacets(block as { items?: unknown }));
         break;
       }
       default:
