@@ -959,3 +959,35 @@ describe("SyncConnection — hanging ticket fetch (no socket yet)", () => {
     }
   });
 });
+
+describe("SyncConnection — concurrent connect() calls", () => {
+  // connect() must be idempotent even while a ticket fetch is still pending
+  // (before any socket exists). Otherwise a second caller starts a rival
+  // attempt, invalidates the first via the epoch guard, and the two race —
+  // one rejects with "abandoned" while both hold a ticket.
+  it("shares one in-flight attempt instead of starting a rival", async () => {
+    vi.useFakeTimers();
+    try {
+      const resolvers: ((t: string) => void)[] = [];
+      const conn = new SyncConnection({
+        fetchTicket: () => new Promise<string>((res) => resolvers.push(res)),
+        wsUrl: "wss://srv/",
+        webSocketImpl: makeMockWS(),
+      });
+      const p1 = conn.connect();
+      const p2 = conn.connect();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // One ticket fetch, not two.
+      expect(resolvers).toHaveLength(1);
+
+      resolvers[0]?.("t");
+      await vi.advanceTimersByTimeAsync(0);
+      lastSocket!._open();
+      await expect(p1).resolves.toBeUndefined();
+      await expect(p2).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

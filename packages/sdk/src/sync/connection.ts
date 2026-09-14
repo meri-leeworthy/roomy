@@ -276,6 +276,13 @@ export class SyncConnection {
    * leave its `connect()` promise pending forever on every retry.
    */
   #failAttempt: ((err: Error) => void) | null = null;
+  /**
+   * The in-flight connect attempt, if any. Returned to concurrent callers
+   * so `connect()` stays idempotent while a ticket fetch is pending —
+   * without this, a second call would start a rival attempt and invalidate
+   * the first, leaving the connection in a confusing half-open state.
+   */
+  #attemptPromise: Promise<void> | null = null;
 
   constructor(opts: SyncConnectionOptions) {
     this.#opts = opts;
@@ -596,6 +603,9 @@ export class SyncConnection {
     if (ws && (ws.readyState === this.#WS.OPEN || ws.readyState === this.#WS.CONNECTING)) {
       return Promise.resolve();
     }
+    // A ticket fetch may still be in flight (no socket yet). Share that
+    // attempt rather than starting a rival one that would supersede it.
+    if (this.#attemptPromise) return this.#attemptPromise;
     // The deferred is created up front (and stored as #failAttempt) so the
     // watchdog can settle this promise even while fetchTicket is hanging —
     // before any socket exists to observe an event on.
@@ -610,6 +620,11 @@ export class SyncConnection {
       reject: (err: unknown) => rejectAttempt(err),
     };
     this.#failAttempt = (err) => attempt.reject(err);
+    this.#attemptPromise = attempt.promise;
+    const clear = () => {
+      if (this.#attemptPromise === attempt.promise) this.#attemptPromise = null;
+    };
+    attempt.promise.then(clear, clear);
     void this.#runConnect(attempt).catch((err) => attempt.reject(err));
     return attempt.promise;
   }
