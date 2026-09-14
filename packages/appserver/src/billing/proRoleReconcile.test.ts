@@ -23,6 +23,7 @@ import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import {
   ROOMY_SPACE_DID,
   MEMBERS_ROLE_ID,
+  MEMBERS_ROOM_ID,
   reconcileProMembers,
 } from "./proRoleReconcile.ts";
 import { setPolar, type PolarConfig } from "./polar.ts";
@@ -94,6 +95,14 @@ async function membersInRole(): Promise<string[]> {
     .query("select user_id from member_roles where role_id = ? and stream_id = ?")
     .all<{ user_id: string }>(MEMBERS_ROLE_ID, ROOMY_SPACE_DID);
   return rows.map((r) => r.user_id);
+}
+
+/** The role↔room permission link for the members channel, if present. */
+async function memberRoomPermission(): Promise<string | null> {
+  const row = await openSpaceDb(ROOMY_SPACE_DID)
+    .query("select permission from role_rooms where role_id = ? and room_id = ?")
+    .get<{ permission: string }>(MEMBERS_ROLE_ID, MEMBERS_ROOM_ID);
+  return row?.permission ?? null;
 }
 
 let db: DbLike;
@@ -203,5 +212,58 @@ describe("reconcileProMembers", () => {
       .query("select did from pro_role_grants where did = ?")
       .get<{ did: string }>(SUB_A);
     expect(tracked?.did).toBe(SUB_A);
+  });
+
+  test("fresh deployment writes the member role↔room link (regression)", async () => {
+    // A new subscriber granted the Members role would still get no room
+    // access: access control JOINs role_rooms, and the Members role has no
+    // row linking it to the members channel. The sweep must write the
+    // setRoleRoomPermission link so the grant is actually usable.
+    stubSubscribers([SUB_A]);
+
+    const res = await reconcileProMembers(openReadStateDb(), CONFIG);
+
+    expect(res.failed).toBe(false);
+    expect(res.added).toEqual([SUB_A]);
+    expect(await membersInRole()).toEqual([SUB_A]);
+    // The link exists and grants read (matching the configured permission).
+    expect(await memberRoomPermission()).toBe("read");
+  });
+
+  test("member role↔room link is idempotent (no rewrite when present)", async () => {
+    // First run writes the link.
+    stubSubscribers([SUB_A]);
+    await reconcileProMembers(openReadStateDb(), CONFIG);
+
+    const before = await db
+      .query("select count(*) as n from stream_events")
+      .get<{ n: number }>();
+
+    // Add a fresh subscriber so the second run is not a total no-op; the
+    // link is already present, so no extra setRoleRoomPermission event may
+    // be written for it.
+    stubSubscribers([SUB_A, SUB_B]);
+    await reconcileProMembers(openReadStateDb(), CONFIG);
+
+    const events = await db
+      .query("select event_type from stream_events")
+      .all<{ event_type: string }>();
+    const linkWrites = events.filter(
+      (e) => e.event_type === "space.roomy.role.setRoleRoomPermission.v0",
+    );
+    expect(linkWrites).toHaveLength(1);
+
+    expect(await memberRoomPermission()).toBe("read");
+  });
+
+  test("Polar outage writes no member role↔room link (fail-safe)", async () => {
+    stubPolarOutage();
+
+    const res = await reconcileProMembers(openReadStateDb(), CONFIG);
+
+    expect(res.failed).toBe(true);
+    // No link may be written when Polar is down: the sweep must not perform
+    // ANY mutation on an unreadable desired set.
+    expect(await memberRoomPermission()).toBeNull();
   });
 });

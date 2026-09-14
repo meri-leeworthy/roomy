@@ -12,6 +12,10 @@
  *   - The sweep writes `space.roomy.role.addMemberRole.v0` for subscribers
  *     not yet granted, and `space.roomy.role.removeMemberRole.v0` for a
  *     granted DID whose subscription has lapsed.
+ *   - It also writes `space.roomy.role.setRoleRoomPermission.v0` to link the
+ *     Members role to the members-area channel. Without that link the role
+ *     grants no room access (access control JOINs role_rooms), so the link is
+ *     part of the sweep's setup path and self-heals on a fresh deployment.
  *   - It is idempotent: re-running with no change writes nothing.
  *   - It is fail-safe on a Polar outage: if the desired set cannot be read
  *     (unreachable / non-200 / malformed Polar), it writes NOTHING — a
@@ -28,6 +32,7 @@
 
 import { StreamDid, UserDid, newUlid, parseEvent, type Event } from "@roomy-space/sdk";
 import type { DbLike } from "../db/types.ts";
+import { openSpaceDb } from "../db/db.ts";
 import type { ServiceSelfWriteType } from "../auth/writeAuth.ts";
 import { getStreamManager } from "../streams/StreamManager.ts";
 import { log } from "../log.ts";
@@ -43,6 +48,33 @@ export const ROOMY_SPACE_DID = "did:plc:gnwy2zbm3hu4gfdawzxmpb2s";
 
 /** The 'Members' role in the Roomy Space. */
 export const MEMBERS_ROLE_ID = "01M2EQP9VWNQ6HBSV8CT6TEVEH";
+
+/** The members-area channel in the Roomy Space the 'Members' role gates. */
+export const MEMBERS_ROOM_ID = "01M2EQKCWRQ2M0BTNK5SD8864S";
+
+/**
+ * The permission the 'Members' role grants on the members-area channel.
+ * Read-only: staff answer in the channel; members ask.
+ */
+export const MEMBERS_ROOM_PERMISSION = "read" as const;
+
+/**
+ * Whether the role↔room permission link for the members channel is present
+ * and grants at least the configured permission. Reads the per-space DB —
+ * the same table `auth/access.ts` consults when deciding room access.
+ */
+async function memberRoomLinkPresent(spaceDb: DbLike): Promise<boolean> {
+  const row = await spaceDb
+    .query(
+      `select permission from role_rooms
+        where role_id = ? and room_id = ?`,
+    )
+    .get<{ permission: "read" | "readwrite" }>(MEMBERS_ROLE_ID, MEMBERS_ROOM_ID);
+  if (!row) return false;
+  const granted = row.permission === MEMBERS_ROOM_PERMISSION ||
+    (row.permission === "readwrite" && MEMBERS_ROOM_PERMISSION === "read");
+  return granted;
+}
 
 /** Max role events per sendEvents batch (matches the XRPC sendEvents cap). */
 export const RECONCILE_BATCH_SIZE = 50;
@@ -114,6 +146,39 @@ export async function reconcileProMembers(
   // sendEvents endpoint authorizes for these events without space standing.
   // Resolved here (not injected) so the writer can never diverge from it.
   const writer = UserDid.assert(streamManager.ownDid);
+
+  // ── Role↔room permission link (setup path) ─────────────────────────────
+  // A granted Member role only gates the members channel once a role_rooms
+  // row links it to the room with a permission. That row is written by the
+  // `setRoleRoomPermission` event; without it access control grants nothing
+  // no matter how many members the grant events add. Ensure the link exists
+  // (idempotent: only when absent, or when the granted permission is weaker
+  // than the configured one), so a fresh deployment self-heals exactly like
+  // the grants do. Uses its own streamManager.sendEvents call so a failure
+  // here is reported without aborting member reconciliation.
+  const linkNeeded = !(await memberRoomLinkPresent(openSpaceDb(ROOMY_SPACE_DID)));
+  if (linkNeeded) {
+    const linkEvent = parseEvent({
+      id: newUlid(),
+      $type: "space.roomy.role.setRoleRoomPermission.v0",
+      roleId,
+      roomId: MEMBERS_ROOM_ID,
+      permission: MEMBERS_ROOM_PERMISSION,
+    });
+    if (linkEvent.success) {
+      try {
+        await streamManager.sendEvents(streamDid, [linkEvent.data as Event], writer);
+      } catch (err) {
+        log.error(
+          "[pro-members] failed to write member role↔room link",
+          err instanceof Error ? err : undefined,
+        );
+        throw err;
+      }
+    } else {
+      log.error("[pro-members] failed to build member role↔room link event", linkEvent.error);
+    }
+  }
 
   // ── Adds: subscriber not yet tracked by this sweep ─────────────────────
   const toAdd: string[] = [];
