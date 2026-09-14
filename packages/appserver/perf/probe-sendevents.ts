@@ -177,7 +177,11 @@ const handle = await createAppserver({
   // the synchronous write path alone.
   disableBackgroundWorkers: true,
   happyView: null,
-  getProfiles: async () => [],
+  // Production leaves `getProfiles` unset, so materialization uses the real
+  // HappyView-first / Bluesky path (and writes the rows it resolves). The
+  // stub keeps the probe hermetic; --production-profiles exercises the real
+  // pipeline so fetch counts match production.
+  ...(argv.includes("--production-profiles") ? {} : { getProfiles: async () => [] }),
 });
 const baseUrl = `http://localhost:${handle.port}`;
 
