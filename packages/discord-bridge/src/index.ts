@@ -37,13 +37,19 @@ import { createLogger } from "./logger.ts";
 import { initRoomyClient } from "./roomy/client.ts";
 import {
 	CapacityService,
+	HARD_STOP_MULTIPLIER,
 	setCapacityGate,
 	type CapacityDecision,
 } from "./roomy/capacity.ts";
+import type { RoomyGateway } from "./roomy/gateway.ts";
 import { LiveRoomyGateway } from "./roomy/live-gateway.ts";
 import { LiveProfileResolver } from "./roomy/live-profile-resolver.ts";
 import { XrpcMembershipClient } from "./roomy/membership-client.ts";
 import { SpaceManager } from "./roomy/space-manager.ts";
+import {
+	sendSystemMessage,
+	systemMessagesConfigured,
+} from "./roomy/system-messages.ts";
 import { runBackfill } from "./services/backfill.ts";
 import {
 	handleMessageDelete,
@@ -82,7 +88,7 @@ const routerReady = new Promise<RoomyEventRouter>((resolve) => {
 });
 
 /** DM the guild owner that bridging is paused because the guild's member
- *  count exceeds the bridged space's capacity. Best-effort: failures are
+ *  count reached 2x the bridged space's capacity. Best-effort: failures are
  *  logged, never thrown. */
 async function dmGuildOwner(
 	bot: DiscordBotWithCache,
@@ -100,7 +106,7 @@ async function dmGuildOwner(
 		const dm = await bot.helpers.getDmChannel(guild.ownerId);
 		await bot.helpers.sendMessage(dm.id, {
 			content:
-				`Roomy bridging is paused for this server: ${decision.memberCount} members exceeds the ${decision.maxMembers} member capacity of the bridged space. ` +
+				`Roomy bridging is paused for this server: ${decision.memberCount} members is at least 2x the ${decision.maxMembers} member capacity of the bridged space. ` +
 				`Upgrade your Roomy Pro plan or increase the space's capacity to resume bridging.`,
 		});
 		log.info(
@@ -111,6 +117,31 @@ async function dmGuildOwner(
 		log.error(
 			`capacity: failed to DM guild owner for ${decision.guildId}`,
 			err,
+		);
+	}
+}
+
+/** Notify Roomy admins (system channel) when a bridge crosses the capacity
+ *  threshold (overLimit) or the hard-stop threshold (2x capacity, bridging
+ *  halted). Fires once per crossing; best-effort, never thrown. */
+function notifyAdmins(
+	roomy: RoomyGateway,
+	decision: CapacityDecision,
+	previous: CapacityDecision | undefined,
+): void {
+	const wasOver = previous?.overLimit ?? false;
+	const wasHardStop = previous?.hardStop ?? false;
+	if (decision.hardStop && !wasHardStop) {
+		void sendSystemMessage(
+			roomy,
+			`[capacity] Bridging halted: space ${decision.spaceDid} (guild ${decision.guildId}) has ${decision.memberCount} members — at least 2x the ${decision.maxMembers}-member capacity of the bridged space. ` +
+				`Bridging resumes automatically once member count drops below ${HARD_STOP_MULTIPLIER * decision.maxMembers} (2x capacity).`,
+		);
+	} else if (decision.overLimit && !wasOver) {
+		void sendSystemMessage(
+			roomy,
+			`[capacity] Bridge over member capacity: space ${decision.spaceDid} (guild ${decision.guildId}) has ${decision.memberCount} members — exceeding the ${decision.maxMembers}-member capacity of the bridged space. ` +
+				`Bridging continues; it will be halted at ${HARD_STOP_MULTIPLIER * decision.maxMembers} members (2x capacity).`,
 		);
 	}
 }
@@ -177,8 +208,10 @@ async function main() {
 					);
 
 					// Capacity enforcement (Roomy Pro bridge tokens): per
-					// (guild, space) member-capacity checks. Sync halts while
-					// over the limit and resumes automatically once under it.
+					// (guild, space) member-capacity checks. Sync halts once
+					// a member count reaches 2x the space's capacity and
+					// resumes automatically once it drops below that; admins
+					// are notified (system channel) on threshold crossings.
 					capacity = new CapacityService(
 						new XrpcMembershipClient(spaceManager.xrpc),
 						new DiscordMemberCountProvider(bot),
@@ -189,9 +222,17 @@ async function main() {
 									void dmGuildOwner(bot, decision);
 								}
 							},
+							onUsageChange: (decision, previous) => {
+								notifyAdmins(roomy, decision, previous);
+							},
 						},
 					);
 					setCapacityGate(capacity);
+					log.info(
+						systemMessagesConfigured()
+							? "capacity: system-message notifications enabled (SYSTEM_SPACE/SYSTEM_CHANNEL set)"
+							: "capacity: system-message notifications disabled (set SYSTEM_SPACE/SYSTEM_CHANNEL to enable)",
+					);
 
 					// Startup: check every bridged (guild, space) tuple.
 					checkAllBridges(repo);

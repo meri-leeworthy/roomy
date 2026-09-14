@@ -54,6 +54,18 @@ export const ENABLE_GUILD_MEMBERS_INTENT = () =>
 	process.env.ENABLE_GUILD_MEMBERS_INTENT !== "false";
 
 /**
+ * Roomy space (DID) and room (channel ULID) where the bridge posts system
+ * messages (capacity alerts for Roomy admins). Both must be set for system
+ * messages to be sent; a missing/partial pair disables them. The bridge's
+ * ATProto account must be a member of the space with write access to the
+ * channel. Examples:
+ *   SYSTEM_SPACE=did:plc:abc123
+ *   SYSTEM_CHANNEL=01KZBRQMEP2FTE079YRVDFKGTA
+ */
+export const SYSTEM_SPACE = () => optional("SYSTEM_SPACE", "");
+export const SYSTEM_CHANNEL = () => optional("SYSTEM_CHANNEL", "");
+
+/**
  * Ops kill switch for capacity enforcement. When set to "true"/"1",
  * per-guild capacity checks are disabled globally: every bridged space
  * passes, regardless of member count vs Roomy Pro capacity. Emergency

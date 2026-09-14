@@ -80,12 +80,16 @@ function makeService(
 	client: MembershipClient,
 	memberCount: MemberCountProvider,
 	onStateChange?: (d: CapacityDecision, p: CapacityDecision | undefined) => void,
+	onUsageChange?: (d: CapacityDecision, p: CapacityDecision | undefined) => void,
 ): CapacityService {
-	return new CapacityService(client, memberCount, { onStateChange });
+	return new CapacityService(client, memberCount, {
+		onStateChange,
+		onUsageChange,
+	});
 }
 
 describe("CapacityService decisions", () => {
-	test("over limit with grants → disabled", async () => {
+	test("over limit but below 2x → still enabled (notify-only)", async () => {
 		const client = makeClient([
 			membership({
 				memberCount: 150,
@@ -99,11 +103,50 @@ describe("CapacityService decisions", () => {
 
 		const decision = await service.check(GUILD, SPACE);
 
-		expect(decision.enabled).toBe(false);
+		expect(decision.enabled).toBe(true);
 		expect(decision.overLimit).toBe(true);
+		expect(decision.hardStop).toBe(false);
 		expect(decision.memberCount).toBe(150);
 		expect(decision.maxMembers).toBe(100);
 		expect(client.calls).toEqual([{ spaceId: SPACE, memberCount: 150 }]);
+	});
+
+	test("at 2x the limit → disabled (hard stop)", async () => {
+		const client = makeClient([
+			membership({
+				memberCount: 200,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
+		]);
+		const service = makeService(client, makeMemberCount(200));
+
+		const decision = await service.check(GUILD, SPACE);
+
+		expect(decision.enabled).toBe(false);
+		expect(decision.overLimit).toBe(true);
+		expect(decision.hardStop).toBe(true);
+	});
+
+	test("just under 2x the limit → still enabled", async () => {
+		const client = makeClient([
+			membership({
+				memberCount: 199,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
+		]);
+		const service = makeService(client, makeMemberCount(199));
+
+		const decision = await service.check(GUILD, SPACE);
+
+		expect(decision.enabled).toBe(true);
+		expect(decision.overLimit).toBe(true);
+		expect(decision.hardStop).toBe(false);
 	});
 
 	test("under limit → enabled", async () => {
@@ -151,25 +194,25 @@ describe("CapacityService decisions", () => {
 	test("isEnabled reflects the decision", async () => {
 		const client = makeClient([
 			membership({
-				memberCount: 150,
+				memberCount: 250,
 				maxMembers: 100,
 				overLimit: true,
 				tokens: [token()],
 				validTokenCount: 1,
 			}),
 		]);
-		const service = makeService(client, makeMemberCount(150));
+		const service = makeService(client, makeMemberCount(250));
 
 		expect(await service.isEnabled(GUILD, SPACE)).toBe(false);
 	});
 });
 
 describe("CapacityService stale handling", () => {
-	test("stale keeps previous enabled decision", async () => {
+	test("stale keeps previous enabled decision (no hard-stop from stale data)", async () => {
 		const client = makeClient([
 			membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
 			membership({
-				memberCount: 150,
+				memberCount: 250,
 				maxMembers: 100,
 				overLimit: true,
 				stale: true,
@@ -177,12 +220,13 @@ describe("CapacityService stale handling", () => {
 				validTokenCount: 1,
 			}),
 		]);
-		const service = makeService(client, makeMemberCount(150));
+		const service = makeService(client, makeMemberCount(250));
 
 		const first = await service.check(GUILD, SPACE);
 		expect(first.enabled).toBe(true);
 
-		// Second check: stale response — keep the previous (enabled) decision.
+		// Second check: stale response — keep the previous (enabled) decision,
+		// even though the stale data alone would imply a hard stop.
 		const second = await service.check(GUILD, SPACE, { force: true });
 		expect(second.enabled).toBe(true);
 		expect(second.overLimit).toBe(false);
@@ -192,7 +236,7 @@ describe("CapacityService stale handling", () => {
 	test("stale keeps previous disabled decision", async () => {
 		const client = makeClient([
 			membership({
-				memberCount: 150,
+				memberCount: 250,
 				maxMembers: 100,
 				overLimit: true,
 				tokens: [token()],
@@ -212,7 +256,7 @@ describe("CapacityService stale handling", () => {
 	test("stale with no previous decision uses the stale data", async () => {
 		const client = makeClient([
 			membership({
-				memberCount: 150,
+				memberCount: 250,
 				maxMembers: 100,
 				overLimit: true,
 				stale: true,
@@ -220,11 +264,12 @@ describe("CapacityService stale handling", () => {
 				validTokenCount: 1,
 			}),
 		]);
-		const service = makeService(client, makeMemberCount(150));
+		const service = makeService(client, makeMemberCount(250));
 
 		const decision = await service.check(GUILD, SPACE);
 
 		expect(decision.enabled).toBe(false);
+		expect(decision.hardStop).toBe(true);
 		expect(decision.stale).toBe(true);
 	});
 });
@@ -247,14 +292,14 @@ describe("CapacityService TTL", () => {
 		const client = makeClient([
 			membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
 			membership({
-				memberCount: 150,
+				memberCount: 250,
 				maxMembers: 100,
 				overLimit: true,
 				tokens: [token()],
 				validTokenCount: 1,
 			}),
 		]);
-		const service = new CapacityService(client, makeMemberCount(150), {
+		const service = new CapacityService(client, makeMemberCount(250), {
 			ttlMs: 1,
 		});
 
@@ -360,7 +405,7 @@ describe("CapacityService state-change callback", () => {
 		const client = makeClient([
 			membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
 			membership({
-				memberCount: 150,
+				memberCount: 250,
 				maxMembers: 100,
 				overLimit: true,
 				tokens: [token()],
@@ -401,6 +446,70 @@ describe("CapacityService state-change callback", () => {
 	test("callback throw does not break the decision flow", async () => {
 		const client = makeClient([
 			membership({
+				memberCount: 250,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
+		]);
+		const service = makeService(client, makeMemberCount(250), () => {
+			throw new Error("callback boom");
+		});
+
+		const decision = await service.check(GUILD, SPACE);
+
+		expect(decision.enabled).toBe(false);
+	});
+});
+
+describe("CapacityService usage-change callback", () => {
+	let usage: Array<{ overLimit: boolean; hardStop: boolean; prevOver?: boolean; prevHardStop?: boolean }>;
+
+	beforeEach(() => {
+		usage = [];
+	});
+
+	test("fires on over-limit crossing and on hard-stop crossing", async () => {
+		const client = makeClient([
+			membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
+			membership({
+				memberCount: 250,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
+		]);
+		const service = makeService(client, makeMemberCount(250), undefined, (d, p) => {
+			usage.push({
+				overLimit: d.overLimit,
+				hardStop: d.hardStop,
+				prevOver: p?.overLimit,
+				prevHardStop: p?.hardStop,
+			});
+		});
+
+		await service.check(GUILD, SPACE); // under → no usage state change
+		await service.check(GUILD, SPACE, { force: true }); // over 1.5x → notify
+		await service.check(GUILD, SPACE, { force: true }); // 2.5x → hard stop
+
+		expect(usage).toEqual([
+			{ overLimit: true, hardStop: false, prevOver: false, prevHardStop: false },
+			{ overLimit: true, hardStop: true, prevOver: true, prevHardStop: false },
+		]);
+	});
+
+	test("fires on the first decision when already over the limit", async () => {
+		const client = makeClient([
+			membership({
 				memberCount: 150,
 				maxMembers: 100,
 				overLimit: true,
@@ -408,13 +517,61 @@ describe("CapacityService state-change callback", () => {
 				validTokenCount: 1,
 			}),
 		]);
-		const service = makeService(client, makeMemberCount(150), () => {
-			throw new Error("callback boom");
+		const service = makeService(client, makeMemberCount(150), undefined, (d) => {
+			usage.push({ overLimit: d.overLimit, hardStop: d.hardStop });
+		});
+
+		const decision = await service.check(GUILD, SPACE);
+
+		expect(usage).toEqual([{ overLimit: true, hardStop: false }]);
+		expect(usage.length).toBe(1);
+	});
+
+	test("does not fire while over but the usage state is unchanged", async () => {
+		const client = makeClient([
+			membership({
+				memberCount: 150,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
+			membership({
+				memberCount: 160,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
+		]);
+		const service = makeService(client, makeMemberCount(160), undefined, (d) => {
+			usage.push({ overLimit: d.overLimit, hardStop: d.hardStop });
+		});
+
+		await service.check(GUILD, SPACE); // first decision → fires once
+		await service.check(GUILD, SPACE, { force: true }); // still over 1.6x → no fire
+
+		expect(usage).toEqual([{ overLimit: true, hardStop: false }]);
+	});
+
+	test("usage-change callback throw does not break enforcement", async () => {
+		const client = makeClient([
+			membership({
+				memberCount: 250,
+				maxMembers: 100,
+				overLimit: true,
+				tokens: [token()],
+				validTokenCount: 1,
+			}),
+		]);
+		const service = makeService(client, makeMemberCount(250), undefined, () => {
+			throw new Error("usage boom");
 		});
 
 		const decision = await service.check(GUILD, SPACE);
 
 		expect(decision.enabled).toBe(false);
+		expect(decision.hardStop).toBe(true);
 	});
 });
 

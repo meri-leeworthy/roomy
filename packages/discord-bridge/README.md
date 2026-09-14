@@ -97,6 +97,20 @@ Events carry two extensions:
 | `LOG_LEVEL`          | `info`                             | Log level                                                                        |
 | `BRIDGE_RECONNECT_BASE_MS` | `5000`                       | Base delay (ms) for the shared reconnect backoff to a failing appserver          |
 | `BRIDGE_RECONNECT_MAX_MS`  | `300000`                     | Max delay (ms) cap for the shared reconnect backoff                              |
+| `SYSTEM_SPACE`             | *(unset)*                    | Space DID for admin system messages (capacity alerts)                            |
+| `SYSTEM_CHANNEL`           | *(unset)*                    | Channel ULID for admin system messages; both must be set to enable               |
+| `BRIDGE_CAPACITY_KILL_SWITCH` | `false`                   | `true`/`1` disables per-guild capacity checks globally (emergency re-enable)      |
+
+## Capacity enforcement (Roomy Pro)
+
+Bridged (guild, space) tuples are checked against `space.roomy.admin.getSpaceMembership`, which reports the space's member count vs its token capacity (`maxMembers`). Decisions are cached for 300s per tuple; the bridge re-checks at startup, every 5 minutes, and on `guildMemberAdd`/`guildMemberRemove`.
+
+Two thresholds drive the policy:
+
+- **Over the capacity threshold** (`memberCount > maxMembers`): sync **continues**, but the bridge posts a notice to the admin system channel (`SYSTEM_SPACE`/`SYSTEM_CHANNEL`) — bridging is at risk, not yet paused.
+- **Hard stop** (`memberCount >= 2x maxMembers`): ALL sync for the tuple halts (messages, edits, room/thread creation, profile sync, backfill) and the guild owner is DMed. Sync resumes automatically once a later check finds the member count back below 2x capacity.
+
+System messages are sent as the bridge's ATProto account, so that account must be a member of `SYSTEM_SPACE` with write access to `SYSTEM_CHANNEL`. If either env var is unset, notifications are disabled and enforcement proceeds silently.
 
 ## Slash commands
 

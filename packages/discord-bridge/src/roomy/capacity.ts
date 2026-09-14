@@ -4,9 +4,15 @@
  *
  * The bridge queries `space.roomy.admin.getSpaceMembership` (appserver) with
  * the bridged guild's current member count. The appserver answers whether
- * the space is over its token capacity; while over the limit, ALL sync for
- * that (guild, space) tuple halts and resumes automatically once a later
- * check finds the space under the limit again.
+ * the space is over its token capacity.
+ *
+ * Enforcement policy (two thresholds):
+ * - Over the capacity threshold (`overLimit`, memberCount > maxMembers):
+ *   sync CONTINUES, but admins are notified (system message) — the bridge is
+ *   at risk, not yet paused.
+ * - At the hard-stop threshold (`hardStop`, memberCount >= 2x maxMembers):
+ *   ALL sync for that (guild, space) tuple halts and resumes automatically
+ *   once a later check finds the member count back under 2x capacity.
  *
  * Decision caching: one decision per (guild, space) with a 300s TTL. The
  * gate path (message ingestion, room creation, profile sync) hits the cache;
@@ -29,6 +35,9 @@ const log = createLogger("capacity");
 
 /** Default decision cache TTL: 300s per the capacity contract. */
 export const CAPACITY_TTL_MS = 300_000;
+
+/** Multiplier of maxMembers at which bridging is hard-stopped. */
+export const HARD_STOP_MULTIPLIER = 2;
 
 export type TokenStatus = "pending" | "spent";
 
@@ -58,6 +67,9 @@ export interface CapacityDecision {
 	memberCount: number;
 	maxMembers: number;
 	overLimit: boolean;
+	/** Derived: memberCount >= 2x maxMembers while over the limit — the
+	 *  hard-stop threshold at which bridging is actually halted. */
+	hardStop: boolean;
 	stale: boolean;
 	checkedAt: number;
 	/** Derived: sync is allowed for this tuple. */
@@ -122,6 +134,14 @@ export interface CapacityServiceOptions {
 		decision: CapacityDecision,
 		previous: CapacityDecision | undefined,
 	) => void;
+	/** Called whenever the usage state changes: the bridge crossing over
+	 *  the capacity threshold (`overLimit` flips) or crossing the hard-stop
+	 *  threshold (`hardStop` flips), including the first decision for a
+	 *  tuple. Used for the admin system-channel notification. */
+	onUsageChange?: (
+		decision: CapacityDecision,
+		previous: CapacityDecision | undefined,
+	) => void;
 }
 
 export class CapacityService implements CapacityGate {
@@ -131,6 +151,7 @@ export class CapacityService implements CapacityGate {
 	#killSwitch: boolean;
 	#killSwitchLogged = false;
 	#onStateChange?: CapacityServiceOptions["onStateChange"];
+	#onUsageChange?: CapacityServiceOptions["onUsageChange"];
 	#cache = new Map<
 		string,
 		{ decision: CapacityDecision; expiresAt: number }
@@ -146,6 +167,7 @@ export class CapacityService implements CapacityGate {
 		this.#ttlMs = opts.ttlMs ?? CAPACITY_TTL_MS;
 		this.#killSwitch = opts.killSwitch ?? false;
 		this.#onStateChange = opts.onStateChange;
+		this.#onUsageChange = opts.onUsageChange;
 	}
 
 	/**
@@ -172,6 +194,7 @@ export class CapacityService implements CapacityGate {
 				memberCount: 0,
 				maxMembers: 0,
 				overLimit: false,
+				hardStop: false,
 				stale: false,
 				checkedAt: Date.now(),
 				enabled: true,
@@ -254,15 +277,23 @@ export class CapacityService implements CapacityGate {
 		spaceDid: string,
 		membership: SpaceMembership,
 	): CapacityDecision {
+		// Hard-stop only when the appserver reports over the limit AND the
+		// member count reaches 2x capacity. Under the limit (or fail-open —
+		// no grants, kill switch, transient errors) hardStop is never set,
+		// so the pre-existing fail-open/fail-safe semantics are preserved.
+		const hardStop =
+			membership.overLimit &&
+			membership.memberCount >= HARD_STOP_MULTIPLIER * membership.maxMembers;
 		const decision: CapacityDecision = {
 			guildId,
 			spaceDid,
 			memberCount: membership.memberCount,
 			maxMembers: membership.maxMembers,
 			overLimit: membership.overLimit,
+			hardStop,
 			stale: membership.stale,
 			checkedAt: membership.checkedAt,
-			enabled: !membership.overLimit,
+			enabled: !hardStop,
 		};
 		const key = `${guildId}:${spaceDid}`;
 		const previous = this.#cache.get(key)?.decision;
@@ -281,6 +312,7 @@ export class CapacityService implements CapacityGate {
 					memberCount: decision.memberCount,
 					maxMembers: decision.maxMembers,
 					overLimit: decision.overLimit,
+					hardStop: decision.hardStop,
 				},
 			);
 			try {
@@ -288,6 +320,20 @@ export class CapacityService implements CapacityGate {
 			} catch (err) {
 				log.error(
 					`capacity: state-change callback failed for ${spaceDid} (guild ${guildId})`,
+					err,
+				);
+			}
+		}
+
+		if (
+			decision.overLimit !== (previous?.overLimit ?? false) ||
+			decision.hardStop !== (previous?.hardStop ?? false)
+		) {
+			try {
+				this.#onUsageChange?.(decision, previous);
+			} catch (err) {
+				log.error(
+					`capacity: usage-change callback failed for ${spaceDid} (guild ${guildId})`,
 					err,
 				);
 			}
