@@ -13,6 +13,7 @@ import {
   type MessageInfo,
 } from "./messages.js";
 import { FileLock, QueueStore, type QueueJob } from "./queue.js";
+import { PostChain, errorText } from "./postChain.js";
 
 type DirectXrpcClient = InstanceType<typeof transport.DirectXrpcClient>;
 
@@ -198,6 +199,13 @@ export async function respond(
 
   // Drain the queue: claim the head job under the lock, run it to
   // completion (or failure), release, and continue — one job at a time.
+  //
+  // `pump()` is invoked fire-and-forget (`void pump()`) from the stdin
+  // handler and the drain timer, so it MUST never reject: an error escaping
+  // the loop (e.g. a lock/queue file write failure: EACCES, ENOSPC) would be
+  // an unhandled rejection that kills the responder and, through the broken
+  // pipe, the whole bridge pipeline. Per-job errors are already contained
+  // below; this outer catch contains everything else.
   let running = false;
   const pump = async () => {
     if (running) return;
@@ -220,11 +228,18 @@ export async function respond(
         } catch (error) {
           const message = error instanceof Error ? error.stack ?? error.message : String(error);
           log(`job ${active.id} failed: ${message}`);
-          queue.finish(active.id, "failed", message);
+          try {
+            queue.finish(active.id, "failed", message);
+          } catch (finishError) {
+            log(`could not record job ${active.id} failure: ${errorText(finishError)}`);
+          }
         }
         heartbeat();
         lock.release(holder);
       }
+    } catch (error) {
+      // Never let the pump reject into a `void pump()` call site.
+      log(`queue pump error: ${errorText(error)}`);
     } finally {
       lock.release(holder);
       running = false;
@@ -321,33 +336,23 @@ async function runMentionJob(
   const streamThinking = opts.streamThinking ?? true;
   // Serialize streamed thinking-chunk posts so they land in order, and so
   // the final answer is posted only after every chunk has been sent.
+  // PostChain contains per-chunk failures (logged + counted, chain carries
+  // on) rather than leaving a rejected link unhandled — see postChain.ts.
   // Chunks posted to a trace room chain under the room's first chunk.
-  let thinkingChain: Promise<unknown> = Promise.resolve();
+  const thinkingPosts = new PostChain((m) => log(`thinking-chunk ${m}`));
   let streamedThinking = false;
   let lastTraceChunkId: string | undefined;
   const reply = await runOmp(prompt, { ...opts, resume }, {
     onThinking: (chunk) => {
       streamedThinking = true;
-      // Each sendReply is chained onto thinkingChain, which is later
-      // awaited at `await thinkingChain`. But onThinking fires
-      // synchronously while runOmp is still streaming, so a rejected
-      // sendReply (e.g. a transient 5xx) would leave this link with no
-      // rejection handler in that window — an unhandled rejection that
-      // crashed the responder and, via the broken pipe, killed the bridge.
-      // Attach a handler immediately so rejections are handled here.
-      thinkingChain = thinkingChain
-        .then(async () => {
-          if (traceRoomId) {
-            const { messageId } = await sendReply(xrpc, spaceId, traceRoomId, chunk, buildThinkingBlocks(chunk), lastTraceChunkId);
-            lastTraceChunkId = messageId;
-          } else {
-            await sendReply(xrpc, spaceId, roomId, chunk, buildThinkingBlocks(chunk), parent);
-          }
-        })
-        .catch((e) => {
-          log(`thinking-chunk post failed: ${e instanceof Error ? e.message : String(e)}`);
-          return Promise.reject(e);
-        });
+      thinkingPosts.push(async () => {
+        if (traceRoomId) {
+          const { messageId } = await sendReply(xrpc, spaceId, traceRoomId, chunk, buildThinkingBlocks(chunk), lastTraceChunkId);
+          lastTraceChunkId = messageId;
+        } else {
+          await sendReply(xrpc, spaceId, roomId, chunk, buildThinkingBlocks(chunk), parent);
+        }
+      });
     },
   });
   if (reply.sessionId) {
@@ -357,7 +362,16 @@ async function runMentionJob(
     log("empty reply — not posting");
     return;
   }
-  await thinkingChain;
+  // Every chunk post has settled by here. Failures were logged and counted by
+  // PostChain (so the trace may be incomplete), but the answer itself is still
+  // worth posting — warn and continue rather than aborting the whole reply.
+  await thinkingPosts.drain();
+  if (thinkingPosts.failureCount() > 0) {
+    log(
+      `warning: ${thinkingPosts.failureCount()} thinking chunk(s) failed to post` +
+        ` (first: ${errorText(thinkingPosts.firstError())}) — posting the answer anyway`,
+    );
+  }
 
   const traceLink = traceRoomId ? `\n\n---\n💭 trace: ${ROOMY_APP_URL}/${spaceId}/${traceRoomId}` : "";
   if (streamThinking && streamedThinking) {
