@@ -28,6 +28,13 @@ import { log } from "../log.ts";
 const SWEEP_BATCH = 100;
 /** How often to poll for pending spaces while idle. */
 const IDLE_POLL_MS = 60_000;
+/**
+ * Safety cap on cycles for a targeted {@link runSpaceBackfill} — an admin
+ * request must not hang forever on a pathological space. 1000 cycles ×
+ * SWEEP_BATCH = 100k messages per call; a partial walk leaves the cursor at
+ * the last indexed id, so the background sweeper resumes from there.
+ */
+const MAX_SPACE_REINDEX_CYCLES = 1000;
 
 // ─── Singleton state ────────────────────────────────────────────────────
 
@@ -370,6 +377,99 @@ export async function runBackfillCatchUp(globalDb: DbLike): Promise<void> {
   }
 }
 
+/**
+ * Result of a targeted {@link runSpaceBackfill}.
+ */
+export interface SpaceBackfillResult {
+  spaceDid: string;
+  /** Messages upserted by this run (delta of the process-local counter). */
+  indexed: number;
+  /** Upserts that failed; their rows stay behind the cursor for a retry. */
+  failed: number;
+  /**
+   * True when the final cycle read a partial batch — i.e. the space was
+   * walked to the end of its message set. `failed > 0` still means some rows
+   * were left behind the cursor for the next cycle.
+   */
+  drained: boolean;
+  /** Sweep cycles executed. */
+  cycles: number;
+}
+
+/**
+ * Re-index ONE space from the beginning, synchronously.
+ *
+ * Clears the space's `search_backfill_cursor` row and tight-loops
+ * {@link sweepOneSpace} until the space is walked to its end. This is the
+ * targeted repair for a cursor that has advanced PAST unindexed messages
+ * (e.g. the Sep 2026 gap, where a cursor-advance bug skipped a contiguous
+ * ULID range): the background sweeper never revisits such a space — its
+ * cursor reads as "caught up" — and {@link runBackfillCatchUp} would
+ * re-index every space to fix one.
+ *
+ * Blast radius is deliberately one space. The sole exception is a Qdrant
+ * collection that does not exist yet: it is created empty, so every other
+ * space's cursor is stale too — {@link clearAllCursors} resets them and the
+ * background sweeper re-indexes those at its own cadence (their cursors are
+ * cleared, so nothing is silently stranded with a cursor past an empty
+ * index).
+ *
+ * The returned counts are deltas of the process-local sweep counters, which
+ * the background loop also increments — they may over-count if the loop
+ * sweeps concurrently. Same caveat as {@link runBackfillCatchUp}: a repair
+ * accelerator, not precise batch accounting.
+ */
+export async function runSpaceBackfill(
+  globalDb: DbLike,
+  spaceDid: string,
+): Promise<SpaceBackfillResult> {
+  const client = getQdrantClient();
+  if (!client) {
+    throw new Error("Message search is not configured on this server");
+  }
+
+  // A (re)created collection is empty, so every cursor is stale. Mirror
+  // sweepCycle's wipe-repair before walking this one space.
+  const created = await ensureMessagesCollection(client);
+  if (created) await clearAllCursors(globalDb);
+
+  // Reset this space's cursor so the walk starts from the beginning.
+  await globalDb.run(
+    "delete from search_backfill_cursor where space_did = ?",
+    [spaceDid],
+  );
+
+  const startBackfilled = statsBackfilled;
+  const startFailed = statsFailed;
+
+  let cycles = 0;
+  let drained = false;
+  for (;;) {
+    const before = await readCursor(globalDb, spaceDid);
+    const full = await sweepOneSpace(globalDb, client, spaceDid);
+    const after = await readCursor(globalDb, spaceDid);
+    cycles++;
+
+    if (!full) {
+      // A partial batch means the space's rows are exhausted.
+      drained = true;
+      break;
+    }
+    // Guard against a non-advancing cursor: a full batch in which every row
+    // failed leaves the cursor put, so `full` would stay true forever.
+    if (before === after) break;
+    if (cycles >= MAX_SPACE_REINDEX_CYCLES) break;
+  }
+
+  return {
+    spaceDid,
+    indexed: statsBackfilled - startBackfilled,
+    failed: statsFailed - startFailed,
+    drained,
+    cycles,
+  };
+}
+
 /** True when any space is missing a `search_backfill_cursor` row (backlog). */
 async function hasCursorlessBacklog(globalDb: DbLike): Promise<boolean> {
   const row = await globalDb
@@ -411,6 +511,17 @@ async function setCursor(
        updated_at = excluded.updated_at`,
     [spaceDid, cursor, Date.now()],
   );
+}
+
+/** Read a space's backfill cursor, or null when it has none. */
+async function readCursor(
+  globalDb: DbLike,
+  spaceDid: string,
+): Promise<string | null> {
+  const row = await globalDb
+    .query("select cursor from search_backfill_cursor where space_did = ?")
+    .get<{ cursor: string }>(spaceDid);
+  return row?.cursor ?? null;
 }
 
 /** Clear every cursor (collection was wiped — re-index everything). */

@@ -40,6 +40,7 @@ import { adminListSpacesHandler } from "./handlers/space.roomy.admin.listSpaces.
 import { adminTestSendHandler } from "./handlers/space.roomy.admin.push.testSend.ts";
 import { adminResetSearchBackfillHandler } from "./handlers/space.roomy.admin.resetSearchBackfill.ts";
 import { adminRunSearchBackfillHandler } from "./handlers/space.roomy.admin.runSearchBackfill.ts";
+import { adminReindexSpaceHandler } from "./handlers/space.roomy.admin.reindexSpace.ts";
 import { getSpacesHandler } from "./handlers/space.roomy.space.getSpaces.ts";
 import { getMembersHandler } from "./handlers/space.roomy.space.getMembers.ts";
 import { getMetadataHandler } from "./handlers/space.roomy.space.getMetadata.ts";
@@ -276,6 +277,9 @@ export function buildRouter(
     })
     .procedure("space.roomy.admin.runSearchBackfill", {
       handler: adminRunSearchBackfillHandler,
+    })
+    .procedure("space.roomy.admin.reindexSpace", {
+      handler: adminReindexSpaceHandler,
     })
     .query("space.roomy.admin.listSpaces", {
       handler: adminListSpacesHandler,
