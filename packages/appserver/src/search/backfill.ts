@@ -29,12 +29,20 @@ const SWEEP_BATCH = 100;
 /** How often to poll for pending spaces while idle. */
 const IDLE_POLL_MS = 60_000;
 /**
- * Safety cap on cycles for a targeted {@link runSpaceBackfill} — an admin
- * request must not hang forever on a pathological space. 1000 cycles ×
- * SWEEP_BATCH = 100k messages per call; a partial walk leaves the cursor at
- * the last indexed id, so the background sweeper resumes from there.
+ * Wall-clock budget for a targeted {@link runSpaceBackfill}.
+ *
+ * This runs SYNCHRONOUSLY inside one XRPC request, and the request path is
+ * fronted by a proxy with a ~100s response timeout (prod returns a 502/524
+ * beyond it). A large space needs far more than that — Roomy Space re-indexes
+ * ~122k messages — so the budget must be expressed in TIME, not cycles: a
+ * generous cycle cap still overran the proxy and the caller got an HTML error
+ * page instead of the result, while the work itself was progressing.
+ *
+ * Stopping early is safe and resumable: the cursor stays at the last indexed
+ * id, so the next call (or the background sweeper) continues from there.
+ * Callers loop until `drained` is true.
  */
-const MAX_SPACE_REINDEX_CYCLES = 1000;
+const SPACE_REINDEX_BUDGET_MS = 60_000;
 
 // ─── Singleton state ────────────────────────────────────────────────────
 
@@ -472,11 +480,14 @@ export interface SpaceBackfillResult {
 export async function runSpaceBackfill(
   globalDb: DbLike,
   spaceDid: string,
+  /** Override the wall-clock budget (tests use a tiny value). */
+  budgetMs: number = SPACE_REINDEX_BUDGET_MS,
 ): Promise<SpaceBackfillResult> {
   const client = getQdrantClient();
   if (!client) {
     throw new Error("Message search is not configured on this server");
   }
+  const deadline = Date.now() + budgetMs;
 
   // A (re)created collection is empty, so every cursor is stale. Mirror
   // sweepCycle's wipe-repair before walking this one space.
@@ -491,6 +502,10 @@ export async function runSpaceBackfill(
 
   const startBackfilled = statsBackfilled;
   const startFailed = statsFailed;
+  // Per-run baseline so `lastRowError` reflects THIS run, not whatever failed
+  // earlier in the process (a stale storage-full error outlived its outage and
+  // was reported next to `failed: 0`).
+  const startRowError = statsLastRowError;
 
   let cycles = 0;
   let drained = false;
@@ -508,7 +523,7 @@ export async function runSpaceBackfill(
     // Guard against a non-advancing cursor: a full batch in which every row
     // failed leaves the cursor put, so `full` would stay true forever.
     if (before === after) break;
-    if (cycles >= MAX_SPACE_REINDEX_CYCLES) break;
+    if (Date.now() >= deadline) break;
   }
 
   return {
@@ -517,7 +532,8 @@ export async function runSpaceBackfill(
     failed: statsFailed - startFailed,
     drained,
     cycles,
-    lastRowError: statsLastRowError,
+    lastRowError:
+      statsLastRowError === startRowError ? null : statsLastRowError,
   };
 }
 

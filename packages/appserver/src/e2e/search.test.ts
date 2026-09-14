@@ -25,7 +25,7 @@ import {
 } from "./helpers.ts";
 import { _setQdrantClientForTest, _resetQdrantClient, type QdrantClientLike } from "../search/qdrantSearch.ts";
 import { flushSearchQueue } from "../search/indexer.ts";
-import { startSearchBackfill, stopSearchBackfill, sweepCycle, _resetSearchBackfill, searchBackfillStats } from "../search/backfill.ts";
+import { startSearchBackfill, stopSearchBackfill, sweepCycle, _resetSearchBackfill, searchBackfillStats, runSpaceBackfill } from "../search/backfill.ts";
 import type { SparseVector } from "../search/bm25.ts";
 
 const USER = "did:plc:e2e-user";
@@ -798,6 +798,59 @@ describe("backfill sweeper (Qdrant)", () => {
       .query("select cursor from search_backfill_cursor where space_did = ?")
       .get<{ cursor: string }>(SPACE);
     expect(cursorRow?.cursor ?? "").toBe("");
+  });
+
+  test("stops at the time budget and resumes from the cursor next call", async () => {
+    const { ctx } = await newAppWithQdrant();
+    // 250 messages = 3 cycles at SWEEP_BATCH=100.
+    const { roomId } = await materializeSpace(ctx, SPACE, USER, {
+      messageText: "message number 0",
+    });
+    for (let batch = 0; batch < 5; batch++) {
+      const events = [];
+      for (let i = batch * 50 + 1; i < Math.min((batch + 1) * 50 + 1, 250); i++) {
+        events.push({
+          id: newUlid(),
+          $type: "space.roomy.message.createMessage.v0",
+          room: roomId,
+          body: {
+            mimeType: "text/plain",
+            data: { $bytes: Buffer.from(`message number ${i}`).toString("base64") },
+          },
+          extensions: {},
+        });
+      }
+      const res = await ctx.authedFetch(USER)(
+        `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
+        { method: "POST", body: JSON.stringify({ spaceId: SPACE, events }) },
+      );
+      if (res.status !== 200) throw new Error(`sendEvents failed ${res.status}`);
+    }
+    await flushSearchQueue();
+
+    const globalDb = globalDbOf(ctx);
+    _resetSearchBackfill();
+    startSearchBackfill({ globalDb: globalDb as never });
+    try {
+      // A zero budget lets exactly one cycle run, then stops — the shape of a
+      // request that would otherwise overrun the ~100s proxy timeout on a
+      // 122k-message space. The run must report `drained: false` and PERSIST
+      // its cursor so the next call continues rather than restarting.
+      const first = await runSpaceBackfill(globalDb as never, SPACE, 0);
+      expect(first.drained).toBe(false);
+      expect(first.indexed).toBeGreaterThan(0);
+      const afterFirst = await globalDb
+        .query("select cursor from search_backfill_cursor where space_did = ?")
+        .get<{ cursor: string }>(SPACE);
+      expect(afterFirst?.cursor ?? "").not.toBe("");
+
+      // Second call resumes: it re-indexes the remainder, not the whole space.
+      const second = await runSpaceBackfill(globalDb as never, SPACE, 0);
+      expect(second.indexed).toBeGreaterThan(0);
+      expect(second.indexed).toBeLessThan(first.indexed + second.indexed);
+    } finally {
+      await stopSearchBackfill();
+    }
   });
 
   test("cursor advances only past the last successful upsert in a batch", async () => {

@@ -332,6 +332,48 @@ describe("space.roomy.admin.reindexSpace", () => {
     },
   );
 
+  test("does not report a stale per-row error on a clean run", async () => {
+    const ctx = await startAppserver();
+    await materializeSpace(ctx, SPACE, USER, { messageText: "the quick brown fox" });
+    await flushSearchQueue();
+
+    const globalDb = globalDbOf(ctx);
+    await globalDb.run("delete from search_backfill_cursor where space_did = ?", [SPACE]);
+    await globalDb.run(
+      "insert into search_backfill_cursor (space_did, cursor, updated_at) values (?, ?, ?)",
+      [SPACE, "01ZZZZZZZZZZZZZZZZZZZZZZZZ", Date.now()],
+    );
+
+    // First run fails (storage full), leaving a per-row error recorded.
+    _setQdrantClientForTest(new (class extends FakeQdrant {
+      override async upsert(): Promise<unknown> {
+        throw new Error("Insufficient Storage");
+      }
+    })());
+    try {
+      const bad = await ctx.authedFetch(ADMIN)(
+        `${ctx.baseUrl}/xrpc/space.roomy.admin.reindexSpace`,
+        { method: "POST", body: JSON.stringify({ spaceId: SPACE }) },
+      );
+      expect((await bad.json()).lastRowError).toContain("storage full");
+
+      // Capacity restored: the SAME process must not keep reporting the old
+      // failure next to `failed: 0` — that reads as an active outage.
+      _setQdrantClientForTest(new FakeQdrant());
+      await globalDb.run("delete from search_backfill_cursor where space_did = ?", [SPACE]);
+      const good = await ctx.authedFetch(ADMIN)(
+        `${ctx.baseUrl}/xrpc/space.roomy.admin.reindexSpace`,
+        { method: "POST", body: JSON.stringify({ spaceId: SPACE }) },
+      );
+      expect(good.status).toBe(200);
+      const body = await good.json();
+      expect(body.failed).toBe(0);
+      expect(body.lastRowError).toBeNull();
+    } finally {
+      _resetQdrantClient();
+    }
+  });
+
   test("does not touch another space's backfill cursor", async () => {
     const ctx = await startAppserver();
     await materializeSpace(ctx, SPACE, USER, { messageText: "the quick brown fox" });
