@@ -480,25 +480,29 @@ export interface SpaceBackfillResult {
 export async function runSpaceBackfill(
   globalDb: DbLike,
   spaceDid: string,
-  /** Override the wall-clock budget (tests use a tiny value). */
-  budgetMs: number = SPACE_REINDEX_BUDGET_MS,
+  opts: { budgetMs?: number; resume?: boolean } = {},
 ): Promise<SpaceBackfillResult> {
   const client = getQdrantClient();
   if (!client) {
     throw new Error("Message search is not configured on this server");
   }
-  const deadline = Date.now() + budgetMs;
+  const deadline = Date.now() + (opts.budgetMs ?? SPACE_REINDEX_BUDGET_MS);
 
   // A (re)created collection is empty, so every cursor is stale. Mirror
   // sweepCycle's wipe-repair before walking this one space.
   const created = await ensureMessagesCollection(client);
   if (created) await clearAllCursors(globalDb);
 
-  // Reset this space's cursor so the walk starts from the beginning.
-  await globalDb.run(
-    "delete from search_backfill_cursor where space_did = ?",
-    [spaceDid],
-  );
+  // Reset this space's cursor so the walk starts from the beginning — UNLESS
+  // resuming. A space bigger than the budget needs several calls, and
+  // resetting each time would restart it forever: the walk would re-index the
+  // same first batch and never reach the end.
+  if (opts.resume !== true) {
+    await globalDb.run(
+      "delete from search_backfill_cursor where space_did = ?",
+      [spaceDid],
+    );
+  }
 
   const startBackfilled = statsBackfilled;
   const startFailed = statsFailed;

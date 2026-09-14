@@ -330,6 +330,10 @@ describe("space.roomy.admin.reindexSpace", () => {
         _resetQdrantClient();
       }
     },
+    // Boots an appserver and pushes 250 messages through the real HTTP write
+    // path. Fast locally, but CI runners under full-suite parallel load blow
+    // the 5s default (observed: "sendEvents failed 500" then a 5s timeout).
+    { timeout: 30000 },
   );
 
   test("does not report a stale per-row error on a clean run", async () => {

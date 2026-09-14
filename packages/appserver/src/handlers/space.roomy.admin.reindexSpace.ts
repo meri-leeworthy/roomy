@@ -34,6 +34,14 @@ import type { AuthCtx, ProcedureHandler, QueryParams } from "../xrpc/types.ts";
 
 interface ReindexSpaceBody {
   spaceId?: unknown;
+  /**
+   * Continue from the stored cursor instead of restarting the space. Required
+   * for a space larger than one time budget: the walk stops at ~60s so the
+   * request cannot overrun the proxy's response timeout, and the caller loops
+   * with `resume: true` until `drained` — restarting each time would re-index
+   * the same first batch forever.
+   */
+  resume?: unknown;
 }
 
 export const adminReindexSpaceHandler: ProcedureHandler<
@@ -86,7 +94,17 @@ export const adminReindexSpaceHandler: ProcedureHandler<
     throw new XrpcError(404, "NotFound", `Unknown space: ${spaceId}`);
   }
 
-  const result = await runSpaceBackfill(globalDb, spaceId);
+  if (body.resume !== undefined && typeof body.resume !== "boolean") {
+    throw new XrpcError(
+      400,
+      "InvalidRequest",
+      "Field 'resume' must be a boolean if provided",
+    );
+  }
+
+  const result = await runSpaceBackfill(globalDb, spaceId, {
+    resume: body.resume === true,
+  });
   const stats = searchBackfillStats();
   return {
     spaceId: result.spaceDid,

@@ -800,58 +800,88 @@ describe("backfill sweeper (Qdrant)", () => {
     expect(cursorRow?.cursor ?? "").toBe("");
   });
 
-  test("stops at the time budget and resumes from the cursor next call", async () => {
-    const { ctx } = await newAppWithQdrant();
-    // 250 messages = 3 cycles at SWEEP_BATCH=100.
-    const { roomId } = await materializeSpace(ctx, SPACE, USER, {
-      messageText: "message number 0",
-    });
-    for (let batch = 0; batch < 5; batch++) {
-      const events = [];
-      for (let i = batch * 50 + 1; i < Math.min((batch + 1) * 50 + 1, 250); i++) {
-        events.push({
-          id: newUlid(),
-          $type: "space.roomy.message.createMessage.v0",
-          room: roomId,
-          body: {
-            mimeType: "text/plain",
-            data: { $bytes: Buffer.from(`message number ${i}`).toString("base64") },
-          },
-          extensions: {},
-        });
+  test(
+    "stops at the time budget and resumes from the cursor next call",
+    // Heavy: 250 messages through the real HTTP write path, like the
+    // 250-message backfill test below — CI load blows the 5s default.
+    async () => {
+      const { ctx } = await newAppWithQdrant();
+      // 250 messages = 3 cycles at SWEEP_BATCH=100.
+      const { roomId } = await materializeSpace(ctx, SPACE, USER, {
+        messageText: "message number 0",
+      });
+      for (let batch = 0; batch < 5; batch++) {
+        const events = [];
+        for (let i = batch * 50 + 1; i < Math.min((batch + 1) * 50 + 1, 250); i++) {
+          events.push({
+            id: newUlid(),
+            $type: "space.roomy.message.createMessage.v0",
+            room: roomId,
+            body: {
+              mimeType: "text/plain",
+              data: { $bytes: Buffer.from(`message number ${i}`).toString("base64") },
+            },
+            extensions: {},
+          });
+        }
+        const res = await ctx.authedFetch(USER)(
+          `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
+          { method: "POST", body: JSON.stringify({ spaceId: SPACE, events }) },
+        );
+        if (res.status !== 200) throw new Error(`sendEvents failed ${res.status}`);
       }
-      const res = await ctx.authedFetch(USER)(
-        `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
-        { method: "POST", body: JSON.stringify({ spaceId: SPACE, events }) },
-      );
-      if (res.status !== 200) throw new Error(`sendEvents failed ${res.status}`);
-    }
-    await flushSearchQueue();
+      await flushSearchQueue();
 
-    const globalDb = globalDbOf(ctx);
-    _resetSearchBackfill();
-    startSearchBackfill({ globalDb: globalDb as never });
-    try {
-      // A zero budget lets exactly one cycle run, then stops — the shape of a
+      const globalDb = globalDbOf(ctx);
+      _resetSearchBackfill();
+      // runSpaceBackfill calls sweepOneSpace directly and does not consult the
+      // `started` flag, so the background loop does not need to run — leaving
+      // it off keeps the counts deterministic.
+
+      // A zero budget lets exactly one sweep run, then stops — the shape of a
       // request that would otherwise overrun the ~100s proxy timeout on a
-      // 122k-message space. The run must report `drained: false` and PERSIST
-      // its cursor so the next call continues rather than restarting.
-      const first = await runSpaceBackfill(globalDb as never, SPACE, 0);
+      // 122k-message space (prod returned 502/524). The run must report
+      // `drained: false` and PERSIST its cursor so the next call continues.
+      const first = await runSpaceBackfill(globalDb as never, SPACE, { budgetMs: 0 });
       expect(first.drained).toBe(false);
-      expect(first.indexed).toBeGreaterThan(0);
-      const afterFirst = await globalDb
+      expect(first.indexed).toBe(100); // exactly one batch
+      const cursorAfterFirst = await globalDb
         .query("select cursor from search_backfill_cursor where space_did = ?")
         .get<{ cursor: string }>(SPACE);
-      expect(afterFirst?.cursor ?? "").not.toBe("");
+      expect(cursorAfterFirst?.cursor ?? "").not.toBe("");
 
-      // Second call resumes: it re-indexes the remainder, not the whole space.
-      const second = await runSpaceBackfill(globalDb as never, SPACE, 0);
-      expect(second.indexed).toBeGreaterThan(0);
-      expect(second.indexed).toBeLessThan(first.indexed + second.indexed);
-    } finally {
-      await stopSearchBackfill();
-    }
-  });
+      // Without `resume` a call restarts the space (it clears the cursor), so
+      // it re-walks the SAME first batch and lands on the same cursor — proof
+      // that a non-resuming caller would loop forever on a large space.
+      const restarted = await runSpaceBackfill(globalDb as never, SPACE, { budgetMs: 0 });
+      expect(restarted.indexed).toBe(100);
+      const cursorAfterRestart = await globalDb
+        .query("select cursor from search_backfill_cursor where space_did = ?")
+        .get<{ cursor: string }>(SPACE);
+      expect(cursorAfterRestart?.cursor).toBe(cursorAfterFirst?.cursor);
+
+      // With `resume`, the walk continues forward from the stored cursor and
+      // reaches the end of the space.
+      const second = await runSpaceBackfill(globalDb as never, SPACE, {
+        budgetMs: 0,
+        resume: true,
+      });
+      expect(second.indexed).toBe(100);
+      const cursorAfterSecond = await globalDb
+        .query("select cursor from search_backfill_cursor where space_did = ?")
+        .get<{ cursor: string }>(SPACE);
+      expect(cursorAfterSecond!.cursor > cursorAfterFirst!.cursor).toBe(true);
+
+      // Two more resumed calls finish the 250-message space and report drained.
+      await runSpaceBackfill(globalDb as never, SPACE, { budgetMs: 0, resume: true });
+      const last = await runSpaceBackfill(globalDb as never, SPACE, {
+        budgetMs: 0,
+        resume: true,
+      });
+      expect(last.drained).toBe(true);
+    },
+    { timeout: 30000 },
+  );
 
   test("cursor advances only past the last successful upsert in a batch", async () => {
     const { ctx } = await newAppWithQdrant();
