@@ -3,7 +3,6 @@
   import { queryClient } from "$lib/client";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { createSpacesQuery } from "$lib/queries/spaces";
-  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import {
     createFederationRequestsQuery,
     createFederationOutgoingQuery,
@@ -30,18 +29,13 @@
 
   const spaceId = $derived(page.params.space!);
 
-  const flagsQuery = createFeatureFlagsQuery();
-  const federationEnabled = $derived(
-    flagsQuery.data?.flags.includes("channel-federation") ?? false,
-  );
-
   const metaQuery = createSpaceMetadataQuery(() => spaceId);
   const isAdmin = $derived(metaQuery.data?.isAdmin ?? false);
 
-  const requestsQuery = createFederationRequestsQuery(() => spaceId, { enabled: () => federationEnabled && isAdmin });
-  const outgoingQuery = createFederationOutgoingQuery(() => spaceId, { enabled: () => federationEnabled && isAdmin });
-  const incomingQuery = createFederationIncomingQuery(() => spaceId, { enabled: () => federationEnabled && isAdmin });
-  const grantsQuery = createFederationGrantsQuery(() => spaceId, { enabled: () => federationEnabled && isAdmin });
+  const requestsQuery = createFederationRequestsQuery(() => spaceId, { enabled: () => isAdmin });
+  const outgoingQuery = createFederationOutgoingQuery(() => spaceId, { enabled: () => isAdmin });
+  const incomingQuery = createFederationIncomingQuery(() => spaceId, { enabled: () => isAdmin });
+  const grantsQuery = createFederationGrantsQuery(() => spaceId, { enabled: () => isAdmin });
   const spacesQuery = createSpacesQuery();
 
   // Own channels of this space (excludes federated channels shown in orphans).
@@ -199,11 +193,7 @@
   }
 </script>
 
-{#if !federationEnabled}
-  <div class="py-12 text-center text-sm text-base-500 dark:text-base-400">
-    Channel federation is not enabled on this space yet.
-  </div>
-{:else if !isAdmin}
+{#if !isAdmin}
   <div class="py-12 text-center text-sm text-base-500 dark:text-base-400">
     Only space admins can manage federations.
   </div>

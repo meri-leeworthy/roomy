@@ -7,7 +7,17 @@
     component: UserProfile,
   });
 
-  const profile = {
+  type Profile = {
+    did: string;
+    handle: string;
+    displayName: string;
+    description: string;
+    pronouns?: string;
+    website?: string;
+    avatar?: string;
+  };
+
+  const baseProfile: Profile = {
     did: "did:plc:test",
     handle: "ada",
     displayName: "Ada Lovelace",
@@ -17,9 +27,9 @@
   };
 </script>
 
-{#snippet template(_args)}
+{#snippet template(args: { profile: Profile })}
   <div class="p-4 w-full">
-    <UserProfile profile={profile}>
+    <UserProfile profile={args.profile}>
       {#snippet actions()}
         <button
           class="px-4 py-2 rounded-lg bg-accent-500 text-white text-sm font-medium"
@@ -31,4 +41,24 @@
   </div>
 {/snippet}
 
-<Story name="Default" {template} />
+<Story name="Default" args={{ profile: baseProfile }} {template} />
+
+<Story
+  name="With pronouns and website"
+  args={{
+    profile: {
+      ...baseProfile,
+      pronouns: "she/her",
+      website: "https://ada.example.com/notes",
+    },
+  }}
+  {template}
+/>
+
+<Story
+  name="Website without scheme"
+  args={{
+    profile: { ...baseProfile, pronouns: "they/them", website: "ada.example.com" },
+  }}
+  {template}
+/>

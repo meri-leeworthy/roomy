@@ -46,12 +46,12 @@ let lastReloadAt = 0;
 export function isRecoverableAtprotoError(err: unknown): boolean {
   if (err == null) return false;
 
-  const name =
-    (err instanceof Error ? err.name : "") ||
-    (typeof (err as { constructor?: { name?: string } })?.constructor?.name ===
+  const name = err instanceof Error ? err.name : "";
+  const ctorName =
+    typeof (err as { constructor?: { name?: string } })?.constructor?.name ===
     "string"
       ? (err as { constructor: { name: string } }).constructor.name
-      : "");
+      : "";
   const message = err instanceof Error ? err.message : String(err);
   const status = (err as { status?: unknown }).status;
   const nsid = (err as { nsid?: unknown }).nsid;
@@ -67,7 +67,8 @@ export function isRecoverableAtprotoError(err: unknown): boolean {
     "AuthMethodUnsatisfiableError",
     "AuthRequiredError",
   ];
-  if (recoverableNames.some((n) => name.includes(n))) return true;
+  if (recoverableNames.some((n) => name.includes(n) || ctorName.includes(n)))
+    return true;
 
   // PDS-level auth failure (e.g. getServiceAuth returned 401) — recoverable
   // because a reload re-runs init and re-attempts the OAuth flow. We exclude

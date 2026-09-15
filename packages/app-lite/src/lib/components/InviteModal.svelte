@@ -13,7 +13,12 @@
     spaceId: string;
   } = $props();
 
-  const invitesQuery = createInvitesQuery(() => spaceId);
+  // Fetch only while the modal is open: the modal is mounted for the whole
+  // lifetime of a selected space, and an unconditional query 403s on every
+  // mount for members of spaces with member invites disabled.
+  const invitesQuery = createInvitesQuery(() => spaceId, {
+    enabled: () => open,
+  });
 
   let creating = $state(false);
 

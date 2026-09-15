@@ -2,13 +2,17 @@
  * XRPC: space.roomy.admin.listSpaces (query).
  *
  * Paginated, per-space stats for the admin dashboard. Each row carries
- * member/event counters and an event-type breakdown for one space, sorted
- * by member count descending (ties broken by space DID ascending so the
- * order is stable across pages).
+ * member/event counters and an event-type breakdown for one space. Rows
+ * are ordered numerically descending by the active sort key
+ * (`memberCount` | `totalEvents` | `eventsToday`, default `memberCount`),
+ * ties broken by space DID ascending so the order is stable across pages.
  *
- * The cursor is `"<memberCount>|<did>"` of the last row on the current
- * page; the next page starts strictly after that (member count, did)
- * under the same sort. Capped at 100 rows per page.
+ * The cursor is `"<sortValue>|<did>"` of the last row on the current page,
+ * where `<sortValue>` is that row's value under the ACTIVE sort key — the
+ * number the cursor filters against is the same one the ORDER BY used, so
+ * paging never re-visits or skips rows when a non-default sort is in
+ * effect. The next page starts strictly after that (sort value, did) under
+ * the same sort. Capped at 100 rows per page.
  *
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
@@ -16,6 +20,7 @@
 import { openDb, openSpaceDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { optionalInt, optionalString } from "../xrpc/params.ts";
+import { XrpcError } from "../xrpc/errors.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
 
 export interface AdminSpaceStats {
@@ -32,25 +37,65 @@ export interface ListSpacesResult {
   cursor?: string;
 }
 
+/** The supported sort keys for the per-space list. */
+export type ListSpacesSort = "memberCount" | "totalEvents" | "eventsToday";
+
+const SORTS: readonly ListSpacesSort[] = [
+  "memberCount",
+  "totalEvents",
+  "eventsToday",
+];
+
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 
 /**
- * Parse the opaque cursor into `{ memberCount, did }`. Returns null when
+ * Parse the opaque cursor into `{ sortValue, did }`. Returns null when
  * the cursor is absent or malformed (the handler treats null as "first
  * page" rather than erroring, so a stale client cursor degrades to a
  * fresh first page instead of a 400).
  *
- * The cursor is `"<memberCount>|<did>"`; `|` is chosen because it never
+ * The cursor is `"<sortValue>|<did>"`, where `<sortValue>` is the last
+ * row's value under the ACTIVE sort key; `|` is chosen because it never
  * appears in a DID (`did:plc:` / `did:web:` use only colons).
  */
-function parseCursor(cursor: string): { memberCount: number; did: string } | null {
+function parseCursor(
+  cursor: string,
+): { sortValue: number; did: string } | null {
   const sep = cursor.indexOf("|");
   if (sep <= 0 || sep === cursor.length - 1) return null;
-  const count = Number(cursor.slice(0, sep));
+  const sortValue = Number(cursor.slice(0, sep));
   const did = cursor.slice(sep + 1);
-  if (!Number.isInteger(count) || count < 0 || did.length === 0) return null;
-  return { memberCount: count, did };
+  if (!Number.isInteger(sortValue) || sortValue < 0 || did.length === 0)
+    return null;
+  return { sortValue, did };
+}
+
+/** Parse the `sort` query param, defaulting to `memberCount`. */
+function parseSort(params: QueryParams): ListSpacesSort {
+  const raw = optionalString(params, "sort");
+  if (raw === undefined) return "memberCount";
+  if ((SORTS as readonly string[]).includes(raw)) return raw as ListSpacesSort;
+  throw new XrpcError(
+    400,
+    "InvalidRequest",
+    `Param sort must be one of: ${SORTS.join(", ")}; got: ${raw}`,
+  );
+}
+
+/** Extract the sort key's numeric value from a space-stats row. */
+function sortValueOf(
+  sort: ListSpacesSort,
+  s: { member_count: number; total_events: number; events_today: number },
+): number {
+  switch (sort) {
+    case "memberCount":
+      return s.member_count;
+    case "totalEvents":
+      return s.total_events;
+    case "eventsToday":
+      return s.events_today;
+  }
 }
 
 export const adminListSpacesHandler: QueryHandler<
@@ -64,6 +109,7 @@ export const adminListSpacesHandler: QueryHandler<
     max: MAX_LIMIT,
     default: DEFAULT_LIMIT,
   });
+  const sort = parseSort(params);
   const cursorRaw = optionalString(params, "cursor") ?? null;
   const cursor = cursorRaw ? parseCursor(cursorRaw) : null;
 
@@ -101,9 +147,8 @@ export const adminListSpacesHandler: QueryHandler<
   // ('member','admin')); name comes from comp_info. Both live in the
   // per-space DB. Event counters come from the grouped event-log query
   // above. The cursor filter preserves the sort: rows strictly after
-  // (memberCount, did) under (member_count desc, did asc) ordering — i.e.
-  // member_count < cursor.memberCount, OR equal member_count AND did >
-  // cursor.did.
+  // (sortValue, did) under (sortValue desc, did asc) ordering — i.e.
+  // sortValue < cursor.sortValue, OR equal sortValue AND did > cursor.did.
   const spaceStats: Array<{
     did: string;
     name: string | null;
@@ -136,20 +181,22 @@ export const adminListSpacesHandler: QueryHandler<
     });
   }
 
-  // Sort by member count desc, ties broken by did asc so the order is
-  // stable across pages.
+  // Sort by the active key desc, ties broken by did asc so the order is
+  // stable across pages. `sortValueOf` reads the same field the cursor
+  // encodes, so the cursor filter stays consistent with the ORDER BY.
   spaceStats.sort(
     (a, b) =>
-      b.member_count - a.member_count ||
+      sortValueOf(sort, b) - sortValueOf(sort, a) ||
       (a.did < b.did ? -1 : a.did > b.did ? 1 : 0),
   );
 
   let paged = spaceStats;
   if (cursor) {
+    const cv = cursor.sortValue;
     paged = spaceStats.filter(
       (s) =>
-        s.member_count < cursor.memberCount ||
-        (s.member_count === cursor.memberCount && s.did > cursor.did),
+        sortValueOf(sort, s) < cv ||
+        (sortValueOf(sort, s) === cv && s.did > cursor.did),
     );
   }
 
@@ -189,7 +236,9 @@ export const adminListSpacesHandler: QueryHandler<
   const result: ListSpacesResult = { spaces };
   if (hasMore && visibleRows.length > 0) {
     const last = visibleRows[visibleRows.length - 1]!;
-    result.cursor = `${last.member_count}|${last.did}`;
+    // Encode the ACTIVE sort key's value — the number the next page's
+    // cursor predicate filters against must match the ORDER BY used.
+    result.cursor = `${sortValueOf(sort, last)}|${last.did}`;
   }
   return result;
 };

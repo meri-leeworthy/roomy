@@ -708,11 +708,12 @@ export const prose: Record<string, EndpointProse> = {
   },
   "space.roomy.admin.listSpaces": {
     description:
-      "Paginated, per-space stats for the admin dashboard. Each row carries member/event counters and an event-type breakdown for one space, sorted by member count descending. Cursor format: '<memberCount>|<did>'.",
+      "Paginated, per-space stats for the admin dashboard. Each row carries member/event counters and an event-type breakdown for one space, sorted by a key you choose (default member count) descending. Cursor format: '<sortValue>|<did>', where sortValue is the row's value under the active sort key.",
     auth: "Admin allowlist (APPSERVER_ADMIN_DIDS).",
     params: [
       { name: "limit", type: "int", required: false, default: "50", description: "Spaces per page (max 100)." },
       { name: "cursor", type: "string", required: false, description: "Opaque cursor from previous response." },
+      { name: "sort", type: "string", required: false, default: "memberCount", description: "Sort key: 'memberCount' | 'totalEvents' | 'eventsToday'. Numeric descending, ties broken by DID ascending." },
     ],
     outputSchema: {
       type: "object",

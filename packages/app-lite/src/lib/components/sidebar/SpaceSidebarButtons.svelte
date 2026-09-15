@@ -6,7 +6,6 @@
   import { IconBell, IconSettings, IconUserPlus, IconX } from "@roomy/design/icons";
   import { settingsBar } from "$lib/components/layout/settings-bar.svelte";
   import { spaceNavigation } from "$lib/components/layout/last-room.svelte";
-  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { createFederationRequestsQuery } from "$lib/queries/federation";
 
   let {
@@ -23,14 +22,10 @@
 
   const currentSpaceId = $derived(spaceId ?? page.params.space);
 
-  // Channel-federation flag gate + pending-request badge (admins only).
-  const flagsQuery = createFeatureFlagsQuery();
-  const federationEnabled = $derived(
-    flagsQuery.data?.flags.includes("channel-federation") ?? false,
-  );
+  // Pending federation-request badge (admins only).
   const requestsQuery = createFederationRequestsQuery(
     () => currentSpaceId ?? "",
-    { enabled: () => federationEnabled && isAdmin && !!currentSpaceId },
+    { enabled: () => isAdmin && !!currentSpaceId },
   );
   const pendingRequestCount = $derived(
     requestsQuery.data?.requests?.length ?? 0,

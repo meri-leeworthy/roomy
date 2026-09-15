@@ -21,6 +21,7 @@
     { href: "/concepts/messages", label: "Messages" },
     { href: "/concepts/real-time", label: "Real-time" },
     { href: "/concepts/auth", label: "Auth" },
+    { href: "/concepts/feature-flags", label: "Feature flags" },
     { href: "/concepts/data-model", label: "Data model" },
   ];
 

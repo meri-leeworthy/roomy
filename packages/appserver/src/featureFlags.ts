@@ -25,11 +25,6 @@ export const FEATURE_FLAGS: readonly FeatureFlagDef[] = [
       "Enable search UI: member search, thread search, and cross-space Explore",
   },
   {
-    key: "channel-federation",
-    description:
-      "Enable channel federation: federating a channel from one space into another",
-  },
-  {
     key: "space-account-management",
     description:
       "Arbiter-powered space account management: space handle settings and Bluesky profile integration",

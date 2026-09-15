@@ -79,11 +79,7 @@
         onmouseleave={() => (hoveredTier = null)}
       >
         {#if tier.name === activeTier}
-          <span
-            class="self-center mb-4 px-3 py-1 rounded-full text-[11px] font-semibold uppercase tracking-wider bg-accent-400/20 text-accent-700 dark:text-accent-300"
-          >
-            Your plan
-          </span>
+          <span class="plan-badge">Your plan</span>
         {/if}
         <h3 class="text-xl font-bold text-base-900 dark:text-base-50 text-center mb-6">
           {tier.name}
@@ -178,6 +174,7 @@
   }
 
   .card {
+    position: relative;
     background: var(--color-base-50);
     border: 1px solid var(--color-base-200);
     border-radius: 12px;
@@ -195,6 +192,30 @@
       box-shadow 0.075s ease-in,
       border-color 0.15s ease,
       outline-color 0.15s ease;
+  }
+
+  /* Overlaps the card's top border instead of occupying flow space, so the
+     badge never pushes the tier content down. */
+  .plan-badge {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1;
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    background: color-mix(in oklab, var(--color-accent-400) 20%, var(--color-base-50));
+    color: var(--color-accent-700);
+  }
+
+  :global(.dark) .plan-badge {
+    background: color-mix(in oklab, var(--color-accent-500) 20%, var(--color-base-900));
+    color: var(--color-accent-300);
   }
 
   .card:hover {
