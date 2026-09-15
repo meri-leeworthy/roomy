@@ -4,6 +4,7 @@ import { testAuthVerifier } from "./xrpc/auth.ts";
 import { closeDb } from "./db/db.ts";
 import { _resetHydrationInflight } from "./hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "./embed/sweeper.ts";
+import { recordProcessStart } from "./fatal.ts";
 import { _resetProfileStoreCache } from "./queries/profileStore.ts";
 import { _resetProfileNegativeCache } from "./materialization/profiles.ts";
 
@@ -89,6 +90,10 @@ describe("createAppserver factory", () => {
     // Hit a real endpoint so the request counter/histogram have a sample.
     await fetch(`${base}/health`);
 
+    // Simulate this process's boot so the restart-rate counter has a series —
+    // the signal that turns 289 silent restarts into an alertable rate.
+    recordProcessStart();
+
     const res = await fetch(`${base}/metrics`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/plain");
@@ -103,12 +108,17 @@ describe("createAppserver factory", () => {
       "roomy_cache_hits_total",
       "roomy_embed_pending",
       "roomy_db_timeouts_total",
+      "roomy_process_starts_total",
     ]) {
       expect(body).toContain(`# TYPE ${name}`);
     }
     // The /health hit should have been recorded as a request.
     expect(body).toContain('endpoint="/health"');
     expect(body).toContain('method="GET"');
+    // The boot counter renders with a value, so the restart-rate alert
+    // expression (`increase(roomy_process_starts_total[10m]) > 3`) has a
+    // series to fire on.
+    expect(body).toMatch(/^roomy_process_starts_total \d+$/m);
   });
 
   test("getConnectionTicket works with test auth header", async () => {
