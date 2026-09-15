@@ -103,27 +103,27 @@ export class DatabasePool {
   }
 
   /** Start a rebuild for `spaceDid` (idempotent). */
-  async spaceRebuildBegin(spaceDid: string): Promise<{ ok: boolean }> {
+  spaceRebuildBegin(spaceDid: string): Promise<{ ok: boolean }> {
     return this.forSpace(spaceDid).spaceRebuildBegin(spaceDid);
   }
 
   /** Atomically swap the rebuild DB over the canonical file (idempotent). */
-  async spaceRebuildCommit(spaceDid: string): Promise<{ committed: boolean }> {
+  spaceRebuildCommit(spaceDid: string): Promise<{ committed: boolean }> {
     return this.forSpace(spaceDid).spaceRebuildCommit(spaceDid);
   }
 
   /** Abandon a rebuild; the old DB keeps serving. */
-  async spaceRebuildAbort(spaceDid: string): Promise<{ aborted: boolean }> {
+  spaceRebuildAbort(spaceDid: string): Promise<{ aborted: boolean }> {
     return this.forSpace(spaceDid).spaceRebuildAbort(spaceDid);
   }
 
   /** Whether `spaceDid` is currently rebuilding. */
-  async isSpaceRebuilding(spaceDid: string): Promise<boolean> {
+  isSpaceRebuilding(spaceDid: string): Promise<boolean> {
     return this.forSpace(spaceDid).isSpaceRebuilding(spaceDid);
   }
 
   /** Whether the canonical per-space DB for `spaceDid` is on the current schema. */
-  async checkSpaceSchema(spaceDid: string): Promise<{ current: boolean }> {
+  checkSpaceSchema(spaceDid: string): Promise<{ current: boolean }> {
     return this.forSpace(spaceDid).checkSpaceSchema(spaceDid);
   }
 

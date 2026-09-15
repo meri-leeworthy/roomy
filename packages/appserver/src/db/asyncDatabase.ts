@@ -29,61 +29,55 @@ export class AsyncStatement {
     this.#handle = handle;
   }
 
-  async all<T = Record<string, unknown>>(...params: unknown[]): Promise<T[]> {
+  all<T = Record<string, unknown>>(...params: unknown[]): Promise<T[]> {
     if (this.#handle !== undefined) {
-      const result = await this.#send({
+      return this.#send({
         type: "prepareAll",
         handle: this.#handle,
         params,
-      });
-      return result as T[];
+      }) as Promise<T[]>;
     }
-    const result = await this.#send({
+    return this.#send({
       type: "query",
       sql: this.#sql,
       params,
       mode: "all",
-    });
-    return result as T[];
+    }) as Promise<T[]>;
   }
 
-  async get<T = Record<string, unknown>>(
+  get<T = Record<string, unknown>>(
     ...params: unknown[]
   ): Promise<T | null> {
     if (this.#handle !== undefined) {
-      const result = await this.#send({
+      return this.#send({
         type: "prepareGet",
         handle: this.#handle,
         params,
-      });
-      return result as T | null;
+      }) as Promise<T | null>;
     }
-    const result = await this.#send({
+    return this.#send({
       type: "query",
       sql: this.#sql,
       params,
       mode: "get",
-    });
-    return result as T | null;
+    }) as Promise<T | null>;
   }
 
-  async run(
+  run(
     ...params: unknown[]
   ): Promise<{ changes: number; lastInsertRowid?: number }> {
     if (this.#handle !== undefined) {
-      const result = await this.#send({
+      return this.#send({
         type: "prepareRun",
         handle: this.#handle,
         params,
-      });
-      return result as { changes: number; lastInsertRowid?: number };
+      }) as Promise<{ changes: number; lastInsertRowid?: number }>;
     }
-    const result = await this.#send({
+    return this.#send({
       type: "run",
       sql: this.#sql,
       params,
-    });
-    return result as { changes: number; lastInsertRowid?: number };
+    }) as Promise<{ changes: number; lastInsertRowid?: number }>;
   }
 
   async finalize(): Promise<void> {
@@ -153,7 +147,17 @@ export class WorkerLink {
 
   /** Send a request, optionally stamped with a DB route. */
   send(req: Omit<WorkerRequest, "id">, route?: DbRoute): Promise<unknown> {
-    if (this.#closed) throw new Error("Database is closed");
+    if (this.#closed) {
+      // The link is already shut down. Return a rejected-but-handled promise
+      // instead of throwing synchronously: an `async` wrapper would otherwise
+      // convert the throw into a brand-new (unhandled-able) rejection. The
+      // no-op catch marks it handled; awaited callers still observe the
+      // "Database is closed" error.
+      const { promise, reject } = Promise.withResolvers<unknown>();
+      reject(new Error("Database is closed"));
+      promise.catch(() => {});
+      return promise;
+    }
     const id = String(this.#nextId++);
     const { promise, resolve, reject } = Promise.withResolvers<unknown>();
     const timeout = setTimeout(() => {
@@ -234,14 +238,14 @@ export class AsyncDatabase {
   }
 
   /** Start a rebuild for `spaceDid` (idempotent). */
-  async spaceRebuildBegin(spaceDid: string): Promise<{ ok: boolean }> {
+  spaceRebuildBegin(spaceDid: string): Promise<{ ok: boolean }> {
     return this.#link.send({ type: "spaceRebuildBegin", spaceDid }) as Promise<{
       ok: boolean;
     }>;
   }
 
   /** Atomically swap the rebuild DB over the canonical file. */
-  async spaceRebuildCommit(spaceDid: string): Promise<{ committed: boolean }> {
+  spaceRebuildCommit(spaceDid: string): Promise<{ committed: boolean }> {
     return this.#link.send({
       type: "spaceRebuildCommit",
       spaceDid,
@@ -249,7 +253,7 @@ export class AsyncDatabase {
   }
 
   /** Abandon a rebuild; the old DB keeps serving. */
-  async spaceRebuildAbort(spaceDid: string): Promise<{ aborted: boolean }> {
+  spaceRebuildAbort(spaceDid: string): Promise<{ aborted: boolean }> {
     return this.#link.send({
       type: "spaceRebuildAbort",
       spaceDid,
@@ -257,12 +261,12 @@ export class AsyncDatabase {
   }
 
   /** Whether `spaceDid` is currently rebuilding. */
-  async isSpaceRebuilding(spaceDid: string): Promise<boolean> {
+  isSpaceRebuilding(spaceDid: string): Promise<boolean> {
     return this.#link.send({ type: "isSpaceRebuilding", spaceDid }) as Promise<boolean>;
   }
 
   /** Whether the canonical per-space DB for `spaceDid` is on the current schema. */
-  async checkSpaceSchema(spaceDid: string): Promise<{ current: boolean }> {
+  checkSpaceSchema(spaceDid: string): Promise<{ current: boolean }> {
     return this.#link.send({ type: "checkSpaceSchema", spaceDid }) as Promise<{
       current: boolean;
     }>;
@@ -315,11 +319,11 @@ export class AsyncDatabase {
     return new AsyncStatement((req) => this.#link.send(req, this.#route), sql, handle);
   }
 
-  async exec(sql: string): Promise<void> {
-    await this.#link.send({ type: "exec", sql }, this.#route);
+  exec(sql: string): Promise<void> {
+    return this.#link.send({ type: "exec", sql }, this.#route) as Promise<void>;
   }
 
-  async run(
+  run(
     sql: string,
     ...params: unknown[]
   ): Promise<{ changes: number; lastInsertRowid?: number }> {
@@ -329,7 +333,7 @@ export class AsyncDatabase {
     }>;
   }
 
-  async transaction<T>(
+  transaction<T>(
     steps: Array<{
       type: "query" | "run" | "exec";
       sql: string;
@@ -344,7 +348,7 @@ export class AsyncDatabase {
    * table (worker-internal). Used on boot to index rooms/messages that were
    * materialized before the index existed. Idempotent.
    */
-  async backfillEntitySpace(spaceDid: string): Promise<{ backfilled: number }> {
+  backfillEntitySpace(spaceDid: string): Promise<{ backfilled: number }> {
     return this.#link.send({ type: "backfillEntitySpace", spaceDid }) as Promise<{
       backfilled: number;
     }>;
