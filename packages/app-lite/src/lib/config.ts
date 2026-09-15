@@ -74,6 +74,13 @@ export const CONFIG = {
   testIdentifier: dynamicEnv.PUBLIC_TEST_IDENTIFIER || null,
   testAppPassword: dynamicEnv.PUBLIC_TEST_APP_PASSWORD || null,
   /**
+   * PDS to authenticate the test-mode app-password login against. Reuses
+   * `PUBLIC_PDS` (the same PDS account creation targets), so a headless E2E
+   * run against a self-hosted PDS works without a second setting. Defaults to
+   * bsky.social.
+   */
+  testPds: dynamicEnv.PUBLIC_PDS || "https://bsky.social",
+  /**
    * Grafana Faro endpoint for browser telemetry (frontend log collection).
    * Points at an Alloy `faro.receiver` (dev compose: http://127.0.0.1:12345,
    * prod: the deploy/alloy collector). When unset the Faro SDK is never

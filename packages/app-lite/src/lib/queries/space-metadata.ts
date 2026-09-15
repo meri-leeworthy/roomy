@@ -6,7 +6,7 @@ const { queryKey } = cache;
 
 export function createSpaceMetadataQuery(
   spaceId: () => string,
-  opts?: { enabled?: boolean },
+  opts?: { enabled?: boolean | (() => boolean) },
 ) {
   return createQuery(() => ({
     queryKey: queryKey("space.roomy.space.getMetadata", { spaceId: spaceId() }),
@@ -14,6 +14,10 @@ export function createSpaceMetadataQuery(
       px().query("space.roomy.space.getMetadata", {
         spaceId: spaceId(),
       }),
-    enabled: opts?.enabled,
+    // Any part of `enabled` derived from reactive state must be an accessor,
+    // or it freezes at first evaluation (Svelte `state_referenced_locally`).
+    // See the fuller note on createRoomMetadataQuery.
+    enabled:
+      typeof opts?.enabled === "function" ? opts.enabled() : opts?.enabled,
   }));
 }

@@ -41,6 +41,7 @@
   import SpaceSidebarButtons from "./SpaceSidebarButtons.svelte";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
   import EditRoomModal from "./EditRoomModal.svelte";
+  import { editRoomModal } from "./edit-room.svelte";
   import RestoreRoomModal from "./RestoreRoomModal.svelte";
   import EditableChannelItem from "./EditableChannelItem.svelte";
   import InviteModal from "$lib/components/InviteModal.svelte";
@@ -77,10 +78,6 @@
   // --- Server bar toggle — the space header (avatar) toggles it. ---
   let isEditing = $state(false);
   let isSaving = $state(false);
-  let editingId = $state<
-    { room: string } | { categoryId: string; categoryName: string } | null
-  >(null);
-  let openEditRoomModal = $state(false);
   let openRestoreRoomModal = $state(false);
   let openInviteModal = $state(false);
   // Channel creation permissions state
@@ -213,14 +210,16 @@
   function editSidebarItem(
     id: { room: string } | { categoryId: string; categoryName: string },
   ) {
-    openEditRoomModal = true;
-    editingId = id;
+    editRoomModal.openFor(id);
   }
 
   // When the edited sidebar item is a federated channel, carry its origin
   // info + origin-grant ceiling into the edit modal so it renders the
-  // receiver-grant editor instead of the native members/roles editor.
+  // receiver-grant editor instead of the native members/roles editor. The
+  // federated context lives in the sidebar's channel map, so it is resolved
+  // the same way whichever entry point opened the modal.
   const editingFederated = $derived.by(() => {
+    const editingId = editRoomModal.target;
     if (!editingId || !("room" in editingId)) return undefined;
     const ch = channelMap.get(editingId.room);
     if (!ch?.federated) return undefined;
@@ -791,9 +790,9 @@
   <InviteModal bind:open={openInviteModal} {spaceId} />
 
   <EditRoomModal
-    bind:open={openEditRoomModal}
+    bind:open={editRoomModal.open}
     {spaceId}
-    id={editingId}
+    id={editRoomModal.target}
     federated={editingFederated}
     {renameCategory}
     {deleteCategory}
