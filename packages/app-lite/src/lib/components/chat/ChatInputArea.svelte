@@ -140,7 +140,26 @@
 
   let isSendingMessage = $state(false);
 
-  let shouldFocus = $derived(autoFocus && !isCoarsePointer && !isSendingMessage && messagingState.previewImages.length === 0);
+  /**
+   * Thread creation in flight. Separate from `isSendingMessage` because the
+   * two flags are set by different paths, but they are mutually exclusive in
+   * this UI (thread creation is only reachable from `threading` mode, the
+   * composer only from `normal` / `replying`), so the shell receives their
+   * disjunction as a single `isSendingMessage` prop rather than a second
+   * parallel "busy" prop.
+   *
+   * A large selection is a multi-second round trip: `createThread` creates the
+   * room, then forwards every selected message in one `sendEvents` batch. With
+   * no in-flight guard the submit stays live for that whole window and a
+   * second press creates a second thread (and a second, differently-ordered
+   * set of forwards).
+   */
+  let creatingThread = $state(false);
+
+  /** Busy state for the shell: a send or a thread creation, whichever is live. */
+  let isBusy = $derived(isSendingMessage || creatingThread);
+
+  let shouldFocus = $derived(autoFocus && !isCoarsePointer && !isBusy && messagingState.previewImages.length === 0);
 
   // Server-side member search for `@mention` in the chat input. Empty query →
   // recent-active preseed; non-empty → `getMembers?search=` on the appserver.
@@ -356,27 +375,40 @@
   async function handleCreateThread() {
     const state = messagingState.current;
     if (state.kind !== "threading") return;
+    // In-flight guard: the submit button is disabled while this is set, but a
+    // form submit can also arrive from the Enter key in the thread-name input,
+    // which the disabled attribute does not cover.
+    if (creatingThread) return;
 
     const name = state.name;
     const selectedIds = state.selectedMessages.map((m) => m.id);
 
-    const threadId = await createThread({
-      spaceId,
-      parentRoomId: roomId,
-      threadName: name,
-      messageIds: selectedIds,
-    });
+    creatingThread = true;
+    try {
+      const threadId = await createThread({
+        spaceId,
+        parentRoomId: roomId,
+        threadName: name,
+        messageIds: selectedIds,
+      });
 
-    messagingState.set({ kind: "normal", input: "", files: [], blocks: [], previewImages: [] });
-    clearInput();
+      messagingState.set({ kind: "normal", input: "", files: [], blocks: [], previewImages: [] });
+      clearInput();
 
-    goto(`/${page.params.space}/${threadId}?parent=${roomId}`);
+      goto(`/${page.params.space}/${threadId}?parent=${roomId}`);
+    } catch (e: unknown) {
+      console.error("Failed to create thread:", e);
+    } finally {
+      // Cleared unconditionally: a failed create must not strand the button
+      // disabled (the user needs to be able to retry).
+      creatingThread = false;
+    }
   }
 </script>
 
 <ChatInputShell
   {canWrite}
-  {isSendingMessage}
+  isSendingMessage={isBusy}
   previewImages={messagingState.previewImages}
   mode={shellMode}
   {actionMenuOpen}
