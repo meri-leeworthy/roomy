@@ -36,18 +36,11 @@
 <style>
   /*
     The wrapper host sits between `.prose` (in MessageBubble) and the rendered
-    markdown, so it breaks the `.prose > :first-child` / `> :last-child` margin
-    resets that Tailwind Typography applies to flush the first/last paragraph
-    with the bubble. The wrapper itself is display:contents (no box), so
-    re-apply those resets through it to keep message text flush.
+    markdown. `display: contents` keeps it box-less; the shared first/last
+    margin resets — which the composer's `.tiptap` needs identically — live in
+    `app-lite/src/lib/message-typography.css`, applied through this class.
   */
   .roomy-message-content {
     display: contents;
-  }
-  :global(.prose > .roomy-message-content > :first-child) {
-    margin-top: 0;
-  }
-  :global(.prose > .roomy-message-content > :last-child) {
-    margin-bottom: 0;
   }
 </style>

@@ -1,6 +1,9 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 @import "./fonts-hanken-grotesk.css";
+/* Block-level message typography shared by the composer and the rendered
+   message — the single source of truth keeping them a WYSIWYG pair. */
+@import "./lib/message-typography.css";
 
 @source "../node_modules/@roomy/design";
 @source "../node_modules/@foxui";

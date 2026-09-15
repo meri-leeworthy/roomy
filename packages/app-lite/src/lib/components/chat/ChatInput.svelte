@@ -242,8 +242,19 @@
       editorProps: {
         attributes: {
           class: cn(
-            // inputVariants({ variant: "primary" }),
-            "w-full outline-none text-base-950 dark:text-base-50",
+            // `roomy-prose` + `prose` opt the editable region into the shared
+            // block typography (lib/message-typography.css) that the rendered
+            // message uses — the composer is a WYSIWYG preview of the sent
+            // message, not a separately-styled editor. `prose-invert` matches
+            // MessageBubble so dark mode agrees too.
+            "roomy-prose prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline",
+            // `text-sm font-normal` mirror MessageBubble's root, so inherited
+            // metrics (notably line-height) are identical on both surfaces.
+            // No explicit text colour: `.prose` supplies the body colour, the
+            // same one the rendered message uses — hardcoding a base-* colour
+            // here would diverge from the preview it is meant to be.
+            "text-sm font-normal",
+            "w-full outline-none",
             "max-h-[30vh] overflow-y-auto",
           ),
         },
@@ -325,43 +336,12 @@
   }
 
   /*
-    WYSIWYG rendering for block nodes produced by markdown shortcuts
-    (`- `, `1. `, `# `, `> `) and the slash menu. StarterKit converts these
-    to bulletList/orderedList/heading/blockquote nodes, which render as plain
-    `<ul>`/`<ol>`/`<h1>`-`<h6>`/`<blockquote>` elements. Without styling they
-    look identical to plain text, so mirror the rendered-message styles
-    (BlocksRenderer) here so the composer shows what will actually be sent.
+    Block-node styling (headings, lists, quotes, code, spacing) is NOT defined
+    here. It lives in `src/lib/message-typography.css`, imported globally by
+    `app.css`, and is scoped to `.tiptap` for this editor and to `.roomy-prose`
+    for rendered messages — one rule set, so the composer stays a WYSIWYG
+    preview of the sent message. Only composer-specific chrome belongs below.
   */
-  :global(.tiptap ul) {
-    list-style: disc;
-    padding-left: 1.25rem;
-    margin: 0.25rem 0;
-  }
-  :global(.tiptap ol) {
-    list-style: decimal;
-    padding-left: 1.25rem;
-    margin: 0.25rem 0;
-  }
-  :global(.tiptap li) {
-    margin: 0.125rem 0;
-  }
-  :global(.tiptap h1),
-  :global(.tiptap h2),
-  :global(.tiptap h3),
-  :global(.tiptap h4),
-  :global(.tiptap h5),
-  :global(.tiptap h6) {
-    font-weight: 600;
-    margin: 0.25rem 0;
-  }
-  :global(.tiptap blockquote) {
-    border-left: 2px solid var(--color-base-300);
-    padding-left: 0.75rem;
-    margin: 0.25rem 0;
-  }
-  :global(.dark .tiptap blockquote) {
-    border-left-color: var(--color-base-600);
-  }
 
   /* Mention chip rendered inline in the composer. Subtle accent rounded
      background + accent text; works in both themes because the bg is a

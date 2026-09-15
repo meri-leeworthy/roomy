@@ -267,9 +267,14 @@
         </span>
       {/if}
 
-      <!-- Message text -->
+      <!-- Message text.
+           `roomy-prose` opts this element into the shared block typography in
+           app-lite's `lib/message-typography.css` — the same rules the
+           composer's `.tiptap` uses, so the two stay a WYSIWYG pair. It is
+           deliberately not applied to other `.prose` users (ActivityFeed,
+           UserProfile), which render inline/compact and keep `.prose` as-is. -->
       <div
-        class="prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline text-sm font-normal max-w-full overflow-auto hide-scrollbar"
+        class="roomy-prose prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline text-sm font-normal max-w-full overflow-auto hide-scrollbar"
         class:text-left={!isSystem}
         class:text-center={isSystem}
         class:opacity-75={isSystem}

@@ -600,23 +600,9 @@
 {/if}
 
 <style>
-  /*
-    The rendered message lives directly under the `.prose` wrapper, so Tailwind
-    Typography's `.prose > :first-child { margin-top: 0 }` / `> :last-child
-    { margin-bottom: 0 }` resets make its first/last paragraphs flush with the
-    bubble. The tiptap editor instead renders paragraphs nested under
-    `.tiptap` (inside `#chat-input`), so those resets never reach it and the
-    editor picks up an extra ~1.25em margin above its first paragraph and below
-    its last — making the edited content look inset vs. the rendered message.
-    Mirror the resets here, scoped to the editing editor so the composer (which
-    is not inside `.prose`) is unaffected.
-  */
-  :global(.editing-message .tiptap > :first-child) {
-    margin-top: 0;
-  }
-  :global(.editing-message .tiptap > :last-child) {
-    margin-bottom: 0;
-  }
+  /* First/last-child margin resets for the in-place editor are part of the
+     shared block typography (app-lite/src/lib/message-typography.css), which
+     applies the same flush to `.tiptap` and `.prose`; don't re-add them here. */
 
   /*
     Deep-link highlight (`?message=<id>` / notification click). The row flashes

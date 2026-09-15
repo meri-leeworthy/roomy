@@ -225,33 +225,19 @@
 
 <style>
   /*
+    Block typography and the first/last-child flush live in
+    `app-lite/src/lib/message-typography.css`: they are shared with the
+    composer, which must render a WYSIWYG preview of this same message. Only
+    markup-structural concerns belong here.
+  */
+
+  /*
     The wrapper host sits between `.prose` (in MessageBubble) and the rendered
-    blocks, so it breaks the `.prose > :first-child` / `> :last-child` margin
-    resets that Tailwind Typography applies to flush the first/last paragraph
-    with the bubble. The wrapper itself is display:contents (no box), so
-    re-apply those resets through it to keep message text flush — mirroring
-    MessageContent.svelte's `.roomy-message-content`.
+    blocks, so its own box would break the shared first/last-child margin
+    resets. `display: contents` keeps it box-less; the shared stylesheet
+    re-applies those resets through this class.
   */
   .roomy-blocks {
     display: contents;
-  }
-  :global(.prose > .roomy-blocks > :first-child) {
-    margin-top: 0;
-  }
-  :global(.prose > .roomy-blocks > :last-child) {
-    margin-bottom: 0;
-  }
-
-  /*
-    Code blocks: the prose wrapper's light-mode `--tw-prose-pre-code` is a
-    light stone-200 (designed for a dark pre background), but our pre uses a
-    light base-100 background in light mode — light text on light bg. Pin the
-    code text color to the message text colors instead.
-  */
-  :global(.prose .roomy-blocks pre code) {
-    color: var(--color-base-800);
-  }
-  :global(.dark .prose .roomy-blocks pre code) {
-    color: var(--color-base-200);
   }
 </style>
