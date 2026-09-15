@@ -12,6 +12,7 @@
   import Input from "@roomy/design/components/ui/input/Input.svelte";
   import HandleTypeahead from "./HandleTypeahead.svelte";
   import { login } from "$lib/auth.svelte";
+  import { lastLogin, loadLastLogin } from "$lib/last-login.svelte";
   import { resolveBlobUrl } from "$lib/utils";
 
   let handle = $state("");
@@ -102,16 +103,15 @@
     }
   }
 
-  type LastLogin = { handle: string; did: string; avatar: string };
-  let lastLogin = $state<LastLogin | undefined>(undefined);
-
   onMount(() => {
-    const raw = localStorage.getItem("last-login");
-    lastLogin = raw ? JSON.parse(raw) : undefined;
+    // The root layout verifies the stored record against its DID on startup
+    // (see `loadLastLogin`); re-run it here so a login screen reaching this
+    // component by another path is verified too.
+    void loadLastLogin();
   });
 
   function onLastLoginClick(evt: Event) {
-    setHandle(lastLogin?.handle ?? "");
+    setHandle(lastLogin.current?.handle ?? "");
     onLogin(evt);
   }
 
@@ -144,7 +144,7 @@
           Sign into your account.
         </Subheading>
 
-        {#if lastLogin?.handle}
+        {#if lastLogin.current?.handle}
           <Label for="atproto-handle" class="text-sm w-full"
             >Previously signed in as</Label
           >
@@ -154,12 +154,12 @@
             disabled={loading}
           >
             <UserAvatar
-              src={resolveBlobUrl(lastLogin.avatar)}
-              name={lastLogin.handle ?? lastLogin.did ?? "user"}
+              src={resolveBlobUrl(lastLogin.current.avatar)}
+              name={lastLogin.current.handle ?? lastLogin.current.did ?? "user"}
               size={24}
               class="size-6"
             />
-            {loading ? "Loading..." : lastLogin.handle}
+            {loading ? "Loading..." : lastLogin.current.handle}
           </Button>
         {/if}
 

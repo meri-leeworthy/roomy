@@ -12,6 +12,7 @@ import { CONFIG, OAUTH_SCOPE } from "./config";
 import { scheduleAutoReload } from "./error-recovery";
 import { setAppserverOrigin } from "./appserver-origin";
 import { subscribeIfAlreadyPermitted, clearPushSubscription } from "./push.svelte";
+import { saveLastLogin } from "./last-login.svelte";
 
 const { ServiceAuthClient, DirectXrpcClient, resolveAppserverHttpOrigin } = transport;
 
@@ -275,8 +276,8 @@ export async function login(handle: string) {
 
 /**
  * Fetch the user's Roomy profile from the appserver and update the reactive
- * `auth.profile` state + localStorage cache. Call this immediately on
- * login/init.
+ * `auth.profile` state + the persisted last-login record. Call this
+ * immediately on login/init.
  *
  * Uses the appserver's `space.roomy.user.getProfile` XRPC (Roomy-first with
  * Bluesky fallback) instead of calling the Bluesky appview directly. This
@@ -296,8 +297,13 @@ export async function updateProfile() {
       displayName: res.displayName || undefined,
     };
     profile = p;
-    localStorage.setItem("last-login", JSON.stringify(p));
+    saveLastLogin(p);
   } catch (e) {
+    // The reactive `profile` drives the signed-in UI, so a failed fetch means
+    // no profile for this session — but the "Previously signed in as" record
+    // is the *signed-out* affordance and is only ever written on success, so
+    // it is deliberately left alone here: it is verified against its DID
+    // before being offered (see `last-login.svelte.ts`).
     console.warn("Failed to fetch profile:", e);
   }
 }

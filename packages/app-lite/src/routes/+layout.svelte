@@ -5,6 +5,7 @@
   import { QueryClientProvider } from "@tanstack/svelte-query";
   import { queryClient } from "$lib/client";
   import { auth, init, updateProfile } from "$lib/auth.svelte";
+  import { loadLastLogin } from "$lib/last-login.svelte";
   import { installPushDebug } from "$lib/push-debug";
   import { preloadSpaceSidebars } from "$lib/preload";
   import { initFaro } from "$lib/telemetry/faro";
@@ -60,6 +61,10 @@
       PUBLIC_BRIDGE_DID: dynamicEnv.PUBLIC_BRIDGE_DID,
     });
     init();
+    // Verify the stored last-login record against its DID before the login
+    // screen can offer it as a one-click sign-in: the handle in that record is
+    // a snapshot, so it is re-resolved and repaired — or dropped — here.
+    void loadLastLogin();
     installPushDebug();
     installPushSubscriptionChangeListener();
     installNotificationNavigateListener();

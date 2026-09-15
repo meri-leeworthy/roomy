@@ -20,20 +20,18 @@
   import type { ThemeMode } from "@roomy/design/utils";
   import { IconEllipsisHorizontal, IconSettings, IconLogOut } from "@roomy/design/icons";
   import { logout, auth } from "$lib/auth.svelte";
+  import { lastLogin } from "$lib/last-login.svelte";
   import { sync_ } from "$lib/sync.svelte";
   import { goto } from "$app/navigation";
 
   const connected = $derived(!!sync_.ctx);
 
   // Reactive profile from auth module — updates immediately on login/init.
-  // Falls back to localStorage for the initial render before the profile
-  // fetch completes.
-  let displayedProfile = $derived(
-    auth.profile ?? (browser ? (() => {
-      const raw = localStorage.getItem("last-login");
-      return raw ? JSON.parse(raw) : undefined;
-    })() : undefined),
-  );
+  // Falls back to the last-login record for the initial render before the
+  // profile fetch completes. That record's handle is verified against its DID
+  // before use (see `last-login.svelte.ts`), so a renamed account cannot
+  // surface a handle that no longer resolves.
+  let displayedProfile = $derived(auth.profile ?? lastLogin.current ?? undefined);
 
   let themeMode = $state<ThemeMode>("system");
 

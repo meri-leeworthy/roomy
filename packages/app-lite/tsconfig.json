@@ -11,6 +11,7 @@
     "noUnusedParameters": true,
     "noImplicitAny": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "moduleResolution": "bundler"
   }
 }
