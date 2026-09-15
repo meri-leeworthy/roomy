@@ -106,6 +106,25 @@ function stripHtmlTags(text: string): string {
 }
 
 /**
+ * Strip leading faux-prefix line(s) from a bridged message's Discord content.
+ *
+ * The bridge marks replies (`-# ↪ <link> <snippet>`) and forwards
+ * (`-# ↪ Forwarded from <link> by <author>`) with Discord small-text lines
+ * (`-# ` is the bridge's own marker in both directions — see
+ * `blocks-to-discord.ts` and `mention-resolver.ts`). A message that was
+ * itself bridged as a reply/forward therefore carries its own marker line(s)
+ * at the top of its Discord content. When such a message is quoted as the
+ * parent of another faux reply (or as the original of a faux forward), those
+ * marker lines must not leak into the snippet/body — the quote must show the
+ * parent's OWN text, not a re-prefixed grandparent link (which, sliced to
+ * the 50-char window, truncates mid-snowflake). The pattern repeats so a
+ * parent that is itself a reply to a reply is fully unwrapped.
+ */
+function stripFauxPrefixLines(content: string): string {
+	return content.replace(/^(?:-# ↪[^\n]*\n?)+/, "");
+}
+
+/**
  * Decode a message body from a Roomy event into a Discord-renderable string.
  *
  * - Rich text bodies (`application/vnd.roomy.richtext+json`) are parsed into
@@ -593,10 +612,18 @@ export class RoomyEventRouter {
 				targetDiscordId,
 			);
 			if (original?.content) {
-				snippet =
-					original.content.length > QUOTE_MAX_LENGTH
-						? ` ${original.content.slice(0, QUOTE_MAX_LENGTH)}...`
-						: ` ${original.content}`;
+				// The parent may itself have been bridged to Discord as a faux
+				// reply/forward, so its content begins with its own `-# ↪`
+				// marker line(s). Snippet the parent's OWN text — a raw slice
+				// would re-print the grandparent's link truncated mid-snowflake.
+				// When the parent has no own text, fall back to link-only.
+				const ownText = stripFauxPrefixLines(original.content);
+				if (ownText) {
+					snippet =
+						ownText.length > QUOTE_MAX_LENGTH
+							? ` ${ownText.slice(0, QUOTE_MAX_LENGTH)}...`
+							: ` ${ownText}`;
+				}
 			}
 		} catch {
 			// Message may be deleted or inaccessible — link alone is fine.
@@ -626,7 +653,7 @@ export class RoomyEventRouter {
 				sourceChannelId,
 				discordMessageId,
 			);
-			body = original?.content ?? "";
+			body = stripFauxPrefixLines(original?.content ?? "");
 		} catch {
 			// Message may be deleted — forward the link alone.
 		}

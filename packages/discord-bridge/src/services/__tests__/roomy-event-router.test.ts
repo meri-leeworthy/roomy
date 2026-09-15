@@ -1461,6 +1461,156 @@ test("RER39: a reply and a forward on one message render both blocks", async () 
 	);
 });
 
+/**
+ * RER40: A Roomy reply to a parent that was itself bridged to Discord as a
+ * faux reply quotes the DIRECT parent's own text — the grandparent link from
+ * the parent's `-# ↪` prefix line must not leak into the snippet. Pre-fix, the
+ * snippet was a raw 50-char slice of the parent's Discord content, whose
+ * leading marker line consumed the whole window and truncated mid-snowflake
+ * (TASK-30).
+ */
+test("RER40: reply snippet is the direct parent's own text, not its inherited faux prefix", async () => {
+	const { roomy, discord, router, repo } = setup();
+	// The parent was bridged to Discord as a faux reply to a grandparent, so
+	// its Discord content begins with the bridge's own `-# ↪` marker line.
+	const parentRoomyId = newUlid();
+	const parentDiscordId = "840000000000000001";
+	const grandparentSnowflake = "850000000000000001";
+	const parentOwnText =
+		"The direct parent's very own message text here, long enough to need a quote ellipsis";
+	repo.registerMapping(
+		SPACE_A,
+		"message",
+		parentDiscordId,
+		parentRoomyId,
+	);
+	discord.setMessage(
+		DISCORD_CHANNEL_ID,
+		parentDiscordId,
+		`-# ↪ https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${grandparentSnowflake} the grandparent's own words\n${parentOwnText}`,
+	);
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "This is a reply to the parent",
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.reply.v0",
+						target: parentRoomyId,
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	const sent = discord.sent[0];
+	// Snippet = first 50 chars of the parent's OWN text, then an ellipsis.
+	expect(sent?.content).toBe(
+		`-# ↪ https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${parentDiscordId} ${parentOwnText.slice(0, 50)}...\nThis is a reply to the parent`,
+	);
+	// The grandparent's snowflake must not appear anywhere in the payload.
+	expect(sent?.content).not.toContain(grandparentSnowflake);
+});
+
+/**
+ * RER41: A faux forward of an original that was itself bridged to Discord as
+ * a faux reply shows the original's own text as the forwarded body — the
+ * original's `-# ↪` marker line is stripped, not duplicated under the
+ * "Forwarded from" block (TASK-30).
+ */
+test("RER41: forward body is the original's own text, not its inherited faux prefix", async () => {
+	const { roomy, discord, router, repo } = setup();
+	const originalRoomyId = newUlid();
+	const originalDiscordId = "860000000000000001";
+	const grandparentSnowflake = "870000000000000001";
+	const originalOwnText = "The original message's very own forwarded text";
+	repo.registerMapping(
+		SPACE_A,
+		"message",
+		originalDiscordId,
+		originalRoomyId,
+	);
+	discord.setMessage(
+		DISCORD_CHANNEL_ID,
+		originalDiscordId,
+		`-# ↪ https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${grandparentSnowflake} a snippet of the grandparent\n${originalOwnText}`,
+	);
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "", // bare forward — no commentary
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.forward.v0",
+						target: originalRoomyId,
+						fromRoomId: ROOMY_CHANNEL_ULID,
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	expect(discord.sent[0]?.content).toBe(
+		`-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${originalDiscordId} by Original Author\n${originalOwnText}`,
+	);
+	expect(discord.sent[0]?.content).not.toContain(grandparentSnowflake);
+});
+
+/**
+ * RER42: When a reply's parent has no own text after stripping its faux
+ * prefix line (e.g. a forward whose original was deleted, bridged as
+ * `-# ↪ Forwarded from …` with an empty body), the faux reply falls back to
+ * a link-only prefix — no marker residue (TASK-30).
+ */
+test("RER42: reply to a marker-only parent falls back to a link-only prefix", async () => {
+	const { roomy, discord, router, repo } = setup();
+	const parentRoomyId = newUlid();
+	const parentDiscordId = "880000000000000001";
+	repo.registerMapping(
+		SPACE_A,
+		"message",
+		parentDiscordId,
+		parentRoomyId,
+	);
+	discord.setMessage(
+		DISCORD_CHANNEL_ID,
+		parentDiscordId,
+		`-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/890000000000000001 by Someone\n`,
+	);
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "Replying to a marker-only parent",
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.reply.v0",
+						target: parentRoomyId,
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	expect(discord.sent[0]?.content).toBe(
+		`-# ↪ https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${parentDiscordId}\nReplying to a marker-only parent`,
+	);
+});
+
 describe("resolveAttachmentUrl", () => {
 	test("resolves an atblob:// ref to the appserver blob proxy", () => {
 		expect(
