@@ -210,6 +210,9 @@
           "type": "ref",
           "ref": "#forwardedFrom"
         },
+        "lastEdit": {
+          "type": "string"
+        },
         "mimeType": {
           "type": "string"
         },
@@ -328,6 +331,9 @@
         "forwardedFrom": {
           "type": "ref",
           "ref": "#forwardedFrom"
+        },
+        "lastEdit": {
+          "type": "string"
         },
         "mimeType": {
           "type": "string"

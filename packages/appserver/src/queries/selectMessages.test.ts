@@ -407,6 +407,63 @@ describe("selectMessages room ordering", () => {
   });
 });
 
+describe("selectMessages edit marker", () => {
+  /**
+   * Seed a message whose `comp_content.last_edit` is the given value. The
+   * materialiser stamps `last_edit` with the creating event's own id on
+   * insert and with the edit event's id on every edit, so the default here
+   * (the message's own id) is exactly the shape a never-edited message has.
+   */
+  async function seedMessage(
+    db: DbLike,
+    roomId: string,
+    content: string,
+    lastEdit?: string,
+  ): Promise<string> {
+    const msgId = newUlid();
+    await db.run(
+      "insert into entities (id, stream_id, room) values (?, ?, ?)",
+      [msgId, STREAM, roomId],
+    );
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit) values (?, 'text/markdown', ?, ?)",
+      [msgId, Buffer.from(content), lastEdit ?? msgId],
+    );
+    return msgId;
+  }
+
+  test("reports the edit event id after an edit, and omits it when unedited", async () => {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+
+    const editedId = await seedMessage(
+      db,
+      roomId,
+      "edited body",
+      "01HXSXKBQ4TESTEDIT0000000B",
+    );
+    const pristineId = await seedMessage(db, roomId, "original body");
+
+    const { messages } = await selectMessages(db, {
+      kind: "room",
+      roomId,
+      limit: 50,
+      cursor: null,
+    });
+
+    const edited = messages.find((m) => m.id === editedId)!;
+    expect(edited.content).toBe("edited body");
+    // The marker is the edit EVENT id, not a timestamp.
+    expect(edited.lastEdit).toBe("01HXSXKBQ4TESTEDIT0000000B");
+
+    // An unedited message's `last_edit` is its own creating event id — the
+    // column's insert value, not evidence of an edit — so the DTO must not
+    // carry a marker for it.
+    const pristine = messages.find((m) => m.id === pristineId)!;
+    expect(pristine.lastEdit).toBeUndefined();
+  });
+});
+
 describe("selectMessages missing-author hydration", () => {
   /**
    * A cross-stream author with no global `profiles` row makes the read path

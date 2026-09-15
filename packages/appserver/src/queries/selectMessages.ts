@@ -74,6 +74,16 @@ export interface MessageDto {
    */
   system?: boolean;
   timestamp: string;
+  /**
+   * Present only when the message has been edited: the ULID of the most
+   * recent edit event (from `comp_content.last_edit`). Absent for a message
+   * that has never been edited — the materialiser stamps `last_edit` with the
+   * creating event's own id in that case, so both cases are told apart by
+   * comparing `last_edit` against the message id rather than by exposing a
+   * field that is always set. The value is the edit EVENT id, not a
+   * timestamp; clients render an "edited" affordance when it is present.
+   */
+  lastEdit?: string;
   replyTo?: string;
   forwardedFrom?: {
     messageId: string;
@@ -121,6 +131,7 @@ interface BaseRow {
   mime_type: string | null;
   data: Buffer | Uint8Array | null;
   timestamp: number | null;
+  last_edit: string | null;
   author_did: string | null;
   author_name: string | null;
   author_handle: string | null;
@@ -148,6 +159,7 @@ export async function selectMessages(
         cc.mime_type as mime_type,
         cc.data as data,
         cc.timestamp as timestamp,
+        cc.last_edit as last_edit,
         author_e.tail as author_did,
         author_info.name as author_name,
         author_info.avatar as author_avatar,
@@ -202,6 +214,7 @@ export async function selectMessages(
           cc.mime_type as mime_type,
           cc.data as data,
           cc.timestamp as timestamp,
+          cc.last_edit as last_edit,
           author_e.tail as author_did,
           author_info.name as author_name,
           author_info.avatar as author_avatar,
@@ -485,6 +498,15 @@ export async function selectMessages(
           : r.forward_target != null
             ? new Date(decodeTime(r.id)).toISOString()
             : "",
+      // `last_edit` holds the id of the event that last wrote this content:
+      // the creating event's own id on insert, the edit event's id on every
+      // edit (see the SDK materialiser's CreateMessage / EditMessage). So
+      // "edited" is exactly `last_edit != id` — a plain `last_edit` column
+      // would mark every message as edited. Absent (not null) for an
+      // unedited message, or when there is no comp_content row at all
+      // (legacy forward references).
+      lastEdit:
+        r.last_edit != null && r.last_edit !== r.id ? r.last_edit : undefined,
       replyTo: r.reply_to,
       forwardedFrom:
         r.forward_target != null

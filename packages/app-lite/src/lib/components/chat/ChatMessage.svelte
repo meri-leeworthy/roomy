@@ -219,6 +219,14 @@
   const isForward = $derived(!!forwardedFrom);
   /** The embedded original message (denormalised server-side). */
   const original = $derived(forwardedFrom?.message);
+  /**
+   * True when the message whose content the bubble renders has been edited.
+   * `lastEdit` is only present on an edited message (the appserver omits it
+   * when `comp_content.last_edit` is the creating event's own id) — a
+   * forward shows the ORIGINAL's content, so its marker follows the
+   * original's edit state, matching how the author/timestamp are chosen.
+   */
+  const edited = $derived(!!(original ? original.lastEdit : message.lastEdit));
   const effBridged = $derived(
     original
       ? original.authorDid.startsWith("did:discord:")
@@ -317,6 +325,7 @@
       timestamp={new Date(original ? original.timestamp : message.timestamp)}
       isBridged={effBridged}
       isSystem={isSystem}
+      isEdited={edited}
       mergeWithPrevious={isSystem ? false : mergeWithPrevious}
       {isSelected}
       {isEditing}
@@ -503,6 +512,7 @@
           onAvatarClick={isBridged ? undefined : () => goto(`/user/${message.authorDid}`)}
           timestamp={new Date(message.timestamp)}
           {isBridged}
+          isEdited={!!message.lastEdit}
         >
           {#snippet content()}
             <MessageContent content={message.content} mimeType={message.mimeType} />

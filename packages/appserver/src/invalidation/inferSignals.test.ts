@@ -91,6 +91,10 @@ function seedMessageDb(opts: {
   authorDid: string;
   authorName: string;
   content: string;
+  /** Value for `comp_content.last_edit`. Defaults to the message's own id —
+   *  the shape the materialiser writes on insert (i.e. never edited). Pass an
+   *  edit event's id to seed the post-edit state. */
+  lastEdit?: string;
 }): { db: Database; asyncDb: DbLike } {
   const db = new Database(":memory:");
   db.exec("pragma journal_mode = wal");
@@ -121,7 +125,7 @@ function seedMessageDb(opts: {
   db.run(
     "insert into comp_content (entity, mime_type, data, last_edit, timestamp) " +
       "values (?, 'text/plain', ?, ?, ?)",
-    [opts.id, Buffer.from(opts.content), opts.id, ts],
+    [opts.id, Buffer.from(opts.content), opts.lastEdit ?? opts.id, ts],
   );
   db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
     opts.id,
@@ -444,6 +448,8 @@ describe("inferSignals: message events", () => {
       authorDid: USER_DID,
       authorName: "Alice",
       content: "edited",
+      // Post-edit state: `last_edit` is the edit event, not the message id.
+      lastEdit: EDIT_EVENT_ID,
     });
 
     const signals = await inferSignals(
@@ -473,6 +479,9 @@ describe("inferSignals: message events", () => {
       if (op.op === "update") {
         expect(op.message.id).toBe(MESSAGE_ID);
         expect(op.message.content).toBe("edited");
+        // The diff frame carries the edit marker, so a client renders the
+        // "edited" affordance on the live update without a re-fetch.
+        expect(op.message.lastEdit).toBe(EDIT_EVENT_ID);
         const validated = schemas.queries.getMessages.Message(op.message);
         expect(validated instanceof type.errors).toBe(false);
       }

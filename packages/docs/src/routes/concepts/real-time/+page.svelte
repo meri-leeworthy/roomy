@@ -98,6 +98,7 @@
       authorHandle?: string;
       authorAvatar?: string;
       timestamp: string;
+      lastEdit?: string;    // set only when the message has been edited (the edit event's ULID)
       replyTo?: string;
       forwardedFrom?: &#123;
         messageId: string;

@@ -37,6 +37,53 @@ describe("room-scoped endpoints resolve a materialized room", () => {
     expect(body.messages.some((m: { id: string }) => m.id === messageId)).toBe(true);
   });
 
+  test("getMessages omits the edit marker until an editEvent lands, then reports it", async () => {
+    const ctx = await startAppserver();
+    const { roomId, messageId } = await materializeSpace(ctx, SPACE, USER);
+
+    const before = await (
+      await get(ctx, `space.roomy.room.getMessages?roomId=${roomId}`)
+    ).json();
+    const fresh = before.messages.find((m: { id: string }) => m.id === messageId);
+    expect(fresh).toBeDefined();
+    // A freshly created message stores `last_edit = <its own create event id>`,
+    // which is the "never edited" state — no marker on the wire.
+    expect(fresh.lastEdit).toBeUndefined();
+
+    const editEventId = newUlid();
+    const editRes = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          spaceId: SPACE,
+          events: [
+            {
+              id: editEventId,
+              $type: "space.roomy.message.editMessage.v0",
+              room: roomId,
+              messageId,
+              body: {
+                mimeType: "text/plain",
+                data: { $bytes: Buffer.from("edited text").toString("base64") },
+              },
+              extensions: {},
+            },
+          ],
+        }),
+      },
+    );
+    expect(editRes.status).toBe(200);
+
+    const after = await (
+      await get(ctx, `space.roomy.room.getMessages?roomId=${roomId}`)
+    ).json();
+    const edited = after.messages.find((m: { id: string }) => m.id === messageId);
+    expect(edited.content).toBe("edited text");
+    // The marker is the edit EVENT id, so a client can also correlate it.
+    expect(edited.lastEdit).toBe(editEventId);
+  });
+
   test("getThreads returns 200 for a channel", async () => {
     const ctx = await startAppserver();
     const { roomId } = await materializeSpace(ctx, SPACE, USER);
