@@ -265,6 +265,47 @@ describe("SyncConnection — abnormal close + reconnect", () => {
     expect(conn.status.state).toBe("closed");
     expect((conn.status as { intentional: boolean }).intentional).toBe(false);
   });
+
+  it("still reconnects when the default backoff draws a zero jitter value", async () => {
+    // Regression (2026-09-15, hedgehog): the default generator is
+    // `floor(random() * cap)`, which draws exactly 0 with probability
+    // 1/cap. The abnormal-close handler treats a non-positive delay as the
+    // caller's "disable auto-reconnect" signal, so one unlucky draw killed
+    // reconnection permanently and SILENTLY while the process stayed alive
+    // (production: `Closed: code=1006 intentional=false`, then no reconnect
+    // line ever again). The default generator must never return 0.
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const fetchTicket = vi.fn().mockResolvedValue("t");
+      const conn = new SyncConnection({
+        fetchTicket,
+        wsUrl: "wss://srv/",
+        webSocketImpl: makeMockWS(),
+      });
+
+      const p = conn.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      lastSocket!._open();
+      await p;
+
+      lastSocket!._emitClose(1006, "drop");
+      // Must be reconnecting, not closed: a zero draw is not a disable.
+      const status = conn.status;
+      expect(status.state).toBe("reconnecting");
+      expect(status.state === "reconnecting" && status.attempt).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sockets).toHaveLength(2);
+      expect(fetchTicket).toHaveBeenCalledTimes(2);
+      lastSocket!._open();
+      expect(conn.status.state).toBe("open");
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("SyncConnection — subscribe/unsubscribe", () => {
