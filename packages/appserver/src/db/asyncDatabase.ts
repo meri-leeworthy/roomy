@@ -80,11 +80,23 @@ export class AsyncStatement {
     }) as Promise<{ changes: number; lastInsertRowid?: number }>;
   }
 
-  async finalize(): Promise<void> {
-    if (this.#handle !== undefined) {
-      await this.#send({ type: "prepareFinalize", handle: this.#handle });
-      this.#handle = undefined;
-    }
+  finalize(): Promise<void> {
+    if (this.#handle === undefined) return Promise.resolve();
+    const p = this.#send({ type: "prepareFinalize", handle: this.#handle });
+    // Release the handle on success regardless of whether the caller awaits.
+    // `p` already carries the no-op catch from send(), so a fire-and-forget
+    // finalize (post-teardown) is a handled rejection. The derived `.then`
+    // promise resolves either way (both handlers present), so it cannot
+    // itself surface an unhandled rejection.
+    p.then(
+      () => {
+        this.#handle = undefined;
+      },
+      () => {
+        // Rejection is already surfaced to callers via `p`.
+      },
+    );
+    return p as Promise<void>;
   }
 }
 
@@ -288,7 +300,7 @@ export class AsyncDatabase {
   }
 
   /** Initialize: open DBs, apply schema, ATTACH read-state. */
-  async init(opts: {
+  init(opts: {
     mainDbPath?: string;
     readStateDbPath?: string;
     eventsDbPath?: string;
@@ -311,12 +323,38 @@ export class AsyncDatabase {
     return new AsyncStatement((req) => this.#link.send(req, this.#route), sql);
   }
 
-  async prepare(sql: string): Promise<AsyncStatement> {
-    const { handle } = (await this.#link.send(
-      { type: "prepare", sql },
-      this.#route,
-    )) as { handle: number };
-    return new AsyncStatement((req) => this.#link.send(req, this.#route), sql, handle);
+  prepare(sql: string): Promise<AsyncStatement> {
+    // Chain the send() result into a statement without an `async` wrapper:
+    // an `async` method would wrap the already-handled send() promise in a
+    // brand-new outer promise, so a fire-and-forget prepare() (post-teardown)
+    // surfaces send()'s rejection as an unhandled rejection. Instead reject
+    // our own promise and mark it handled — awaited callers still see the
+    // error, dropped callers don't fail the run.
+    const { promise, resolve, reject } = Promise.withResolvers<AsyncStatement>();
+    this.#link.send({ type: "prepare", sql }, this.#route).then(
+      (result) => {
+        if (
+          result === null ||
+          typeof result !== "object" ||
+          !("handle" in result) ||
+          typeof result.handle !== "number"
+        ) {
+          reject(new Error("prepare: worker returned no statement handle"));
+          return;
+        }
+        resolve(
+          new AsyncStatement(
+            (req) => this.#link.send(req, this.#route),
+            sql,
+            result.handle,
+          ),
+        );
+      },
+      (err) => reject(err instanceof Error ? err : new Error(String(err))),
+    );
+    // no-op catch marks the rejection handled (mirrors WorkerLink.send()).
+    promise.catch(() => {});
+    return promise;
   }
 
   exec(sql: string): Promise<void> {

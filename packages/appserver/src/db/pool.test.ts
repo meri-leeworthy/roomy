@@ -173,4 +173,32 @@ describe("DatabasePool teardown (TASK-122)", () => {
 
     expect(unhandled).toEqual([]);
   });
+
+  test("fire-and-forget prepare() after closeDb() raises no unhandled rejection", async () => {
+    const unhandled: Error[] = [];
+    const onUnhandled = (e: Error) => {
+      unhandled.push(e);
+      process.exit(9);
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      const db = openDb({ path: ":memory:" });
+      // Fire-and-forget prepared statement creation, dropped (no await). A
+      // still-`async` prepare() wrapper would wrap the send() promise in a
+      // brand-new outer promise, so the post-teardown rejection surfaced as
+      // an unhandled rejection. The handled pass-through must not.
+      void db.forSpace("did:plc:after-close").prepare(
+        "insert or ignore into entities (id, stream_id) values (?, ?)",
+      );
+      closeDb();
+      await yieldToLoop();
+      await yieldToLoop();
+    } finally {
+      openDb({ path: ":memory:" });
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
+  });
 });
