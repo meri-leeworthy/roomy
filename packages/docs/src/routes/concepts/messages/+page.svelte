@@ -25,6 +25,7 @@
     <li><code>content</code> — raw markdown</li>
     <li><code>authorDid</code>, <code>authorName</code>, <code>authorAvatar</code> — denormalised author</li>
     <li><code>timestamp</code> — ISO timestamp</li>
+    <li><code>lastEdit</code> — absent unless the message was edited; when present, the ULID of the most recent edit event</li>
     <li><code>replyTo</code> — parent message ID</li>
     <li><code>forwardedFrom</code> — original source, with the fully denormalised original message nested</li>
     <li><code>reactions</code> — grouped by emoji, with reactor DIDs</li>

@@ -203,6 +203,28 @@ describe("schemas/queries", () => {
     expect(parsed.messages.length).toBe(1);
   });
 
+  it("getMessages parses the optional edit marker, absent on unedited messages", () => {
+    const base = {
+      id: "01M000000000000000000000XX",
+      content: "hi",
+      authorDid: "did:plc:abcdef",
+      authorName: "alice",
+      timestamp: "2026-05-17T00:00:00.000Z",
+      reactions: [],
+      media: [],
+      linkEmbeds: [],
+    };
+    const parsed = queries.getMessages.Response({
+      messages: [
+        { ...base, lastEdit: "01M000000000000000000000EF" },
+        base,
+      ],
+    });
+    assertOk(parsed);
+    expect(parsed.messages[0]!.lastEdit).toBe("01M000000000000000000000EF");
+    expect(parsed.messages[1]!.lastEdit).toBeUndefined();
+  });
+
   it("getMessage parses a single MessageDto (top-level)", () => {
     const ex = {
       id: "01M000000000000000000000XX",

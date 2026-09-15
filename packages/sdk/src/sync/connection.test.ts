@@ -530,8 +530,51 @@ describe("SyncConnection — exponential backoff", () => {
     // attempt 0: 1000, attempt 1: 2000, attempt 2: 4000, attempt 3+: 5000
     await conn.connect().catch(() => {});
     expect(delays).toHaveLength(1);
-    expect(delays[0]!).toBeGreaterThanOrEqual(0);
+    // The default is full jitter, so any sample must sit within [1, 1000].
+    // The lower bound is 1, never 0: a 0 delay is the "stop reconnecting"
+    // signal (see the wedge test below), so the default must be unable to
+    // produce it.
+    expect(delays[0]!).toBeGreaterThanOrEqual(1);
     expect(delays[0]!).toBeLessThanOrEqual(1000);
+  });
+
+  // Math.random() can return exactly 0. With the unclamped full-jitter
+  // formula that yields delay 0, which #handleAbnormalClose treats as "stop
+  // reconnecting" — status flips to `closed`, no timer is armed, and the
+  // connection can never reopen without a full page reload. This is the
+  // intermittent "websocket closed and can't reopen" report.
+  it("never disables reconnect when jitter floors to zero", async () => {
+    vi.useFakeTimers();
+    const randSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const conn = new SyncConnection({
+        fetchTicket: async () => "t",
+        wsUrl: "wss://srv/",
+        webSocketImpl: makeMockWS(),
+      });
+      conn.onError(() => {});
+
+      const statuses: string[] = [];
+      conn.onStatusChange((s) => statuses.push(s.state));
+
+      const p = conn.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      lastSocket!._open();
+      await p;
+
+      // Drop the socket; the default backoff computes a zero delay here.
+      lastSocket!._emitClose(1006, "drop");
+      expect(conn.status.state).toBe("reconnecting");
+
+      // A reconnect must actually be scheduled despite the zero jitter.
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sockets).toHaveLength(2);
+      expect(statuses).not.toContain("closed");
+    } finally {
+      randSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1027,6 +1070,50 @@ describe("SyncConnection — concurrent connect() calls", () => {
       lastSocket!._open();
       await expect(p1).resolves.toBeUndefined();
       await expect(p2).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Calling connect() while a reconnect is pending means "try now": the
+  // caller's nudge (e.g. the tab becoming visible again after the backoff
+  // timer was throttled) must start an attempt immediately rather than
+  // waiting out the remaining backoff. The pending timer must not then issue
+  // a second, concurrent attempt once it eventually fires.
+  it("re-drives immediately when connect() is called during a pending reconnect", async () => {
+    vi.useFakeTimers();
+    try {
+      const conn = new SyncConnection({
+        fetchTicket: async () => "t",
+        wsUrl: "wss://srv/",
+        webSocketImpl: makeMockWS(),
+        reconnectDelay: () => 10_000,
+      });
+      conn.onError(() => {});
+
+      const p = conn.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      lastSocket!._open();
+      await p;
+
+      // Drop: reconnect is now scheduled 10s out.
+      lastSocket!._emitClose(1006, "drop");
+      expect(conn.status.state).toBe("reconnecting");
+      expect(sockets).toHaveLength(1);
+
+      // Nudge: a fresh attempt starts immediately, without waiting the 10s.
+      const p2 = conn.connect().catch(() => {});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sockets).toHaveLength(2);
+
+      // The original timer must have been cleared: advancing past it creates
+      // no third socket.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(sockets).toHaveLength(2);
+
+      lastSocket!._open();
+      await p2;
+      expect(conn.status.state).toBe("open");
     } finally {
       vi.useRealTimers();
     }

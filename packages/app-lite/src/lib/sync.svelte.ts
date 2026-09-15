@@ -85,7 +85,19 @@ export function createSyncContext(deps: {
   }
 
   async function connect() {
-    if (connection) return;
+    // An existing connection must be *driven*, not skipped. Returning early
+    // here made every recovery path that re-calls `connect()` — the
+    // visibilitychange nudge below — a no-op once the connection object
+    // existed, so a connection whose reconnect loop had stopped (backoff
+    // timer throttled away while backgrounded, or an abandoned attempt with
+    // no socket and no timer) could only be revived by a full page reload.
+    // `SyncConnection.connect()` is itself idempotent: it no-ops while open
+    // or connecting and shares an in-flight ticket fetch, but it does start a
+    // fresh attempt when the connection is closed and has no socket.
+    if (connection) {
+      await connection.connect();
+      return;
+    }
 
     let wsOrigin: string;
     if (CONFIG.appserverWsOrigin) {

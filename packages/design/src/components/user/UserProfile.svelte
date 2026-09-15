@@ -1,6 +1,8 @@
 <script lang="ts">
   import { type Snippet } from "svelte";
   import UserAvatar from "./UserAvatar.svelte";
+  import Badge from "../ui/badge/Badge.svelte";
+  import { IconGlobe } from "../../icons/index";
 
   // Props
   let {
@@ -11,6 +13,8 @@
       did?: string;
       handle?: string;
       displayName?: string;
+      pronouns?: string;
+      website?: string;
       avatar?: string;
       banner?: string;
       description?: string;
@@ -18,6 +22,28 @@
     };
     actions?: Snippet;
   } = $props();
+
+  // `website` is a free-form uri-format string; it may lack a scheme
+  // (e.g. "example.com"), which browsers would otherwise resolve relative to
+  // the current origin. Only treat the value as already-qualified when it
+  // parses as an absolute http(s) URL, so hostile/odd schemes degrade to a
+  // harmless https:// prefix instead of a live link into the page.
+  function websiteHref(website: string): string {
+    const value = website.trim();
+    try {
+      const url = new URL(value);
+      if (url.protocol === "http:" || url.protocol === "https:") return value;
+    } catch {
+      // not absolute — fall through
+    }
+    return `https://${value}`;
+  }
+
+  // Displayed label: host + path without the scheme, so the link reads as
+  // "example.com/about" rather than a full URL twice as long as the layout.
+  function websiteLabel(website: string): string {
+    return websiteHref(website).replace(/^https?:\/\//, "").replace(/\/$/, "");
+  }
 
   // Function to convert URLs in text to clickable links
   function linkifyText(text: string): string {
@@ -64,11 +90,20 @@
           "flex min-w-0 max-w-full flex-1 flex-col items-baseline",
         ]}
       >
-        <h1
-          class="max-w-full truncate text-xl font-bold text-base-900 dark:text-base-100 sm:text-xl"
+        <div
+          class="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1"
         >
-          {profile?.displayName || profile?.handle}
-        </h1>
+          <h1
+            class="max-w-full truncate text-xl font-bold text-base-900 dark:text-base-100 sm:text-xl"
+          >
+            {profile?.displayName || profile?.handle}
+          </h1>
+          {#if profile?.pronouns}
+            <Badge variant="secondary" size="sm" class="shrink-0 font-normal">
+              {profile.pronouns}
+            </Badge>
+          {/if}
+        </div>
         {#if profile?.handle}
           <a
             href="https://aturi.to/{profile.did}"
@@ -77,6 +112,17 @@
             class="text-sm text-accent-600 dark:text-accent-400 transition-colors font-medium"
           >
             @{profile.handle}
+          </a>
+        {/if}
+        {#if profile?.website}
+          <a
+            href={websiteHref(profile.website)}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="flex min-w-0 max-w-full items-center gap-1.5 text-sm text-accent-600 dark:text-accent-400 transition-colors font-medium hover:underline"
+          >
+            <IconGlobe class="size-3.5 shrink-0" />
+            <span class="truncate">{websiteLabel(profile.website)}</span>
           </a>
         {/if}
       </div>

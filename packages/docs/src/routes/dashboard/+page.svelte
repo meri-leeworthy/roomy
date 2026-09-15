@@ -10,6 +10,7 @@
     callAdminListSpaces,
     type DashboardStats,
     type AdminSpaceStats,
+    type ListSpacesSort,
   } from "$lib/xrpc";
   import { untrack } from "svelte";
   import {
@@ -55,13 +56,14 @@
     }
   }
 
-  // ── Per-space list (paginated, sorted by member count) ───────────────
+  // ── Per-space list (paginated, sortable by member count / event volume) ─
 
   let spaces = $state<AdminSpaceStats[]>([]);
   let spacesCursor = $state<string | undefined>(undefined);
   let spacesLoading = $state(false);
   let spacesError = $state<string | null>(null);
   let spacesHasMore = $state(false);
+  let spacesSort = $state<ListSpacesSort>("memberCount");
 
   async function fetchSpaces(reset = false) {
     if (!auth.agent) return;
@@ -78,6 +80,7 @@
       const res = await callAdminListSpaces(auth.agent, {
         limit: 50,
         cursor: spacesCursor,
+        sort: spacesSort,
       });
       spaces = reset ? res.spaces : [...spaces, ...res.spaces];
       spacesCursor = res.cursor;
@@ -356,7 +359,19 @@
 
       <!-- ── Per-space stats ─────────────────────────────────────────────── -->
       <section class="mb-10">
-        <h2 class="text-sm font-semibold text-base-500 dark:text-base-400 uppercase tracking-wider mb-4">Spaces</h2>
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-semibold text-base-500 dark:text-base-400 uppercase tracking-wider">Spaces</h2>
+          <select
+            bind:value={spacesSort}
+            onchange={() => fetchSpaces(true)}
+            class="rounded-xl border border-base-200 dark:border-base-800 bg-white dark:bg-base-900 text-base-800 dark:text-base-200 text-sm px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-accent-400/50 focus:border-accent-400"
+            title="Sort spaces by"
+          >
+            <option value="memberCount">Sort by members</option>
+            <option value="totalEvents">Sort by total events</option>
+            <option value="eventsToday">Sort by events today</option>
+          </select>
+        </div>
 
         {#if spacesError}
           <div class="rounded-2xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-4 text-sm text-red-700 dark:text-red-300">

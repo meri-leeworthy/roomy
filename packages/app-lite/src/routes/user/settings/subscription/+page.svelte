@@ -1,30 +1,22 @@
 <script lang="ts">
   import { page } from "$app/state";
+  import { goto } from "$app/navigation";
   import Button from "@roomy/design/components/ui/button/Button.svelte";
   import PricingTiers from "@roomy/design/components/marketing/PricingTiers.svelte";
   import { IconCheck, IconAlertCircle, IconArrowRight } from "@roomy/design/icons";
-  import { createMembershipStatusQuery } from "$lib/queries/membership-status";
+  import {
+    createMembershipStatusQuery,
+    CHECKOUT_CONFIRM_TIMEOUT_MS,
+  } from "$lib/queries/membership-status";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { createProCheckout } from "$lib/mutations/pro-checkout";
 
-  // The SDK lexicon doesn't type space.roomy.user.getMembershipStatus yet, so
-  // px().query returns a union — narrow the shape we render here.
-  type MembershipStatus = {
-    isPro: boolean;
-    capacity: number;
-    stale: boolean;
-    checkedAt: number;
-  };
-
-  function isMembershipStatus(value: unknown): value is MembershipStatus {
-    return (
-      typeof value === "object" &&
-      value !== null &&
-      "isPro" in value &&
-      "capacity" in value &&
-      "stale" in value
-    );
-  }
+  // The Roomy Space's members-area channel. Pro subscribers are granted the
+  // 'Members' role (see appserver billing/proRoleReconcile.ts), whose
+  // dedicated channel this is. Relative, so it navigates in-app — the user
+  // is already signed in here, so a new tab is strictly worse.
+  const MEMBERS_AREA_HREF =
+    "/did:plc:gnwy2zbm3hu4gfdawzxmpb2s/01M2EQKCWRQ2M0BTNK5SD8864S";
 
   // Polar checkout for Roomy Pro (billed via polar.sh). The session is
   // minted server-side (space.roomy.pro.createCheckout) bound to the
@@ -56,25 +48,54 @@
   );
 
   // After a successful checkout Polar redirects back to this page with
-  // ?checkout={CHECKOUT_ID}. Passing it to the status query forces a
-  // non-cached Polar refresh so the new membership shows immediately.
-  // Read once at mount: the param is fixed by the redirect and never
-  // changes while this page is mounted.
-  const checkoutId = $state(page.url.searchParams.get("checkout") ?? undefined);
-  const statusQuery = createMembershipStatusQuery(() => checkoutId);
+  // ?checkout={CHECKOUT_ID}, which forces a non-cached Polar refresh. Read
+  // once at mount: the param is fixed by the redirect and never changes
+  // while this page is mounted.
+  const checkoutId = page.url.searchParams.get("checkout") ?? undefined;
+  const statusQuery = createMembershipStatusQuery(() => checkoutId, {
+    confirmUntil: checkoutId ? Date.now() + CHECKOUT_CONFIRM_TIMEOUT_MS : 0,
+  });
 
-  const status = $derived(
-    isMembershipStatus(statusQuery.data) ? statusQuery.data : undefined,
+  const status = $derived(statusQuery.data);
+
+  // Polar's redirect can land before the subscription is finalized, so the
+  // status query keeps polling for a bounded window. This drives the
+  // transient "confirming…" notice: it clears the moment the membership
+  // resolves, and at the latest when the window closes — the notice can
+  // never stick.
+  let confirmTimedOut = $state(false);
+  $effect(() => {
+    if (!checkoutId) return;
+    const timer = setTimeout(
+      () => (confirmTimedOut = true),
+      CHECKOUT_CONFIRM_TIMEOUT_MS,
+    );
+    return () => clearTimeout(timer);
+  });
+  const confirming = $derived(
+    Boolean(checkoutId) && !status?.isPro && !confirmTimedOut,
   );
+
+  // Once the membership is confirmed, drop ?checkout= so a reload can't
+  // replay the notice. On timeout it is kept deliberately: the param is what
+  // forces a non-cached read, so a refresh retries the confirmation instead
+  // of reading 300s of cached "not a member".
+  $effect(() => {
+    if (!status?.isPro || !page.url.searchParams.has("checkout")) return;
+    const url = new URL(page.url);
+    url.searchParams.delete("checkout");
+    goto(url.pathname + url.search, { replaceState: true });
+  });
 
   // Highlight the tier the user is on: Pro members see Pro selected,
   // everyone else sees Free.
   const activeTier = $derived(status?.isPro ? "Pro" : "Free");
 
   // Tier cards tailored to this page: no "Open Roomy" CTA on Free (the user
-  // is already in the app), Pro links straight to checkout, and Custom
-  // frames the over-1000 case as negotiable.
-  const tiers = [
+  // is already in the app), Pro carries checkout or the members-area link
+  // depending on membership, and Custom frames the over-1000 case as
+  // negotiable.
+  const tiers = $derived([
     {
       name: "Free",
       features: [
@@ -85,7 +106,11 @@
     },
     {
       name: "Pro",
-      cta: { label: "Subscribe", action: startCheckout },
+      // Pro members get the members-area link (same destination as the hero
+      // CTA); everyone else gets the checkout action.
+      cta: status?.isPro
+        ? { label: "Open the Members area", href: MEMBERS_AREA_HREF }
+        : { label: "Subscribe", action: startCheckout },
       features: [
         [
           { text: "Bridge " },
@@ -111,7 +136,7 @@
       ],
       cta: { label: "Talk to us", href: "mailto:hello@roomy.space" },
     },
-  ];
+  ]);
 
   const faqs: { q: string; a: string }[] = [
     {
@@ -145,7 +170,7 @@
       </p>
     </div>
   {:else}
-    {#if checkoutId}
+    {#if confirming}
       <div
         class="flex items-start gap-2 rounded-lg border border-green-600/30 bg-green-50 dark:bg-green-950/30 px-3 py-2.5"
       >
@@ -173,9 +198,7 @@
             You're a Roomy Pro member
           </span>
           <Button
-            href="https://roomy.space/did:plc:gnwy2zbm3hu4gfdawzxmpb2s/01M2EQKCWRQ2M0BTNK5SD8864S"
-            target="_blank"
-            rel="noopener noreferrer"
+            href={MEMBERS_AREA_HREF}
             variant="primary"
             size="lg"
           >

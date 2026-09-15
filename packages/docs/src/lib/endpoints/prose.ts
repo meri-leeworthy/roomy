@@ -467,7 +467,7 @@ export const prose: Record<string, EndpointProse> = {
     outputSchema: {
       type: "object",
       properties: {
-        messages: { type: "Array<MessageDto>", description: "Messages. Each has: id, content, authorDid, authorName, authorAvatar, timestamp, replyTo, forwardedFrom (with nested denormalised message), reactions, media, tags." },
+        messages: { type: "Array<MessageDto>", description: "Messages. Each has: id, content, authorDid, authorName, authorAvatar, timestamp, lastEdit (present only when the message has been edited — it carries the edit event's ULID), replyTo, forwardedFrom (with nested denormalised message), reactions, media, tags." },
         cursor: { type: "string | null", description: "Next page cursor, null if no more pages." },
       },
     },
@@ -533,6 +533,7 @@ export const prose: Record<string, EndpointProse> = {
         authorName: { type: "string", description: "Display name of the author." },
         authorAvatar: { type: "string | null", description: "Avatar URL of the author." },
         timestamp: { type: "string", description: "ISO timestamp." },
+        lastEdit: { type: "string", description: "Absent unless the message has been edited; when present it is the ULID of the most recent edit event. Clients render an 'edited' notice on its presence." },
         replyTo: { type: "string | null", description: "Parent message ID." },
         forwardedFrom: { type: "{ messageId: string; name: string; roomId: string; message?: MessageDto } | null", description: "Original source if forwarded; message carries the fully denormalised original." },
         reactions: { type: "Array<{ emoji: string; dids: string[] }>", description: "Reactions grouped by emoji." },
@@ -708,11 +709,12 @@ export const prose: Record<string, EndpointProse> = {
   },
   "space.roomy.admin.listSpaces": {
     description:
-      "Paginated, per-space stats for the admin dashboard. Each row carries member/event counters and an event-type breakdown for one space, sorted by member count descending. Cursor format: '<memberCount>|<did>'.",
+      "Paginated, per-space stats for the admin dashboard. Each row carries member/event counters and an event-type breakdown for one space, sorted by a key you choose (default member count) descending. Cursor format: '<sortValue>|<did>', where sortValue is the row's value under the active sort key.",
     auth: "Admin allowlist (APPSERVER_ADMIN_DIDS).",
     params: [
       { name: "limit", type: "int", required: false, default: "50", description: "Spaces per page (max 100)." },
       { name: "cursor", type: "string", required: false, description: "Opaque cursor from previous response." },
+      { name: "sort", type: "string", required: false, default: "memberCount", description: "Sort key: 'memberCount' | 'totalEvents' | 'eventsToday'. Numeric descending, ties broken by DID ascending." },
     ],
     outputSchema: {
       type: "object",

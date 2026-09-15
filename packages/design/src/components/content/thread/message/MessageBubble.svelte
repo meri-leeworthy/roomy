@@ -26,6 +26,7 @@
     timestamp,
     isBridged = false,
     isSystem = false,
+    isEdited = false,
     mergeWithPrevious = false,
     isSelected = false,
     isEditing = false,
@@ -55,6 +56,8 @@
     isBridged?: boolean;
     /** System notice (e.g. "X joined the space"). Renders centred without an author identity line or avatar. */
     isSystem?: boolean;
+    /** Message content has been edited — renders an "edited" marker beside the timestamp. */
+    isEdited?: boolean;
     mergeWithPrevious?: boolean;
     isSelected?: boolean;
     isEditing?: boolean;
@@ -87,6 +90,19 @@
   >
     {isValid ? formatMessageTimestamp(date) : ""}
   </time>
+{/snippet}
+
+<!-- Edit notice. The appserver sets `lastEdit` only on a message whose
+     content was actually edited, so this never shows for a pristine one.
+     Rendered beside the timestamp in the message header, and on its own
+     line when the header is suppressed — consecutive messages by one author
+     merge into a single header, which is exactly where a fresh edit lands. -->
+{#snippet editedLabel()}
+  <span
+    class="text-[11px] font-medium align-middle text-base-400 dark:text-base-500"
+  >
+    edited
+  </span>
 {/snippet}
 
 <div
@@ -182,7 +198,17 @@
           <span class="opacity-70">
             {@render timestampLabel(timestamp)}
           </span>
+          {#if isEdited}
+            {@render editedLabel()}
+          {/if}
         </div>
+      {:else if isEdited}
+        <!-- Header suppressed (merged with the previous message by the same
+             author): the timestamp is not rendered, so the edit notice gets
+             its own line rather than disappearing with the header. -->
+        <span class="text-sm w-full text-start">
+          {@render editedLabel()}
+        </span>
       {/if}
 
       <!-- Message text -->

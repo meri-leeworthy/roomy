@@ -28,7 +28,11 @@
      * button (with a tooltip explaining why) and hides the file input.
      */
     disableUploads?: boolean;
-    /** Whether a message is currently being sent. */
+    /**
+     * Whether a submission is in flight — a message send or a thread
+     * creation. The two are mutually exclusive in this UI, so the shell takes
+     * one busy flag rather than a parallel per-action prop.
+     */
     isSendingMessage: boolean;
     /** Local object-URLs for image / video previews. */
     previewImages: string[];
@@ -288,7 +292,13 @@
                 class="grow ml-2 disabled:opacity-50"
               />
 
-              <Button type="submit"><IconNeedleThread />Create Thread</Button>
+              <Button
+                type="submit"
+                asyncState={
+                  isSendingMessage ? { status: "loading" } : { status: "idle" }
+                }
+              >
+                <IconNeedleThread />Create Thread</Button>
             </form>
           {:else if mode === "selecting"}
             <!-- Selecting mode has no composer input — the context preview
