@@ -300,15 +300,14 @@ export class SyncConnection {
     this.#maxReconnectAttempts = opts.maxReconnectAttempts ?? Infinity;
     this.#reconnectDelay = opts.reconnectDelay ?? ((attempt: number) => {
       const cap = Math.min(this.#backoffBaseMs * 2 ** attempt, this.#backoffMaxMs);
-      // Full jitter, but never 0: `Math.random()` can return exactly 0, and a
-      // non-positive delay is the documented "stop reconnecting" signal that
-      // #handleAbnormalClose honours by transitioning to `closed` and
-      // scheduling NOTHING. A plain `floor(random() * cap)` therefore wedges
-      // the connection permanently with probability ~1/cap on any given drop
-      // (~1/1000 on the first attempt). Clamp the low end to 1ms so the
-      // default can never accidentally disable reconnect. An explicit
-      // non-positive `backoffMaxMs` still disables, as documented.
-      if (cap <= 0) return cap;
+      // Full jitter: random value in [0, cap]. Floor at 1ms: a draw of exactly
+      // 0 is indistinguishable from the documented "return a non-positive
+      // number to disable auto-reconnect" signal below, so an unlucky RNG
+      // permanently and silently stopped reconnecting (observed in production:
+      // a bridge logged `Closed: code=1006 intentional=false`, then never
+      // logged a reconnect attempt again while its process stayed alive and
+      // every liveness probe read healthy). Disabling reconnect is the
+      // caller's explicit override, never a default-generator outcome.
       return Math.max(1, Math.floor(Math.random() * cap));
     });
     this.#configureHeartbeat(opts);
@@ -913,6 +912,14 @@ export class SyncConnection {
     }
     const delay = this.#reconnectDelay(attempt);
     if (!Number.isFinite(delay) || delay <= 0) {
+      // The caller's explicit "stop reconnecting" signal (documented on
+      // `reconnectDelay`). This used to be silent, which made a disabled
+      // reconnect indistinguishable in the log from a healthy idle socket —
+      // say so loudly instead, so a stuck-but-alive process is visible.
+      this.#log(
+        `Not reconnecting: reconnectDelay returned ${delay} on attempt ${attempt + 1}`
+          + " (auto-reconnect disabled by caller)",
+      );
       this.#setStatus({ state: "closed", intentional: false });
       return;
     }
