@@ -1321,6 +1321,146 @@ test("RER32: falls back to a plain message when reply target is not bridged", as
 	expect(discord.sent[0]?.content).toBe("Replying to nothing bridged");
 });
 
+/**
+ * RER37: A modern forward — a createMessage carrying a
+ * `space.roomy.attachment.forward.v0` embed with an empty body — is bridged
+ * to Discord as a faux forward (TASK-110). Previously the bridge skipped it
+ * entirely: forward.v0 was unknown to #extractAttachments and a bare forward
+ * had nothing else renderable.
+ */
+test("RER37: bridges a bare forward attachment as a faux forward via webhook", async () => {
+	const { roomy, discord, router, repo } = setup();
+	// The forwarded original was bridged to Discord earlier. Its source room
+	// (ROOMY_CHANNEL_ULID) is bridged to DISCORD_CHANNEL_ID in setup().
+	repo.registerMapping(
+		SPACE_A,
+		"message",
+		DISCORD_MESSAGE_ID,
+		ROOMY_MESSAGE_ULID,
+	);
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "", // bare forward — no commentary
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.forward.v0",
+						target: ROOMY_MESSAGE_ULID,
+						fromRoomId: ROOMY_CHANNEL_ULID,
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	const sent = discord.sent[0];
+	// Faux forward: the same grey "Forwarded from <link> by <author>" block
+	// (with the original's content) the legacy forwardMessages path produces.
+	expect(sent?.content).toBe(
+		`-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID} by Original Author\noriginal content`,
+	);
+	// Sent via webhook (not the bot) so the original author's identity holds.
+	expect(sent?.options?.webhook).toBeDefined();
+});
+
+/**
+ * RER38: A modern forward with commentary keeps the commentary AND renders
+ * the forward block below it — the commentary is not dropped (TASK-110).
+ */
+test("RER38: bridges a forward with commentary as commentary plus faux forward", async () => {
+	const { roomy, discord, router, repo } = setup();
+	repo.registerMapping(
+		SPACE_A,
+		"message",
+		DISCORD_MESSAGE_ID,
+		ROOMY_MESSAGE_ULID,
+	);
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "Look at what they said",
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.forward.v0",
+						target: ROOMY_MESSAGE_ULID,
+						fromRoomId: ROOMY_CHANNEL_ULID,
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	expect(discord.sent[0]?.content).toBe(
+		`Look at what they said\n-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID} by Original Author\noriginal content`,
+	);
+});
+
+/**
+ * RER39: a reply.v0 and a forward.v0 on one message coexist — the faux reply
+ * prefix, the commentary, and the faux forward block all render (TASK-110).
+ */
+test("RER39: a reply and a forward on one message render both blocks", async () => {
+	const { roomy, discord, router, repo } = setup();
+	// Reply target: ROOMY_MESSAGE_ULID, bridged as DISCORD_MESSAGE_ID.
+	repo.registerMapping(
+		SPACE_A,
+		"message",
+		DISCORD_MESSAGE_ID,
+		ROOMY_MESSAGE_ULID,
+	);
+	// Forward target: a different message, bridged to a second snowflake.
+	const forwardedRoomyId = newUlid();
+	const forwardedDiscordId = "810000000000000001";
+	repo.registerMapping(
+		SPACE_A,
+		"message",
+		forwardedDiscordId,
+		forwardedRoomyId,
+	);
+	discord.setMessage(
+		DISCORD_CHANNEL_ID,
+		forwardedDiscordId,
+		"forwarded content",
+	);
+	await router.subscribeToSpace(SPACE_A);
+
+	const event = makeCreateMessageEvent({
+		content: "Replying with a forward",
+		extensions: {
+			"space.roomy.extension.attachments.v0": {
+				$type: "space.roomy.extension.attachments.v0",
+				attachments: [
+					{
+						$type: "space.roomy.attachment.reply.v0",
+						target: ROOMY_MESSAGE_ULID,
+					},
+					{
+						$type: "space.roomy.attachment.forward.v0",
+						target: forwardedRoomyId,
+						fromRoomId: ROOMY_CHANNEL_ULID,
+					},
+				],
+			},
+		},
+	});
+	await roomy.fireEvent(SPACE_A, event);
+
+	expect(discord.sent).toHaveLength(1);
+	expect(discord.sent[0]?.content).toBe(
+		`-# ↪ https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${DISCORD_MESSAGE_ID} original content\nReplying with a forward\n-# ↪ Forwarded from https://discord.com/channels/${GUILD}/${DISCORD_CHANNEL_ID}/${forwardedDiscordId} by Original Author\nforwarded content`,
+	);
+});
+
 describe("resolveAttachmentUrl", () => {
 	test("resolves an atblob:// ref to the appserver blob proxy", () => {
 		expect(

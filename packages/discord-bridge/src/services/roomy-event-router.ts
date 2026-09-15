@@ -3,7 +3,8 @@
  * events to Discord.
  *
  * Handles the Roomy→Discord direction of the bridge:
- * - createMessage  → send to Discord via webhook
+ * - createMessage  → send to Discord via webhook (reply/forward attachments
+ *                    are rendered as faux reply/forward blocks)
  * - editMessage    → edit in Discord
  * - deleteMessage  → delete from Discord
  * - addReaction    → add reaction in Discord
@@ -335,23 +336,27 @@ export class RoomyEventRouter {
 		// Decode the message body
 		const content = decodeBody(event.body);
 
-		// Extract reply + media attachments to carry into Discord.
-		const { replyTargetDiscordId, files } = await this.#extractAttachments(
-			spaceDid,
-			event,
-		);
+		// Extract reply + forwarded-message + media attachments to carry into
+		// Discord.
+		const { replyTargetDiscordId, forwardTargets, files } =
+			await this.#extractAttachments(spaceDid, event);
 
-		// Skip messages with nothing renderable: unsupported body and no files.
-		if (content === undefined && files.length === 0) {
+		// Skip messages with nothing renderable: unsupported body, no forwarded
+		// targets, and no files.
+		if (
+			content === undefined &&
+			files.length === 0 &&
+			forwardTargets.length === 0
+		) {
 			log.debug(
 				`Skipping createMessage ${event.id}: unsupported MIME type ${event.body.mimeType}`,
 			);
 			return;
 		}
 
-		// Skip empty content with no files (e.g. media-less blank messages).
+		// Skip empty content with no attachments (e.g. media-less blank messages).
 		// Sending a blank Discord message is worse than sending nothing.
-		if (content === "" && files.length === 0) {
+		if (content === "" && files.length === 0 && forwardTargets.length === 0) {
 			log.debug(
 				`Skipping createMessage ${event.id}: empty body (likely media-only)`,
 			);
@@ -368,6 +373,39 @@ export class RoomyEventRouter {
 				replyTargetDiscordId,
 			);
 			if (replyPrefix) sendContent = `${replyPrefix}\n${sendContent}`;
+		}
+
+		// Faux forward: a modern forward is a createMessage carrying a
+		// `space.roomy.attachment.forward.v0` embed. Render it with the same grey
+		// "Forwarded from <link> by <author>" block the legacy forwardMessages
+		// path uses (`#buildForwardContent`), attributed to the original author.
+		// The message's own body (commentary) stays above the forward block.
+		for (const fwd of forwardTargets) {
+			const original = await this.#queryMessage(fwd.targetMessageId);
+			const originalAuthorName = original
+				? original.authorName ||
+					(original.authorHandle ? `@${original.authorHandle}` : "someone")
+				: "someone";
+			const forwardBlock = await this.#buildForwardContent(
+				discordChannelId,
+				fwd.sourceChannelId,
+				fwd.discordMessageId,
+				originalAuthorName,
+			);
+			if (forwardBlock) {
+				sendContent = sendContent
+					? `${sendContent}\n${forwardBlock}`
+					: forwardBlock;
+			}
+		}
+
+		// Nothing left to render after resolving the forward blocks (e.g. every
+		// original was deleted) — skip rather than send a blank message.
+		if (sendContent === "" && files.length === 0) {
+			log.debug(
+				`Skipping createMessage ${event.id}: nothing renderable after forward resolution`,
+			);
+			return;
 		}
 
 		// Resolve author profile.
@@ -424,12 +462,19 @@ export class RoomyEventRouter {
 	}
 
 	/**
-	 * Resolve the Discord reply target and downloadable media files carried by a
-	 * createMessage's attachments extension.
+	 * Resolve the Discord reply target, forwarded-message targets, and
+	 * downloadable media files carried by a createMessage's attachments
+	 * extension.
 	 *
 	 * - `reply.v0` → the Discord snowflake of the Roomy message being replied to
 	 *   (undefined when the target was never bridged to Discord — the message
 	 *   then falls back to a plain Discord message).
+	 * - `forward.v0` → the Discord snowflake of the forwarded original plus the
+	 *   Discord channel/thread its source room maps to, resolved via the same
+	 *   repo lookups the reply path uses. The caller renders each as a
+	 *   faux-forward block. A forward whose original was never bridged to
+	 *   Discord (or whose source room isn't bridged) is dropped — like an
+	 *   unbridged reply, the message falls back to whatever else it carries.
 	 * - `image.v0` / `video.v0` / `file.v0` → bytes fetched from the attachment
 	 *   URI for a multipart webhook upload. Unfetchable attachments are skipped
 	 *   (with a warning) rather than failing the whole message.
@@ -439,6 +484,14 @@ export class RoomyEventRouter {
 		event: Event & { $type: "space.roomy.message.createMessage.v0" },
 	): Promise<{
 		replyTargetDiscordId?: string;
+		forwardTargets: {
+			/** Roomy message id of the forwarded original. */
+			targetMessageId: string;
+			/** Discord snowflake of the forwarded original (for the faux link). */
+			discordMessageId: string;
+			/** Discord channel/thread the forwarded original was bridged to. */
+			sourceChannelId: string;
+		}[];
 		files: {
 			filename: string;
 			contentType: string;
@@ -448,6 +501,11 @@ export class RoomyEventRouter {
 		const attExt = event.extensions?.["space.roomy.extension.attachments.v0"];
 		const attachments = attExt?.attachments ?? [];
 		let replyTargetDiscordId: string | undefined;
+		const forwardTargets: {
+			targetMessageId: string;
+			discordMessageId: string;
+			sourceChannelId: string;
+		}[] = [];
 		const files: {
 			filename: string;
 			contentType: string;
@@ -462,6 +520,25 @@ export class RoomyEventRouter {
 					att.target,
 				);
 				if (discordMessageId) replyTargetDiscordId = discordMessageId;
+				continue;
+			}
+
+			if (att.$type === "space.roomy.attachment.forward.v0") {
+				const discordMessageId = this.#repo.getDiscordId(
+					spaceDid,
+					"message",
+					att.target,
+				);
+				const sourceChannelId =
+					this.#repo.getDiscordId(spaceDid, "channel", att.fromRoomId) ??
+					this.#repo.getDiscordId(spaceDid, "thread", att.fromRoomId);
+				if (discordMessageId && sourceChannelId) {
+					forwardTargets.push({
+						targetMessageId: att.target,
+						discordMessageId,
+						sourceChannelId,
+					});
+				}
 				continue;
 			}
 
@@ -488,7 +565,7 @@ export class RoomyEventRouter {
 			}
 		}
 
-		return { replyTargetDiscordId, files };
+		return { replyTargetDiscordId, forwardTargets, files };
 	}
 
 	/**
