@@ -26,7 +26,9 @@
   const query = $derived(page.url.searchParams.get("q") ?? "");
   const currentSpace = $derived(currentSpaceState.value);
 
-  const roomMetaQuery = createRoomMetadataQuery(() => roomId);
+  const roomMetaQuery = createRoomMetadataQuery(() => roomId, {
+    enabled: () => !!roomId,
+  });
   // Display name for the room being searched (from the dedicated metadata
   // query — the room page's sidebar-derived name lives in its own page).
   const roomName = $derived(

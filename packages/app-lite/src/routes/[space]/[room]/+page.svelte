@@ -83,7 +83,9 @@
     };
   });
 
-  const roomQuery = createRoomMetadataQuery(() => roomId);
+  const roomQuery = createRoomMetadataQuery(() => roomId, {
+    enabled: () => !!roomId,
+  });
   const spaceMetaQuery = createSpaceMetadataQuery(() => spaceId);
 
   /**
