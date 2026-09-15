@@ -35,8 +35,11 @@
       originSpaceName?: string;
       permission: "read" | "readwrite";
     };
-    renameCategory: (id: string, newName: string) => void;
-    deleteCategory: (id: string) => void;
+    /** Sidebar-only: categories live in the sidebar draft, so their rename and
+     * delete callbacks come from the sidebar. Absent when the modal was opened
+     * from the navbar, where only rooms are editable. */
+    renameCategory?: (id: string, newName: string) => void;
+    deleteCategory?: (id: string) => void;
   } = $props();
 
   const isRoom = $derived(id !== null && "room" in id);
@@ -68,12 +71,22 @@
     if (federated) return "Federated Channel";
     if (!room) return "Category";
     switch (room.kind) {
-      case "space.roomy.channel":
-        return "Channel";
+      // `getMetadata` reports the short form (`stripLabel`), so a thread is
+      // "thread" — not "space.roomy.thread".
+      case "thread":
+        return "Thread";
       default:
         return "Channel";
     }
   });
+
+  /**
+   * Threads have no permission settings: they inherit the parent channel's
+   * (see `resolveRoom` in the appserver's auth/access.ts, which resolves a
+   * thread's effective access from the channel it is canonically linked to).
+   * Only the name and archived state are editable.
+   */
+  let isThread = $derived(kind === "Thread");
 
   // Permissions state
   let accessMode = $state<"open" | "roles">("open");
@@ -235,7 +248,7 @@
         name,
       });
     } else if ("categoryId" in id) {
-      renameCategory(id.categoryId, name);
+      renameCategory?.(id.categoryId, name);
     }
     open = false;
   }
@@ -245,14 +258,28 @@
     if ("room" in id) {
       await deleteRoom(spaceId, id.room);
     } else if ("categoryId" in id) {
-      deleteCategory(id.categoryId);
+      deleteCategory?.(id.categoryId);
     }
     open = false;
   }
 
   let canDelete = $derived(!!id && !federated);
   let isCategory = $derived(!!id && "categoryId" in id);
+  /** Threads inherit the parent channel's permissions, so the editor is only
+   * rendered for channels (native or federated). */
+  let showPermissions = $derived(kind === "Channel" || !!federated);
 </script>
+
+{#snippet permissions()}
+  <ChannelPermissions
+    {spaceId}
+    roomId={id && "room" in id ? id.room : undefined}
+    {federated}
+    bind:accessMode
+    bind:rolePermissions
+    bind:defaultAccess
+  />
+{/snippet}
 
 {#if id}
   <RoomEditForm
@@ -263,7 +290,8 @@
     {canDelete}
     {onSave}
     {onDelete}
-    deleteLabel={isCategory ? "Delete Category" : "Archive Channel"}
+    permissions={showPermissions ? permissions : undefined}
+    deleteLabel={isCategory ? "Delete Category" : isThread ? "Archive Thread" : "Archive Channel"}
     deleteIcon={isCategory ? "trash" : "archive"}
     deleteConfirmTitle={isCategory ? "Deleting Category" : undefined}
     deleteConfirmButton={isCategory ? "Yes, Delete" : undefined}
@@ -272,22 +300,13 @@
       {#if isCategory}
         Are you sure you want to delete the category <b>{name}</b>? Channels
         in this category will move to the uncategorized section.
+      {:else if isThread}
+        Are you sure you want to archive <b>{name}</b>? Archived threads
+        aren't visible to non-admins.
       {:else}
         Are you sure you want to archive <b>{name}</b>? Archived channels
         aren't visible to non-admins. You can find and restore archived
         channels when editing the sidebar.
-      {/if}
-    {/snippet}
-    {#snippet permissions()}
-      {#if kind === "Channel" || federated}
-        <ChannelPermissions
-          {spaceId}
-          roomId={id && "room" in id ? id.room : undefined}
-          {federated}
-          bind:accessMode
-          bind:rolePermissions
-          bind:defaultAccess
-        />
       {/if}
     {/snippet}
   </RoomEditForm>

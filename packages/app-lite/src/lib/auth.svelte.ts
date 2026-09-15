@@ -115,9 +115,13 @@ async function setupDirectXrpc(authAgent: Agent) {
  * OAuth path. Used when PUBLIC_TEST_IDENTIFIER + PUBLIC_TEST_APP_PASSWORD are
  * set in the build env, enabling headless E2E testing without the OAuth
  * round-trip (which requires a publicly-exposed redirect URI).
+ *
+ * The PDS comes from `PUBLIC_PDS` so the test account does not have to live on
+ * bsky.social; app passwords are PDS-scoped, so a self-hosted account only
+ * authenticates against its own PDS.
  */
 async function loginWithAppPassword(identifier: string, password: string) {
-  const atpAgent = new AtpAgent({ service: "https://bsky.social" });
+  const atpAgent = new AtpAgent({ service: CONFIG.testPds });
   await atpAgent.login({ identifier, password });
   if (!atpAgent.did) throw new Error("App password login failed — no DID");
 
