@@ -12,6 +12,7 @@ export { default as IconSearch } from "~icons/ph/magnifying-glass-bold";
 // Actions
 export { default as IconBell } from "~icons/ph/bell-bold";
 export { default as IconCheck } from "~icons/ph/check-bold";
+export { default as IconRetry } from "~icons/ph/arrow-clockwise-bold";
 export { default as IconEdit } from "~icons/ph/pencil-simple-bold";
 export { default as IconEllipsisHorizontal } from "~icons/ph/dots-three-bold";
 export { default as IconGripVertical } from "~icons/ph/dots-six-vertical-bold";
