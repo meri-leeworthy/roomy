@@ -279,7 +279,7 @@ export async function callAdminGetDashboardStats(
   return res.data as DashboardStats;
 }
 
-// ── Per-space stats (paginated, sorted by member count desc) ──────────────
+// ── Per-space stats (paginated, sortable) ────────────────────────────────
 
 export interface AdminSpaceStats {
   did: string;
@@ -290,6 +290,8 @@ export interface AdminSpaceStats {
   eventBreakdown: Record<string, number>;
 }
 
+export type ListSpacesSort = "memberCount" | "totalEvents" | "eventsToday";
+
 export interface ListSpacesResult {
   spaces: AdminSpaceStats[];
   cursor?: string;
@@ -297,12 +299,13 @@ export interface ListSpacesResult {
 
 export async function callAdminListSpaces(
   agent: Agent,
-  opts: { limit?: number; cursor?: string } = {},
+  opts: { limit?: number; cursor?: string; sort?: ListSpacesSort } = {},
 ): Promise<ListSpacesResult> {
   const c = await getClient(agent);
   const params: Record<string, string> = {};
   if (opts.limit !== undefined) params.limit = String(opts.limit);
   if (opts.cursor !== undefined) params.cursor = opts.cursor;
+  if (opts.sort !== undefined) params.sort = opts.sort;
   const res = await c.call("space.roomy.admin.listSpaces", params);
   return res.data as ListSpacesResult;
 }

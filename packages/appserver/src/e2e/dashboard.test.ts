@@ -52,9 +52,19 @@ function seedUsers(ctx: E2eContext): void {
   for (const u of [USER_A, USER_B, USER_C]) seedUser(ctx.db, u);
 }
 
-/** Routed per-space handle for seeding materialised rows. */
+/** Routed per-space handle for seeding materialised rows. Writes are
+ * fire-and-forget; attach a no-op catch (matching `helpers.ts`'s
+ * `swallowDropped`) so a write still in flight when `afterEach` closes the
+ * DB isn't reported as an unhandled rejection (bun exits 1). */
 function spaceDb(ctx: E2eContext, spaceId: string) {
-  return (ctx.db as unknown as { forSpace(did: string): { run(sql: string, ...p: unknown[]): Promise<unknown> } }).forSpace(spaceId);
+  const sp = (ctx.db as unknown as { forSpace(did: string): { run(sql: string, ...p: unknown[]): Promise<unknown> } }).forSpace(spaceId);
+  return {
+    run(sql: string, ...p: unknown[]) {
+      const prom = sp.run(sql, ...p);
+      prom.catch(() => {});
+      return prom;
+    },
+  };
 }
 
 /** Seed a bare space (no built-in membership) so member counts are exact. */
@@ -240,8 +250,169 @@ describe("space.roomy.admin.listSpaces", () => {
     expect(body2.cursor).toBeUndefined();
   });
 
-  test("empty DB → empty spaces array, no cursor", async () => {
+  test("sort param: totalEvents and eventsToday order by that key", async () => {
     const ctx = await startAppserver();
+    seedUsers(ctx);
+
+    // Three spaces with distinct member/event shapes so each sort key
+    // yields a different (unambiguous) order:
+    //   S1: 1 member, 5 total events, 0 today
+    //   S2: 3 members, 2 total events, 4 today
+    //   S3: 2 members, 4 total events, 1 today
+    seedBareSpace(ctx, "did:web:s1.example", "S1");
+    addMember(ctx, "did:web:s1.example", USER_A);
+    seedBareSpace(ctx, "did:web:s2.example", "S2");
+    addMember(ctx, "did:web:s2.example", USER_A);
+    addMember(ctx, "did:web:s2.example", USER_B);
+    addMember(ctx, "did:web:s2.example", USER_C);
+    seedBareSpace(ctx, "did:web:s3.example", "S3");
+    addMember(ctx, "did:web:s3.example", USER_A);
+    addMember(ctx, "did:web:s3.example", USER_B);
+
+    const now = Date.now();
+    const yesterday = now - 86_400_000;
+    // S1: 5 events, all yesterday → 5 total, 0 today.
+    for (let i = 0; i < 5; i++) {
+      seedEvent(ctx, "did:web:s1.example", i, "space.roomy.message.createMessage.v0", yesterday);
+    }
+    // S2: 2 events yesterday + 4 today → 6 total, 4 today.
+    seedEvent(ctx, "did:web:s2.example", 0, "space.roomy.message.createMessage.v0", yesterday);
+    seedEvent(ctx, "did:web:s2.example", 1, "space.roomy.message.createMessage.v0", yesterday);
+    for (let i = 2; i < 6; i++) {
+      seedEvent(ctx, "did:web:s2.example", i, "space.roomy.message.createMessage.v0", now);
+    }
+    // S3: 3 events yesterday + 1 today → 4 total, 1 today.
+    for (let i = 0; i < 3; i++) {
+      seedEvent(ctx, "did:web:s3.example", i, "space.roomy.message.createMessage.v0", yesterday);
+    }
+    seedEvent(ctx, "did:web:s3.example", 3, "space.roomy.message.createMessage.v0", now);
+
+    // totalEvents desc: S2(6), S1(5), S3(4).
+    const resTotal = await ctx.authedFetch(ADMIN)(
+      `${ctx.baseUrl}/xrpc/space.roomy.admin.listSpaces?limit=50&sort=totalEvents`,
+    );
+    expect(resTotal.status).toBe(200);
+    const totalBody = await resTotal.json();
+    expect(totalBody.spaces.map((s: { did: string; totalEvents: number }) => s.did)).toEqual([
+      "did:web:s2.example",
+      "did:web:s1.example",
+      "did:web:s3.example",
+    ]);
+    expect(totalBody.spaces.map((s: { totalEvents: number }) => s.totalEvents)).toEqual([6, 5, 4]);
+
+    // eventsToday desc: S2(4), S3(1), S1(0).
+    const resToday = await ctx.authedFetch(ADMIN)(
+      `${ctx.baseUrl}/xrpc/space.roomy.admin.listSpaces?limit=50&sort=eventsToday`,
+    );
+    expect(resToday.status).toBe(200);
+    const todayBody = await resToday.json();
+    expect(todayBody.spaces.map((s: { did: string }) => s.did)).toEqual([
+      "did:web:s2.example",
+      "did:web:s3.example",
+      "did:web:s1.example",
+    ]);
+    expect(todayBody.spaces.map((s: { eventsToday: number }) => s.eventsToday)).toEqual([4, 1, 0]);
+
+    // memberCount (default) is unchanged.
+    const resMember = await ctx.authedFetch(ADMIN)(
+      `${ctx.baseUrl}/xrpc/space.roomy.admin.listSpaces?limit=50`,
+    );
+    const memberBody = await resMember.json();
+    expect(memberBody.spaces.map((s: { did: string }) => s.did)).toEqual([
+      "did:web:s2.example",
+      "did:web:s3.example",
+      "did:web:s1.example",
+    ]);
+  });
+
+  test.each([
+    "memberCount",
+    "totalEvents",
+    "eventsToday",
+  ] as const)("pagination under sort=%s returns each space exactly once (no dupes, no gaps)", async (sort) => {
+    const ctx = await startAppserver();
+    seedUsers(ctx);
+
+    // Six spaces with deliberately overlapping values on every sort key so
+    // tie-breaking + cursor consistency are actually exercised (not a
+    // trivial distinct-key case). Member counts 0–3 with repeats; event
+    // volumes chosen to collide across spaces.
+    const spaces = [
+      // [did-suffix, memberCount, totalEvents, eventsToday]
+      ["s1", 3, 10, 5],
+      ["s2", 1, 12, 2],
+      ["s3", 2, 10, 8],
+      ["s4", 0, 15, 3],
+      ["s5", 3, 8, 5],
+      ["s6", 2, 12, 8],
+    ] as const;
+
+    const now = Date.now();
+    const yesterday = now - 86_400_000;
+    for (const [suffix, members, total, today] of spaces) {
+      const did = `did:web:${suffix}.example`;
+      seedBareSpace(ctx, did, `S${suffix.toUpperCase()}`);
+      for (let m = 0; m < members; m++) {
+        addMember(ctx, did, [USER_A, USER_B, USER_C][m]!);
+      }
+      const todayEvts = Math.min(today, total);
+      for (let i = 0; i < todayEvts; i++) {
+        seedEvent(ctx, did, i, "space.roomy.message.createMessage.v0", now);
+      }
+      for (let i = todayEvts; i < total; i++) {
+        seedEvent(ctx, did, i, "space.roomy.message.createMessage.v0", yesterday);
+      }
+    }
+
+    // Page through with limit=2 collecting every space + the values we
+    // expect to see in descending order per sort key.
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const q = new URLSearchParams({ limit: "2", sort });
+      if (cursor) q.set("cursor", cursor);
+      const res = await ctx.authedFetch(ADMIN)(
+        `${ctx.baseUrl}/xrpc/space.roomy.admin.listSpaces?${q.toString()}`,
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      for (const s of body.spaces as Array<{ did: string }>) seen.push(s.did);
+      if (body.cursor === undefined) break;
+      cursor = body.cursor;
+    }
+
+    // Every space appears exactly once.
+    expect(seen).toHaveLength(spaces.length);
+    expect(new Set(seen).size).toBe(spaces.length);
+
+    // And the collected order is exactly the sort key's descending order
+    // (ties broken by DID ascending), proving no gaps/dupes across pages.
+    const val = (suffix: string) => {
+      const row = spaces.find((s) => `did:web:${s[0]}.example` === suffix)!;
+      return sort === "memberCount" ? row[1] : sort === "totalEvents" ? row[2] : row[3];
+    };
+    const expected = [...spaces]
+      .map((s) => `did:web:${s[0]}.example`)
+      .sort((a, b) => {
+        const dv = val(b) - val(a);
+        return dv !== 0 ? dv : a < b ? -1 : a > b ? 1 : 0;
+      });
+    expect(seen).toEqual(expected);
+  });
+
+  test("invalid sort → 400", async () => {
+    const ctx = await startAppserver();
+    seedUsers(ctx);
+    seedBareSpace(ctx, "did:web:s1.example", "S1");
+    seedEvent(ctx, "did:web:s1.example", 0, "space.roomy.message.createMessage.v0", Date.now());
+
+    const res = await ctx.authedFetch(ADMIN)(
+      `${ctx.baseUrl}/xrpc/space.roomy.admin.listSpaces?sort=bogus`,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test("empty DB → empty spaces array, no cursor", async () => {    const ctx = await startAppserver();
     const res = await ctx.authedFetch(ADMIN)(
       `${ctx.baseUrl}/xrpc/space.roomy.admin.listSpaces`,
     );
