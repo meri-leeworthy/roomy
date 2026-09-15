@@ -27,6 +27,30 @@ function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Retry budget + backoff for transient channel-resolution failures. */
+const RESOLUTION_RETRY_ATTEMPTS = 3;
+const RESOLUTION_RETRY_BASE_DELAY_MS = 500;
+
+/**
+ * Retry a channel-resolution call that signals failure by resolving to
+ * undefined (REST-backed data sources swallow errors and return undefined).
+ * Returns the first defined result, or undefined once the budget is spent,
+ * so a transient lookup blip costs retry latency instead of a skipped
+ * channel.
+ */
+async function resolveChannelFieldWithRetry<T>(
+	resolve: () => Promise<T | undefined>,
+): Promise<T | undefined> {
+	for (let attempt = 1; attempt <= RESOLUTION_RETRY_ATTEMPTS; attempt++) {
+		const result = await resolve();
+		if (result !== undefined) return result;
+		if (attempt < RESOLUTION_RETRY_ATTEMPTS) {
+			await delay(RESOLUTION_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+		}
+	}
+	return undefined;
+}
+
 export async function runBackfill(
 	discord: DiscordDataSource,
 	repo: BridgeRepository,
@@ -150,15 +174,19 @@ async function ensureRoomyRooms(
 			}
 
 			let created = 0;
+			let skippedNameResolution = 0;
 
 			for (const channelId of channelIds) {
 				try {
 					if (repo.getRoomyId(spaceDid, "channel", channelId)) continue;
 
-					const channelName = await discord.resolveChannelName(channelId);
+					const channelName = await resolveChannelFieldWithRetry(() =>
+						discord.resolveChannelName(channelId),
+					);
 					if (!channelName) {
+						skippedNameResolution++;
 						log.error(
-							`Cannot resolve name for Discord channel ${channelId} in guild ${guildId}; skipping room creation`,
+							`Cannot resolve name for Discord channel ${channelId} in guild ${guildId} after ${RESOLUTION_RETRY_ATTEMPTS} attempts; skipping room creation`,
 						);
 						continue;
 					}
@@ -195,9 +223,9 @@ async function ensureRoomyRooms(
 				}
 			}
 
-			if (created > 0) {
+			if (created > 0 || skippedNameResolution > 0) {
 				log.info(
-					`Created ${created} Roomy rooms for ${channelIds.length} bridged channels in ${spaceDid}`,
+					`Room creation for ${channelIds.length} bridged channels in ${spaceDid}: ${created} created, ${skippedNameResolution} skipped (name not resolvable after ${RESOLUTION_RETRY_ATTEMPTS} attempts)`,
 				);
 			}
 		} catch (err) {
@@ -440,12 +468,19 @@ export async function backfillChannel(
 
 	try {
 		const guildId =
-			guildIdOverride ?? (await discord.resolveGuildIdForChannel(channelId));
+			guildIdOverride ??
+			(await resolveChannelFieldWithRetry(() =>
+				discord.resolveGuildIdForChannel(channelId),
+			));
 		if (!guildId) {
 			log.error(
-				`Cannot resolve guildId for channel ${channelId}; skipping backfill`,
+				`Cannot resolve guildId for channel ${channelId} after ${RESOLUTION_RETRY_ATTEMPTS} attempts; skipping backfill`,
 			);
-			return;
+			// Surface as a failure so the run summary counts it instead of
+			// reporting success while this channel's history is silently
+			// missing. Callers (runBackfill, backfillSingleChannel) already
+			// catch and log/report failures.
+			throw new Error(`Cannot resolve guildId for channel ${channelId}`);
 		}
 
 		// Capacity enforcement: backfill is the main cost driver — abort
@@ -532,8 +567,11 @@ export async function backfillChannel(
 /**
  * Fetch public archived threads for all bridged parent channels, create Roomy
  * rooms for any that aren't yet mapped, and backfill their messages.
+ *
+ * Exported for the regression tests covering pagination, page-failure
+ * isolation, and the stall guard.
  */
-async function ensureAndBackfillArchivedThreads(
+export async function ensureAndBackfillArchivedThreads(
 	discord: DiscordDataSource,
 	repo: BridgeRepository,
 	roomy: RoomyGateway,
@@ -544,6 +582,7 @@ async function ensureAndBackfillArchivedThreads(
 	const CHANNEL_DELAY_MS = 1_000;
 	const BACKFILL_DELAY_MS = 500;
 	let totalThreads = 0;
+	let failedParentChannels = 0;
 
 	for (const config of configs) {
 		try {
@@ -657,12 +696,21 @@ async function ensureAndBackfillArchivedThreads(
 							await delay(BACKFILL_DELAY_MS);
 						}
 
-						hasMore = result.hasMore ?? false;
-						if (result.threads.length > 0) {
-							cursor = result.threads[result.threads.length - 1]?.id;
-						} else {
+						// Advance the cursor only from a successful page, and stop
+						// if a page fails to move it — otherwise a sticky page
+						// would loop forever. A stalled page is counted as a
+						// per-parent-channel failure.
+						const lastThread = result.threads.at(-1);
+						if (!lastThread) break;
+						if (cursor !== undefined && lastThread.id === cursor) {
+							failedParentChannels++;
+							log.error(
+								`Archived thread pagination stalled for parent channel ${parentChannelId} in ${spaceDid}: cursor ${cursor} did not advance; stopping`,
+							);
 							break;
 						}
+						cursor = lastThread.id;
+						hasMore = result.hasMore ?? false;
 					}
 
 					parentChannelsProcessed++;
@@ -671,6 +719,7 @@ async function ensureAndBackfillArchivedThreads(
 						await delay(CHANNEL_DELAY_MS);
 					}
 				} catch (err) {
+					failedParentChannels++;
 					log.error(
 						`Failed to backfill archived threads for parent channel ${parentChannel.id} in ${spaceDid}`,
 						err,
@@ -679,7 +728,7 @@ async function ensureAndBackfillArchivedThreads(
 			}
 
 			log.info(
-				`Archived thread backfill for ${spaceDid}: processed ${totalThreads} threads across ${parentChannelsProcessed} parent channels`,
+				`Archived thread backfill for ${spaceDid}: processed ${totalThreads} threads across ${parentChannelsProcessed} parent channels, ${failedParentChannels} parent channel failures`,
 			);
 		} catch (err) {
 			log.error(

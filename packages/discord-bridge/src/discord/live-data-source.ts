@@ -23,6 +23,42 @@ import type { DiscordBot } from "./types.ts";
 
 const log = createLogger("live-discord");
 
+const DISCORD_EPOCH_MS = 1420070400000; // Discord epoch: 2015-01-01T00:00:00Z
+
+/**
+ * Millisecond timestamp encoded in a Discord snowflake (its upper 22 bits).
+ *
+ * Discord's list-archived-threads `before` accepts a snowflake or an ISO8601
+ * timestamp, but discordeno rewrites the option into a URL query parameter via
+ * `new Date(before).toISOString()` (see routes.cjs in @discordeno/rest). A
+ * raw snowflake is an 18–19 digit decimal — `Number(snowflake)` rounds it to
+ * ~7.2e17, which is outside `Date`'s valid range (±8.64e15 ms), so
+ * `.toISOString()` throws `RangeError: Invalid Date`. Decode the snowflake's
+ * encoded epoch instead: it stays well inside `Date`'s range and round-trips
+ * exactly through discordeno's conversion, which matches Discord's own
+ * snowflake→timestamp treatment of the parameter.
+ */
+function snowflakeToEpochMs(snowflake: string): number {
+	// The timestamp occupies the upper 22 bits; the remainder is at most
+	// 2^41, which Number represents exactly.
+	return Number(BigInt(snowflake) >> 22n) + DISCORD_EPOCH_MS;
+}
+
+/** Sleep for a given number of milliseconds. */
+function sleep(ms: number): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setTimeout(resolve, ms);
+	return promise;
+}
+
+/**
+ * Bounded retry for one archived-thread page fetch. Backfill paginates
+ * through the whole guild, so a single transient REST failure must cost
+ * retry latency — not the parent channel's remaining history.
+ */
+const THREAD_PAGE_RETRY_ATTEMPTS = 3;
+const THREAD_PAGE_RETRY_BASE_DELAY_MS = 500;
+
 export class LiveDiscordDataSource implements DiscordDataSource {
 	#bot: DiscordBot;
 
@@ -88,37 +124,53 @@ export class LiveDiscordDataSource implements DiscordDataSource {
 		channelId: string,
 		opts: PaginationOpts,
 	): Promise<ThreadPage> {
-		try {
-			// Discordeno types ListArchivedThreads.before as number (timestamp), but
-			// the Discord API accepts a snowflake or ISO8601 timestamp. Pass our
-			// snowflake as-is — the API handles both.
-			const params: { limit: number; before?: number } = {
-				limit: opts.limit ?? 100,
-			};
-			if (opts.before) {
-				// Discordeno's type says `before: number`, but the API accept/s snowflake strings
-				params.before = Number(opts.before);
-			}
-			const result = await this.#bot.helpers.getPublicArchivedThreads(
-				BigInt(channelId),
-				params,
-			);
-
-			const threads: DiscordChannelData[] = result.threads.map((t) =>
-				normalizeChannel(t),
-			);
-
-			return {
-				threads,
-				hasMore: result.hasMore,
-			};
-		} catch (err) {
-			log.error(
-				`getPublicArchivedThreads failed for channel ${channelId} (before=${opts.before ?? "-"}, limit=${opts.limit ?? 100})`,
-				err,
-			);
-			throw err;
+		const params: { limit: number; before?: number } = {
+			limit: opts.limit ?? 100,
+		};
+		if (opts.before) {
+			// discordeno types `before` as number and URL-encodes it as
+			// `new Date(before).toISOString()`. Pass the epoch ms our snowflake
+			// cursor encodes — a bare `Number(snowflake)` overflows Date's range.
+			params.before = snowflakeToEpochMs(opts.before);
 		}
+
+		// Backfill paginates through this loop for a whole guild, so a single
+		// transient REST failure must not abort the parent channel's history:
+		// retry with a bounded backoff, and only log/throw once exhausted.
+		let lastError: unknown;
+		for (let attempt = 1; attempt <= THREAD_PAGE_RETRY_ATTEMPTS; attempt++) {
+			try {
+				const result = await this.#bot.helpers.getPublicArchivedThreads(
+					BigInt(channelId),
+					params,
+				);
+
+				const threads: DiscordChannelData[] = result.threads.map((t) =>
+					normalizeChannel(t),
+				);
+
+				return {
+					threads,
+					hasMore: result.hasMore,
+				};
+			} catch (err) {
+				lastError = err;
+				if (attempt < THREAD_PAGE_RETRY_ATTEMPTS) {
+					log.warn(
+						`getPublicArchivedThreads failed for channel ${channelId} (before=${opts.before ?? "-"}, limit=${opts.limit ?? 100}), attempt ${attempt}/${THREAD_PAGE_RETRY_ATTEMPTS}; retrying`,
+						err,
+					);
+					await sleep(
+						THREAD_PAGE_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
+					);
+				}
+			}
+		}
+		log.error(
+			`getPublicArchivedThreads failed for channel ${channelId} (before=${opts.before ?? "-"}, limit=${opts.limit ?? 100}) after ${THREAD_PAGE_RETRY_ATTEMPTS} attempts`,
+			lastError,
+		);
+		throw lastError;
 	}
 
 	async resolveChannelName(channelId: string): Promise<string | undefined> {

@@ -31,7 +31,7 @@ import {
 	resetCapacityGate,
 	setCapacityGate,
 } from "../../roomy/capacity.ts";
-import { backfillChannel, ensureRoomyThreads } from "../backfill.ts";
+import { backfillChannel, ensureAndBackfillArchivedThreads, ensureRoomyThreads } from "../backfill.ts";
 import { expectToBeDefined } from "./utils.ts";
 
 // ─── Test constants ─────────────────────────────────────────────────────
@@ -918,5 +918,254 @@ describe("backfill — capacity enforcement", () => {
 		]);
 
 		expect(roomy.eventCount(SPACE)).toBe(0);
+	});
+});
+
+// ─── Archived-thread backfill regression tests ─────────────────────────────
+
+interface FakeThreadsScenario {
+	parents: Array<{
+		id: string;
+		name: string;
+		/** Pages served in order; each page is a list of thread ids+names. */
+		pages?: Array<Array<{ id: string; name: string }>>;
+		/** Always throw on page fetch (simulates a permanently broken page). */
+		alwaysFail?: boolean;
+		/** Re-serve the same first page forever with hasMore=true. */
+		sticky?: boolean;
+	}>;
+}
+
+interface FakeThreadsSource {
+	ds: DiscordDataSource;
+	pageCalls: Array<{ parentId: string; before: string | undefined }>;
+}
+
+/** Scripted DiscordDataSource for the archived-thread backfill loop. */
+function makeArchivedThreadsSource(
+	scenario: FakeThreadsScenario,
+): FakeThreadsSource {
+	const pageCalls: Array<{ parentId: string; before: string | undefined }> =
+		[];
+	const parentById = new Map(scenario.parents.map((p) => [p.id, p]));
+	const channelById = new Map(
+		scenario.parents.map((p) => [p.id, { id: p.id, name: p.name }]),
+	);
+
+	const ds: DiscordDataSource = {
+		async getMessages() {
+			return [];
+		},
+		async getChannel(channelId) {
+			const p = channelById.get(channelId);
+			return p
+				? { id: p.id, type: 0, name: p.name, guildId: GUILD }
+				: undefined;
+		},
+		async getChannels(guildId) {
+			if (guildId !== GUILD) return [];
+			return scenario.parents.map((p) => ({
+				id: p.id,
+				type: 0,
+				name: p.name,
+				guildId: GUILD,
+			}));
+		},
+		async getGuild(guildId) {
+			if (guildId !== GUILD) return undefined;
+			return { id: GUILD, channels: await ds.getChannels(guildId) };
+		},
+		async getPublicArchivedThreads(parentId, opts) {
+			pageCalls.push({ parentId, before: opts.before });
+			const parent = parentById.get(parentId);
+			if (!parent || parent.alwaysFail) {
+				throw new Error(`simulated page failure for ${parentId}`);
+			}
+			const pages = parent.pages ?? [];
+			if (pages.length === 0) return { threads: [], hasMore: false };
+			if (parent.sticky) {
+				const page = pages[0];
+				if (!page) return { threads: [], hasMore: false };
+				return {
+					threads: page.map((t) => ({
+						id: t.id,
+						type: 11,
+						name: t.name,
+						guildId: GUILD,
+						parentId,
+					})),
+					hasMore: true,
+				};
+			}
+			const page = pages.shift();
+			if (!page) return { threads: [], hasMore: false };
+			return {
+				threads: page.map((t) => ({
+					id: t.id,
+					type: 11,
+					name: t.name,
+					guildId: GUILD,
+					parentId,
+				})),
+				hasMore: pages.length > 0,
+			};
+		},
+		async resolveChannelName(channelId) {
+			return channelById.get(channelId)?.name;
+		},
+		async resolveChannelType(channelId) {
+			const ch = channelById.get(channelId);
+			return ch ? 0 : undefined;
+		},
+		async resolveGuildIdForChannel(channelId) {
+			const ch = channelById.get(channelId);
+			return ch ? GUILD : undefined;
+		},
+		async getActiveThreads() {
+			return [];
+		},
+	};
+
+	return { ds, pageCalls };
+}
+
+function archivedThreadConfig(): {
+	guildId: string;
+	spaceDid: string;
+	mode: "full";
+	createdAt: number;
+	updatedAt: number;
+} {
+	return {
+		guildId: GUILD,
+		spaceDid: SPACE,
+		mode: "full",
+		createdAt: 0,
+		updatedAt: 0,
+	};
+}
+
+/** Count createRoom events for thread-kind rooms in a space. */
+function countThreadRoomEvents(roomy: MockRoomyGateway, spaceDid: string) {
+	return roomy
+		.eventsFor(spaceDid)
+		.filter((e) => e.$type === "space.roomy.room.createRoom.v0")
+		.filter((e) => e.kind === "space.roomy.thread");
+}
+
+describe("ensureAndBackfillArchivedThreads", () => {
+	/**
+	 * AT01: A multi-page archived-thread backfill completes, passing the
+	 * previous page's last thread id (a raw snowflake STRING) as the `before`
+	 * cursor — the conversion to a Date happens downstream in the live data
+	 * source, so the loop must never Number()-coerce the cursor itself.
+	 */
+	test("AT01: pages through archived threads with the snowflake cursor", async () => {
+		const PARENT = "200000000000000001";
+		const source = makeArchivedThreadsSource({
+			parents: [
+				{
+					id: PARENT,
+					name: "general",
+					pages: [
+						[
+							{ id: "300000000000000001", name: "t1" },
+							{ id: "300000000000000002", name: "t2" },
+						],
+						[{ id: "300000000000000003", name: "t3" }],
+					],
+				},
+			],
+		});
+
+		const repo = BridgeRepository.open(":memory:");
+		repo.upsertBridgeConfig(GUILD, SPACE, "full");
+		repo.registerMapping(SPACE, "channel", PARENT, newUlid());
+		const roomy = new MockRoomyGateway();
+
+		await ensureAndBackfillArchivedThreads(source.ds, repo, roomy, [
+			archivedThreadConfig(),
+		]);
+
+		// Both pages fetched; second page carried the raw snowflake cursor.
+		expect(source.pageCalls).toHaveLength(2);
+		expect(source.pageCalls[0]?.before).toBeUndefined();
+		expect(source.pageCalls[1]?.before).toBe("300000000000000002");
+
+		// All three threads got rooms + mappings.
+		const roomEvents = countThreadRoomEvents(roomy, SPACE);
+		expect(roomEvents).toHaveLength(3);
+		expect(repo.getRoomyId(SPACE, "thread", "300000000000000001")).toBe(
+			roomEvents[0]?.id,
+		);
+		expect(repo.getRoomyId(SPACE, "thread", "300000000000000003")).toBe(
+			roomEvents[2]?.id,
+		);
+	});
+
+	/**
+	 * AT02: A page whose cursor never advances must stop the loop instead of
+	 * spinning on the same page forever.
+	 */
+	test("AT02: stops when a page fails to advance the cursor", async () => {
+		const PARENT = "200000000000000001";
+		const source = makeArchivedThreadsSource({
+			parents: [
+				{
+					id: PARENT,
+					name: "general",
+					pages: [[{ id: "300000000000000001", name: "stuck" }]],
+					sticky: true,
+				},
+			],
+		});
+
+		const repo = BridgeRepository.open(":memory:");
+		repo.upsertBridgeConfig(GUILD, SPACE, "full");
+		repo.registerMapping(SPACE, "channel", PARENT, newUlid());
+		const roomy = new MockRoomyGateway();
+
+		await ensureAndBackfillArchivedThreads(source.ds, repo, roomy, [
+			archivedThreadConfig(),
+		]);
+
+		// First page creates the thread, second identical page stalls the loop.
+		expect(source.pageCalls).toHaveLength(2);
+		expect(countThreadRoomEvents(roomy, SPACE)).toHaveLength(1);
+	});
+
+	/**
+	 * AT03: A permanently failing parent channel is contained (counted, other
+	 * parent channels still processed) instead of one bad page abandoning the
+	 * whole guild.
+	 */
+	test("AT03: a failing parent channel does not stop other parent channels", async () => {
+		const PARENT_A = "200000000000000001";
+		const PARENT_B = "200000000000000002";
+		const source = makeArchivedThreadsSource({
+			parents: [
+				{ id: PARENT_A, name: "broken", alwaysFail: true },
+				{
+					id: PARENT_B,
+					name: "healthy",
+					pages: [[{ id: "300000000000000002", name: "tb" }]],
+				},
+			],
+		});
+
+		const repo = BridgeRepository.open(":memory:");
+		repo.upsertBridgeConfig(GUILD, SPACE, "full");
+		repo.registerMapping(SPACE, "channel", PARENT_A, newUlid());
+		repo.registerMapping(SPACE, "channel", PARENT_B, newUlid());
+		const roomy = new MockRoomyGateway();
+
+		await ensureAndBackfillArchivedThreads(source.ds, repo, roomy, [
+			archivedThreadConfig(),
+		]);
+
+		// The healthy parent's thread is still backfilled.
+		const roomEvents = countThreadRoomEvents(roomy, SPACE);
+		expect(roomEvents).toHaveLength(1);
+		expect(roomEvents[0]?.name).toBe("tb");
 	});
 });
