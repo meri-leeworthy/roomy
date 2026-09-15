@@ -15,9 +15,23 @@ import { DatabasePool } from "./pool.ts";
 import { GLOBAL_SCHEMA_VERSION, SPACE_SCHEMA_VERSION } from "./db.ts";
 import { READSTATE_SCHEMA_VERSION } from "./readStateDb.ts";
 import { runPendingGlobalMigrations } from "./globalMigrations.ts";
+import { GLOBAL_MIGRATIONS } from "./globalVersions.ts";
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const GLOBAL_SCHEMA_PATH = join(THIS_DIR, "schema-global.sql");
+
+/**
+ * The newest version that schedules async data work, i.e. the one that gets a
+ * (null) marker row in `global_schema_migrations`. Only `kind: "data"`
+ * versions are tracked there — a structural version's DDL is applied by the
+ * schema exec, so it has no marker to assert on. Derived from the manifest so
+ * adding a version cannot silently invalidate this.
+ */
+const NEWEST_DATA_VERSION = Object.entries(GLOBAL_MIGRATIONS)
+  .filter(([, entry]) => entry.kind === "data")
+  .map(([version]) => parseInt(version, 10))
+  .sort((a, b) => b - a)[0]!
+  .toString();
 const cleanup: string[] = [];
 
 afterEach(() => {
@@ -68,7 +82,7 @@ describe("global schema migration", () => {
         .query(
           "select completed_at from global_schema_migrations where version = ?",
         )
-        .get<{ completed_at: number | null }>(GLOBAL_SCHEMA_VERSION);
+        .get<{ completed_at: number | null }>(NEWEST_DATA_VERSION);
 
       expect(edge?.n).toBe(1);
       expect(version?.version).toBe(GLOBAL_SCHEMA_VERSION);
@@ -225,7 +239,11 @@ describe("global schema v9 — mentions.kind column", () => {
       const version = await global
         .query("select version from global_schema_version where id = 1")
         .get<{ version: string }>();
-      expect(version?.version).toBe("9");
+      // Pinned to the running version rather than the literal "9": the worker
+      // advances a v8 DB to GLOBAL_SCHEMA_VERSION, and this test is about
+      // v9's `mentions.kind` backfill surviving that upgrade, not about which
+      // version happens to be current.
+      expect(version?.version).toBe(GLOBAL_SCHEMA_VERSION);
 
       // Existing rows survive and are backfilled to 'mention'.
       const rows = await global

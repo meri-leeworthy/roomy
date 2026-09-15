@@ -25,6 +25,7 @@ import {
 import type { HappyViewConfig } from "../happyview.ts";
 import { log } from "../log.ts";
 import { runPendingGlobalMigrations } from "../db/globalMigrations.ts";
+import { refreshSpaceStats } from "../queries/spaceStats.ts";
 
 interface RawEvent {
   idx: number;
@@ -134,6 +135,21 @@ export async function reMaterializeFromLocalEvents(
       log.warn(
         "startup",
         `entity_space backfill failed for ${stream_id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Publish this space's `space_stats` aggregate row. Member count only
+    // exists in the space's own DB, so the admin dashboard's member-count
+    // ordering needs it precomputed; doing that per request is what made
+    // listSpaces fan out over every space. This sweep runs for every stream on
+    // every boot (caught up or not), so an existing dataset self-heals on the
+    // next deploy and no separate data migration is needed. Idempotent.
+    try {
+      await refreshSpaceStats(db, stream_id as StreamDid);
+    } catch (err) {
+      log.warn(
+        "startup",
+        `space_stats refresh failed for ${stream_id}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 
