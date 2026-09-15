@@ -310,7 +310,7 @@
   id="chat-input"
   onpaste={handlePaste}
   bind:this={element}
-  class="flex-1 relative"
+  class="flex-1 min-w-0 relative"
   role="region"
   aria-label="Chat editor"
 ></div>
