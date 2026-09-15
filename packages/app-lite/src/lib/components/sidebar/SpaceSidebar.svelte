@@ -66,7 +66,10 @@
 
   const roomMetaQuery = createRoomMetadataQuery(
     () => page.params.room ?? "",
-    { enabled: !!page.params.room },
+    // Accessor, not a snapshot: this component stays mounted across room
+    // changes (it is only keyed on `spaceId`), so a plain boolean would
+    // freeze at whatever the route param was on first render.
+    { enabled: () => !!page.params.room },
   );
 
   const spacesQuery = createSpacesQuery({ includeLeft: true });
