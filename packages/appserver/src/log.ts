@@ -145,6 +145,32 @@ export function _setLokiSink(sink: LokiSink | null): void {
   lokiSink = sink;
 }
 
+/**
+ * Flush the Loki sink's queue, bounded by `timeoutMs` so a dead Alloy can
+ * never hold the caller open. Used by the fatal-exit path (`fatal.ts`) to get
+ * the record of *why* the process died into Loki before it exits — the record
+ * that was missing entirely from the 2026-09-14 restart loop.
+ *
+ * Bounded for a different reason than it looks: the sink's own `flush()` is
+ * already fire-and-forget and swallows its errors, so the race is not a
+ * correctness backstop — it stops a *stuck* flush (unresolved fetch) from
+ * holding the exit. Never rejects, so the caller cannot turn a logging
+ * problem into a second failure while handling the first.
+ *
+ * No-op when the sink is disabled (no `ALLOY_URL`).
+ */
+export function flushLogs(timeoutMs: number): Promise<void> {
+  const sink = lokiSink;
+  if (sink === null) return Promise.resolve();
+  return Promise.race([
+    sink.flush().catch(() => {}),
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      timer.unref();
+    }),
+  ]);
+}
+
 export const log = {
   debug: (...args: unknown[]): void => emit("debug", args),
   info: (...args: unknown[]): void => emit("info", args),

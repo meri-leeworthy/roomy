@@ -81,6 +81,18 @@ The appserver exposes a Prometheus `/metrics` endpoint (see
 - `roomy_embed_pending` / `roomy_embed_in_flight` / `roomy_embed_enriched_null` / `roomy_embed_db_backoff`
 - `roomy_search_indexer_queue` / `roomy_search_backfilled` / `roomy_push_queued`
 - `roomy_db_timeouts_total` — DB requests that hit the 30s timeout (pool saturation)
+- `roomy_process_starts_total` — process boots, incremented once per process
+  at startup (`src/fatal.ts`). This is the crash-loop signal: with
+  `Restart=always`, a service that cannot boot shows as a rising boot count
+  instead of a service that merely looks healthy between restarts.
+  **Alert:** `increase(roomy_process_starts_total[10m]) > 3`.
+
+  A fatal exit (uncaught exception / unhandled rejection) is recorded before
+  the process dies, as a `level="error"`, `scope="fatal"`, `fatal=true`
+  record carrying `kind`, `error_name`, and the error message/stack. Query
+  Loki with `{service_name="appserver"} | json | scope="fatal"` to see why a
+  process died — the record that was missing entirely during the 2026-09-14
+  restart loop (289 restarts, zero error lines).
 
 Alloy scrapes it (`prometheus.scrape "appserver"`) and remote-writes to
 Grafana Cloud Mimir. Build Grafana dashboards + alerts on these, e.g. alert

@@ -6,10 +6,16 @@
  * events DB. The factory handles all server construction — DBs, routes,
  * CORS, health endpoints, WebSocket — so this file is only the process
  * entry point and the re-materialization driver.
+ *
+ * Fatal handlers and the boot counter are installed as the first statements,
+ * ahead of the top-level `await`s below: a rejection from `createAppserver`
+ * or the membership migration is exactly the boot-window crash that must be
+ * recorded (see `./fatal.ts`).
  */
 
 import { createAppserver, type AppserverHandle } from "./appserver.ts";
 import { log } from "./log.ts";
+import { installFatalHandlers, recordProcessStart } from "./fatal.ts";
 import {
   reMaterializeFromLocalEvents,
   DEFAULT_REMATERIALIZE_CONCURRENCY,
@@ -17,6 +23,14 @@ import {
 import { openDb, poolStats } from "./db/db.ts";
 import { runPendingReadStateMigrationsWithRetry } from "./db/userSpaceMembershipMigration.ts";
 import { getHappyView } from "./happyview.ts";
+
+// ─── Fatal-exit visibility ─────────────────────────────────────────────────
+// Install before anything that can throw or reject: a boot failure must leave
+// an error record behind, not just a raw Bun abort that never reaches Loki.
+// `recordProcessStart` bumps `roomy_process_starts_total`, which makes a
+// restart loop visible to a scrape (`increase(...[10m]) > 3`).
+installFatalHandlers();
+recordProcessStart();
 
 // ─── Server construction ───────────────────────────────────────────────────
 
