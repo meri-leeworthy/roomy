@@ -9,14 +9,21 @@ const GET_MESSAGES_NSID = "space.roomy.room.getMessages" as const;
 export type Message = typeof schemas.queries.getMessages.Message.infer;
 
 /**
- * Messages query keyed by `{ roomId }` only — matches the key the
- * SyncRouter patches when applying `#messageDiff` frames. Pagination
- * params (limit/cursor) are passed to `queryFn` but excluded from the
- * cache key.
+ * The `getMessages` cache key for a room — keyed by `{ roomId }` only, so it
+ * matches the key the SyncRouter patches when applying `#messageDiff` frames.
+ * Pagination params (limit/cursor) are passed to `queryFn` but excluded from
+ * the cache key.
+ *
+ * Single source of truth for that key: the query, the optimistic send path,
+ * and the cache reads all build it here rather than each re-deriving the shape.
  */
+export function messagesKey(roomId: string): readonly unknown[] {
+  return queryKey(GET_MESSAGES_NSID, { roomId });
+}
+
 export function createMessagesQuery(roomId: () => string, limit = 50) {
   return createQuery<Message[]>(() => ({
-    queryKey: queryKey(GET_MESSAGES_NSID, { roomId: roomId() }),
+    queryKey: messagesKey(roomId()),
     queryFn: async () => {
       const res = await px().query(GET_MESSAGES_NSID, {
         roomId: roomId(),
@@ -36,7 +43,7 @@ export function createMessagesQuery(roomId: () => string, limit = 50) {
       // seen here; a patch landing after this synchronous read is applied on top
       // of the returned value and wins anyway.
       const cached = queryClient.getQueryData<Message[]>(
-        queryKey(GET_MESSAGES_NSID, { roomId: roomId() }) as unknown[],
+        messagesKey(roomId()) as unknown[],
       );
       if (cached && cached.length > 0) {
         const fetchedIds = new Set(fetched.map((m) => m.id));

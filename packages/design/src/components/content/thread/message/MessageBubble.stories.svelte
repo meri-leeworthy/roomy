@@ -8,7 +8,7 @@
   });
 </script>
 
-{#snippet template(args: { authorName: string; isBridged: boolean; isSystem: boolean; mergeWithPrevious: boolean })}
+{#snippet template(args: { authorName: string; isBridged: boolean; isSystem: boolean; mergeWithPrevious: boolean; deliveryState?: "pending" | "failed" })}
   <div class="w-full max-w-2xl p-4">
     <MessageBubble
       authorDid="did:plc:test"
@@ -19,6 +19,7 @@
       isBridged={args.isBridged}
       isSystem={args.isSystem}
       mergeWithPrevious={args.mergeWithPrevious}
+      deliveryState={args.deliveryState}
       onAvatarClick={() => {}}
     >
       {#snippet content()}
@@ -46,6 +47,10 @@
             >❤️ 1</span
           >
         </div>
+      {/snippet}
+      {#snippet deliveryActions()}
+        <span class="font-semibold underline">Retry</span>
+        <span class="font-semibold underline">Discard</span>
       {/snippet}
     </MessageBubble>
   </div>
@@ -91,6 +96,34 @@
     isBridged: false,
     isSystem: false,
     mergeWithPrevious: true,
+  }}
+  {template}
+/>
+
+<!-- An unacknowledged send: dimmed with a "Sending…" line while the appserver
+     round-trip is in flight. -->
+<Story
+  name="Pending delivery"
+  args={{
+    authorName: "Alice",
+    isBridged: false,
+    isSystem: false,
+    mergeWithPrevious: false,
+    deliveryState: "pending",
+  }}
+  {template}
+/>
+
+<!-- A send the appserver rejected: dimmed, marked "Not sent", with the retry
+     and discard controls the app wires into the deliveryActions slot. -->
+<Story
+  name="Failed delivery"
+  args={{
+    authorName: "Alice",
+    isBridged: false,
+    isSystem: false,
+    mergeWithPrevious: false,
+    deliveryState: "failed",
   }}
   {template}
 />

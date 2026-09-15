@@ -3,6 +3,7 @@
   import UserAvatar from "../../../user/UserAvatar.svelte";
   import { formatMessageTimestamp } from "../../../../utils/date.js";
   import Badge from "../../../ui/badge/Badge.svelte";
+  import { IconAlertCircle, IconLoading } from "../../../../icons/index";
 
   /**
    * Presentational message bubble shell.
@@ -33,6 +34,7 @@
     // Visual / interaction state
     showToolbar = false,
     compact = false,
+    deliveryState,
     // Avatar fallback handling: wrappers may want a CDN-resolved URL
     avatarSrc,
     // Behaviour hooks
@@ -46,6 +48,7 @@
     toolbar,
     reactions,
     actions,
+    deliveryActions,
   }: {
     authorDid: string | null;
     authorName?: string;
@@ -64,6 +67,14 @@
     showToolbar?: boolean;
     /** Reduced top margin for dense contexts (e.g. search result lists). */
     compact?: boolean;
+    /**
+     * Delivery state of a message the viewer just sent, until the server
+     * acknowledges it. `pending` dims the message body and shows a sending
+     * indicator; `failed` shows the indicator as an error with the
+     * `deliveryActions` slot (retry / discard). Messages delivered by the
+     * server leave this unset.
+     */
+    deliveryState?: "pending" | "failed";
     /** Pre-resolved avatar URL (e.g. after CDN rewriting). Falls back to authorAvatarUrl. */
     avatarSrc?: string;
     onAvatarClick?: (e: MouseEvent) => void;
@@ -80,6 +91,9 @@
         centered across the whole message (avatar + header + body) — e.g. the
         save/cancel controls shown while editing. Only rendered while editing. */
     actions?: Snippet;
+    /** Controls rendered beside the failure marker of an unsent message
+        (retry / discard). Only rendered when `deliveryState` is `failed`. */
+    deliveryActions?: Snippet;
   } = $props();
 </script>
 
@@ -111,13 +125,44 @@
     mergeWithPrevious ? "mt-1" : compact ? "mt-1.5 pt-0.5" : "mt-5 pt-1",
   ]}
 >
+  {#if deliveryState}
+    <!-- Delivery state of the viewer's own unacknowledged send. Sits above the
+         message so it is visible without hover (unlike the message toolbar)
+         and does not shift the row when it resolves. -->
+    <div
+      class="flex items-center gap-1.5 pl-12 text-[11px] font-medium"
+      class:text-base-500={deliveryState === "pending"}
+      class:dark:text-base-400={deliveryState === "pending"}
+      class:text-red-600={deliveryState === "failed"}
+      class:dark:text-red-400={deliveryState === "failed"}
+    >
+      {#if deliveryState === "pending"}
+        <IconLoading class="size-3 shrink-0 animate-spin" />
+        Sending…
+      {:else}
+        <IconAlertCircle class="size-3 shrink-0" />
+        Not sent
+        {#if deliveryActions}
+          <span class="flex items-center gap-1">
+            {@render deliveryActions()}
+          </span>
+        {/if}
+      {/if}
+    </div>
+  {/if}
+
   <div class={mergeWithPrevious ? "pl-12" : ""}>
     {#if replyContext}
       {@render replyContext()}
     {/if}
   </div>
 
-  <div class="group relative flex w-full justify-start gap-3">
+  <!-- An unacknowledged send reads as provisional: the message itself is
+       dimmed, while the status line above stays at full strength. -->
+  <div
+    class="group relative flex w-full justify-start gap-3"
+    class:opacity-60={!!deliveryState}
+  >
     <!-- Avatar, or left margin (skipped for centred system notices) -->
     {#if !isSystem && !mergeWithPrevious}
       <div class="size-8 sm:size-10">

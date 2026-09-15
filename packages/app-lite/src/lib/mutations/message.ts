@@ -1,6 +1,21 @@
-import { newUlid, serializeBlocks, toBytes } from "@roomy-space/sdk";
+import { decodeTime, newUlid, serializeBlocks, toBytes } from "@roomy-space/sdk";
 import type { Block } from "@roomy-space/sdk";
+import { auth } from "$lib/auth.svelte";
+import type { Message } from "$lib/queries/messages";
+import {
+  confirmPendingSend,
+  failPendingSend,
+  startPendingSend,
+} from "./pending-sends.svelte";
 import { sendEvents } from "./send-events";
+
+/** Base64 of a message body, matching the appserver's `decodeContent` (which
+ *  base64-encodes every non-`text/*` body for the wire). */
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
 
 /**
  * Send a message.
@@ -13,6 +28,12 @@ import { sendEvents } from "./send-events";
  * The composer's Send button and its Enter key both route through this
  * function (via `ChatInput.submit()`), so a message encodes identically
  * however it was submitted.
+ *
+ * The message is inserted into the room's `getMessages` cache before the
+ * request goes out (see {@link startPendingSend}), so it renders immediately
+ * as pending instead of waiting for the server round-trip. A failure leaves
+ * that row in place marked failed — the caller keeps the draft and offers a
+ * retry (see `ChatInputArea.handleSend`).
  */
 export async function sendMessage(
   spaceId: string,
@@ -26,7 +47,6 @@ export async function sendMessage(
     replyTo?: string;
   },
 ): Promise<string> {
-  const id = newUlid();
   const attachments = [
     ...(opts.attachments ?? []),
     ...(opts.replyTo
@@ -40,8 +60,7 @@ export async function sendMessage(
   ];
 
   const serialized = serializeBlocks(opts.blocks);
-  const event: Record<string, unknown> = {
-    id,
+  const draft: Record<string, unknown> = {
     room: roomId,
     $type: "space.roomy.message.createMessage.v0",
     body: { mimeType: serialized.mimeType, data: toBytes(serialized.data) },
@@ -56,7 +75,56 @@ export async function sendMessage(
         : {},
   };
 
-  await sendEvents(spaceId, [event]);
+  const content = toBase64(serialized.data);
+  const { id, event } = startPendingSend({
+    spaceId,
+    roomId,
+    draft,
+    message: (id) => {
+      const profile = auth.profile;
+      return {
+        id,
+        content,
+        mimeType: serialized.mimeType,
+        authorDid: auth.userDid ?? "",
+        authorName: profile?.displayName ?? profile?.handle ?? "",
+        ...(profile?.handle ? { authorHandle: profile.handle } : {}),
+        ...(profile?.avatar ? { authorAvatar: profile.avatar } : {}),
+        timestamp: new Date(decodeTime(id)).toISOString(),
+        ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+        reactions: [],
+        // Mirrors the appserver's embed rows: media URLs carry a
+        // `?message=<id>` query (see `selectMessages` / the createMessage
+        // materialiser), so the optimistic row renders the same image the
+        // server will return at the same URL. Replies and links produce no
+        // embed row, so they are not media here either.
+        media: attachments.flatMap((a) => {
+          if (a.$type === "space.roomy.attachment.reply.v0") return [];
+          if (a.$type === "space.roomy.attachment.link.v0") return [];
+          const { uri, mimeType: type } = a;
+          if (typeof uri !== "string" || typeof type !== "string") return [];
+          return [
+            {
+              url: `${uri}?message=${id}`,
+              type,
+              ...(typeof a.alt === "string" ? { alt: a.alt } : {}),
+              ...(typeof a.size === "number" ? { size: a.size } : {}),
+              ...(typeof a.name === "string" ? { name: a.name } : {}),
+            },
+          ];
+        }),
+        linkEmbeds: [],
+      } satisfies Message;
+    },
+  });
+
+  try {
+    await sendEvents(spaceId, [event]);
+    confirmPendingSend(id);
+  } catch (e) {
+    failPendingSend(id);
+    throw e;
+  }
   return id;
 }
 

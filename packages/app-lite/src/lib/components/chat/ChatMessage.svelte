@@ -5,7 +5,7 @@
   import MessageBubble from "@roomy/design/components/content/thread/message/MessageBubble.svelte";
   import { messagingState, toggleToolbar, toolbarOpenState } from "./messaging-state.svelte";
   import Button from "@roomy/design/components/ui/button/Button.svelte";
-  import { IconCheck, IconX } from "@roomy/design/icons";
+  import { IconCheck, IconRetry, IconX } from "@roomy/design/icons";
   import MessageContext from "./MessageContext.svelte";
   import MessageReactions from "./MessageReactions.svelte";
   import MessageToolbar from "./MessageToolbar.svelte";
@@ -16,6 +16,11 @@
   import ChatInput from "./ChatInput.svelte";
   import { createMentionSearch } from "$lib/tiptap/mentions";
   import { editMessage, removeLinkEmbed } from "$lib/mutations/message";
+  import {
+    discardPendingSend,
+    getDeliveryState,
+    retryPendingSend,
+  } from "$lib/mutations/pending-sends.svelte";
   import type { Message } from "$lib/queries/messages";
   import { resolveBlobUrl } from "$lib/utils";
   import { RICHTEXT_MIME, extractFacetUrls } from "@roomy-space/sdk";
@@ -196,11 +201,17 @@
   // authored by the space itself. They carry no meaningful author identity, so
   // render them as a centred system notice without an avatar/author line.
   let isSystem = $derived(message.system === true);
+  // A message this client sent whose appserver acknowledgement hasn't landed
+  // yet. Read from the send registry rather than the cached row: the
+  // `#messageDiff` `add` replaces that row wholesale, so a flag stored on it
+  // would not survive reconciliation.
+  const deliveryState = $derived(getDeliveryState(message.id));
   let showToolbar = $derived(
     !isSystem &&
       !isEditing &&
       !isThreading &&
       !isSelecting &&
+      !deliveryState &&
       ((!isMobile.current && hovered) || (isMobile.current && isToolbarOpen)) ||
       keepToolbarOpen,
   );
@@ -297,6 +308,23 @@
           : undefined,
     });
   }
+
+  // ── Unacknowledged sends ───────────────────────────────────────────────
+  /** True while a *retry* is in flight, so the button reflects it. */
+  let retrying = $state(false);
+
+  async function handleRetry() {
+    retrying = true;
+    try {
+      await retryPendingSend(message.id);
+    } catch (e) {
+      // Still failed — the row stays marked, so the user can try again. The
+      // marker itself is the feedback; log for the console trail.
+      console.error("Failed to resend message:", e);
+    } finally {
+      retrying = false;
+    }
+  }
 </script>
 
 {#snippet messageBox()}
@@ -330,6 +358,7 @@
       {isSelected}
       {isEditing}
       {showToolbar}
+      {deliveryState}
     >
       {#snippet replyContext()}
         {#if message.forwardedFrom}
@@ -439,6 +468,32 @@
             <IconCheck />
           </Button>
         {/if}
+      {/snippet}
+
+      {#snippet deliveryActions()}
+        <Button
+          variant="ghost"
+          size="sm"
+          class="font-medium"
+          disabled={retrying}
+          aria-label="Retry sending"
+          title="Retry sending"
+          onclick={handleRetry}
+        >
+          <IconRetry />
+          Retry
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="font-medium"
+          disabled={retrying}
+          aria-label="Discard message"
+          title="Discard message"
+          onclick={() => discardPendingSend(message.id)}
+        >
+          Discard
+        </Button>
       {/snippet}
 
       {#snippet linkEmbeds()}
