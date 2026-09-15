@@ -21,9 +21,6 @@
     onOpenChange,
     onOutsideClick,
   }: Props = $props();
-  $effect(() => {
-    console.error(onOutsideClick);
-  });
 </script>
 
 <Drawer.Root
