@@ -209,6 +209,8 @@
     did: profile?.did,
     handle: profile?.handle,
     displayName: profile?.displayName,
+    pronouns: profile?.pronouns,
+    website: profile?.website,
     description: profile?.description,
     avatar: resolveBlobUrl(profile?.avatar),
     banner: resolveBlobUrl(profile?.banner),
