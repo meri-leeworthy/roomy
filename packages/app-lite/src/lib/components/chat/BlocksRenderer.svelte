@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Block, Facet, FacetFeature } from "@roomy-space/sdk";
+  import { enrichInternalLinks, parseInternalLinkHref } from "./enrich-internal-links";
 
   let {
     blocks,
@@ -130,7 +131,15 @@
           if (appliedAnchor) break;
           appliedAnchor = true;
           const roomRef = feature as { spaceId: string; roomId?: string };
-          inner = `<a href="/${escapeAttr(roomRef.spaceId)}${roomRef.roomId ? `/${escapeAttr(roomRef.roomId)}` : ""}" oncontextmenu="event.stopPropagation()" class="mention !no-underline">${inner}</a>`;
+          const href = `/${escapeAttr(roomRef.spaceId)}${roomRef.roomId ? `/${escapeAttr(roomRef.roomId)}` : ""}`;
+          // Mark internal anchors so the shared enrichInternalLinks action can
+          // upgrade them to a SpaceRoomBadge — the same treatment a hand-typed
+          // room link gets on the legacy markdown path.
+          const isInternalLink =
+            parseInternalLinkHref(href) !== null
+              ? ' data-roomy-internal-link="true"'
+              : "";
+          inner = `<a href="${href}"${isInternalLink} oncontextmenu="event.stopPropagation()" class="mention !no-underline">${inner}</a>`;
           break;
         }
         default:
@@ -184,7 +193,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="roomy-blocks">
+<div use:enrichInternalLinks class="roomy-blocks">
   {#each blocks as block, i (blockKey(block, i))}
     {#if block.$type === "space.roomy.richtext.blocks#text"}
       <!-- svelte-ignore a11y_no_static_element_interactions -->

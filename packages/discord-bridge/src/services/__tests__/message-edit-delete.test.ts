@@ -19,8 +19,10 @@ import {
 	makeUser,
 	ROOMY_CHANNEL_ULID,
 	ROOMY_MESSAGE_ULID,
+	ROOMY_THREAD_ULID,
 	SPACE_A,
 	SPACE_B,
+	THREAD,
 } from "./helpers/test-data.ts";
 import { decodeRichText, expectToBe, expectToBeDefined } from "./utils.ts";
 
@@ -174,6 +176,35 @@ describe("handleMessageEdit", () => {
 		const rich = decodeRichText(event.body);
 		expect(rich.text).toContain("@Test User");
 		expect(rich.didMentions).toContain("did:discord:111111111111111111");
+	});
+
+	// ED11: A bridged THREAD mention in edited content keeps its display name
+	// and roomRef/link even when it's absent from mentionChannelIds (Discord
+	// omits threads from that field). The edit path's name resolution must
+	// scan the content — matching the create path — so the display name is
+	// resolved rather than falling back to the raw snowflake text.
+	test("ED11: preserves thread mention display name + roomRef on edit", async () => {
+		repo.registerMapping(SPACE_A, "message", MSG_ID_STR, ROOMY_MESSAGE_ULID);
+		repo.registerMapping(SPACE_A, "thread", THREAD, ROOMY_THREAD_ULID);
+
+		const msg = makeMessage({
+			id: MSG_ID_STR,
+			content: `Edited: look at <#${THREAD}>`,
+			editedTimestamp: Date.now(),
+			// no mentionChannelIds — threads are omitted by Discord
+		});
+		const resolveChannelName = async (_id: string) => "my-thread";
+
+		await handleMessageEdit(msg, repo, roomy, resolveChannelName);
+
+		const event = editMessageEvent(roomy, SPACE_A);
+		expectToBeDefined(event);
+		const rich = decodeRichText(event.body);
+		expect(rich.text).toContain("#my-thread");
+		expect(rich.text).not.toContain(THREAD);
+		expect(rich.roomRefs).toEqual([
+			{ spaceId: SPACE_A, roomId: ROOMY_THREAD_ULID },
+		]);
 	});
 
 	// ED10: Edit fan-out to multiple spaces

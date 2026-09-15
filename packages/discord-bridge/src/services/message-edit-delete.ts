@@ -49,12 +49,19 @@ export async function handleMessageEdit(
 	const targetSpaces = repo.getTargetSpacesForChannel(guildId, channelId);
 	if (targetSpaces.length === 0) return;
 
-	// Pre-resolve channel names from mentionedChannelIds (with REST fallback)
+	// Pre-resolve channel/thread names from mentionChannelIds AND a content scan
+	// for `<#id>` (with REST fallback). Discord omits threads from
+	// mentionChannelIds, so an edited thread mention would otherwise fall back
+	// to the raw snowflake text — mirror the create path (message-ingestion.ts)
+	// which scans the content to guarantee every bridged reference resolves.
 	const channelNames = new Map<string, string>();
-	if (resolveChannelName && message.mentionChannelIds) {
+	if (resolveChannelName) {
+		const refs = new Set<string>(message.mentionChannelIds ?? []);
+		for (const m of (message.content ?? "").matchAll(/<#(\d+)>/g)) {
+			if (m[1]) refs.add(m[1]);
+		}
 		const results = await Promise.all(
-			message.mentionChannelIds.map(async (id) => {
-				const idStr = id;
+			[...refs].map(async (idStr) => {
 				const name = await resolveChannelName(idStr);
 				return { idStr, name } as const;
 			}),
