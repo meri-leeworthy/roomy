@@ -147,12 +147,7 @@
         (meta?.joinPolicy.allowMemberInvites ?? false)),
   );
   const showDiscordBridgeTab = false; //$derived(meta?.isAdmin ?? false);
-  const federationEnabled = $derived(
-    flagsQuery.data?.flags.includes("channel-federation") ?? false,
-  );
-  const showFederationTab = $derived(
-    federationEnabled && (meta?.isAdmin ?? false),
-  );
+  const showFederationTab = $derived(meta?.isAdmin ?? false);
   const spaceAccountMgmtEnabled = $derived(
     flagsQuery.data?.flags.includes("space-account-management") ?? false,
   );
