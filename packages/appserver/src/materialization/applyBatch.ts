@@ -571,6 +571,36 @@ async function applyChunkSideEffects(
       if (messageId) {
         enqueueDeleteMessage(messageId);
       }
+    } else if (
+      e.event.$type === "space.roomy.message.moveMessages.v0" &&
+      "toRoomId" in e.event
+    ) {
+      // The per-event statements above only rewrote `entities.room`. The
+      // derived state (sort_idx, activity windows, read-state) is applied by
+      // `applyBundle`'s move branch — the same route createMessage takes
+      // through this function, with an empty statement list because the event
+      // SQL has already been applied. Single call site: routing moves through
+      // applyBundle here (rather than calling the helper directly) keeps ONE
+      // owner of the side effects, so they can never be applied twice.
+      const bundle: StatementBundleSuccess = {
+        status: "success",
+        event: e.event,
+        eventIdx: e.idx,
+        user: e.user,
+        statements: [],
+        dependsOn: [],
+      };
+      await applyBundle(db, bundle, { isBackfill, streamId }, globalDb, openReadStateDb());
+
+      // Re-index every moved message: the search worker reads the message's
+      // `room` from the per-space DB, and Qdrant filters on it, so a moved
+      // message must be re-upserted to leave the source room's results.
+      const messageIds = (e.event as Record<string, unknown>).messageIds;
+      if (Array.isArray(messageIds)) {
+        for (const id of messageIds) {
+          if (typeof id === "string") enqueueIndexMessage(streamId, id);
+        }
+      }
     }
   }
 }

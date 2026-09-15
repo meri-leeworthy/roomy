@@ -192,6 +192,7 @@ describe("auth/writeAuth — room write events", () => {
     expect(result).toBeUndefined();
   });
 
+
   test("banned user cannot write", async () => {
     const { asyncDb: db } = freshDb();
     await seedSpace(db);
@@ -238,6 +239,93 @@ describe("auth/writeAuth — room write events", () => {
     );
     expect(result).toBeDefined();
     expect(result!.status).toBe(404);
+  });
+});
+
+describe("auth/writeAuth — moveMessages is admin-only", () => {
+  /** A move event with `room` as the source and `toRoomId` the destination. */
+  function moveEvent(sourceRoomId: string, destRoomId: string) {
+    return {
+      id: newUlid(),
+      $type: "space.roomy.message.moveMessages.v0",
+      room: sourceRoomId,
+      messageIds: [newUlid()],
+      toRoomId: destRoomId,
+    };
+  }
+
+  test("an ordinary room-writer cannot move a message", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    const DEST = newUlid();
+    await seedChannel(db, DEST, SPACE, "readwrite");
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+
+    const result = await checkWriteAuth(db, SPACE, USER, moveEvent(CHANNEL, DEST));
+    expect(result).toBeDefined();
+    expect(result!.status).toBe(403);
+    expect(result!.message).toContain("admin");
+  });
+
+  test("a space admin can move a message", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    const DEST = newUlid();
+    await seedChannel(db, DEST, SPACE, "readwrite");
+    await seedUser(db, ADMIN);
+    await addEdge(db, SPACE, ADMIN, "admin");
+
+    const result = await checkWriteAuth(db, SPACE, ADMIN, moveEvent(CHANNEL, DEST));
+    expect(result).toBeUndefined();
+  });
+
+  test("an admin cannot move into a room that does not exist", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    await seedUser(db, ADMIN);
+    await addEdge(db, SPACE, ADMIN, "admin");
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      ADMIN,
+      moveEvent(CHANNEL, "01MISSINGDEST0000000000000"),
+    );
+    expect(result).toBeDefined();
+    expect(result!.status).toBe(404);
+  });
+
+  test("an admin cannot move a message into another space's room", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    // A room owned by a different stream (space).
+    const FOREIGN_SPACE = "did:web:other-space.example";
+    const FOREIGN_ROOM = newUlid();
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [
+      FOREIGN_ROOM,
+      FOREIGN_SPACE,
+    ]);
+    await db.run(
+      "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', 'readwrite')",
+      [FOREIGN_ROOM],
+    );
+    await seedUser(db, ADMIN);
+    await addEdge(db, SPACE, ADMIN, "admin");
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      ADMIN,
+      moveEvent(CHANNEL, FOREIGN_ROOM),
+    );
+    expect(result).toBeDefined();
+    expect(result!.status).toBe(400);
+    expect(result!.message).toContain("not in this space");
   });
 });
 

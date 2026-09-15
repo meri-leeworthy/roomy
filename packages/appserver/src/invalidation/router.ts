@@ -142,6 +142,18 @@ export class Router implements IInvalidationRouter {
           if (messageId) ids.add(messageId);
           break;
         }
+        // moveMessages: the diff carries the moved messages into the
+        // destination room, keyed by their own ids (surfaced by
+        // `toAppliedEvent` as `details.messageIds`). Reading them back
+        // post-materialization yields the row with its NEW `room`, which is
+        // what the destination `add` op must carry.
+        case "space.roomy.message.moveMessages.v0": {
+          const messageIds = event.details?.messageIds as Ulid[] | undefined;
+          if (Array.isArray(messageIds)) {
+            for (const id of messageIds) if (id) ids.add(id);
+          }
+          break;
+        }
       }
     }
     if (ids.size === 0) return new Map();

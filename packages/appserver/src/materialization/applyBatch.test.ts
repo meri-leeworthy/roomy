@@ -1320,3 +1320,330 @@ describe("applyBatch — activity item canonical timestamps", () => {
     expect(stored[1]!.ts).toBe(discordTs1);
   });
 });
+
+/** Build a moveMessages event moving one message from `source` to `dest`. */
+function moveMessagesEvent(
+  sourceRoomId: string,
+  destRoomId: string,
+  id: string,
+  messageId: string,
+): Event {
+  return {
+    $type: "space.roomy.message.moveMessages.v0",
+    id,
+    room: sourceRoomId,
+    messageIds: [messageId],
+    toRoomId: destRoomId,
+  } as unknown as Event;
+}
+
+describe("moveMessages", () => {
+  // The SDK materialiser only rewrites `entities.room`. Everything else that
+  // is keyed by the message's room has to follow, or the move is only half
+  // applied: sort_idx decides which page the message lands on, activity_item
+  // drives the feed, and unread counts are maintained incrementally.
+  async function seedTwoChannels(db: Database): Promise<{
+    source: string;
+    dest: string;
+  }> {
+    const source = newUlid();
+    const dest = newUlid();
+    for (const id of [source, dest]) {
+      db.run("insert into entities (id, stream_id) values (?, ?)", [id, STREAM]);
+      db.run(
+        "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', 'readwrite')",
+        [id],
+      );
+    }
+    return { source, dest };
+  }
+
+  test("a moved message sorts at the top of the destination timeline", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+    const { source, dest } = await seedTwoChannels(db);
+
+    // An OLD message (2 days back) in the source room, and a newer message
+    // already sitting in the destination.
+    const T_old = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    const movedId = ulid(T_old);
+    const destMsgId = ulid(T_old + 60_000);
+
+    // The move happens NOW — its event id is the newest timestamp in play.
+    const moveId = newUlid();
+
+    await applyBatch(
+      asyncDb,
+      STREAM,
+      [
+        decoded(createMessageEvent(source, movedId, "moved"), 1),
+        decoded(createMessageEvent(dest, destMsgId, "already here"), 2),
+        decoded(moveMessagesEvent(source, dest, moveId, movedId), 3),
+      ],
+      { isBackfill: true },
+    );
+
+
+    const { messages } = await selectMessages(asyncDb, {
+      kind: "room",
+      roomId: dest,
+      limit: 50,
+      cursor: null,
+    });
+
+    // Ascending order: the moved message sorts LAST (newest) because the move
+    // event's time is now, even though its own ULID is two days old. Without
+    // the sort_idx rewrite its old ULID would keep it FIRST here — and on a
+    // busy channel below the newest-page cutoff, absent from the page
+    // entirely (appearing only via the WS diff and vanishing on refetch).
+    expect(messages.map((m) => m.id)).toEqual([destMsgId, movedId]);
+  });
+
+  test("the source room no longer returns the moved message", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+    const { source, dest } = await seedTwoChannels(db);
+
+    const movedId = newUlid();
+
+    await applyBatch(
+      asyncDb,
+      STREAM,
+      [
+        decoded(createMessageEvent(source, movedId, "moving out"), 1),
+        decoded(moveMessagesEvent(source, dest, newUlid(), movedId), 2),
+      ],
+      { isBackfill: true },
+    );
+
+    const fromSource = await selectMessages(asyncDb, {
+      kind: "room",
+      roomId: source,
+      limit: 50,
+      cursor: null,
+    });
+    expect(fromSource.messages).toHaveLength(0);
+
+    const fromDest = await selectMessages(asyncDb, {
+      kind: "room",
+      roomId: dest,
+      limit: 50,
+      cursor: null,
+    });
+    expect(fromDest.messages.map((m) => m.id)).toEqual([movedId]);
+    expect(fromDest.messages[0]?.content).toBe("moving out");
+  });
+
+  test("activity windows follow the move: dest gains, source drops", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+    const { source, dest } = await seedTwoChannels(db);
+
+    const movedId = newUlid();
+    const stayingId = newUlid();
+
+    await applyBatch(
+      asyncDb,
+      STREAM,
+      [
+        decoded(createMessageEvent(source, movedId, "leaving"), 1),
+        decoded(createMessageEvent(source, stayingId, "staying"), 2),
+        decoded(moveMessagesEvent(source, dest, newUlid(), movedId), 3),
+      ],
+      { isBackfill: true },
+    );
+
+    const destRow = await asyncDb
+      .query("select recent_message_ids from activity_item where room_id = ?")
+      .get<{ recent_message_ids: string }>([dest]);
+    expect(destRow).not.toBeNull();
+    expect(JSON.parse(destRow!.recent_message_ids).map((e: { id: string }) => e.id)).toEqual([
+      movedId,
+    ]);
+
+    // The source window is rebuilt from its REMAINING contents, so the moved
+    // id is gone while the untouched message stays.
+    const sourceRow = await asyncDb
+      .query("select recent_message_ids from activity_item where room_id = ?")
+      .get<{ recent_message_ids: string }>([source]);
+    expect(sourceRow).not.toBeNull();
+    expect(JSON.parse(sourceRow!.recent_message_ids).map((e: { id: string }) => e.id)).toEqual([
+      stayingId,
+    ]);
+  });
+
+  test("emptying a room drops its activity_item row", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+    const { source, dest } = await seedTwoChannels(db);
+
+    const onlyId = newUlid();
+
+    await applyBatch(
+      asyncDb,
+      STREAM,
+      [
+        decoded(createMessageEvent(source, onlyId, "the only one"), 1),
+        decoded(moveMessagesEvent(source, dest, newUlid(), onlyId), 2),
+      ],
+      { isBackfill: true },
+    );
+
+    const sourceRow = await asyncDb
+      .query("select 1 as n from activity_item where room_id = ?")
+      .get<{ n: number }>([source]);
+    expect(sourceRow).toBeNull();
+  });
+});
+
+describe("moveMessages — read-state side effects", () => {
+  /**
+   * Seed a channel pair plus read positions in the read-state DB (reached via
+   * the process-wide handle `beforeEach` installs).
+   */
+  async function seedChannels(
+    db: Database,
+    positions: Array<{ roomId: string; seenUpTo: string; unreadCount: number }>,
+  ): Promise<{ source: string; dest: string }> {
+    const source = newUlid();
+    const dest = newUlid();
+    for (const id of [source, dest]) {
+      db.run("insert into entities (id, stream_id) values (?, ?)", [id, STREAM]);
+      db.run(
+        "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', 'readwrite')",
+        [id],
+      );
+    }
+    for (const p of positions) {
+      await openReadStateDb().run(
+        `insert into read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
+         values (?, ?, ?, ?, ?, ?)`,
+        [USER, p.roomId, STREAM, p.seenUpTo, p.unreadCount, Date.now()],
+      );
+    }
+    return { source, dest };
+  }
+
+  /**
+   * Materialize the message via a BACKFILL batch — it writes the row (and its
+   * `comp_content.timestamp`) without touching read-state, so the move's own
+   * effect is measured in isolation.
+   */
+  async function seedMessage(
+    asyncDb: DbLike,
+    roomId: string,
+    messageId: string,
+  ): Promise<void> {
+    await applyBatch(
+      asyncDb,
+      STREAM,
+      [decoded(createMessageEvent(roomId, messageId, "payload"), 1)],
+      { isBackfill: true },
+    );
+  }
+
+  test("an unread moved message leaves the source count and bumps the destination", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    const msgTs = Date.now() - 60_000;
+    const movedId = ulid(msgTs);
+    const { source, dest } = await seedChannels(db, []);
+    await seedMessage(asyncDb, source, movedId);
+
+    // The user read everything BEFORE the message (watermark below it), and
+    // tracks the destination with a caught-up count.
+    await openReadStateDb().run(
+      `insert into read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
+       values (?, ?, ?, ?, ?, ?)`,
+      [USER, source, STREAM, ulid(msgTs - 10_000), 1, Date.now()],
+    );
+    await openReadStateDb().run(
+      `insert into read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
+       values (?, ?, ?, ?, ?, ?)`,
+      [USER, dest, STREAM, "0", 0, Date.now()],
+    );
+
+    await applyBatch(
+      asyncDb,
+      STREAM,
+      [decoded(moveMessagesEvent(source, dest, newUlid(), movedId), 1)],
+      { isBackfill: false },
+    );
+
+    const readState = openReadStateDb();
+    const sourceRow = await readState
+      .query("select unread_count from read_positions where user_did = ? and room_id = ?")
+      .get<{ unread_count: number }>([USER, source]);
+    // The message was unread for this user, so moving it out removes exactly
+    // that one from the room's count.
+    expect(sourceRow?.unread_count).toBe(0);
+
+    const destRow = await readState
+      .query("select unread_count from read_positions where user_did = ? and room_id = ?")
+      .get<{ unread_count: number }>([USER, dest]);
+    // A channel move bumps every user tracking the destination.
+    expect(destRow?.unread_count).toBe(1);
+  });
+
+  test("an ALREADY-READ moved message does not decrement the source count", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    const msgTs = Date.now() - 60_000;
+    const movedId = ulid(msgTs);
+    const { source, dest } = await seedChannels(db, []);
+    await seedMessage(asyncDb, source, movedId);
+
+    // The watermark is PAST the moved message, and a later message is what
+    // the count of 1 refers to. A blind `-1 per moved message` would wrongly
+    // zero it; the exact decrement compares against the watermark instead.
+    await openReadStateDb().run(
+      `insert into read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
+       values (?, ?, ?, ?, ?, ?)`,
+      [USER, source, STREAM, ulid(msgTs + 10_000), 1, Date.now()],
+    );
+
+    await applyBatch(
+      asyncDb,
+      STREAM,
+      [decoded(moveMessagesEvent(source, dest, newUlid(), movedId), 1)],
+      { isBackfill: false },
+    );
+
+    const sourceRow = await openReadStateDb()
+      .query("select unread_count from read_positions where user_did = ? and room_id = ?")
+      .get<{ unread_count: number }>([USER, source]);
+    expect(sourceRow?.unread_count).toBe(1);
+  });
+
+  test("backfill replay skips the read-state mutations", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    const msgTs = Date.now() - 60_000;
+    const movedId = ulid(msgTs);
+    const { source } = await seedChannels(db, []);
+    await seedMessage(asyncDb, source, movedId);
+
+    await openReadStateDb().run(
+      `insert into read_positions (user_did, room_id, space_did, seen_up_to, unread_count, updated_at)
+       values (?, ?, ?, ?, ?, ?)`,
+      [USER, source, STREAM, ulid(msgTs - 10_000), 1, Date.now()],
+    );
+
+    await applyBatch(
+      asyncDb,
+      STREAM,
+      [decoded(moveMessagesEvent(source, newUlid(), newUlid(), movedId), 1)],
+      { isBackfill: true },
+    );
+
+    const sourceRow = await openReadStateDb()
+      .query("select unread_count from read_positions where user_did = ? and room_id = ?")
+      .get<{ unread_count: number }>([USER, source]);
+    // Read-state is appserver-owned and not reconstructed by replay, so a
+    // replayed move must leave the live counts alone.
+    expect(sourceRow?.unread_count).toBe(1);
+  });
+});

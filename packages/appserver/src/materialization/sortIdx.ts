@@ -68,6 +68,49 @@ export async function setMessageSortIdxByForward(db: DbLike, event: Event): Prom
 }
 
 /**
+ * Set `entities.sort_idx` for messages moved by a `moveMessages` event.
+ *
+ * Ordering policy — a moved message sorts at the TOP of the destination
+ * room's timeline, keyed by the MOVE event's own ULID time.
+ *
+ * Why: `sort_idx` is the server's page-selection key (`selectMessages` orders
+ * by it and takes the newest `limit` rows — room.getMessages.ts). A moved
+ * message that kept its original `sort_idx` would be buried according to its
+ * ORIGINAL send time, so moving an old message into a busy channel would put
+ * it outside the newest-50 page: it would flash into connected clients via
+ * the WS `add` diff and vanish on the next refetch. Keying by the move
+ * event's time makes the move immediately visible and consistent between the
+ * diff and a refetch, which is the same reasoning the `forwardMessages` fix
+ * above applies to a forward of an old message.
+ *
+ * `comp_content.timestamp` is deliberately NOT rewritten: the message's
+ * original send time is its identity, and the client renders timestamps from
+ * `timestamp` (the timeline is ordered by cache order, which the diff
+ * re-sorts by `timestamp` — see the SDK's `applyMessageDiff`).
+ *
+ * Only messages that actually exist are touched (a move of an unmaterialised
+ * id is a no-op), and the update is unconditional: unlike create/forward,
+ * which use `and sort_idx is null`, a moved message already HAS a sort_idx
+ * and the move must overwrite it.
+ */
+export async function setMessageSortIdxByMove(
+  db: DbLike,
+  event: Event,
+): Promise<void> {
+  if (event.$type !== "space.roomy.message.moveMessages.v0") return;
+
+  const sortIdx = ulid(decodeTime(event.id)) as Ulid;
+  for (const messageId of event.messageIds) {
+    await db.run(
+      "update entities set sort_idx = ? where id = ? and room = ?",
+      sortIdx,
+      messageId,
+      event.toRoomId,
+    );
+  }
+}
+
+/**
  * Set `entities.sort_idx` for a message moved by a `reorderMessage` event,
  * placing it lexicographically between the entity referenced by `after` and
  * whichever entity currently sorts immediately after that one.

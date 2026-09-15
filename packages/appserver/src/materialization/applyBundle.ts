@@ -26,16 +26,16 @@
  * serializes the savepoint-managed section so only one `applyBundle` has an
  * open savepoint at a time.
  */
-
 import type { DbLike } from "../db/types.ts";
 import type { StreamDid, Ulid, UserDid } from "@roomy-space/sdk";
-import type { SqlStatement, StatementBundleSuccess } from "./types.ts";
 import {
   canonicalMessageTimestamp,
   setMessageSortIdxByForward,
   setMessageSortIdxByReorder,
   setMessageSortIdxByTimestamp,
 } from "./sortIdx.ts";
+import { applyMoveSideEffects } from "./moveMessages.ts";
+import type { SqlStatement, StatementBundleSuccess } from "./types.ts";
 import { isThread, refreshThreadActivityOnMessage, upsertUserThreadActivity } from "../queries/userActiveThreads.ts";
 import { upsertUserRoomParticipation } from "../queries/userRoomParticipation.ts";
 import { upsertActivityItem } from "./activityItem.ts";
@@ -267,6 +267,25 @@ async function applyBundleInner(
             : bundle.user;
         await upsertUserThreadActivity(readStateDb, reactingUser, bundle.event.room, opts.streamId, timestamp);
       }
+    }
+
+    // moveMessages: unwind the message's createMessage bookkeeping in the
+    // SOURCE room and re-apply it in the DESTINATION (activity windows,
+    // unread counts, thread activity, participation). The per-space side of
+    // this runs on backfill too — the source room's activity window must
+    // reflect its contents after a replay — while the read-state half is
+    // skipped for backfill (see applyMoveSideEffects).
+    if (
+      bundle.event.$type === "space.roomy.message.moveMessages.v0" &&
+      bundle.event.room &&
+      "toRoomId" in bundle.event
+    ) {
+      await applyMoveSideEffects(db, {
+        streamId: opts.streamId,
+        event: bundle.event,
+        readStateDb,
+        isBackfill: opts.isBackfill,
+      });
     }
 
     // SetUserProfile events update the global profile store (bridged users

@@ -103,7 +103,6 @@ const ALLOWED_TYPES: Set<string> = new Set([
  */
 const ROOM_WRITE_TYPES = new Set([
   "space.roomy.message.createMessage.v0",
-  "space.roomy.message.moveMessages.v0",
   "space.roomy.message.reorderMessage.v0",
   "space.roomy.message.forwardMessages.v0",
   "space.roomy.reaction.addReaction.v0",
@@ -111,6 +110,11 @@ const ROOM_WRITE_TYPES = new Set([
   "space.roomy.link.createRoomLink.v0",
   "space.roomy.link.removeRoomLink.v0",
 ]);
+
+// NB: `space.roomy.message.moveMessages.v0` is deliberately NOT in
+// ROOM_WRITE_TYPES. It is a curator action (it rewrites another room's
+// timeline and both rooms' unread/activity state), so it is dispatched to
+// `checkMoveMessages` below — space admin, plus a destination-room guard.
 
 /**
  * Room-write events that additionally require author-or-admin check.
@@ -320,6 +324,50 @@ async function requireRoomWriteCheck(
     "Forbidden",
     "Caller does not have write access to this room",
   );
+}
+
+/**
+ * Authorize a `moveMessages` event. Requires a space admin, plus two guards
+ * that the materializer cannot enforce on its own:
+ *
+ *   - the destination room must exist (otherwise the message would be
+ *     materialised into a room that isn't there, invisible to every read),
+ *   - the destination must be in the SAME space. The event is written to one
+ *     space's stream and the materializer blindly rewrites the per-space
+ *     `entities.room`, so a cross-space id would point a message at a room
+ *     that lives in a different DB.
+ *
+ * Like every other room-write event, this requires the referenced room to be
+ * materialized already — a room created in the same batch is not (see
+ * `sendEvents`; `createRoom` + `createMessage` in one batch is likewise
+ * rejected). Callers create the destination first, then move into it.
+ */
+async function checkMoveMessages(
+  db: DbLike,
+  spaceId: string,
+  callerDid: string,
+  event: { $type: string; [k: string]: unknown },
+  access?: SpaceAccess,
+): Promise<WriteAuthResult> {
+  const adminResult = await requireSpaceAdminCheck(db, spaceId, callerDid, access);
+  if (adminResult) return adminResult;
+
+  const toRoomId = event.toRoomId;
+  if (typeof toRoomId !== "string") {
+    return denied(400, "InvalidRequest", "Event is missing required 'toRoomId' field");
+  }
+  const destination = await roomAccess(db, toRoomId, callerDid);
+  if (!destination.exists) {
+    return denied(404, "NotFound", `Destination room not found: ${toRoomId}`);
+  }
+  if (destination.spaceId !== spaceId) {
+    return denied(
+      400,
+      "InvalidRequest",
+      `Destination room ${toRoomId} is not in this space`,
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -651,6 +699,15 @@ export async function checkWriteAuth(
       return denied(400, "InvalidRequest", `Event is missing required 'room' field`);
     }
     return await requireRoomWriteCheck(db, roomId, callerDid, globalDb, dbResolver);
+  }
+
+  // ── Message move (space admin + destination guard) ──
+  if ($type === "space.roomy.message.moveMessages.v0") {
+    const roomId = event.room;
+    if (typeof roomId !== "string") {
+      return denied(400, "InvalidRequest", `Event is missing required 'room' field`);
+    }
+    return await checkMoveMessages(db, spaceId, callerDid, event, access);
   }
 
   // ── Room write + author check (edit/delete) ──

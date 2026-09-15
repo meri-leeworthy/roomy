@@ -158,6 +158,24 @@ export async function syncMentionsIndex(
         await globalDb.run(`delete from mentions where message_id = ?`, [messageId]);
         break;
       }
+      case "space.roomy.message.moveMessages.v0": {
+        // `event.roomId` is the SOURCE room; the messages now live in
+        // `toRoomId`, so the index's room_id must follow. The `(did,
+        // message_id)` rows and their kinds are unchanged — only the room
+        // context the mentions list renders (and the room the `#mention`
+        // frame carries when the message is later deleted) moves with it.
+        const messageIds = event.details?.messageIds as Ulid[] | undefined;
+        const toRoomId = event.details?.toRoomId as Ulid | undefined;
+        if (!toRoomId || !Array.isArray(messageIds) || messageIds.length === 0) {
+          break;
+        }
+        const ph = messageIds.map(() => "?").join(",");
+        await globalDb.run(
+          `update mentions set room_id = ? where message_id in (${ph})`,
+          [toRoomId, ...messageIds],
+        );
+        break;
+      }
     }
   }
 }

@@ -90,5 +90,37 @@ describe("toAppliedEvent — mentions extraction", () => {
     const applied = toAppliedEvent(decoded(event, 1), STREAM);
     expect(applied.details?.mentions).toBeUndefined();
   });
+});
 
+describe("toAppliedEvent — moveMessages details", () => {
+  test("surfaces messageIds and toRoomId so invalidation can split source/destination", () => {
+    const sourceRoom = newUlid();
+    const destRoom = newUlid();
+    const messageId = newUlid();
+
+    const event = {
+      $type: "space.roomy.message.moveMessages.v0",
+      id: newUlid(),
+      room: sourceRoom,
+      messageIds: [messageId],
+      toRoomId: destRoom,
+    } as unknown as Event;
+
+    const applied = toAppliedEvent(decoded(event, 1), STREAM);
+    // The envelope's room is the SOURCE; the destination comes from details.
+    expect(applied.roomId).toBe(sourceRoom);
+    expect(applied.details?.messageIds).toEqual([messageId]);
+    expect(applied.details?.toRoomId).toBe(destRoom);
+  });
+
+  test("defaults to undefined details for unrelated event types", () => {
+    const event = {
+      $type: "space.roomy.space.updateSpaceInfo.v0",
+      id: newUlid(),
+      name: "x",
+    } as unknown as Event;
+
+    const applied = toAppliedEvent(decoded(event, 1), STREAM);
+    expect(applied.details).toBeUndefined();
+  });
 });

@@ -552,6 +552,99 @@ async function handleDeleteMessage(
   return signals;
 }
 
+/**
+ * A `moveMessages` event: the messages left the source room (the event
+ * envelope's `room`) and now live in `details.toRoomId`.
+ *
+ * Clients hold `staleTime: Infinity` and refresh ONLY from WS invalidation
+ * frames, so a move must be delivered as two independent message diffs —
+ * a `remove` in the source room and an `add` in the destination — or the
+ * message visibly stays in the source room and never appears in the
+ * destination until the client navigates. (A single `update` diff cannot
+ * express it: the diff stream is keyed by room, so the client would only
+ * ever be told about one of the two rooms.)
+ *
+ * Both rooms are then invalidated on the query channels: each room's
+ * `getMetadata`/`getThreads` counts and the space's sidebar/index totals
+ * change, and the space list's unread rollup follows. The invalidations
+ * also keep the server-side response cache coherent and catch clients whose
+ * live frames were missed (other tabs, backgrounded sockets).
+ *
+ * The `add` carries the message row re-read AFTER materialization, so its
+ * `room` (and sort_idx) reflect the move — the client validates the frame
+ * against the SDK `Message` schema and needs the same shape
+ * `room.getMessages` returns.
+ */
+async function handleMoveMessages(
+  event: AppliedEvent,
+  db?: DbLike,
+  messageSnapshots?: ReadonlyMap<Ulid, MessageDto>,
+): Promise<InvalidationEvent[]> {
+  const sourceRoomId = event.roomId;
+  const details = event.details ?? {};
+  const toRoomId = details.toRoomId as Ulid | undefined;
+  const messageIds = details.messageIds as Ulid[] | undefined;
+  if (!sourceRoomId || !toRoomId || !Array.isArray(messageIds) || messageIds.length === 0) {
+    return [];
+  }
+
+  const spaceId = event.streamDid;
+  const signals: InvalidationEvent[] = [];
+
+  for (const messageId of messageIds) {
+    // Source: drop the message from the room it left.
+    signals.push({
+      kind: "messageDiff",
+      signal: {
+        roomId: sourceRoomId,
+        seq: (details.seq as number) ?? 0,
+        ops: [{ op: "remove", key: messageId }],
+      },
+    });
+
+    // Destination: add the post-move row (preferring the router's batched
+    // snapshot; falling back to a read for direct callers/tests).
+    const message =
+      messageSnapshots?.get(messageId) ??
+      (
+        await selectMessages(db ?? openSpaceDb(event.streamDid), {
+          kind: "ids",
+          ids: [messageId],
+        })
+      ).messages[0];
+    if (!message) continue;
+    signals.push({
+      kind: "messageDiff",
+      signal: {
+        roomId: toRoomId,
+        seq: 0,
+        ops: [{ op: "add", key: messageId, message }],
+      },
+    });
+  }
+
+  // NB: the mentions index rows are re-pointed at the destination room by
+  // `syncMentionsIndex` (the router runs it for this event), so a later
+  // delete reports the message's new room. No `mentionDiff` is emitted for
+  // the move: `mentions:<did>` subscribers would need an `add` carrying the
+  // destination room, but the SDK's SyncRouter consumes no `#mention` frames
+  // today (only `#invalidate`, `#messageDiff`, `#roomMetadataDiff`), so the
+  // frame would be speculative — the rows are correct and the client's
+  // mentions list refetches from `mention.getMentions`.
+
+  // Both rooms' metadata/threads and the space-level rollups change: the
+  // source loses a message (and may drop out of the index board entirely),
+  // the destination gains one, and unread totals move between them.
+  signals.push(...invalidateRoom(sourceRoomId, spaceId));
+  signals.push(...invalidateRoom(toRoomId, spaceId));
+  signals.push(invalidate("space.roomy.room.getMessages", { roomId: sourceRoomId }));
+  signals.push(invalidate("space.roomy.room.getMessages", { roomId: toRoomId }));
+  signals.push(invalidate("space.roomy.space.getThreads", { spaceId }));
+  signals.push(invalidate("space.roomy.space.getActivityFeed", {}));
+
+  return signals;
+}
+
 // ─── Reaction events ────────────────────────────────────────────────────
 
 function handleReactionChange(event: AppliedEvent): InvalidationEvent[] {
@@ -943,7 +1036,7 @@ const HANDLERS: Record<string, (event: AppliedEvent, db?: DbLike, messageSnapsho
   "space.roomy.message.createMessage.v0": handleCreateMessage,
   "space.roomy.message.editMessage.v0": handleEditMessage,
   "space.roomy.message.deleteMessage.v0": handleDeleteMessage,
-  "space.roomy.message.moveMessages.v0": () => [],
+  "space.roomy.message.moveMessages.v0": handleMoveMessages,
   "space.roomy.message.reorderMessage.v0": () => [],
   "space.roomy.message.forwardMessages.v0": handleCreateMessage,
 

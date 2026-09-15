@@ -100,6 +100,17 @@ function extractDetails(
     case "space.roomy.message.deleteMessage.v0":
       return { messageId: event["messageId"] };
 
+    // moveMessages targets existing messages and carries the destination
+    // room. `event.room` (the envelope) is the SOURCE room, so the
+    // invalidation handler can emit a `remove` there and an `add` in
+    // `toRoomId` — without both, a move is invisible to connected clients
+    // (they hold `staleTime: Infinity` and only refresh from WS frames).
+    case "space.roomy.message.moveMessages.v0":
+      return {
+        messageIds: event["messageIds"],
+        toRoomId: event["toRoomId"],
+      };
+
     case "space.roomy.message.forwardMessages.v0":
       return undefined;
 

@@ -522,6 +522,90 @@ describe("inferSignals: message events", () => {
     // Deleting a room's latest message can reorder/drop it on the index board.
     expect(nsids).toContain("space.roomy.space.getThreads");
   });
+
+  it("moveMessages emits a source remove AND a destination add, invalidating both rooms", async () => {
+    const MESSAGE_ID = "01HXSXKBQ4TESTMSG00000000C" as Ulid;
+    const DEST_ROOM_ID = "01HXSXKBQ4TESTDEST00000000D" as Ulid;
+
+    // The row is materialized post-move: `room` is already the destination,
+    // which is exactly what the `add` op must carry.
+    const { db, asyncDb } = seedMessageDb({
+      id: MESSAGE_ID,
+      roomId: DEST_ROOM_ID,
+      authorDid: USER_DID,
+      authorName: "Alice",
+      content: "moved here",
+    });
+    db.run("update entities set room = ? where id = ?", [DEST_ROOM_ID, MESSAGE_ID]);
+
+    const signals = await inferSignals(
+      makeEvent({
+        type: "space.roomy.message.moveMessages.v0",
+        roomId: ROOM_ID, // the SOURCE room (event envelope)
+        details: { messageIds: [MESSAGE_ID], toRoomId: DEST_ROOM_ID },
+      }),
+      asyncDb,
+    );
+
+    const diffs = signals.filter((s) => s.kind === "messageDiff");
+    expect(diffs).toHaveLength(2);
+
+    const remove = diffs.find(
+      (d) => d.kind === "messageDiff" && d.signal.roomId === ROOM_ID,
+    );
+    expect(remove).toBeDefined();
+    if (remove?.kind === "messageDiff") {
+      expect(remove.signal.ops).toEqual([{ op: "remove", key: MESSAGE_ID }]);
+    }
+
+    const add = diffs.find(
+      (d) => d.kind === "messageDiff" && d.signal.roomId === DEST_ROOM_ID,
+    );
+    expect(add).toBeDefined();
+    if (add?.kind === "messageDiff") {
+      expect(add.signal.ops).toHaveLength(1);
+      const op = add.signal.ops[0]!;
+      expect(op.op).toBe("add");
+      expect(op.key).toBe(MESSAGE_ID);
+      if (op.op === "add") {
+        expect(op.message.content).toBe("moved here");
+        // MUST satisfy the SDK schema or the client drops the frame silently.
+        const validated = schemas.queries.getMessages.Message(op.message);
+        expect(validated instanceof type.errors).toBe(false);
+      }
+    }
+
+    const nsids = invalidatedNsids(signals);
+    // Both rooms' metadata/threads change (the move is a transfer between
+    // them), and the space rollups follow.
+    expect(nsids).toContain("space.roomy.room.getMetadata");
+    expect(nsids).toContain("space.roomy.room.getMessages");
+    expect(nsids).toContain("space.roomy.space.getMetadata");
+    expect(nsids).toContain("space.roomy.space.getThreads");
+    expect(nsids).toContain("space.roomy.space.getActivityFeed");
+    // Each affected room is invalidated — verify both ids appear rather than
+    // trusting the NSID alone (the source room must not be the only one).
+    const roomParams = signals
+      .filter(
+        (s): s is { kind: "queryInvalidation"; signal: QueryInvalidation } =>
+          s.kind === "queryInvalidation" &&
+          s.signal.nsid === "space.roomy.room.getMetadata",
+      )
+      .map((s) => s.signal.params["roomId"]);
+    expect(roomParams).toContain(ROOM_ID);
+    expect(roomParams).toContain(DEST_ROOM_ID);
+  });
+
+  it("moveMessages with no messageIds or destination yields no signals", async () => {
+    const signals = await inferSignals(
+      makeEvent({
+        type: "space.roomy.message.moveMessages.v0",
+        roomId: ROOM_ID,
+        details: {},
+      }),
+    );
+    expect(signals).toEqual([]);
+  });
 });
 
 // ─── Reaction events ────────────────────────────────────────────────────
