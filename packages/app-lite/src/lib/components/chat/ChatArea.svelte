@@ -38,9 +38,11 @@
     highlightMessage?: string | null;
     /** Forward one or more messages (modal owned by the route page). */
     onForward: (messages: Message[]) => void;
+    /** Move one or more messages to another room (modal owned by the route page). */
+    onMove: (messages: Message[]) => void;
   };
   
-  let { spaceId, roomId, onSeen, highlightMessage = null, onForward }: Props = $props();
+  let { spaceId, roomId, onSeen, highlightMessage = null, onForward, onMove }: Props = $props();
 
   const messagesQuery = createMessagesQuery(() => roomId);
 
@@ -523,6 +525,7 @@
                       onCancelEdit={() => (editingMessageId = undefined)}
                       onRequestDelete={openDeleteConfirm}
                       onForward={(messages) => onForward(messages)}
+                      onMove={(messages) => onMove(messages)}
                       mergeWithPrevious={message.mergeWithPrevious}
                       highlighted={highlight?.id === message.id}
                     />

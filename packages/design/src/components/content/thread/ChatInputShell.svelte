@@ -17,6 +17,7 @@
     IconLoading,
     IconForward,
     IconCheckSquare,
+    IconMove,
   } from "../../../icons";
 
   type Props = {
@@ -65,6 +66,8 @@
     onCreateThread: () => void;
     /** Selecting: forward the selected messages. */
     onForwardSelection: () => void;
+    /** Selecting: move the selected messages to another room (admin only). */
+    onMoveSelection?: () => void;
     /** Selecting: create a thread from the selected messages. */
     onSelectCreateThread: () => void;
     /** Remove a preview image by index. */
@@ -105,6 +108,7 @@
     onCreateThreadFromMenu,
     onCreateThread,
     onForwardSelection,
+    onMoveSelection,
     onSelectCreateThread,
     onRemoveImage,
     onThreadNameChange,
@@ -203,6 +207,17 @@
             <IconForward class="size-4" />
             Forward
           </Button>
+          {#if onMoveSelection}
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={selectedCount === 0}
+              onclick={onMoveSelection}
+            >
+              <IconMove class="size-4" />
+              Move
+            </Button>
+          {/if}
           <Button
             variant="secondary"
             size="sm"

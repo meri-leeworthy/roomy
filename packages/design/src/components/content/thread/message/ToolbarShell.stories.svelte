@@ -8,11 +8,12 @@
   });
 </script>
 
-{#snippet template(args: { canEdit: boolean; canDelete: boolean; mergeWithPrevious: boolean; keepToolbarOpen: boolean })}
+{#snippet template(args: { canEdit: boolean; canDelete: boolean; canMove: boolean; mergeWithPrevious: boolean; keepToolbarOpen: boolean })}
   <div class="w-full max-w-2xl p-4">
     <ToolbarShell
       canEdit={args.canEdit}
       canDelete={args.canDelete}
+      canMove={args.canMove}
       mergeWithPrevious={args.mergeWithPrevious}
       keepToolbarOpen={args.keepToolbarOpen}
       onToggleReaction={() => {}}
@@ -22,6 +23,7 @@
       onSelect={() => {}}
       onReply={() => {}}
       onForward={() => {}}
+      onMove={() => {}}
     />
   </div>
 {/snippet}
@@ -31,6 +33,7 @@
   args={{
     canEdit: true,
     canDelete: true,
+    canMove: true,
     mergeWithPrevious: false,
     keepToolbarOpen: false,
   }}
@@ -42,6 +45,7 @@
   args={{
     canEdit: true,
     canDelete: false,
+    canMove: false,
     mergeWithPrevious: false,
     keepToolbarOpen: false,
   }}

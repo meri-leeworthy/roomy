@@ -350,6 +350,73 @@ export async function reorderMessage(
   return { id: reorderId };
 }
 /**
+ * Options for moving messages to another room.
+ */
+export interface MoveMessagesOptions {
+  /** The room the messages currently live in (the event's `room`). */
+  fromRoomId: Ulid;
+  /** The message IDs to move. */
+  messageIds: Ulid[];
+  /** The room the messages should be moved to. */
+  toRoomId: Ulid;
+}
+
+/**
+ * Result of moving messages.
+ */
+export interface MoveMessagesResult {
+  /** The IDs of the move events, one per moved message. */
+  ids: Ulid[];
+}
+
+/**
+ * Move messages from one room to another — the originals change room; nothing
+ * is copied. Unlike {@link forwardMessage} (which creates a new message
+ * embedding the original), a move relocates the existing message entity.
+ *
+ * The event schema caps `messageIds` at one entry (`MoveMessagesSchema` in
+ * `schema/events/message.ts`: "Must be exactly one until we have TVFs in
+ * LibSQL"), so this emits one event per message — same shape the legacy
+ * thread-creation flow used.
+ *
+ * @param options - Message move options
+ * @param sendEvent - Function to send the event
+ * @returns The IDs of the emitted move events
+ *
+ * @example
+ * ```ts
+ * const result = await moveMessages({
+ *   fromRoomId: "01H...", // source channel
+ *   toRoomId: "01J...",   // destination room
+ *   messageIds: ["01K...", "01L..."],
+ * }, sendEvent);
+ * ```
+ */
+export async function moveMessages(
+  options: MoveMessagesOptions,
+  sendEvent: (event: Event) => Promise<void>,
+): Promise<MoveMessagesResult> {
+  const ids: Ulid[] = [];
+
+  for (const messageId of options.messageIds) {
+    const id = newUlid();
+    ids.push(id);
+
+    const event: Event = {
+      id,
+      room: options.fromRoomId,
+      $type: "space.roomy.message.moveMessages.v0",
+      messageIds: [messageId],
+      toRoomId: options.toRoomId,
+    };
+
+    await sendEvent(event);
+  }
+
+  return { ids };
+}
+
+/**
  * Options for forwarding messages.
  */
 export interface ForwardMessagesOptions {

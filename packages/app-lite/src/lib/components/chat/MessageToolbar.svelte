@@ -11,11 +11,15 @@
     mergeWithPrevious?: boolean;
     canEdit: boolean;
     canDelete: boolean;
+    /** Space admin only — renders the Move action. */
+    canMove: boolean;
     keepToolbarOpen?: boolean;
     onForward: (messages: Message[]) => void;
     onStartEdit: (messageId: string) => void;
     /** Requests the delete confirmation (owned by ChatArea). */
     onRequestDelete: () => void;
+    /** Requests the move picker for this message (owned by the route page). */
+    onMove: (messages: Message[]) => void;
   };
 
   let {
@@ -25,10 +29,12 @@
     mergeWithPrevious = false,
     canEdit,
     canDelete,
+    canMove,
     keepToolbarOpen = $bindable(false),
     onForward,
     onStartEdit,
     onRequestDelete,
+    onMove,
   }: Props = $props();
 
   function onToggleReaction(emoji: string) {
@@ -59,6 +65,7 @@
 <ToolbarShell
   {canEdit}
   {canDelete}
+  {canMove}
   {mergeWithPrevious}
   bind:keepToolbarOpen
   {onToggleReaction}
@@ -68,4 +75,5 @@
   {onSelect}
   {onReply}
   onForward={() => onForward([message])}
+  onMove={() => onMove([message])}
 />

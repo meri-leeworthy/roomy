@@ -10,6 +10,8 @@ import {
   deleteMessage,
   reorderMessage,
   forwardMessages,
+  moveMessages,
+  newUlid,
 } from "../../src";
 
 // Mock send event function
@@ -384,6 +386,59 @@ describe("reorderMessage", () => {
       room: "01HXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
       messageId: "01JXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
       after: "01KXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    });
+  });
+});
+
+describe("moveMessages", () => {
+  it("emits one move event per message, each capped at a single id", async () => {
+    const fromRoomId = newUlid();
+    const toRoomId = newUlid();
+    const messageIds = [newUlid(), newUlid()];
+
+    const result = await moveMessages(
+      { fromRoomId, toRoomId, messageIds },
+      mockSendEvent,
+    );
+
+    expect(result.ids).toHaveLength(2);
+    for (const id of result.ids) expect(id).toMatch(/^[\w-]{26}$/);
+    expect(mockSendEvent).toHaveBeenCalledTimes(2);
+
+    const events = mockSendEvent.mock.calls.map((call) => call[0]);
+    expect(events[0]).toMatchObject({
+      $type: "space.roomy.message.moveMessages.v0",
+      room: fromRoomId,
+      messageIds: [messageIds[0]],
+      toRoomId,
+    });
+    expect(events[1]).toMatchObject({
+      $type: "space.roomy.message.moveMessages.v0",
+      room: fromRoomId,
+      messageIds: [messageIds[1]],
+      toRoomId,
+    });
+    // Distinct event ids — a duplicate would collapse the two moves into one
+    // in the event log.
+    expect(events[0].id).not.toBe(events[1].id);
+  });
+
+  it("emits a single event for a single message", async () => {
+    const fromRoomId = newUlid();
+    const toRoomId = newUlid();
+    const messageId = newUlid();
+
+    const result = await moveMessages(
+      { fromRoomId, toRoomId, messageIds: [messageId] },
+      mockSendEvent,
+    );
+
+    expect(result.ids).toHaveLength(1);
+    expect(mockSendEvent).toHaveBeenCalledTimes(1);
+    expect(mockSendEvent.mock.calls[0][0]).toMatchObject({
+      room: fromRoomId,
+      messageIds: [messageId],
+      toRoomId,
     });
   });
 });

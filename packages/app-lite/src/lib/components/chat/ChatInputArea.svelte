@@ -45,6 +45,12 @@
     autoFocus?: boolean;
     /** Select mode: forward the selected messages (modal owned by the route page). */
     onForwardSelection?: (messages: Message[]) => void;
+    /**
+     * Select mode: move the selected messages to another room (modal owned by
+     * the route page). Admin-only — the route page passes this only when the
+     * viewer is a space admin, which is also what renders the Move button.
+     */
+    onMoveSelection?: (messages: Message[]) => void;
   };
 
   let {
@@ -54,6 +60,7 @@
     disableUploads = false,
     autoFocus = true,
     onForwardSelection,
+    onMoveSelection,
   }: Props = $props();
 
   // On mobile (coarse pointer), never autofocus — the virtual keyboard
@@ -303,6 +310,11 @@
     onForwardSelection?.(messagingState.current.selectedMessages);
   }
 
+  function handleMoveSelection() {
+    if (messagingState.current.kind !== "selecting") return;
+    onMoveSelection?.(messagingState.current.selectedMessages);
+  }
+
   function handleSelectCreateThread() {
     if (messagingState.current.kind !== "selecting") return;
     messagingState.setThreadingFromMessages(
@@ -462,6 +474,7 @@
   onCreateThreadFromMenu={handleCreateThreadFromMenu}
   onCreateThread={handleCreateThread}
   onForwardSelection={handleForwardSelection}
+  onMoveSelection={onMoveSelection ? handleMoveSelection : undefined}
   onSelectCreateThread={handleSelectCreateThread}
   onRemoveImage={removeImageFile}
   onThreadNameChange={(name) => (messagingState.name = name)}

@@ -1,13 +1,14 @@
 <script lang="ts">
   import { schemas } from "@roomy-space/sdk";
   import type { Block } from "@roomy-space/sdk";
-  import ForwardMessageModal, {
-    type ForwardFetchState,
-    type ForwardTarget,
-  } from "@roomy/design/components/modals/ForwardMessageModal.svelte";
+  import RoomPickerModal, {
+    type RoomPickerFetchState,
+    type RoomPickerTarget,
+    type RoomPickerMode,
+  } from "@roomy/design/components/modals/RoomPickerModal.svelte";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { createSearchRoomsQuery } from "$lib/queries/search-rooms";
-  import { forwardMessage } from "$lib/mutations/message";
+  import { forwardMessage, moveMessages } from "$lib/mutations/message";
   import ChatInput from "./ChatInput.svelte";
   import { messagingState } from "./messaging-state.svelte";
   import { createMentionSearch } from "$lib/tiptap/mentions";
@@ -18,15 +19,19 @@
 
   let {
     open = $bindable(false),
+    mode = "forward",
     spaceId,
     fromRoomId,
     messageIds,
   }: {
     open: boolean;
+    /** `forward` cross-posts as new forward messages (with commentary);
+     *  `move` relocates the originals. */
+    mode?: RoomPickerMode;
     spaceId: string;
-    /** The room the forwarded messages currently live in. */
+    /** The room the forwarded/moved messages currently live in. */
     fromRoomId: string;
-    /** The message(s) to forward. */
+    /** The message(s) to forward or move. */
     messageIds: string[];
   } = $props();
 
@@ -36,7 +41,8 @@
   let body = $state("");
   let bodyBlocks: Block[] | undefined = $state();
   /** The forward commentary editor. (`composer` is taken by the design
-   *  modal's snippet prop below, so this ref is named for what it holds.) */
+   *  modal's snippet prop below, so this ref is named for what it holds.
+   *  Only mounted in forward mode.) */
   let composerRef: { getBlocks: () => Block[] } | undefined = $state();
 
   // Room-name search term typed into the modal's input. The design modal
@@ -67,11 +73,11 @@
   // to (with their recently active threads), plus writable active threads
   // of unreadable channels. Readable channels' threads render under the
   // channel as "suggested".
-  const sidebarTargets = $derived.by<ForwardTarget[]>(() => {
+  const sidebarTargets = $derived.by<RoomPickerTarget[]>(() => {
     const meta = metaQuery.data;
     if (!meta) return [];
 
-    const out: ForwardTarget[] = [];
+    const out: RoomPickerTarget[] = [];
     const seen = new Set<string>();
     const push = (id: string, name?: string) => {
       if (seen.has(id)) return;
@@ -111,9 +117,9 @@
 
   // Searching: the server is authoritative. Search results already carry
   // read-access filtering + names; dedupe channels and threads by id.
-  const searchTargets = $derived.by<ForwardTarget[]>(() => {
+  const searchTargets = $derived.by<RoomPickerTarget[]>(() => {
     const rooms = roomsSearchQuery.data?.rooms ?? [];
-    const out: ForwardTarget[] = [];
+    const out: RoomPickerTarget[] = [];
     const seen = new Set<string>();
     for (const r of rooms) {
       if (seen.has(r.id)) continue;
@@ -125,7 +131,7 @@
 
   const searching = $derived(searchQuery.trim().length > 0);
 
-  const fetchState = $derived.by((): ForwardFetchState => {
+  const fetchState = $derived.by((): RoomPickerFetchState => {
     if (!open) return { status: "idle" };
 
     // Server search in flight: show the loading state for the first term
@@ -160,6 +166,15 @@
     return { status: "success", data };
   });
 
+  /** Leave select mode after an action consumes the selection
+   *  (Signal/WhatsApp pattern). Harmless for the single-message toolbar path
+   *  — state is already normal, and `setNormal` preserves the draft. */
+  function consumeSelection() {
+    if (messagingState.current.kind === "selecting") {
+      messagingState.setNormal();
+    }
+  }
+
   async function handleForward(roomIds: string[]) {
     // Read the commentary from the editor rather than the `blocks` binding:
     // that binding stays undefined until the modal's editor is edited, so an
@@ -178,21 +193,26 @@
     toast.success(
       `Forwarded ${messageIds.length} message${messageIds.length > 1 ? "s" : ""} to ${roomIds.length} room${roomIds.length > 1 ? "s" : ""}`,
     );
-    // Forwarding consumes the selection — leave select mode (Signal/WhatsApp
-    // pattern) so the composer returns to normal after a multi-message
-    // forward. Harmless for the single-message toolbar path (state is
-    // already normal; setNormal preserves the draft).
-    if (messagingState.current.kind === "selecting") {
-      messagingState.setNormal();
-    }
+    consumeSelection();
+  }
+
+  async function handleMove(roomIds: string[]) {
+    const toRoomId = roomIds[0];
+    if (!toRoomId) return;
+    await moveMessages(spaceId, fromRoomId, messageIds, toRoomId);
+    toast.success(
+      `Moved ${messageIds.length} message${messageIds.length > 1 ? "s" : ""}`,
+    );
+    consumeSelection();
   }
 </script>
 
-<ForwardMessageModal
+<RoomPickerModal
   bind:open
+  {mode}
   bind:query={searchQuery}
   {fetchState}
-  onForward={handleForward}
+  onSelect={mode === "move" ? handleMove : handleForward}
 >
   {#snippet composer()}
     <ChatInput
@@ -206,4 +226,4 @@
       mentionSearch={createMentionSearch(spaceId, fromRoomId)}
     />
   {/snippet}
-</ForwardMessageModal>
+</RoomPickerModal>

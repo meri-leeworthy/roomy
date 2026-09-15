@@ -46,6 +46,8 @@
     onRequestDelete: (message: Message) => void;
     /** Forward one or more messages (modal owned by the route page). */
     onForward: (messages: Message[]) => void;
+    /** Move one or more messages to another room (modal owned by the route page). */
+    onMove: (messages: Message[]) => void;
     /** Temporary visual emphasis for a search deep-link land; OR-ed into
      *  the selection styling and cleared by the caller after a beat. */
     highlighted?: boolean;
@@ -63,6 +65,7 @@
     onCancelEdit,
     onRequestDelete,
     onForward,
+    onMove,
     highlighted = false,
     mergeWithPrevious = false,
   }: Props = $props();
@@ -532,10 +535,12 @@
           {mergeWithPrevious}
           {canEdit}
           {canDelete}
+          canMove={isAdmin}
           bind:keepToolbarOpen
           {onStartEdit}
           onRequestDelete={() => onRequestDelete(message)}
           {onForward}
+          onMove={() => onMove([message])}
         />
       {/snippet}
 

@@ -14,11 +14,13 @@
     IconTrash,
     IconEllipsisHorizontal,
     IconCheckSquare,
+    IconMove,
   } from "../../../../icons/index";
 
   let {
     canEdit,
     canDelete,
+    canMove,
     mergeWithPrevious = false,
     keepToolbarOpen = $bindable(false),
     onToggleReaction,
@@ -28,11 +30,14 @@
     onSelect,
     onReply,
     onForward,
+    onMove,
   }: {
     /** Author-only — shows the Edit button. */
     canEdit: boolean;
     /** Author or space admin — shows the Delete button. */
     canDelete: boolean;
+    /** Space admin only — shows the Move action. */
+    canMove: boolean;
     /** Whether this is a message sharing the previous message's author and timestamp row. */
     mergeWithPrevious?: boolean;
     /** Bindable — kept open while the emoji picker is open. */
@@ -45,6 +50,7 @@
     onSelect: () => void;
     onReply: () => void;
     onForward: () => void;
+    onMove: () => void;
   } = $props();
 
   let isEmojiToolbarPickerOpen = $state(false);
@@ -173,6 +179,12 @@
         <IconForward class="size-4" />
         Forward
       </ContextMenuItem>
+      {#if canMove}
+        <ContextMenuItem onclick={onMove}>
+          <IconMove class="size-4" />
+          Move
+        </ContextMenuItem>
+      {/if}
       <ContextMenuItem onclick={onStartThreading}>
         <IconNeedleThread class="size-4" />
         Create Thread

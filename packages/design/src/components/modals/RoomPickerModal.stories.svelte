@@ -1,14 +1,15 @@
 <script lang="ts" module>
   import { defineMeta } from "@storybook/addon-svelte-csf";
-  import ForwardMessageModal from "./ForwardMessageModal.svelte";
+  import RoomPickerModal from "./RoomPickerModal.svelte";
 
   const { Story } = defineMeta({
-    title: "Modals/ForwardMessageModal",
-    component: ForwardMessageModal,
+    title: "Modals/RoomPickerModal",
+    component: RoomPickerModal,
   });
 
   type Args = {
     open: boolean;
+    mode: "forward" | "move";
     fetchState: {
       status: "idle" | "loading" | "error" | "success";
       data?: { id: string; name?: string }[];
@@ -18,9 +19,9 @@
 </script>
 
 {#snippet template(args: Args)}
-  <ForwardMessageModal
+  <RoomPickerModal
     {...(args as any)}
-    onForward={async () => {
+    onSelect={async () => {
       /* no-op in story */
     }}
   />
@@ -30,6 +31,23 @@
   name="Default"
   args={{
     open: true,
+    mode: "forward",
+    fetchState: {
+      status: "success",
+      data: [
+        { id: "r1", name: "General" },
+        { id: "r2", name: "Random" },
+      ],
+    },
+  }}
+  {template}
+/>
+
+<Story
+  name="Move"
+  args={{
+    open: true,
+    mode: "move",
     fetchState: {
       status: "success",
       data: [
@@ -45,6 +63,7 @@
   name="Empty"
   args={{
     open: true,
+    mode: "forward",
     fetchState: { status: "success", data: [] },
   }}
   {template}
@@ -54,6 +73,7 @@
   name="Error"
   args={{
     open: true,
+    mode: "forward",
     fetchState: { status: "error", message: "Failed to load rooms" },
   }}
   {template}

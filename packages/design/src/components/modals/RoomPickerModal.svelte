@@ -6,27 +6,35 @@
   import { IconHashtag, IconLoading, IconCheck } from "../../icons/index";
   import ErrorMessage from "../helper/ErrorMessage.svelte";
 
-  export interface ForwardTarget {
+  export interface RoomPickerTarget {
     id: string;
     name?: string;
   }
 
-  export type ForwardFetchState =
+  export type RoomPickerFetchState =
     | { status: "idle" }
     | { status: "loading" }
     | { status: "error"; message: string }
-    | { status: "success"; data: ForwardTarget[] };
+    | { status: "success"; data: RoomPickerTarget[] };
+
+  /** `forward` cross-posts the messages as new forward messages (multi-select,
+   *  optional commentary); `move` relocates the originals (single-select,
+   *  no commentary). */
+  export type RoomPickerMode = "forward" | "move";
 
   let {
     open = $bindable(false),
+    mode = "forward",
     fetchState,
-    onForward,
+    onSelect,
     composer,
     query = $bindable(""),
   }: {
     open: boolean;
-    fetchState: ForwardFetchState;
-    onForward: (roomIds: string[]) => void | Promise<void>;
+    mode?: RoomPickerMode;
+    fetchState: RoomPickerFetchState;
+    /** Called with the chosen room ids. A move always passes exactly one. */
+    onSelect: (roomIds: string[]) => void | Promise<void>;
     /** WYSIWYG message composer (the chat input). Renders below the room picker. */
     composer?: Snippet;
     /** Room-name search term. The host owns the query (e.g. to drive a
@@ -35,15 +43,17 @@
     query?: string;
   } = $props();
 
+  const isMove = $derived(mode === "move");
+
   let selected = $state<string[]>([]);
-  let forwarding = $state(false);
+  let submitting = $state(false);
   let errorMessage = $state<string | null>(null);
 
   $effect(() => {
     if (!open) {
       query = "";
       selected = [];
-      forwarding = false;
+      submitting = false;
       errorMessage = null;
     }
   });
@@ -53,7 +63,7 @@
   // Local filter over the host-provided list. The host may already have
   // server-filtered (room-name search); this is a pure client-side fallback
   // so the modal stays usable standalone (e.g. design docs/tests).
-  const results = $derived.by<ForwardTarget[]>(() => {
+  const results = $derived.by<RoomPickerTarget[]>(() => {
     if (fetchState.status !== "success") return [];
     const q = query.trim().toLowerCase();
     if (!q) return fetchState.data;
@@ -62,23 +72,34 @@
     );
   });
 
-  function toggle(target: ForwardTarget) {
-    if (forwarding) return;
+  function toggle(target: RoomPickerTarget) {
+    if (submitting) return;
+    if (isMove) {
+      // A move has exactly one destination: picking a room replaces the
+      // previous choice rather than adding to it.
+      selected = selectedIds.has(target.id) ? [] : [target.id];
+      return;
+    }
     selected = selectedIds.has(target.id)
       ? selected.filter((id) => id !== target.id)
       : [...selected, target.id];
   }
 
   async function handleSend() {
-    if (forwarding || selected.length === 0) return;
-    forwarding = true;
+    if (submitting || selected.length === 0) return;
+    submitting = true;
     errorMessage = null;
     try {
-      await onForward(selected);
+      await onSelect(selected);
       open = false;
     } catch (e) {
-      errorMessage = e instanceof Error ? e.message : "Failed to forward message";
-      forwarding = false;
+      errorMessage =
+        e instanceof Error
+          ? e.message
+          : isMove
+            ? "Failed to move message"
+            : "Failed to forward message";
+      submitting = false;
     }
   }
 </script>
@@ -87,10 +108,12 @@
   <div class="flex flex-col gap-4">
     <div>
       <h3 class="text-base font-semibold text-base-900 dark:text-base-100">
-        Forward message
+        {isMove ? "Move message" : "Forward message"}
       </h3>
       <p class="text-sm text-base-500 dark:text-base-400">
-        Select one or more rooms, then send.
+        {isMove
+          ? "Select a room, then move."
+          : "Select one or more rooms, then send."}
       </p>
     </div>
 
@@ -125,7 +148,7 @@
               <button
                 type="button"
                 onclick={() => toggle(target)}
-                disabled={forwarding}
+                disabled={submitting}
                 aria-pressed={isSelected}
                 class={
                   "w-full flex items-center gap-2 rounded-md py-2 px-2 text-start font-normal border-1 disabled:opacity-50 " +
@@ -148,7 +171,7 @@
       {/if}
     {/if}
 
-    {#if composer}
+    {#if composer && !isMove}
       <div>
         <label
           for="forward-composer"
@@ -167,11 +190,13 @@
       <Button
         variant="primary"
         onclick={handleSend}
-        disabled={selected.length === 0 || forwarding}
+        disabled={selected.length === 0 || submitting}
       >
-        {#if forwarding}
+        {#if submitting}
           <IconLoading class="size-4 animate-spin" />
-          Sending…
+          {isMove ? "Moving…" : "Sending…"}
+        {:else if isMove}
+          Move
         {:else}
           Send {selected.length > 0 ? `to ${selected.length} room${selected.length > 1 ? "s" : ""}` : ""}
         {/if}

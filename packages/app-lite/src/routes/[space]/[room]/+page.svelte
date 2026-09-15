@@ -14,7 +14,7 @@
   import { updateSeen } from "$lib/mutations/update-seen";
   import ChatArea from "$lib/components/chat/ChatArea.svelte";
   import ChatInputArea from "$lib/components/chat/ChatInputArea.svelte";
-  import ForwardMessageModal from "$lib/components/chat/ForwardMessageModal.svelte";
+  import RoomPickerModal from "$lib/components/chat/RoomPickerModal.svelte";
   import type { Message } from "$lib/queries/messages";
   import ChannelBoardView from "$lib/components/thread/ChannelBoardView.svelte";
   import SeoMeta from "$lib/components/seo/SeoMeta.svelte";
@@ -41,6 +41,20 @@
     forwardMessages = messages;
     forwardSourceRoom = roomId;
     isForwardModalOpen = true;
+  }
+
+  // ── Move modal ──────────────────────────────────────────────────────────
+  // Same ownership rationale as the forward modal. Moves are admin-only (the
+  // Move action is gated in ChatMessage's toolbar and the select-mode bar);
+  // the modal reuses the forward room picker in "move" mode.
+  let moveTargets = $state<Message[] | null>(null);
+  let isMoveModalOpen = $state(false);
+  let moveSourceRoom = $state<string | null>(null);
+
+  function openMove(messages: Message[]) {
+    moveTargets = messages;
+    moveSourceRoom = roomId;
+    isMoveModalOpen = true;
   }
 
   useTopicSubscription(
@@ -229,6 +243,13 @@
 
   /** Computes the original space ID if the channel was federated, otherwise it's just the current space ID. */
   let effectiveSpaceId = $derived(sidebarRoomInfo?.federated?.originSpaceId || spaceId);
+
+  // Space admin status of the room's own space — gates the Move action (the
+  // toolbar item, the select-mode button, and the modal). Same query key as
+  // ChatArea's own `isAdmin` derivation, so the two share one request.
+  // Defaults false while the query loads: an unknown viewer gets no Move.
+  const roomSpaceMetaQuery = createSpaceMetadataQuery(() => effectiveSpaceId);
+  const isAdmin = $derived(roomSpaceMetaQuery.data?.isAdmin ?? false);
 </script>
 
 <SeoMeta
@@ -273,7 +294,7 @@
     <div class="relative flex-1 min-h-0">
       <!-- Chat view - always rendered but visibility toggled -->
       <div class="absolute inset-0 flex flex-col" class:hidden={channelActiveTab !== "Chat"}>
-        <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} onForward={openForward} /> 
+        <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} onForward={openForward} onMove={openMove} /> 
       </div>
 
       <!-- Threads view - always rendered but visibility toggled -->
@@ -289,23 +310,33 @@
            previous room's text. Remounting re-seeds from the recalled per-room
            composer document (draft string + blocks). -->
       {#key roomId}
-        <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} onForwardSelection={openForward} />
+        <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} onForwardSelection={openForward} onMoveSelection={isAdmin ? openMove : undefined} />
       {/key}
     {/if}
   {:else}
     <!-- Thread rooms only have chat view -->
-    <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} onForward={openForward} />
+    <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} onForward={openForward} onMove={openMove} />
     {#key roomId}
       <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} onForwardSelection={openForward} />
     {/key}
   {/if}
 
   {#if forwardMessages && forwardSourceRoom}
-    <ForwardMessageModal
+    <RoomPickerModal
       bind:open={isForwardModalOpen}
       spaceId={effectiveSpaceId}
       fromRoomId={forwardSourceRoom}
       messageIds={forwardMessages.map((m) => m.id)}
+    />
+  {/if}
+
+  {#if moveTargets && moveSourceRoom}
+    <RoomPickerModal
+      bind:open={isMoveModalOpen}
+      mode="move"
+      spaceId={effectiveSpaceId}
+      fromRoomId={moveSourceRoom}
+      messageIds={moveTargets.map((m) => m.id)}
     />
   {/if}
 </div>

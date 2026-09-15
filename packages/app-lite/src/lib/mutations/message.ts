@@ -254,6 +254,31 @@ export async function removeLinkEmbed(
 }
 
 /**
+ * Move one or more messages to another room. The originals relocate — no copy
+ * is created, unlike {@link forwardMessage}.
+ *
+ * `space.roomy.message.moveMessages.v0` caps `messageIds` at one entry until
+ * LibSQL TVFs land, so this emits one event per message (the schema is
+ * batched as a single `sendEvents` call).
+ */
+export async function moveMessages(
+  spaceId: string,
+  fromRoomId: string,
+  messageIds: string[],
+  toRoomId: string,
+): Promise<void> {
+  const events = messageIds.map((messageId) => ({
+    id: newUlid(),
+    room: fromRoomId,
+    $type: "space.roomy.message.moveMessages.v0",
+    messageIds: [messageId],
+    toRoomId,
+  }));
+
+  await sendEvents(spaceId, events);
+}
+
+/**
  * Forward a message into another room as an embed, with an optional
  * blocks+facets commentary body.
  *
