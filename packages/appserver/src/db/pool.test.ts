@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { openDb } from "./db.ts";
+import { openDb, closeDb } from "./db.ts";
 import { hashSpace } from "./pool.ts";
 
 describe("hashSpace", () => {
@@ -99,5 +99,78 @@ describe("DatabasePool routing", () => {
     expect(rp?.unread_count).toBe(0);
 
     await db.close();
+  });
+});
+
+describe("DatabasePool teardown (TASK-122)", () => {
+  // Yield to the event loop so a latent unhandled-rejection (had the bug
+  // been present) would be surfaced before the assertion. The worker pool is
+  // a real thread, so this cannot be driven by fake timers; a macrotask
+  // yield (setImmediate) is deterministic and costs no wall-clock time.
+  const yieldToLoop = () => new Promise<void>((r) => setImmediate(r));
+
+  test("fire-and-forget routed run() before closeDb() raises no unhandled rejection", async () => {
+    // Regression test for CI "Test Appserver" teardown flake: an `async`
+    // DB wrapper created a fresh (unhandled) promise around the already
+    // handled `send()` promise, so terminating the worker mid-request left
+    // an unhandled rejection that failed the whole `bun test` run.
+    const unhandled: Error[] = [];
+    const onUnhandled = (e: Error) => {
+      unhandled.push(e);
+      process.exit(9); // fail loudly — do not let the run limp on
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    // Use the process-wide singleton (what `closeDb()` tears down) — the
+    // same path the e2e helpers use (seedEvent / seedBareSpace / addMember).
+    const db = openDb({ path: ":memory:" });
+    // Fire-and-forget seeded write, exactly like the e2e helpers do.
+    void db.forSpace("did:plc:teardown-regression").run(
+      "insert or ignore into entities (id, stream_id) values (?, ?)",
+      "entity-teardown",
+      "did:plc:teardown-regression",
+    );
+
+    try {
+      // Tear down while the fire-and-forget request may still be in flight.
+      closeDb();
+      // Let worker termination reject any pending request, surfacing a
+      // latent unhandled rejection before we assert.
+      await yieldToLoop();
+      await yieldToLoop();
+    } finally {
+      openDb({ path: ":memory:" });
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
+  });
+
+  test("fire-and-forget routed run() after closeDb() raises no unhandled rejection", async () => {
+    const unhandled: Error[] = [];
+    const onUnhandled = (e: Error) => {
+      unhandled.push(e);
+      process.exit(9);
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      openDb({ path: ":memory:" });
+      closeDb();
+      // Post-teardown call — previously a synchronous throw, which on the
+      // async wrapper became an unhandled rejected promise.
+      void openDb({ path: ":memory:" }).forSpace("did:plc:after-close").run(
+        "insert or ignore into entities (id, stream_id) values (?, ?)",
+        "entity-after",
+        "did:plc:after-close",
+      );
+      await yieldToLoop();
+      await yieldToLoop();
+    } finally {
+      openDb({ path: ":memory:" });
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
   });
 });
