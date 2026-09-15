@@ -39,6 +39,7 @@ import {
   detectAndStoreLinksFromUrls,
 } from "../embed/enricher.ts";
 import { openReadStateDb } from "../db/db.ts";
+import { recordSpaceStats, selectMemberCount } from "../queries/spaceStats.ts";
 import {
   classifyMembershipEvent,
   setUserSpaceMembership,
@@ -57,6 +58,24 @@ export interface ApplyBatchOpts {
   /** True for backfill events — skips the unread-counter increment. */
   isBackfill: boolean;
 }
+
+/**
+ * Materialised events that can change a space's member/admin edge set, and so
+ * invalidate the global `space_stats.member_count` aggregate the admin
+ * dashboard sorts on.
+ *
+ * `space.roomy.query.spaceMeta.v0` is the synthetic event the SDK emits when a
+ * space is first connected: it seeds the member edges for the space's admins
+ * (synthetic.ts), which is how spaces materialised from a live sync — rather
+ * than from joinSpace events — get their member rows.
+ */
+const MEMBERSHIP_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "space.roomy.space.joinSpace.v0",
+  "space.roomy.space.leaveSpace.v0",
+  "space.roomy.space.addAdmin.v0",
+  "space.roomy.space.removeAdmin.v0",
+  "space.roomy.query.spaceMeta.v0",
+]);
 
 export interface MaterializationStats {
   applied: number;
@@ -408,6 +427,26 @@ export async function applyBatch(
     // steps. Running them per-chunk keeps them interleaved with progress
     // logging rather than causing a long freeze after the last progress line.
     await applyChunkSideEffects(db, chunk, streamId, opts.isBackfill, stats.detectedLinks, globalDb);
+
+    // Refresh the global `space_stats` aggregate when this chunk contained an
+    // event that can change the space's member/admin edges. One extra worker
+    // round-trip per such chunk (not per event: a chunk counts at most once),
+    // which is negligible next to materialising the chunk itself, and it keeps
+    // the admin dashboard's member-count ordering exact without re-deriving it
+    // from every space's DB at read time. Failures are non-fatal: the count is
+    // derived data, and the boot sweep plus the read-time refresh both heal it.
+    if (globalDb && chunk.some((e) => MEMBERSHIP_EVENT_TYPES.has(e.event.$type))) {
+      try {
+        // The count is read from `db` (this stream's per-space DB — a
+        // membership edge lives there) and written to `globalDb`.
+        const memberCount = await selectMemberCount(db, streamId);
+        await recordSpaceStats(globalDb, streamId, memberCount);
+      } catch (err) {
+        log.warn(
+          `[materialize] space_stats refresh failed for ${streamId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   // Advance the legacy comp_space.backfilled_to cursor. The authoritative

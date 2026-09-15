@@ -14,13 +14,54 @@
  * effect. The next page starts strictly after that (sort value, did) under
  * the same sort. Capped at 100 rows per page.
  *
+ * ── Cost model ──────────────────────────────────────────────────────────
+ *
+ * This handler used to be O(all spaces): it read the event log for every
+ * stream, opened EVERY space's DB to count member edges, sorted in JS, and
+ * sliced the page last — so `limit` bought nothing. On a 4276-space dataset
+ * that was ~19 s and ~4200 DB worker round-trips per request, and several
+ * dashboard clients polling it was enough to time the request out in prod.
+ *
+ * Now only the page's spaces are opened. The floor is one grouped scan of the
+ * event log (`group by stream_id`, an index scan over the `(stream_id, idx)`
+ * primary key: ~0.5 s for 436k events), which is what enumerates the space
+ * list and its event counters. Everything per-space — the member count and the
+ * display name — is either precomputed or read for the page only:
+ *
+ *   - Member counts come from the global `space_stats` aggregate
+ *     (schema-global.sql), kept current by `applyBatch` whenever a
+ *     membership-changing event materialises, and reconciled by the boot
+ *     per-space sweep in `reMaterializeFromLocalEvents`. A space's member
+ *     edges live only in its own DB, so precomputing this is what lets the
+ *     ordering run without opening every space.
+ *   - The event-volume sorts order and limit entirely in the event log.
+ *   - Names are read from each space's `comp_info`, for the page only.
+ *
+ * `space_stats` and `stream_events` live on different workers (global and
+ * events), so the member-count ordering merges the two reads in memory rather
+ * than joining in SQL. Both reads are compact (`did` + two integers, and
+ * `did` + one integer) and take a few milliseconds, against the grouped event
+ * scan they sit on top of.
+ *
+ * Invariant: a space with members always HAS a `space_stats` row. Its member
+ * edges can only come from an event that publishes on materialisation
+ * (joinSpace / leaveSpace / addAdmin / removeAdmin / the synthetic spaceMeta —
+ * see MEMBERSHIP_EVENT_TYPES in materialization/applyBatch.ts) or from data
+ * materialised before this aggregate existed, which the boot sweep rewrites.
+ * That is what makes `coalesce(member_count, 0)` exact rather than a guess for
+ * spaces that have no row. The sweep is not awaited before serving (neither is
+ * the sibling `entity_space` backfill), so a request in the boot window can
+ * under-report for a space the sweep has not reached yet; that is what the
+ * refresh pass below is for, and the correction is persisted.
+ *
  * Authorisation: admin allowlist (`APPSERVER_ADMIN_DIDS`).
  */
 
-import { openDb, openSpaceDb } from "../db/db.ts";
+import { openDb, openGlobalDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { optionalInt, optionalString } from "../xrpc/params.ts";
 import { XrpcError } from "../xrpc/errors.ts";
+import { refreshSpaceStats } from "../queries/spaceStats.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
 
 export interface AdminSpaceStats {
@@ -48,6 +89,14 @@ const SORTS: readonly ListSpacesSort[] = [
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
+
+/**
+ * How many times the page may be re-selected after a refresh pass. Each pass
+ * refreshes at most `limit + 1` aggregate rows and ends as soon as the page is
+ * unchanged, so this only bounds the pathological case where a space's member
+ * count keeps moving between the select and the refresh.
+ */
+const MAX_REFRESH_PASSES = 4;
 
 /**
  * Parse the opaque cursor into `{ sortValue, did }`. Returns null when
@@ -83,18 +132,27 @@ function parseSort(params: QueryParams): ListSpacesSort {
   );
 }
 
-/** Extract the sort key's numeric value from a space-stats row. */
-function sortValueOf(
-  sort: ListSpacesSort,
-  s: { member_count: number; total_events: number; events_today: number },
-): number {
+/** One space with its counters, before name/breakdown are filled in. */
+interface SpaceCounters {
+  did: string;
+  total_events: number;
+  events_today: number;
+}
+
+/** A row for the page: counters plus the member count to sort on. */
+interface PageRow extends SpaceCounters {
+  member_count: number;
+}
+
+/** The sort key's value on a page row. */
+function sortValueOf(sort: ListSpacesSort, r: PageRow): number {
   switch (sort) {
     case "memberCount":
-      return s.member_count;
+      return r.member_count;
     case "totalEvents":
-      return s.total_events;
+      return r.total_events;
     case "eventsToday":
-      return s.events_today;
+      return r.events_today;
   }
 }
 
@@ -113,132 +171,204 @@ export const adminListSpacesHandler: QueryHandler<
   const cursorRaw = optionalString(params, "cursor") ?? null;
   const cursor = cursorRaw ? parseCursor(cursorRaw) : null;
 
-  const eventsDb = openDb();
   const todayMidnight = new Date();
   todayMidnight.setUTCHours(0, 0, 0, 0);
   const todayStart = todayMidnight.getTime();
 
-  // ── Enumerate spaces + event counters from the event-log DB ─────────────
+  const counters = await selectSpaceCounters(todayStart);
+  let stats =
+    sort === "memberCount" ? await selectSpaceStats() : new Map<string, number>();
+
+  // ── Fill in member counts the aggregate cannot answer for ───────────────
   //
-  // Phase 3: there is no monolithic DB to enumerate `comp_space` from, and
-  // `stream_events` is no longer ATTACHed to the same handle as the
-  // materialised tables. The event-log DB (openDb) is the source of the
-  // space list: every space has a stream, and every stream with events is
-  // counted here. Per-space details (member edges, comp_space/comp_info)
-  // are read from each space's per-space DB via openSpaceDb(spaceDid)
-  // below.
-  const eventRows = await eventsDb
+  // A space with no `space_stats` row has never been swept, so its true member
+  // count is unknown — not necessarily 0. Every such row therefore has to be
+  // resolved BEFORE the ordering can be trusted, not just the ones that happen
+  // to land on the current page: an unswept space sorts as if it had no
+  // members, so leaving any unresolved can push a space with members below the
+  // page boundary and return a different page than the old per-space scan did.
+  //
+  // In steady state this loop does nothing: the boot sweep writes a row for
+  // every space it visits, INCLUDING a count of 0, so "no row" is rare and
+  // short-lived. It is non-empty only for spaces the sweep has not reached yet
+  // — during the boot window, or a space materialised since. Resolving them
+  // both repairs the page and persists the correction, so the following
+  // request is fast.
+  if (sort === "memberCount") {
+    const db = openDb();
+    for (let pass = 0; pass < MAX_REFRESH_PASSES; pass++) {
+      const unknown = counters
+        .filter((c) => !stats.has(c.did))
+        .map((c) => c.did);
+      if (unknown.length === 0) break;
+      await Promise.all(unknown.map((did) => refreshSpaceStats(db, did)));
+      stats = await selectSpaceStats();
+    }
+  }
+
+  const page = selectPage(counters, stats, sort, cursor, limit);
+
+  const hasMore = page.length > limit;
+  const visibleRows = hasMore ? page.slice(0, limit) : page;
+
+  const eventBreakdownBySpace = await selectEventBreakdowns(
+    visibleRows.map((r) => r.did),
+  );
+  const nameBySpace = await selectNames(visibleRows.map((r) => r.did));
+
+  const spaces: AdminSpaceStats[] = visibleRows.map((r) => ({
+    did: r.did,
+    name: nameBySpace.get(r.did) ?? r.did,
+    memberCount: r.member_count,
+    totalEvents: r.total_events,
+    eventsToday: r.events_today,
+    eventBreakdown: eventBreakdownBySpace.get(r.did) ?? {},
+  }));
+
+  const result: ListSpacesResult = { spaces };
+  if (hasMore && visibleRows.length > 0) {
+    const last = visibleRows[visibleRows.length - 1]!;
+    result.cursor = `${sortValueOf(sort, last)}|${last.did}`;
+  }
+  return result;
+};
+
+/**
+ * Order the space list and cut the page (up to `limit + 1` rows, so the caller
+ * can tell whether a next page exists without a second query).
+ *
+ * Pure and synchronous: every number it needs has already been read. For
+ * `memberCount` the ordering key comes from the aggregate, which the caller
+ * has made exhaustive; for the event-volume sorts it is already in the
+ * counters. Ordering in memory is not a fallback but the only option for
+ * `memberCount` — the key lives in the global DB on a different pool worker,
+ * so it cannot be ordered against `stream_events` in SQL. Against a few
+ * thousand rows of two integers this is a few milliseconds, next to the
+ * grouped event scan the counters come from.
+ */
+function selectPage(
+  counters: SpaceCounters[],
+  stats: Map<string, number>,
+  sort: ListSpacesSort,
+  cursor: { sortValue: number; did: string } | null,
+  limit: number,
+): PageRow[] {
+  const rows: PageRow[] = counters.map((c) => ({
+    ...c,
+    member_count: sort === "memberCount" ? (stats.get(c.did) ?? 0) : 0,
+  }));
+
+  const keyOf = (r: PageRow): number =>
+    sort === "memberCount"
+      ? r.member_count
+      : sort === "eventsToday"
+        ? r.events_today
+        : r.total_events;
+
+  rows.sort(
+    (a, b) =>
+      keyOf(b) - keyOf(a) || (a.did < b.did ? -1 : a.did > b.did ? 1 : 0),
+  );
+
+  if (cursor === null) return rows.slice(0, limit + 1);
+  const cv = cursor.sortValue;
+  const did = cursor.did;
+  const filtered = rows.filter(
+    (r) => keyOf(r) < cv || (keyOf(r) === cv && r.did > did),
+  );
+  return filtered.slice(0, limit + 1);
+}
+
+/**
+ * Event counters for every stream in the log, from one grouped scan.
+ *
+ * This is the handler's floor cost (~0.5 s / 436k events on the reference
+ * dataset) and the source of the space list: `group by stream_id` walks the
+ * `(stream_id, idx)` primary key, and `count(*)` / the conditional `count`
+ * need no table access beyond the covering index.
+ */
+async function selectSpaceCounters(
+  todayStart: number,
+): Promise<SpaceCounters[]> {
+  return await openDb()
     .query(
-      `select stream_id,
+      `select stream_id as did,
               count(*) as total_events,
               count(case when created_at >= ? then 1 end) as events_today
          from stream_events
         group by stream_id`,
     )
-    .all<{
-      stream_id: string;
-      total_events: number;
-      events_today: number;
-    }>(todayStart);
+    .all<SpaceCounters>(todayStart);
+}
 
-  // ── Per-space aggregates ────────────────────────────────────────────────
-  //
-  // Member count is a count over `edges` (head = space, label in
-  // ('member','admin')); name comes from comp_info. Both live in the
-  // per-space DB. Event counters come from the grouped event-log query
-  // above. The cursor filter preserves the sort: rows strictly after
-  // (sortValue, did) under (sortValue desc, did asc) ordering — i.e.
-  // sortValue < cursor.sortValue, OR equal sortValue AND did > cursor.did.
-  const spaceStats: Array<{
-    did: string;
-    name: string | null;
-    member_count: number;
-    total_events: number;
-    events_today: number;
-  }> = [];
+/**
+ * The global member-count aggregate, read compactly (`did` + one integer).
+ *
+ * A space with no row here has no member/admin edges — see the invariant note
+ * at the top of this file.
+ */
+async function selectSpaceStats(): Promise<Map<string, number>> {
+  const rows = await openGlobalDb()
+    .query("select space_did, member_count from space_stats")
+    .all<{ space_did: string; member_count: number }>();
+  return new Map(rows.map((r) => [r.space_did, r.member_count]));
+}
 
-  for (const r of eventRows) {
-    const spaceDb = openSpaceDb(r.stream_id);
-    const spaceRow = await spaceDb
-      .query(
-        `select
-           (select count(*) from edges
-             where head = cs.entity and label in ('member','admin')
-           ) as member_count,
-           ci.name as name
-         from comp_space cs
-         left join comp_info ci on ci.entity = cs.entity
-        where cs.entity = ?`,
-      )
-      .get<{ member_count: number; name: string | null }>(r.stream_id);
+/**
+ * Event-type breakdown for the visible rows, in ONE grouped query over their
+ * stream ids (the original ran one query per space).
+ */
+async function selectEventBreakdowns(
+  dids: string[],
+): Promise<Map<string, Record<string, number>>> {
+  const bySpace = new Map<string, Record<string, number>>();
+  if (dids.length === 0) return bySpace;
+  const placeholders = dids.map(() => "?").join(", ");
+  const rows = await openDb()
+    .query(
+      `select stream_id, event_type, count(*) as n
+         from stream_events
+        where stream_id in (${placeholders}) and event_type is not null
+        group by stream_id, event_type
+        order by n desc`,
+    )
+    .all<{ stream_id: string; event_type: string; n: number }>(...dids);
 
-    spaceStats.push({
-      did: r.stream_id,
-      name: spaceRow?.name ?? null,
-      member_count: spaceRow?.member_count ?? 0,
-      total_events: r.total_events,
-      events_today: r.events_today,
-    });
-  }
-
-  // Sort by the active key desc, ties broken by did asc so the order is
-  // stable across pages. `sortValueOf` reads the same field the cursor
-  // encodes, so the cursor filter stays consistent with the ORDER BY.
-  spaceStats.sort(
-    (a, b) =>
-      sortValueOf(sort, b) - sortValueOf(sort, a) ||
-      (a.did < b.did ? -1 : a.did > b.did ? 1 : 0),
-  );
-
-  let paged = spaceStats;
-  if (cursor) {
-    const cv = cursor.sortValue;
-    paged = spaceStats.filter(
-      (s) =>
-        sortValueOf(sort, s) < cv ||
-        (sortValueOf(sort, s) === cv && s.did > cursor.did),
-    );
-  }
-
-  // Fetch one extra row to detect a next page without a second query.
-  const pageRows = paged.slice(0, limit + 1);
-  const hasMore = pageRows.length > limit;
-  const visibleRows = hasMore ? pageRows.slice(0, limit) : pageRows;
-
-  // ── Event-type breakdown per space (one grouped query per space) ──────
-  const spaces: AdminSpaceStats[] = [];
-  for (const r of visibleRows) {
-    const breakdownRows = await eventsDb
-      .query(
-        `select event_type, count(*) as n
-           from stream_events
-          where stream_id = ? and event_type is not null
-          group by event_type
-          order by n desc`,
-      )
-      .all<{ event_type: string; n: number }>(r.did);
-
-    const eventBreakdown: Record<string, number> = {};
-    for (const b of breakdownRows) {
-      eventBreakdown[b.event_type] = b.n;
+  for (const r of rows) {
+    let counts = bySpace.get(r.stream_id);
+    if (!counts) {
+      counts = {};
+      bySpace.set(r.stream_id, counts);
     }
-
-    spaces.push({
-      did: r.did,
-      name: r.name ?? r.did,
-      memberCount: r.member_count,
-      totalEvents: r.total_events,
-      eventsToday: r.events_today,
-      eventBreakdown,
-    });
+    counts[r.event_type] = r.n;
   }
+  return bySpace;
+}
 
-  const result: ListSpacesResult = { spaces };
-  if (hasMore && visibleRows.length > 0) {
-    const last = visibleRows[visibleRows.length - 1]!;
-    // Encode the ACTIVE sort key's value — the number the next page's
-    // cursor predicate filters against must match the ORDER BY used.
-    result.cursor = `${sortValueOf(sort, last)}|${last.did}`;
+/**
+ * Display name per visible row, read from each space's own `comp_info`.
+ *
+ * This is the only per-space DB work the handler still does, and it is bounded
+ * by the page size. A space whose DB has no `comp_info` row (or whose name is
+ * null) falls back to the space DID, matching the previous behaviour.
+ */
+async function selectNames(dids: string[]): Promise<Map<string, string>> {
+  const bySpace = new Map<string, string>();
+  if (dids.length === 0) return bySpace;
+  const db = openDb();
+
+  const names = await Promise.all(
+    dids.map(async (did) => {
+      const row = await db
+        .forSpace(did)
+        .query("select name from comp_info where entity = ?")
+        .get<{ name: string | null }>(did);
+      return row?.name ?? null;
+    }),
+  );
+  for (let i = 0; i < dids.length; i++) {
+    const name = names[i];
+    if (name !== null && name !== undefined) bySpace.set(dids[i]!, name);
   }
-  return result;
-};
+  return bySpace;
+}

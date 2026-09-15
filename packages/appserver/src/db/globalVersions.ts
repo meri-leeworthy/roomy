@@ -63,9 +63,15 @@ export const GLOBAL_MIGRATIONS = {
   "8": { kind: "data" },
   // mentions.kind added and backfilled by the async task.
   "9": { kind: "data" },
+  // space_stats aggregate for the admin dashboard's space list. Structural:
+  // schema-global.sql creates the table on every open. Its rows are published
+  // by the boot per-space sweep in reMaterializeFromLocalEvents (which runs
+  // for every boot and every stream, so an existing dataset self-heals on the
+  // next deploy) — a data migration here would duplicate that sweep.
+  "10": { kind: "structural" },
   // Next global schema change goes here, e.g.:
-  //   "10": { kind: "structural" },   // table added to schema-global.sql
-  //   "10": { kind: "data" },         // plus a task in GLOBAL_MIGRATION_TASKS
+  //   "11": { kind: "structural" },   // table added to schema-global.sql
+  //   "11": { kind: "data" },         // plus a task in GLOBAL_MIGRATION_TASKS
 } as const satisfies Record<string, GlobalMigrationEntry>;
 
 /**

@@ -179,3 +179,32 @@ create table if not exists federation_receiver_permissions (
   primary key (space_id, federating_space_did, room_id, grantee, kind)
 ) strict;
 create index if not exists idx_frper_room on federation_receiver_permissions(room_id);
+
+-- Cross-space per-space aggregate for the admin dashboard's space list
+-- (space.roomy.admin.listSpaces). One row per space that is known to have
+-- member/admin edges; a MISSING row means "member_count = 0" and carries no
+-- other information (the handler still reads `comp_info.name` from the space's
+-- own DB for the page it returns).
+--
+-- Why this exists: the dashboard's default sort is member count, which only
+-- lives in each space's per-space DB (`edges where head = space and label in
+-- ('member','admin')`). Producing it by opening every space DB turned a single
+-- dashboard request into O(all spaces) DB opens — ~19 s and ~4200 worker
+-- round-trips on a 4276-space dataset, regardless of `limit`, because the
+-- ordering+limit were applied only AFTER the fan-out. This table lets the
+-- ordering and the cursor predicate run in SQL over one small table, so only
+-- the returned page's space DBs are opened.
+--
+-- Written by:
+--   - the boot per-space sweep (reMaterialize runs it after the entity_space
+--     backfill, so an existing dataset self-heals on the next deploy), and
+--   - `applyBatch` whenever a materialised event changes a space's
+--     member/admin edges (joinSpace, leaveSpace, addAdmin, removeAdmin, and
+--     the synthetic space create).
+-- Derived data: deleting it is safe — the next boot sweep rebuilds it.
+create table if not exists space_stats (
+  space_did     text primary key,
+  member_count  integer not null,
+  updated_at    integer not null default (unixepoch() * 1000)
+) strict;
+create index if not exists idx_space_stats_members on space_stats(member_count desc, space_did);
