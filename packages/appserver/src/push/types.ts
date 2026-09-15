@@ -51,8 +51,21 @@ export interface PushPayload {
   count: number;
   /** Resolved room display name, when available. */
   roomName?: string;
-  /** Resolved author display name for `message` pushes, when available. */
+  /**
+   * Resolved author display name. Never the raw DID while a friendlier name
+   * exists: per-space `comp_info.name` → `comp_user.handle` → global
+   * `profiles` store → the DID itself (see `resolveAuthorName`). Present on
+   * every `message` push and on `digest` pushes whose room has a known
+   * most-recent author.
+   */
   authorName?: string;
+  /**
+   * The author's DID. Always carried alongside `authorName` so the service
+   * worker can still name the author if `authorName` is somehow missing
+   * (legacy/synthetic payloads) — a notification must never read "New
+   * message" while the sender's DID is known.
+   */
+  authorDid?: string;
   /**
    * Decoded message text content for `message` pushes. Only the first ~120
    * characters to keep the encrypted payload small — the push service never

@@ -209,6 +209,7 @@ describe("push/evaluate — Busy immediate pushes", () => {
       count: 1,
       roomName: "general",
       authorName: "Alice",
+      authorDid: AUTHOR,
     });
   });
 
@@ -229,6 +230,54 @@ describe("push/evaluate — Busy immediate pushes", () => {
     });
 
     expect(deliveries.find((d) => d.userDid === AUTHOR)).toBeUndefined();
+  });
+
+  test("author with only a handle (no display name) names the handle", async () => {
+    const db = freshDb();
+    await seedFixture(db);
+    // The fixture seeds comp_user with a NULL handle (`insert or ignore`
+    // ignores the second, handle-bearing row), so set it explicitly. Then
+    // drop the author's comp_info display name: the comp_user handle
+    // (alice.test) must fill in.
+    await db.run("update comp_user set handle = ? where did = ?", ["alice.test", AUTHOR]);
+    await db.run("delete from comp_info where entity = ?", [AUTHOR]);
+
+    const deliveries = await evaluatePush(db, db, {
+      spaceId: SPACE,
+      roomId: CHANNEL,
+      messageId: MESSAGE_ID,
+      authorDid: AUTHOR as UserDid,
+      timestamp: 1_000_000,
+    });
+
+    const d = deliveries.find((x) => x.userDid === BUSY_READER);
+    expect(d).toBeDefined();
+    expect(d!.payload.authorName).toBe("alice.test");
+    expect(d!.payload.authorDid).toBe(AUTHOR);
+  });
+
+  test("author with no comp_info/comp_user row names the raw DID (bridge-bot case)", async () => {
+    const db = freshDb();
+    await seedFixture(db);
+    // Strip the author's rows entirely — the cross-stream-author case the
+    // per-space DB never materialised (e.g. the Discord bridge bot, which
+    // creates threads without a comp_user row). The notification must name
+    // the author by DID instead of rendering "New message".
+    await db.run("delete from comp_user where did = ?", [AUTHOR]);
+    await db.run("delete from comp_info where entity = ?", [AUTHOR]);
+
+    const deliveries = await evaluatePush(db, db, {
+      spaceId: SPACE,
+      roomId: CHANNEL,
+      messageId: MESSAGE_ID,
+      authorDid: AUTHOR as UserDid,
+      timestamp: 1_000_000,
+    });
+
+    const d = deliveries.find((x) => x.userDid === BUSY_READER);
+    expect(d).toBeDefined();
+    expect(d!.payload.authorName).toBe(AUTHOR);
+    expect(d!.payload.authorDid).toBe(AUTHOR);
   });
 
   test("engaged member gets no immediate message push (digest path, not per-message)", async () => {
@@ -373,6 +422,10 @@ describe("push/evaluate — Engaged digest path", () => {
     expect(digest!.payload.count).toBe(DIGEST_THRESHOLD);
     expect(digest!.payload.roomName).toBe("general");
     expect(digest!.payload.messageId).toBeUndefined();
+    // The digest names its triggering author too (TASK-117): the digest
+    // branch never falls back to an anonymous count while an author is known.
+    expect(digest!.payload.authorName).toBe("Alice");
+    expect(digest!.payload.authorDid).toBe(AUTHOR);
     expect(await notifState(db, ENGAGED_READER, CHANNEL)).toEqual({
       unseen_count: 5,
       notified: 1,

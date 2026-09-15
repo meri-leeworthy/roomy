@@ -25,7 +25,7 @@ import type { DbLike } from "../db/types.ts";
 import { openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { createHash } from "node:crypto";
 import { log } from "../log.ts";
-import { evaluatePush } from "./evaluate.ts";
+import { evaluatePush, resolveAuthorName } from "./evaluate.ts";
 import { sendPush } from "./webpush.ts";
 import {
   pruneSubscriptionByEndpoint,
@@ -186,7 +186,7 @@ async function processBatch(db: DbLike, batch: PushJob[]): Promise<void> {
  * or any author; we resolve the owning space from the global `entity_space`
  * index and the most-recent sender via {@link resolveLatestRoomAuthor}
  * (both against the room's per-space DB) so the payload can carry `spaceId`
- * + an avatar icon.
+ * + an author name (via {@link resolveAuthorName}) + an avatar icon.
  */
 async function runDigestSweep(db: DbLike): Promise<void> {
   const due = await selectDueDigests(db, Date.now(), SWEEP_BATCH_LIMIT);
@@ -200,26 +200,49 @@ async function runDigestSweep(db: DbLike): Promise<void> {
   const global = openGlobalDb();
   const roomMeta = new Map<
     string,
-    { name: string | null; spaceId: string | null }
+    {
+      name: string | null;
+      spaceId: string | null;
+      authorDid: string | null;
+      authorName: string | null;
+    }
   >();
-  const spaceDbByRoom = new Map<string, DbLike>();
+  const iconByRoom = new Map<string, string>();
   for (const row of due) {
     if (roomMeta.has(row.roomId)) continue;
     const spaceRow = await global
       .query("select space_did from entity_space where entity_id = ?")
       .get<{ space_did: string }>(row.roomId);
     const spaceId = spaceRow?.space_did ?? null;
-    roomMeta.set(row.roomId, { name: null, spaceId });
+    roomMeta.set(row.roomId, { name: null, spaceId, authorDid: null, authorName: null });
     if (spaceId) {
       const spaceDb = openSpaceDb(spaceId);
-      spaceDbByRoom.set(row.roomId, spaceDb);
       const r = await spaceDb.query(
         `select ci.name as name
            from entities e
            left join comp_info ci on ci.entity = e.id
           where e.id = ?`,
       ).get<{ name: string | null }>(row.roomId);
-      roomMeta.set(row.roomId, { name: r?.name ?? null, spaceId });
+      // Most-recent sender: one author per room batch — name + avatar. The
+      // name degrades through the global `profiles` store to the raw DID
+      // (never null once a DID is known), so a digest names its sender too.
+      const latestAuthor = await resolveLatestRoomAuthor(spaceDb, row.roomId);
+      const authorName = latestAuthor
+        ? await resolveAuthorName(spaceDb, latestAuthor)
+        : null;
+      roomMeta.set(row.roomId, {
+        name: r?.name ?? null,
+        spaceId,
+        authorDid: latestAuthor,
+        authorName,
+      });
+      // Icon: most-recent sender avatar → space avatar (same "user avatars, or
+      // failing that, space avatars" rule as message pushes). Sender avatars
+      // are the reliable source; space `atblob://` avatars often 404.
+      const icon =
+        (latestAuthor ? await resolveEntityAvatar(spaceDb, latestAuthor) : undefined) ??
+        (await resolveEntityAvatar(spaceDb, spaceId));
+      if (icon) iconByRoom.set(row.roomId, icon);
     }
   }
 
@@ -232,18 +255,12 @@ async function runDigestSweep(db: DbLike): Promise<void> {
       roomId: row.roomId,
       count: row.unseenCount,
       ...(meta?.name != null ? { roomName: meta.name } : {}),
+      ...(meta?.authorDid != null
+        ? { authorDid: meta.authorDid, authorName: meta.authorName ?? meta.authorDid }
+        : {}),
     };
-    // Icon: most-recent sender avatar → space avatar (same "user avatars, or
-    // failing that, space avatars" rule as message pushes). Sender avatars are
-    // the reliable source; space `atblob://` avatars often 404.
-    const spaceDb = spaceDbByRoom.get(row.roomId);
-    if (spaceDb) {
-      const latestAuthor = await resolveLatestRoomAuthor(spaceDb, row.roomId);
-      const icon =
-        (latestAuthor ? await resolveEntityAvatar(spaceDb, latestAuthor) : undefined) ??
-        (await resolveEntityAvatar(spaceDb, spaceId));
-      if (icon) payload.icon = icon;
-    }
+    const icon = iconByRoom.get(row.roomId);
+    if (icon) payload.icon = icon;
     // Mark notified regardless of delivery success so a transient push-service
     // outage doesn't re-fire the same batch every 60s (Phase 4 adds retry).
     await deliverPayload(db, row.userDid, payload);
