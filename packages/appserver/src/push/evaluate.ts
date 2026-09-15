@@ -40,6 +40,7 @@
 
 import { stripMarkdownToPlaintext } from "./plaintext.ts";
 import type { DbLike } from "../db/types.ts";
+import { tryOpenGlobalDb } from "../db/db.ts";
 import { decodeContent, decodeRichTextBody } from "../db/content.ts";
 import { RICHTEXT_MIME, blocksToPlaintext } from "@roomy-space/sdk";
 import { roomAccess } from "../auth/access.ts";
@@ -53,9 +54,55 @@ import type { PushDelivery, PushJob, PushPayload } from "./types.ts";
 
 export interface MessageFacts {
   roomName: string | null;
-  authorName: string | null;
+  /**
+   * Author display name, never null while the author DID is known — resolves
+   * per-space `comp_info.name` → `comp_user.handle` → global `profiles`
+   * store → the DID itself (see {@link resolveAuthorName}). A push must
+   * always name its author; "New message" instead of a sender is a bug.
+   */
+  authorName: string;
   /** Decoded message text content (first ~120 chars). */
   messageContent: string | null;
+}
+
+/**
+ * Resolve a display name for a message author, degrading instead of
+ * returning null:
+ *
+ *   1. per-space `comp_info.name` — the denormalised copy, which may lag or
+ *      be absent entirely for cross-stream authors (e.g. the Discord bridge
+ *      bot, which creates threads without a `comp_user` row);
+ *   2. per-space `comp_user.handle`;
+ *   3. the global `profiles` store — the authoritative cross-space profile
+ *      row (`name`, then `handle`; see `materialization/profiles.ts`);
+ *   4. the DID itself.
+ *
+ * `db` is the per-space handle (comp_info/comp_user live there); the
+ * global-store read goes through `tryOpenGlobalDb()` — a no-op (returns the
+ * DID) when the global DB isn't open (e.g. raw in-memory DBs in tests).
+ */
+export async function resolveAuthorName(
+  db: DbLike,
+  did: string,
+): Promise<string> {
+  const local = await db.query(
+    `select ci.name as name, cu.handle as handle
+       from (select 1) _
+       left join comp_info ci on ci.entity = ?
+       left join comp_user cu on cu.did = ?`,
+  ).get<{ name: string | null; handle: string | null }>(did, did);
+  const localName = local?.name ?? local?.handle;
+  if (localName) return localName;
+
+  const globalDb = tryOpenGlobalDb();
+  if (globalDb) {
+    const row = await globalDb
+      .query("select name, handle from profiles where did = ?")
+      .get<{ name: string | null; handle: string | null }>(did);
+    if (row?.name) return row.name;
+    if (row?.handle) return row.handle;
+  }
+  return did;
 }
 
 /**
@@ -75,13 +122,14 @@ export async function resolveMessageFacts(
   ).get<{ name: string | null }>(roomId);
   const roomName = roomRow?.name ?? null;
 
-  const authorRow = await db.query(
-    `select ci.name as name, cu.handle as handle
-       from (select 1) _
-       left join comp_info ci on ci.entity = ?
-       left join comp_user cu on cu.did = ?`,
-  ).get<{ name: string | null; handle: string | null }>(authorDid, authorDid);
-  const authorName = authorRow?.name ?? authorRow?.handle ?? null;
+  const authorName = await resolveAuthorName(db, authorDid);
+  if (authorName === authorDid) {
+    // Degraded path marker: the author has no comp_info/comp_user row AND no
+    // global profile (e.g. the Discord bridge bot) — the notification names
+    // them by raw DID. Cheap info log so prod can confirm how often this
+    // happens (it's what used to render as "New message").
+    log.info(`[push-evaluate] authorName fell back to raw DID for ${messageId}: ${authorDid}`);
+  }
 
   // Fetch message content from comp_content, truncated to ~120 chars.
   const contentRow = await db.query(
@@ -136,9 +184,8 @@ function buildMessagePayload(
     messageId: job.messageId,
     count: 1,
     ...(facts.roomName != null ? { roomName: facts.roomName } : {}),
-    ...(facts.authorName != null
-      ? { authorName: facts.authorName }
-      : {}),
+    authorName: facts.authorName,
+    authorDid: job.authorDid,
     ...(facts.messageContent != null
       ? { messageContent: facts.messageContent }
       : {}),
@@ -252,6 +299,8 @@ export async function evaluatePush(
       roomId,
       count: outcome.unseenCount,
       ...(facts.roomName != null ? { roomName: facts.roomName } : {}),
+      authorDid,
+      authorName: facts.authorName,
     };
     if (icon) payload.icon = icon;
     deliveries.push({ userDid: did, payload });

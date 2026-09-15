@@ -6,6 +6,7 @@
 declare let self: ServiceWorkerGlobalScope;
 
 import { build, files, version } from "$service-worker";
+import { notificationText, type PushNotificationView } from "./lib/notificationText";
 
 // Create a unique cache name for this deployment
 const CACHE = `cache-${version}`;
@@ -152,16 +153,10 @@ self.addEventListener("fetch", (event: FetchEvent) => {
 // `event.notification` is unavailable in a `push` event (it only exists for
 // `notificationclick`), so we read the payload from `event.data`.
 
-interface PushPayload {
-  type: "message" | "digest";
+interface PushPayload extends PushNotificationView {
   spaceId?: string;
   roomId?: string;
   messageId?: string;
-  count?: number;
-  roomName?: string;
-  authorName?: string;
-  /** Decoded message text content (first ~120 chars). */
-  messageContent?: string;
   /** Browser-fetchable avatar URL (sender for messages, room/space for digests). */
   icon?: string;
 }
@@ -181,22 +176,10 @@ async function handlePush(event: PushEvent): Promise<void> {
     // would otherwise be silently dropped / flagged by the browser).
     payload = null;
   }
-  const count = payload?.count ?? 1;
-  const room = payload?.roomName ?? "a room";
-  const title =
-    payload?.type === "digest"
-      ? `${count} new messages in ${room}`
-      : payload?.authorName
-        ? `${payload.authorName} in ${room}`
-        : `New message in ${room}`;
-  const body =
-    payload?.type === "digest"
-      ? `${count} new messages`
-      : payload?.messageContent
-        ? payload.messageContent
-        : payload?.authorName
-          ? `${payload.authorName} sent a message`
-          : "New message";
+  // Title/body come from the shared renderer (see lib/notificationText.ts):
+  // authorName when resolved, else the author DID — "New message" only when
+  // the payload has no author at all.
+  const { title, body } = notificationText(payload ?? {});
 
   // Stash the deep-link target on the notification so `notificationclick`
   // can route into the right room. Tag = roomId so a room's notifications
