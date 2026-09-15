@@ -188,9 +188,21 @@
         },
       );
 
-      // Invalidate the appserver profile query so it re-fetches from HappyView.
+      // Invalidate the appserver profile queries so they re-fetch.
+      // The profile page's query is keyed on the ROUTE PARAM (the URL's
+      // actor — a DID when navigated via avatar/mention links, or a handle
+      // when the address bar holds one), while `agent.assertDid` is always
+      // the user's DID. TanStack matches keys structurally, so an
+      // invalidation keyed on one won't touch a live query keyed on the
+      // other. Invalidate both the DID key (covers handle-navigated URLs
+      // whose key resolves to this DID server-side) and the route-param key
+      // (covers the exact key the open page is mounted on), so a save is
+      // reflected on-screen regardless of how the page was reached.
       await queryClient.invalidateQueries({
         queryKey: cache.queryKey("space.roomy.user.getProfile", { actor: agent.assertDid }),
+      });
+      await queryClient.invalidateQueries({
+        queryKey: cache.queryKey("space.roomy.user.getProfile", { actor: actorParam }),
       });
       editing = false;
     } catch (e) {

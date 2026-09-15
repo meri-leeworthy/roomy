@@ -14,6 +14,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { startAppserver, type E2eContext } from "./helpers.ts";
 import { setHappyView } from "../happyview.ts";
+import { _setTestGetRoomyProfileRecord } from "../materialization/roomyProfile.ts";
 
 const USER = "did:plc:e2e-user";
 const HAPPYVIEW = { endpoint: "https://happyview.test", clientKey: "hvc_test" };
@@ -155,6 +156,58 @@ describe("space.roomy.user.getProfile", () => {
     expect(body.displayName).toBe("Little Fox");
     // Persisted: the poisoned `''` is gone from the row.
     expect(await readStoredHandle(ctx, USER)).toBe("meri-little-fox.roomy.chat");
+  });
+
+  test("serves the PDS record over a stale HappyView snapshot (read-after-write)", async () => {
+    // Regression: read-after-write consistency. The write path confirms the
+    // record on the PDS, but HappyView is Jetstream-fed and can lag a
+    // just-confirmed write. getProfile used to consult HappyView first and
+    // re-materialise that snapshot into the global row, so immediately after
+    // a putRecord the stale pre-write fields were served — and clobbered the
+    // global row. Now the PDS is authoritative and consulted first.
+    const ctx = await startAppserver();
+    setHappyView(HAPPYVIEW);
+    // Fresh, just-written record on the PDS (post-putRecord).
+    _setTestGetRoomyProfileRecord(async () => ({
+      displayName: "Fresh Name",
+      description: "edited just now",
+      pronouns: "they/them",
+      website: "https://fresh.example",
+    }));
+    // HappyView still serves the pre-write snapshot (Jetstream lag).
+    stubProfileSources({
+      happyView: [
+        {
+          did: USER,
+          displayName: "Stale Name",
+          description: "old description",
+          pronouns: "she/her",
+          website: "https://stale.example",
+        },
+      ],
+      bluesky: [{ did: USER, handle: "user.test" }],
+    });
+    await seedProfile(ctx, USER, "user.test");
+
+    const body = await getProfile(ctx, USER);
+
+    // The just-confirmed PDS write is immediately visible.
+    expect(body.displayName).toBe("Fresh Name");
+    expect(body.description).toBe("edited just now");
+    expect(body.pronouns).toBe("they/them");
+    expect(body.website).toBe("https://fresh.example");
+    expect(body.handle).toBe("user.test");
+    // The stale HappyView snapshot must not clobber the global row.
+    const reader = ctx.db as unknown as {
+      global(): {
+        query(sql: string): { get<T>(...p: unknown[]): Promise<T | null> };
+      };
+    };
+    const stored = await reader
+      .global()
+      .query("select name from profiles where did = ?")
+      .get<{ name: string | null }>(USER);
+    expect(stored?.name).toBe("Fresh Name");
   });
 
   test("never returns an empty-string handle", async () => {

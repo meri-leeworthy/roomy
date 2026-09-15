@@ -30,15 +30,23 @@ import { openGlobalDb } from "../db/db.ts";
 import { idResolver } from "../identity.ts";
 import { insertProfilesWithExtras, defaultGetProfiles } from "../materialization/profiles.ts";
 import { getHappyView } from "../happyview.ts";
-import { getProfileFromHappyView, happyViewToProfileView, happyViewExtras } from "../materialization/roomyProfile.ts";
+import {
+  getProfileFromHappyView,
+  getRoomyProfileRecord,
+  happyViewToProfileView,
+  happyViewExtras,
+  roomyRecordToProfileView,
+  roomyRecordExtras,
+} from "../materialization/roomyProfile.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { requireString } from "../xrpc/params.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
+import { log } from "../log.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
 import type { UserDid } from "@roomy-space/sdk";
 import type { DbLike } from "../db/types.ts";
 import type { ProfileViewDetailed } from "@atproto/api/dist/client/types/app/bsky/actor/defs";
-import type { RoomyProfileExtras } from "../materialization/roomyProfile.ts";
+import type { RoomyProfileExtras, RoomyProfileRecord } from "../materialization/roomyProfile.ts";
 
 export interface GetProfileResult {
   did: string;
@@ -77,14 +85,62 @@ export const getProfileHandler: QueryHandler<
 
   const db = openGlobalDb();
 
-  // ── Roomy profile record from HappyView (authoritative) ──────────────
-  // The appserver processes events from its local event store, not ATProto repo commits,
-  // so a `putRecord` to `space.roomy.user.profile/self` on the PDS does not
-  // trigger re-materialisation. HappyView subscribes to the Jetstream
-  // firehose and indexes Roomy profile records, so it has the freshest
-  // copy. Always check HappyView first and re-materialise from it when a
-  // record exists — `insertProfilesWithExtras` uses `on conflict do
-  // update` for Roomy-sourced profiles, so this is idempotent.
+  // ── Roomy profile record from the PDS (authoritative) ─────────────────
+  // The write path confirms the record on the PDS (`putRecord` with the
+  // `atproto-proxy` header). The PDS is the record's source of truth, and
+  // read-after-write consistency requires that a just-confirmed write is
+  // immediately visible. We used to check HappyView first, but HappyView is
+  // Jetstream-fed and eventually-consistent: immediately after a `putRecord`
+  // it may still serve the pre-write snapshot, and re-materialising from that
+  // clobbers the global `profiles` row with stale data — the read-after-write
+  // bug. So the PDS is consulted first; HappyView is only a fallback when the
+  // PDS has no record.
+  let pdsRecord: RoomyProfileRecord | null = null;
+  try {
+    pdsRecord = await getRoomyProfileRecord(did);
+  } catch (err) {
+    // Unresolvable DID (bridged/synthetic) or unreachable/slow PDS — fall
+    // through to HappyView/row/Bluesky rather than failing the read.
+    log.warn(
+      `[getProfile] PDS record fetch failed for ${did}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  if (pdsRecord) {
+    const pdsPv = roomyRecordToProfileView(did, pdsRecord);
+    const pdsEx = roomyRecordExtras(did, pdsRecord);
+    await insertProfilesWithExtras(
+      db,
+      [pdsPv],
+      new Map([[did, pdsEx]]),
+    );
+
+    // Re-read the global profile row to get the handle (Roomy records don't
+    // carry one — the handle comes from the global `profiles` row, populated
+    // by prior Bluesky/hydration). If that row has no usable handle, resolve
+    // one from Bluesky now instead of returning an empty handle: a Roomy
+    // record may be this user's only profile source, and the handle is
+    // publicly resolvable.
+    let row = await readProfileRow(db, did);
+    if (!row?.handle) row = await hydrateHandle(db, did) ?? row;
+    return stripNulls({
+      did,
+      handle: row?.handle || undefined,
+      displayName: pdsPv.displayName,
+      avatar: pdsPv.avatar,
+      description: pdsPv.description,
+      banner: pdsEx.banner,
+      pronouns: pdsEx.pronouns,
+      website: pdsEx.website,
+    }) as GetProfileResult;
+  }
+
+  // ── Roomy profile record from HappyView ──────────────────────────────
+  // No Roomy record on the PDS (user hasn't written one). Fall back to
+  // HappyView's indexed copy, re-materialising it so the global row stays
+  // fresh for the materialisation read paths that don't hit the PDS.
   const happyView = getHappyView();
   let freshPv: ProfileViewDetailed | null = null;
   let freshEx: RoomyProfileExtras | null = null;
@@ -104,12 +160,6 @@ export const getProfileHandler: QueryHandler<
       new Map([[did, freshEx]]),
     );
 
-    // Re-read the global profile row to get the handle (Roomy records don't
-    // carry one — the handle comes from the global `profiles` row, populated
-    // by prior Bluesky/hydration). If that row has no usable handle, resolve
-    // one from Bluesky now instead of returning an empty handle: a Roomy
-    // record may be this user's only profile source, and the handle is
-    // publicly resolvable.
     let row = await readProfileRow(db, did);
     if (!row?.handle) row = await hydrateHandle(db, did) ?? row;
     return stripNulls({

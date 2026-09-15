@@ -29,6 +29,7 @@ import { stopSearchIndexer, _resetSearchIndexer } from "../search/indexer.ts";
 import { stopSearchBackfill, _resetSearchBackfill } from "../search/backfill.ts";
 import { _resetQdrantClient, _resetMessagesCollection } from "../search/qdrantSearch.ts";
 import { _resetProfileStoreCache, _setTestGetProfiles } from "../queries/profileStore.ts";
+import { _setTestGetRoomyProfileRecord } from "../materialization/roomyProfile.ts";
 import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
 import { newUlid } from "@roomy-space/sdk";
 import type { Database } from "bun:sqlite";
@@ -78,6 +79,7 @@ export async function startAppserver(): Promise<E2eContext> {
   // 5s per-test timeout. Tests don't assert on profile materialization, so
   // no-op fetchers are safe.
   _setTestGetProfiles(async () => []);
+  _setTestGetRoomyProfileRecord(async () => null);
 
   // Open the singleton DB in-memory so handlers' internal openDb() resolves.
   const db = openDb({ path: ":memory:" }) as unknown as Database;
@@ -137,6 +139,7 @@ export async function startAppserver(): Promise<E2eContext> {
     _resetProfileStoreCache();
     _resetProfileNegativeCache();
     _setTestGetProfiles(null);
+    _setTestGetRoomyProfileRecord(null);
   });
 
   return { handle, baseUrl, authedFetch, anonFetch, db };

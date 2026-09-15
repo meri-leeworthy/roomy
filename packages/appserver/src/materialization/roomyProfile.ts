@@ -54,11 +54,32 @@ export interface HappyViewProfile {
 const PROFILE_COLLECTION = "space.roomy.user.profile";
 const PROFILE_RKEY = "self";
 
+// ─── Test-only override ──────────────────────────────────────────────────
+
+/**
+ * Test-only override for the on-demand PDS `getRecord` call. When set,
+ * `getRoomyProfileRecord` uses it instead of resolving the PDS and hitting
+ * the network. E2E tests stub it to exercise the PDS-first branch of the
+ * `getProfile` handler hermetically. Mirrors `_setTestGetProfiles`.
+ */
+let testGetRoomyProfileRecord:
+  | ((did: string) => Promise<RoomyProfileRecord | null>)
+  | null = null;
+
+/** Set a test-only PDS-record fetcher override (or null to clear). */
+export function _setTestGetRoomyProfileRecord(
+  fn: ((did: string) => Promise<RoomyProfileRecord | null>) | null,
+): void {
+  testGetRoomyProfileRecord = fn;
+}
+
 // ─── On-demand single-DID PDS fetch ──────────────────────────────────────
 
 /**
  * Fetch the `space.roomy.user.profile/self` record from a user's PDS.
- * Used only by the on-demand `getProfile` handler as a last-resort fallback.
+ * The authoritative source for a user's Roomy profile — the write path
+ * confirms records here, so reads must consult it first for read-after-write
+ * consistency (HappyView/Jetstream can lag a just-confirmed write).
  *
  * Returns `null` if the record doesn't exist (user hasn't edited their Roomy
  * profile). Throws on network/DID-resolution failures.
@@ -66,6 +87,7 @@ const PROFILE_RKEY = "self";
 export async function getRoomyProfileRecord(
   did: string,
 ): Promise<RoomyProfileRecord | null> {
+  if (testGetRoomyProfileRecord) return testGetRoomyProfileRecord(did);
   const pdsEndpoint = await resolvePdsEndpoint(did);
   const agent = new AtpAgent({ service: pdsEndpoint });
   try {
