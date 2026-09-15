@@ -86,6 +86,11 @@ SCOPE+=" rpc:space.roomy.push.registerSubscription?aud=*"
 SCOPE+=" rpc:space.roomy.push.unregisterSubscription?aud=*"
 SCOPE+=" rpc:space.roomy.push.setPreferences?aud=*"
 
+# ── Roomy Pro bridge tokens ──────────────────────────────────────────────
+SCOPE+=" rpc:space.roomy.space.getBridgeTokens?aud=*"
+SCOPE+=" rpc:space.roomy.space.grantBridgeToken?aud=*"
+SCOPE+=" rpc:space.roomy.space.revokeBridgeToken?aud=*"
+
 # Build the OAuth client metadata JSON
 oauth_shared=$(
   cat <<EOF

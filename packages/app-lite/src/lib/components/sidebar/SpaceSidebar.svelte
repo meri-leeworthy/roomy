@@ -149,7 +149,12 @@
       ((meta?.isAdmin ?? false) ||
         (meta?.joinPolicy.allowMemberInvites ?? false)),
   );
-  const showDiscordBridgeTab = false; //$derived(meta?.isAdmin ?? false);
+  // The bridge is a Roomy Pro feature: the tab appears for anyone whose
+  // `pro-subscription` flag is enabled. Direct navigation still works without
+  // it, and the page itself gates the Pro panel on the same flag.
+  const showDiscordBridgeTab = $derived(
+    flagsQuery.data?.flags.includes("pro-subscription") ?? false,
+  );
   const showFederationTab = $derived(meta?.isAdmin ?? false);
   const spaceAccountMgmtEnabled = $derived(
     flagsQuery.data?.flags.includes("space-account-management") ?? false,

@@ -44,6 +44,10 @@ const APPSERVER_RPCS = [
   "space.roomy.push.unregisterSubscription",
   "space.roomy.push.setPreferences",
   "space.roomy.pro.createCheckout",
+  // Roomy Pro bridge tokens
+  "space.roomy.space.getBridgeTokens",
+  "space.roomy.space.grantBridgeToken",
+  "space.roomy.space.revokeBridgeToken",
 ];
 
 export const CONFIG = {
@@ -89,6 +93,15 @@ export const CONFIG = {
    */
   faroApiKey: dynamicEnv.PUBLIC_FARO_API_KEY || null,
 };
+
+/**
+ * Member limit of the free Discord Bridge tier (no Roomy Pro membership).
+ * Mirrors the "up to 50 members" tier copy in the design system's
+ * PricingTiers and the subscription page; the bridge enforces the Pro
+ * capacity server-side, while this constant is only for UI copy on the
+ * space's bridge settings.
+ */
+export const FREE_BRIDGE_MEMBER_LIMIT = 50;
 
 export const OAUTH_SCOPE = [
   "atproto",

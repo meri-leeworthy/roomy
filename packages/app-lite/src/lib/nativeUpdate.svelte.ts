@@ -1,4 +1,5 @@
 import type { Update } from '@tauri-apps/plugin-updater';
+import { browser } from '$app/environment';
 import { createContext } from 'svelte';
 
 
@@ -6,13 +7,21 @@ import { createContext } from 'svelte';
 //       for package managers handling updates externally.
 const DISABLE_INTERNAL_UPDATE = false;
 export const desktopUpdatesEnabled =
+  browser &&
   "__TAURI__" in window &&
   typeof window.__TAURI__ === 'object' &&
   "updater" in window.__TAURI__ &&
   !DISABLE_INTERNAL_UPDATE;
 
+/** Preferences live in localStorage, which only exists in the browser. */
+function readEnableAutoupdate(): boolean {
+  if (!browser) return true;
+  const stored = localStorage.getItem('enableAutoupdate');
+  return stored === null ? true : stored === 'true';
+}
+
 export class Updater {
-  #enableAutoupdate = $state(localStorage.getItem('enableAutoupdate') === null ? true : localStorage.getItem('enableAutoupdate') === 'true');
+  #enableAutoupdate = $state(readEnableAutoupdate());
 
   #update: Update | null = $state(null)
   #size = $state(0)
@@ -21,11 +30,11 @@ export class Updater {
   #progress = $derived((this.#downloaded / Math.max(this.#size, 1)) * 100.0)
 
   get enableAutoupdate() {
-    if (!('__TAURI__' in window)) return false;
+    if (!desktopUpdatesEnabled) return false;
     return this.#enableAutoupdate;
   }
   set enableAutoupdate(val) {
-    if (!('__TAURI__' in window)) return
+    if (!desktopUpdatesEnabled) return;
     this.#enableAutoupdate = val;
     localStorage.setItem('enableAutoupdate', String(val));
   }

@@ -129,6 +129,10 @@ export const QUERY_SCHEMAS = {
     params: queries.getFederationGrants.Params,
     response: queries.getFederationGrants.Response,
   },
+  "space.roomy.space.getBridgeTokens": {
+    params: queries.getBridgeTokens.Params,
+    response: queries.getBridgeTokens.Response,
+  },
 } as const;
 
 export const PROCEDURE_SCHEMAS = {
@@ -179,6 +183,14 @@ export const PROCEDURE_SCHEMAS = {
   "space.roomy.push.setPreferences": {
     input: procedures.setPreferences.Input,
     output: procedures.setPreferences.Output,
+  },
+  "space.roomy.space.grantBridgeToken": {
+    input: procedures.grantBridgeToken.Input,
+    output: procedures.grantBridgeToken.Output,
+  },
+  "space.roomy.space.revokeBridgeToken": {
+    input: procedures.revokeBridgeToken.Input,
+    output: procedures.revokeBridgeToken.Output,
   },
   "space.roomy.pro.createCheckout": {
     input: procedures.createProCheckout.Input,

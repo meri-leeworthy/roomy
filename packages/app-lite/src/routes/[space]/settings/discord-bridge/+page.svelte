@@ -8,9 +8,19 @@
   import InlineMono from "@roomy/design/components/helper/InlineMono.svelte";
   import { IconCopy } from "@roomy/design/icons";
   import { createMembersQuery } from "$lib/queries/members";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
+  import { createMembershipStatusQuery } from "$lib/queries/membership-status";
+  import { createBridgeTokensQuery } from "$lib/queries/bridge-tokens";
+  import {
+    grantBridgeToken,
+    revokeBridgeToken,
+    xrpcErrorName,
+  } from "$lib/mutations/bridge-tokens";
   import { sendEvents } from "$lib/mutations/send-events";
+  import { auth } from "$lib/auth.svelte";
   import { newUlid, type UserDid, type Event } from "@roomy-space/sdk";
   import { setSpaceInfoExtra } from "$lib/components/layout/navbar.svelte";
+  import { FREE_BRIDGE_MEMBER_LIMIT } from "$lib/config";
 
   const spaceId = $derived(page.params.space!);
 
@@ -27,6 +37,82 @@
         (ea) => ea.did === bridgeBotDid,
       ),
   );
+
+  // ── Roomy Pro membership ──────────────────────────────────────────────
+  // The Discord Bridge settings tab is only visible when the caller has the
+  // pro-subscription flag (see SpaceSidebar); direct navigation can still
+  // reach this page, so the Pro panel below degrades to a gated notice.
+  const flagsQuery = createFeatureFlagsQuery();
+  const proEnabled = $derived(
+    flagsQuery.data?.flags.includes("pro-subscription") ?? false,
+  );
+
+  // The caller's Pro membership: capacity 0 means not a Pro member (or Polar
+  // unreachable with nothing cached — `stale`).
+  const statusQuery = createMembershipStatusQuery(() => undefined);
+  const status = $derived(statusQuery.data);
+  const isProMember = $derived((status?.capacity ?? 0) > 0);
+
+  // Grants for THIS space. Only fetched once the caller is known to be a
+  // member (the query 403s otherwise) and they're a Pro member (nobody else
+  // can grant). `getBridgeTokens` reports the grant-time capacity snapshot,
+  // not live validity.
+  const tokensQuery = createBridgeTokensQuery(() => spaceId, {
+    enabled: () => proEnabled && isProMember,
+  });
+  const myGrant = $derived(
+    (tokensQuery.data?.tokens ?? []).find(
+      (t) => t.grantorDid === auth.userDid,
+    ),
+  );
+
+  let tokenBusy = $state(false);
+
+  async function onUseMembership() {
+    if (tokenBusy) return;
+    tokenBusy = true;
+    try {
+      await grantBridgeToken(spaceId);
+      toast.success("Your Roomy Pro membership now powers this space.");
+    } catch (err) {
+      const name = xrpcErrorName(err);
+      if (name === "AlreadyGranted") {
+        toast.error(
+          "You've already used your membership on another space. Free it there first.",
+        );
+      } else if (name === "AlreadySpent") {
+        toast.error("This membership is already permanently used.");
+      } else if (name === "NotProMember") {
+        toast.error("Roomy Pro isn't active on your account.");
+      } else {
+        toast.error("Couldn't use your membership here. Please try again.");
+      }
+      console.error("grantBridgeToken failed:", err);
+    } finally {
+      tokenBusy = false;
+    }
+  }
+
+  async function onStopUsingMembership() {
+    if (tokenBusy) return;
+    tokenBusy = true;
+    try {
+      await revokeBridgeToken(spaceId);
+      toast.success("Your Roomy Pro membership is free to use elsewhere.");
+    } catch (err) {
+      const name = xrpcErrorName(err);
+      if (name === "AlreadySpent") {
+        toast.error(
+          "This membership is permanently in use and can't be taken back.",
+        );
+      } else {
+        toast.error("Couldn't free your membership. Please try again.");
+      }
+      console.error("revokeBridgeToken failed:", err);
+    } finally {
+      tokenBusy = false;
+    }
+  }
 
   let bridgeStatus:
     | { type: "checking" }
@@ -184,6 +270,113 @@
   {/if}
 {/snippet}
 
+{#snippet proMembershipPanel()}
+  {#if !proEnabled}
+    <section
+      class="rounded-lg border border-base-200 dark:border-base-800 px-4 py-3"
+    >
+      <p class="text-sm text-base-600 dark:text-base-400">
+        Roomy Pro isn't enabled for your account yet, so the Discord Bridge
+        can't be set up from here.
+      </p>
+    </section>
+  {:else if statusQuery.isPending}
+    <section
+      class="rounded-lg border border-base-200 dark:border-base-800 px-4 py-3"
+    >
+      <p class="text-sm text-base-400">Checking your membership…</p>
+    </section>
+  {:else if statusQuery.isError}
+    <section
+      class="rounded-lg border border-red-500/30 bg-red-200/20 dark:bg-red-950/10 px-4 py-3"
+    >
+      <p class="text-sm text-base-600 dark:text-base-400">
+        Couldn't load your Roomy Pro membership right now. Refresh to try
+        again.
+      </p>
+    </section>
+  {:else if !isProMember}
+    <section
+      class="rounded-lg border border-accent-500/30 bg-accent-200/20 dark:bg-accent-950/10 px-4 py-3"
+    >
+      <h2 class="text-sm font-semibold text-base-900 dark:text-base-100">
+        Bridge bigger communities with Roomy Pro
+      </h2>
+      <p class="mt-1 text-sm text-base-600 dark:text-base-400">
+        On the free tier this space bridges a Discord server of up to
+        <strong>{FREE_BRIDGE_MEMBER_LIMIT} members</strong>. Roomy Pro raises
+        that to <strong>1000 members</strong> and lets you use your membership
+        here.
+      </p>
+      <div class="mt-3">
+        <Button size="sm" variant="primary" href="/user/settings/subscription">
+          Get Roomy Pro
+        </Button>
+      </div>
+    </section>
+  {:else}
+    <section
+      class="rounded-lg border border-base-200 dark:border-base-800 px-4 py-3"
+    >
+      <div class="flex items-start justify-between gap-4">
+        <div class="min-w-0">
+          <h2 class="text-sm font-semibold text-base-900 dark:text-base-100">
+            Roomy Pro membership
+          </h2>
+          <p class="mt-1 text-sm text-base-600 dark:text-base-400">
+            Your plan bridges a Discord server of up to
+            <strong>{status?.capacity ?? 0} members</strong>.
+          </p>
+        </div>
+        {#if myGrant}
+          <Badge variant={myGrant.spent ? "orange" : "green"}>
+            {myGrant.spent ? "in use permanently" : "in use here"}
+          </Badge>
+        {:else}
+          <Badge>not used here</Badge>
+        {/if}
+      </div>
+
+      {#if myGrant?.spent}
+        <p class="mt-3 text-sm text-base-600 dark:text-base-400">
+          Your membership is permanently in use for this space. It can no
+          longer be moved to another space. 
+        </p>
+      {:else if myGrant}
+        <p class="mt-3 text-sm text-base-600 dark:text-base-400">
+          This space is bridged using your Roomy Pro membership. You can free
+          it to use on another space — unless this space's Discord server has
+          grown beyond the free limit, which makes the membership permanent.
+        </p>
+        <div class="mt-3">
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={tokenBusy}
+            onclick={onStopUsingMembership}
+          >
+            {tokenBusy ? "Freeing…" : "Stop using here"}
+          </Button>
+        </div>
+      {:else}
+        <p class="mt-3 text-sm text-base-600 dark:text-base-400">
+          Use your Roomy Pro membership to bridge this space. Your membership allows you to bridge one Discord guild to one Roomy space, non-transferrable above the free limit of 50 Discord members.
+        </p>
+        <div class="mt-3">
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={tokenBusy}
+            onclick={onUseMembership}
+          >
+            {tokenBusy ? "Using…" : "Use membership here"}
+          </Button>
+        </div>
+      {/if}
+    </section>
+  {/if}
+{/snippet}
+
 {#if bridgeStatus.type === "loaded" && bridgeStatus.guildId}
   <form class="pt-4">
     <div class="space-y-12">
@@ -200,11 +393,15 @@
         You can disconnect it by going to Discord and running the slash command:
         <InlineMono>/disconnect-roomy-space</InlineMono>.
       </p>
+
+      {@render proMembershipPanel()}
     </div>
   </form>
 {:else}
   <form class="pt-4">
     <div class="space-y-12">
+
+      {@render proMembershipPanel()}
       <div class="flex flex-col justify-center gap-8">
         <div class="sm:col-span-4">
           <label
