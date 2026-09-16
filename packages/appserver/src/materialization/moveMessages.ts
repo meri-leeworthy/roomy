@@ -38,6 +38,10 @@ import type { DbLike } from "../db/types.ts";
 import type { Event, StreamDid, Ulid } from "@roomy-space/sdk";
 import { decodeTime, ulid } from "ulidx";
 import { upsertActivityItem } from "./activityItem.ts";
+import {
+  decrementUnreadForRemovedMessages,
+  rebuildActivityWindow,
+} from "./roomDerivedState.ts";
 import { setMessageSortIdxByMove } from "./sortIdx.ts";
 import { isThread, refreshThreadActivityOnMessage } from "../queries/userActiveThreads.ts";
 import { upsertUserRoomParticipation } from "../queries/userRoomParticipation.ts";
@@ -173,54 +177,6 @@ async function readMovedMessages(
   }));
 }
 
-/**
- * Recompute a room's `activity_item.recent_message_ids` window from the room's
- * current newest 5 message-shaped rows, ordered by `sort_idx` descending —
- * the same filter and order the `selectMessages` timeline uses (a row needs
- * own content or a forward edge to be a message). Leaves `last_activity_at`
- * at the newest entry's canonical time; when the room has no messages left
- * the row is deleted so the feed stops listing it.
- *
- * Used for the source room after a move, and for the destination so its
- * window reflects the moved message's new position rather than insertion
- * order.
- */
-async function rebuildActivityWindow(db: DbLike, roomId: string): Promise<void> {
-  const rows = await db
-    .query(
-      `select e.id as id, e.sort_idx as sort_idx
-         from entities e
-         left join comp_content cc on cc.entity = e.id
-         left join edges forward_e on forward_e.head = e.id and forward_e.label = 'forward'
-        where e.room = ?
-          and (cc.entity is not null or forward_e.tail is not null)
-        order by e.sort_idx desc
-        limit 5`,
-    )
-    .all<{ id: string; sort_idx: string | null }>([roomId]);
-
-  if (rows.length === 0) {
-    await db.run("delete from activity_item where room_id = ?", [roomId]);
-    return;
-  }
-
-  // `sort_idx` is a ULID of the canonical send time, so its time component is
-  // the entry timestamp the feed orders the window by — no second read of
-  // comp_content needed.
-  const entries = rows.map((r) => ({
-    id: r.id,
-    ts: decodeTime((r.sort_idx ?? r.id) as Ulid),
-  }));
-
-  await db.run(
-    `update activity_item
-        set last_activity_at = ?,
-            recent_message_ids = ?,
-            updated_at = (unixepoch() * 1000)
-      where room_id = ?`,
-    [entries[0]!.ts, JSON.stringify(entries), roomId],
-  );
-}
 
 /**
  * Destination unread bump. Mirrors `applyBundle`'s createMessage path: a
@@ -261,20 +217,10 @@ async function bumpDestinationUnread(
 }
 
 /**
- * Source unread decrement — exact, not a blind `-1`.
- *
- * A user's `unread_count` for a room counts the messages past their
- * `seen_up_to` watermark (createMessage adds one per message). Moving a
- * message out must remove exactly the messages that were still unread for
- * them, and the watermark decides that: the message's ORIGINAL `sort_idx` is
- * a ULID of its canonical send time (`comp_content.timestamp`, falling back
- * to the id's own time for a content-less forward), so reconstructing that
- * ULID yields the ordering key the message had before the move. Comparing it
- * against `seen_up_to` (also a stored `sort_idx`) says whether it was unread.
- *
- * Blindly subtracting one per moved message would corrupt the count for users
- * who had already read it — the count is maintained incrementally, so this is
- * the only place with enough information to be exact.
+ * Source unread decrement. The moved message's `sort_idx` has already been
+ * rewritten by the move, so the ORIGINAL ordering key is reconstructed from
+ * `comp_content.timestamp` (falling back to the id's own time for a
+ * content-less forward).
  *
  * Caveat: a message that was *reordered* before being moved carries a
  * mid-pointed `sort_idx` that is not reproducible from its timestamp; the
@@ -286,33 +232,10 @@ async function decrementSourceUnread(
   sourceRoomId: string,
   moved: readonly MovedMessage[],
 ): Promise<void> {
-  const rows = await readStateDb
-    .query(
-      `select user_did, seen_up_to, unread_count
-         from read_positions
-        where room_id = ? and unread_count > 0`,
-    )
-    .all<{ user_did: string; seen_up_to: string; unread_count: number }>([
-      sourceRoomId,
-    ]);
-  if (rows.length === 0) return;
-
-  // Original ordering keys, reconstructed once for every moved message.
   const originalSortIdx = moved.map(
     (m) => ulid(m.timestamp ?? decodeTime(m.id)) as string,
   );
-
-  for (const row of rows) {
-    const unreadMoved = originalSortIdx.filter((s) => s > row.seen_up_to).length;
-    if (unreadMoved === 0) continue;
-    const next = Math.max(0, row.unread_count - unreadMoved);
-    await readStateDb.run(
-      `update read_positions
-          set unread_count = ?, updated_at = (unixepoch() * 1000)
-        where user_did = ? and room_id = ?`,
-      [next, row.user_did, sourceRoomId],
-    );
-  }
+  await decrementUnreadForRemovedMessages(readStateDb, sourceRoomId, originalSortIdx);
 }
 
 /**

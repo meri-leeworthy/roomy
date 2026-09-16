@@ -292,6 +292,147 @@ describe("Router", () => {
     expect(events).toHaveLength(0);
   });
 
+  // ─── Per-batch signal dedup (TASK-134) ───────────────────────────────
+  // A batch of N same-type events used to make every handler emit N copies of
+  // the whole batch-level signal set, and the WS handler broadcasts each copy
+  // to every connection. These pin the coalescing contract.
+
+  it("a batch of N deletes emits ONE getActivityFeed invalidation", async () => {
+    const router = new Router();
+    const { events, listener } = collect();
+    router.subscribe(listener);
+
+    const roomId = "01ROOMDELETEAAAAAAAAA000" as Ulid;
+    const deletes = Array.from({ length: 5 }, (_, i) =>
+      makeEvent("space.roomy.message.deleteMessage.v0", {
+        id: `01DELETE${i}AAAAAAAAAAAAAA` as Ulid,
+        roomId,
+        details: { messageId: `01DELMSG${i}AAAAAAAAAAAAA` },
+      }),
+    );
+
+    await router.onEventsApplied(STREAM_DID, deletes, { isBackfill: false });
+
+    expect(events).toHaveLength(1);
+    const feedInvalidations = events[0]!.filter(
+      (e) =>
+        e.kind === "queryInvalidation" &&
+        e.signal.nsid === "space.roomy.space.getActivityFeed",
+    );
+    expect(feedInvalidations).toHaveLength(1);
+
+    // Every other batch-level invalidation collapses too (they were emitted
+    // once per delete before this fix).
+    const nsids = events[0]!
+      .filter((e) => e.kind === "queryInvalidation")
+      .map((e) => (e.kind === "queryInvalidation" ? e.signal.nsid : ""));
+    expect(new Set(nsids).size).toBe(nsids.length);
+  });
+
+  it("keeps one messageDiff per delete (per-message signals never collapse)", async () => {
+    const router = new Router();
+    const { events, listener } = collect();
+    router.subscribe(listener);
+
+    const roomId = "01ROOMDELETEBBBBBBBBB000" as Ulid;
+    const deletes = Array.from({ length: 3 }, (_, i) =>
+      makeEvent("space.roomy.message.deleteMessage.v0", {
+        id: `01DELETE2${i}AAAAAAAAAAAAA` as Ulid,
+        roomId,
+        details: { messageId: `01DELMSG2${i}AAAAAAAAAAAA` },
+      }),
+    );
+
+    await router.onEventsApplied(STREAM_DID, deletes, { isBackfill: false });
+
+    const diffs = events[0]!.filter((e) => e.kind === "messageDiff");
+    expect(diffs).toHaveLength(3);
+    const keys = diffs.map((d) => (d.kind === "messageDiff" ? d.signal.ops[0] : null));
+    // Distinct remove ops — one per deleted message, not merged.
+    expect(new Set(keys.map((k) => JSON.stringify(k))).size).toBe(3);
+  });
+
+  it("dedupes query invalidations that differ only by param key order", async () => {
+    const router = new Router();
+    const { events, listener } = collect();
+    router.subscribe(listener);
+
+    router.emit([
+      {
+        kind: "queryInvalidation",
+        signal: {
+          nsid: "space.roomy.space.getThreads",
+          params: { spaceId: STREAM_DID, limit: "20" },
+        },
+      },
+      {
+        kind: "queryInvalidation",
+        signal: {
+          nsid: "space.roomy.space.getThreads",
+          params: { limit: "20", spaceId: STREAM_DID },
+        },
+      },
+    ]);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toHaveLength(1);
+  });
+
+  it("keeps invalidations that differ by affectedUser separate", async () => {
+    const router = new Router();
+    const { events, listener } = collect();
+    router.subscribe(listener);
+
+    router.emit([
+      {
+        kind: "queryInvalidation",
+        signal: {
+          nsid: "space.roomy.space.getActivityFeed",
+          params: {},
+          affectedUser: USER_DID,
+        },
+      },
+      {
+        kind: "queryInvalidation",
+        signal: {
+          nsid: "space.roomy.space.getActivityFeed",
+          params: {},
+          affectedUser: "did:plc:bob" as UserDid,
+        },
+      },
+      {
+        kind: "queryInvalidation",
+        signal: {
+          nsid: "space.roomy.space.getActivityFeed",
+          params: {},
+          affectedUser: USER_DID,
+        },
+      },
+    ]);
+
+    expect(events).toHaveLength(1);
+    // alice, bob — the duplicate alice signal collapses.
+    expect(events[0]).toHaveLength(2);
+  });
+
+  it("emit dedupes a repeated invalidation", () => {
+    const router = new Router();
+    const { events, listener } = collect();
+    router.subscribe(listener);
+    const signal: InvalidationEvent = {
+      kind: "queryInvalidation",
+      signal: {
+        nsid: "space.roomy.space.getActivityFeed",
+        params: {},
+      },
+    };
+
+    router.emit([signal, signal, signal]);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toHaveLength(1);
+  });
+
   it("emit delivers signals directly to subscribers", () => {
     const router = new Router();
     const { events, listener } = collect();

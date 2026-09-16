@@ -28,6 +28,7 @@ import type {
 import { materialize } from "./materializer.ts";
 import { applyBundle, getSavepointMutex } from "./applyBundle.ts";
 import { canonicalMessageTimestamp } from "./sortIdx.ts";
+import { applyDeleteSideEffects, collectPendingDeletes } from "./deleteMessage.ts";
 import { isGlobalDbStatement } from "./statementRouting.ts";
 import type { StatementBundleSuccess } from "./types.ts";
 import {
@@ -268,6 +269,11 @@ export async function applyBatch(
       }
     }
 
+    // Capture the chunk's deletes (with the ordering keys of the rows they are
+    // about to remove) BEFORE any of the chunk's SQL runs — after that the rows
+    // are gone and their `sort_idx` is unrecoverable.
+    const pendingDeletes = await collectPendingDeletes(db, chunk);
+
     // Compute the max idx for this chunk — used to advance the cursor after
     // the chunk is processed (whether it succeeded or failed).
     let chunkMaxIdx: StreamIndex = 0 as StreamIndex;
@@ -421,6 +427,30 @@ export async function applyBatch(
       streamId,
       chunkMaxIdx,
     );
+
+    // Delete side-effects: rebuild each affected room's activity window from
+    // its remaining messages (dropping the row when the room is empty) and
+    // unwind the readers' unread counts for exactly the messages that were
+    // still unread. Runs after the chunk's SQL (the rows must already be gone
+    // for the window rebuild to be correct) but uses the ordering keys
+    // captured above, which the delete would otherwise have destroyed. This is
+    // the same derived-state maintenance `moveMessages` performs on its source
+    // room, via the same helpers.
+    if (pendingDeletes.length > 0) {
+      try {
+        await applyDeleteSideEffects(db, pendingDeletes, {
+          readStateDb: openReadStateDb(),
+          isBackfill: opts.isBackfill,
+        });
+      } catch (err) {
+        // Derived state, not correctness: a failure here must not roll back
+        // the delete itself. The window self-heals on the next write to the
+        // room; the unread count is reconciled by the next updateSeen.
+        log.warn(
+          `[materialize] deleteMessage side-effects failed for ${streamId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
 
     // Post-transaction side-effects for this chunk: activity_item upsert and
     // link detection. These need JS logic so they can't be inlined as SQL

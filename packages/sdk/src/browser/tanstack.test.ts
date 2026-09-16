@@ -66,16 +66,23 @@ describe("createTanstackCacheAdapter", () => {
   });
 
   describe("invalidate", () => {
-    it("delegates to queryClient.invalidateQueries with the provided key", () => {
+    it("delegates to queryClient.invalidateQueries with the key, never cancelling in-flight refetches", () => {
       const adapter = createTanstackCacheAdapter(queryClient);
       const spy = vi.spyOn(queryClient, "invalidateQueries");
       const key = queryKey("nsid.test", { roomId: "r1" });
 
       adapter.invalidate(key);
 
+      // `cancelRefetch: false` is the contract: a second invalidation must
+      // JOIN an in-flight refetch, not cancel and restart it. Restarting a
+      // 13s feed refetch on every frame is the freeze this guards.
       expect(spy).toHaveBeenCalledTimes(1);
-      expect(spy).toHaveBeenCalledWith({ queryKey: key });
+      expect(spy).toHaveBeenCalledWith(
+        { queryKey: key },
+        { cancelRefetch: false },
+      );
     });
+
 
     it("flips matching queries to stale", async () => {
       const adapter = createTanstackCacheAdapter(queryClient);
@@ -95,6 +102,88 @@ describe("createTanstackCacheAdapter", () => {
       expect(cacheEntry?.isStale()).toBe(true);
     });
 
+    it("collapses a burst of duplicate invalidations for one key into one leading refetch", () => {
+      vi.useFakeTimers();
+      try {
+        const adapter = createTanstackCacheAdapter(queryClient, {
+          invalidateCoalesceMs: 100,
+        });
+        const spy = vi.spyOn(queryClient, "invalidateQueries");
+        const key = queryKey("nsid.test", { roomId: "r1" });
+
+        // A delete fans out into several frames for the same key; the client
+        // must not refetch once per frame.
+        for (let i = 0; i < 5; i++) adapter.invalidate(key);
+
+        expect(spy).toHaveBeenCalledTimes(1);
+
+        // The window saw duplicates, so exactly one trailing flush is owed —
+        // the last invalidation is never dropped.
+        vi.advanceTimersByTime(100);
+        expect(spy).toHaveBeenCalledTimes(2);
+
+        // Burst over: the trailing window closes with nothing to flush.
+        vi.advanceTimersByTime(200);
+        expect(spy).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("coalesces per key — a different key still refetches immediately", () => {
+      vi.useFakeTimers();
+      try {
+        const adapter = createTanstackCacheAdapter(queryClient, {
+          invalidateCoalesceMs: 100,
+        });
+        const spy = vi.spyOn(queryClient, "invalidateQueries");
+        const a = queryKey("nsid.test", { roomId: "r1" });
+        const b = queryKey("nsid.test", { roomId: "r2" });
+
+        adapter.invalidate(a);
+        adapter.invalidate(a);
+        adapter.invalidate(b);
+
+        expect(spy).toHaveBeenCalledTimes(2);
+        expect(spy).toHaveBeenCalledWith({ queryKey: a }, { cancelRefetch: false });
+        expect(spy).toHaveBeenCalledWith({ queryKey: b }, { cancelRefetch: false });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a single genuine invalidation still refetches", () => {
+      vi.useFakeTimers();
+      try {
+        const adapter = createTanstackCacheAdapter(queryClient, {
+          invalidateCoalesceMs: 100,
+        });
+        const spy = vi.spyOn(queryClient, "invalidateQueries");
+
+        adapter.invalidate(queryKey("nsid.test", { roomId: "r1" }));
+
+        expect(spy).toHaveBeenCalledTimes(1);
+        // No duplicate arrived, so the window closes without a second flush.
+        vi.advanceTimersByTime(500);
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("invalidateCoalesceMs: 0 disables coalescing", () => {
+      const adapter = createTanstackCacheAdapter(queryClient, {
+        invalidateCoalesceMs: 0,
+      });
+      const spy = vi.spyOn(queryClient, "invalidateQueries");
+      const key = queryKey("nsid.test", { roomId: "r1" });
+
+      adapter.invalidate(key);
+      adapter.invalidate(key);
+
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
     it("invalidates by prefix — nsid-only keys match all param scopes", () => {
       const adapter = createTanstackCacheAdapter(queryClient);
       const k1 = queryKey("nsid.test", { roomId: "r1" });
@@ -104,6 +193,7 @@ describe("createTanstackCacheAdapter", () => {
       queryClient.setQueryData(k2 as unknown[], "v2");
 
       adapter.invalidate(queryKey("nsid.test"));
+
 
       const cache = queryClient.getQueryCache();
       expect(cache.find({ queryKey: k1 as unknown[] })?.isStale()).toBe(true);

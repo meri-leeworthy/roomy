@@ -226,6 +226,43 @@ let lastSeq: number | null = null;
 /** Timestamp the tab was last hidden, or null while visible. */
 let hiddenSince: number | null = null;
 
+/** Max frequency of the `updateSeen` echo (see `scheduleSeenFlush`). */
+const SEEN_FLUSH_INTERVAL_MS = 1_000;
+/** Room a coalesced `updateSeen` is pending for, or null when none is. */
+let seenPendingRoom: string | null = null;
+/** Timer that flushes the pending `updateSeen`. */
+let seenTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Coalesced `updateSeen` call.
+ *
+ * A `#messageDiff` for the room you are viewing means "there is new content
+ * past your watermark", so the room should be marked read — but each
+ * `updateSeen` is an XRPC POST whose handler emits a `getActivityFeed`
+ * invalidation (plus room/space metadata ones) back to this very connection.
+ * Firing it per frame turns one delete into the delete's own signal set AND a
+ * second, identical one. Coalescing to at most one call per second per room
+ * keeps the unread state correct — it is a watermark, not an event log, so
+ * only the newest value matters — while making the echo independent of burst
+ * size.
+ *
+ * `seenUpTo` is omitted so the appserver marks read up to the room's current
+ * latest message, which is what "I am looking at this room" means.
+ */
+function scheduleSeenFlush(roomId: string): void {
+  seenPendingRoom = roomId;
+  if (seenTimer !== null) return;
+  seenTimer = setTimeout(() => {
+    seenTimer = null;
+    const room = seenPendingRoom;
+    seenPendingRoom = null;
+    if (!room) return;
+    void import("./mutations/update-seen").then(({ updateSeen }) =>
+      updateSeen(room).catch(() => {}),
+    );
+  }, SEEN_FLUSH_INTERVAL_MS);
+}
+
 /**
  * Invalidate the active room's `getMessages` query so it refetches.
  * Called when we detect a missed diff (seq gap / server seq reset) or
@@ -237,9 +274,13 @@ let hiddenSince: number | null = null;
 function invalidateActiveRoomMessages() {
   const room = activeRoomId;
   if (!room) return;
-  void queryClient.invalidateQueries({
-    queryKey: queryKey(GET_MESSAGES_NSID, { roomId: room }),
-  });
+  // Same contract as the cache adapter: a resync must not cancel an
+  // in-flight refetch and start it over. `cancelRefetch` is an
+  // InvalidateOptions (second argument), not a query filter.
+  void queryClient.invalidateQueries(
+    { queryKey: queryKey(GET_MESSAGES_NSID, { roomId: room }) },
+    { cancelRefetch: false },
+  );
 }
 
 /**
@@ -293,9 +334,7 @@ export function startSync(opts: { onLog?: (msg: string) => void } = {}) {
       }
       lastSeq = lastSeq == null ? seq : Math.max(lastSeq, seq);
       if (roomId === activeRoomId) {
-        import("./mutations/update-seen").then(({ updateSeen }) => {
-          updateSeen(roomId).catch(() => {});
-        });
+        scheduleSeenFlush(roomId);
       }
     },
   });

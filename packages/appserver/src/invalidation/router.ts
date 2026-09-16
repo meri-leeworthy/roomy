@@ -99,12 +99,23 @@ export class Router implements IInvalidationRouter {
       await syncMentionsIndex(globalDb, events, { spaceDb, replyToAuthors });
     }
 
-    const allSignals: InvalidationEvent[] = [];
+    // Collect per-event signals, stamping each diff with its seq as it is
+    // produced (the seq is the client's gap-detection cursor, so it must be
+    // assigned in event order, before any dedup reordering).
+    const collected: InvalidationEvent[] = [];
     for (const event of events) {
       const signals = await inferSignals(event, undefined, messageSnapshots, replyToAuthors);
       this.#stampSeq(signals);
-      allSignals.push(...signals);
+      collected.push(...signals);
     }
+
+    // Deduplicate identical signals across the batch. A `sendEvents` call
+    // carrying N events of the same type (e.g. N deletes) produces N copies
+    // of every batch-level signal each handler emits — N identical
+    // `getActivityFeed` broadcasts, N `getThreads` broadcasts, and so on.
+    // See `dedupeSignals`: only identity-keyed query invalidations collapse;
+    // per-message diffs and unread deltas pass through untouched.
+    const allSignals = dedupeSignals(collected);
     if (allSignals.length === 0) return;
     for (const listener of this.#listeners) {
       try {
@@ -191,9 +202,13 @@ export class Router implements IInvalidationRouter {
     // refetch on every card-enrichment diff. Assigning seq here keeps the
     // counter coherent across ALL sources.
     this.#stampSeq(signals);
+    // One `emit` call is one coalescing scope, exactly like one
+    // `onEventsApplied` batch — a caller that hands us the same invalidation
+    // N times (e.g. one per enriched message) must not broadcast it N times.
+    const deduped = dedupeSignals(signals);
     for (const listener of this.#listeners) {
       try {
-        listener(signals);
+        listener(deduped);
       } catch (err) {
         log.error("[InvalidationRouter] listener threw:", err);
       }
@@ -217,4 +232,52 @@ export class Router implements IInvalidationRouter {
   get currentSeq(): number {
     return this.#seq;
   }
+}
+
+/**
+ * Collapse duplicate signals within one emission scope.
+ * A batch of N events of the same type makes `inferSignals` emit N copies of
+ * every batch-level signal (the same `getActivityFeed` / `getThreads` /
+ * `getSpaces` invalidation). The WS handler turns each copy into a frame per
+ * connection, so N duplicates become N broadcasts of identical bytes and N
+ * client-side refetch storms.
+ *
+ * Only `queryInvalidation` signals collapse, keyed by their full identity
+ * `(nsid, params, affectedUser)`: that is what "this query result is stale"
+ * means, and a duplicate says exactly the same thing again. Everything else is
+ * per-event data and passes through untouched —
+ *   - `messageDiff`/`mentionDiff` are per-message ops (and carry a unique seq),
+ *   - `roomMetadataDiff` carries an unread DELTA: two creates each mean +1, so
+ *     collapsing them by (space, room) would silently lose an increment.
+ * Restricting the dedup to identity-keyed invalidations makes that class of
+ * bug unrepresentable rather than relying on the seq stamp to keep them apart.
+ *
+ * Order is preserved: the first occurrence of each distinct invalidation is
+ * kept, and non-invalidation signals stay exactly where they were.
+ */
+export function dedupeSignals(
+  signals: readonly InvalidationEvent[],
+): InvalidationEvent[] {
+  if (signals.length < 2) return [...signals];
+  const seen = new Set<string>();
+  const out: InvalidationEvent[] = [];
+  for (const signal of signals) {
+    if (signal.kind !== "queryInvalidation") {
+      out.push(signal);
+      continue;
+    }
+    const key = `${signal.signal.nsid}\u0000${signal.signal.affectedUser ?? ""}\u0000${canonicalParams(signal.signal.params)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(signal);
+  }
+  return out;
+}
+
+/** Deterministic param serialization: key order must not change the identity. */
+function canonicalParams(params: Record<string, string>): string {
+  const keys = Object.keys(params).sort();
+  let out = "";
+  for (const key of keys) out += `${key}=${params[key]}\u0001`;
+  return out;
 }
