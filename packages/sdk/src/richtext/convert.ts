@@ -758,6 +758,15 @@ export function extractInternalLinkTargets(
             spaceId: string;
             roomId?: string;
           };
+          // Only treat a facet as an internal-link target when it names a
+          // real (DID, ULID) pair. A stale/malformed facet holding a
+          // non-DID `spaceId` (e.g. a Discord channel snowflake or a bare
+          // word) would otherwise fan out 404 `getSpaceSummary` prefetches —
+          // this mirrors the `parseInternalLinkHref` guard in app-lite so
+          // every path that decides "is this a space/room link" agrees.
+          if (Did(roomRef.spaceId) instanceof type.errors) continue;
+          if (roomRef.roomId && Ulid(roomRef.roomId) instanceof type.errors)
+            continue;
           const key = `${roomRef.spaceId}/${roomRef.roomId ?? ""}`;
           if (seen.has(key)) continue;
           seen.add(key);

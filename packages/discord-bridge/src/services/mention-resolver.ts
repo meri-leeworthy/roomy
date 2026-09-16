@@ -29,6 +29,9 @@ import {
 	type Block,
 	type Facet,
 	type FacetFeature,
+	Did,
+	Ulid,
+	type,
 	utf8ByteLength,
 } from "@roomy-space/sdk";
 import { createLogger } from "../logger.ts";
@@ -446,7 +449,16 @@ function parseInline(
 			const displayName = ctx.channelNames.get(snowflake) ?? snowflake;
 			const features: FacetFeature[] = [...inherited];
 			const roomyRoomId = ctx.roomyRoomIds.get(snowflake);
-			if (roomyRoomId) {
+			// Only emit a `#roomRef` for a validated (DID, ULID) pair. A
+			// non-DID space or non-ULID room id (stale mapping, malformed
+			// bridge state) would otherwise be persisted here and trusted by
+			// every later reader's internal-link prefetch, which would fire
+			// 404 `getSpaceSummary` queries for it.
+			if (
+				roomyRoomId &&
+				!(Did(ctx.spaceDid) instanceof type.errors) &&
+				!(Ulid(roomyRoomId) instanceof type.errors)
+			) {
 				features.push(
 					{
 						$type: "space.roomy.richtext.facet#roomRef" as const,

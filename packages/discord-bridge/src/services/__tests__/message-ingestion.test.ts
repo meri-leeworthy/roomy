@@ -402,7 +402,7 @@ describe("ingestDiscordMessage — mention resolution", () => {
 		// omits threads from that field). Its display name comes from a content
 		// scan + resolver, and it must get a roomRef/link to the bridged Roomy room.
 		const threadId = "222222222222222222";
-		mapThread(repo, threadId, "01HXBRIDGEDTHREADULID");
+		mapThread(repo, threadId, ROOMY_MESSAGE_ULID_2);
 		const msg = makeMessage({
 			id: "1111111120",
 			content: `look at <#${threadId}>`,
@@ -424,7 +424,7 @@ describe("ingestDiscordMessage — mention resolution", () => {
 		const rich = decodeRichText(event.body);
 		expect(rich.text).toContain("#announcements");
 		expect(rich.roomRefs).toEqual([
-			{ spaceId: SPACE_A, roomId: "01HXBRIDGEDTHREADULID" },
+			{ spaceId: SPACE_A, roomId: ROOMY_MESSAGE_ULID_2 },
 		]);
 	});
 });
