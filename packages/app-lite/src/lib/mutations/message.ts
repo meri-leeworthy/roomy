@@ -220,6 +220,28 @@ export async function deleteMessage(
 }
 
 /**
+ * Delete one or more messages from a room.
+ *
+ * `space.roomy.message.deleteMessage.v0` carries a single `messageId`, so this
+ * emits one event per message — batched into ONE `sendEvents` call so the
+ * whole selection is one round-trip (same shape as {@link moveMessages}).
+ */
+export async function deleteMessages(
+  spaceId: string,
+  roomId: string,
+  messageIds: string[],
+): Promise<void> {
+  const events = messageIds.map((messageId) => ({
+    id: newUlid(),
+    room: roomId,
+    $type: "space.roomy.message.deleteMessage.v0",
+    messageId,
+  }));
+
+  await sendEvents(spaceId, events);
+}
+
+/**
  * Remove (dismiss) a link embed from the author's own message. Sends an
  * `editMessage` event carrying a link attachment with `showPreview: false` so
  * the embed preview stops rendering for that URL, without altering the message

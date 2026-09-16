@@ -1,7 +1,6 @@
 <script lang="ts">
   import { ScrollArea } from "bits-ui";
   import ChatMessage from "./ChatMessage.svelte";
-  import DeleteMessageDialog from "@roomy/design/components/content/thread/message/DeleteMessageDialog.svelte";
   import { Virtualizer, type VirtualizerHandle } from "virtua/svelte";
   import { setContext, onMount } from "svelte";
   import Button from "@roomy/design/components/ui/button/Button.svelte";
@@ -9,7 +8,6 @@
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
   import ChatMessageSkeleton from "@roomy/design/components/content/thread/message/ChatMessageSkeleton.svelte";
   import { createMessagesQuery, type Message } from "$lib/queries/messages";
-  import { deleteMessage } from "$lib/mutations/message";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { auth } from "$lib/auth.svelte";
   import { cache } from "@roomy-space/sdk";
@@ -40,9 +38,12 @@
     onForward: (messages: Message[]) => void;
     /** Move one or more messages to another room (modal owned by the route page). */
     onMove: (messages: Message[]) => void;
+    /** Requests the delete confirmation for one or more messages (dialog
+     *  owned by the route page, shared with select mode's admin batch delete). */
+    onRequestDelete: (messages: Message[]) => void;
   };
   
-  let { spaceId, roomId, onSeen, highlightMessage = null, onForward, onMove }: Props = $props();
+  let { spaceId, roomId, onSeen, highlightMessage = null, onForward, onMove, onRequestDelete }: Props = $props();
 
   const messagesQuery = createMessagesQuery(() => roomId);
 
@@ -67,16 +68,6 @@
 
   // Lifted state for editing messages
   let editingMessageId = $state<string | undefined>(undefined);
-
-  // Delete-confirmation state — lifted here (not inside the hover-gated
-  // toolbar) so the modal survives while it is open.
-  let deleteMessageTarget = $state<Message | null>(null);
-  let isDeleteConfirmOpen = $state(false);
-
-  function openDeleteConfirm(message: Message) {
-    deleteMessageTarget = message;
-    isDeleteConfirmOpen = true;
-  }
 
   // Compute chronological order + mergeWithPrevious from the query data
   let timeline = $derived.by(() => {
@@ -523,7 +514,7 @@
                       editingMessageId={editingMessageId}
                       onStartEdit={(id) => (editingMessageId = id)}
                       onCancelEdit={() => (editingMessageId = undefined)}
-                      onRequestDelete={openDeleteConfirm}
+                      onRequestDelete={() => onRequestDelete([message])}
                       onForward={(messages) => onForward(messages)}
                       onMove={(messages) => onMove(messages)}
                       mergeWithPrevious={message.mergeWithPrevious}
@@ -547,18 +538,4 @@
     </ScrollArea.Scrollbar>
     <ScrollArea.Corner />
   </ScrollArea.Root>
-
-  <DeleteMessageDialog
-    bind:open={isDeleteConfirmOpen}
-    authorName={deleteMessageTarget?.authorName}
-    isAdminDelete={
-      deleteMessageTarget
-        ? deleteMessageTarget.authorDid !== currentUserDid && isAdmin
-        : false
-    }
-    onConfirm={async () => {
-      if (!deleteMessageTarget) return;
-      await deleteMessage(spaceId, roomId, deleteMessageTarget.id);
-    }}
-  />
 </div>

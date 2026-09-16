@@ -8,6 +8,7 @@ import {
   createMessage,
   editMessage,
   deleteMessage,
+  deleteMessages,
   reorderMessage,
   forwardMessages,
   moveMessages,
@@ -366,6 +367,34 @@ describe("deleteMessage", () => {
       room: "01HXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
       messageId: "01JXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
     });
+  });
+});
+
+describe("deleteMessages", () => {
+  it("emits one single-id delete event per message, with distinct event ids", async () => {
+    const roomId = newUlid();
+    const messageIds = [newUlid(), newUlid()];
+
+    const result = await deleteMessages({ roomId, messageIds }, mockSendEvent);
+
+    expect(result.ids).toHaveLength(2);
+    for (const id of result.ids) expect(id).toMatch(/^[\w-]{26}$/);
+    expect(mockSendEvent).toHaveBeenCalledTimes(2);
+
+    const events = mockSendEvent.mock.calls.map((call) => call[0]);
+    expect(events[0]).toMatchObject({
+      $type: "space.roomy.message.deleteMessage.v0",
+      room: roomId,
+      messageId: messageIds[0],
+    });
+    expect(events[1]).toMatchObject({
+      $type: "space.roomy.message.deleteMessage.v0",
+      room: roomId,
+      messageId: messageIds[1],
+    });
+    // Distinct event ids — a duplicate would collapse two deletes into one in
+    // the event log, silently leaving a message behind.
+    expect(events[0].id).not.toBe(events[1].id);
   });
 });
 

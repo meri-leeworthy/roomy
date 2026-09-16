@@ -51,6 +51,12 @@
      * viewer is a space admin, which is also what renders the Move button.
      */
     onMoveSelection?: (messages: Message[]) => void;
+    /**
+     * Select mode: delete the selected messages (confirm dialog owned by the
+     * route page). Admin-only — the route page passes this only when the
+     * viewer is a space admin, which is also what renders the Delete button.
+     */
+    onDeleteSelection?: (messages: Message[]) => void;
   };
 
   let {
@@ -61,6 +67,7 @@
     autoFocus = true,
     onForwardSelection,
     onMoveSelection,
+    onDeleteSelection,
   }: Props = $props();
 
   // On mobile (coarse pointer), never autofocus — the virtual keyboard
@@ -315,6 +322,11 @@
     onMoveSelection?.(messagingState.current.selectedMessages);
   }
 
+  function handleDeleteSelection() {
+    if (messagingState.current.kind !== "selecting") return;
+    onDeleteSelection?.(messagingState.current.selectedMessages);
+  }
+
   function handleSelectCreateThread() {
     if (messagingState.current.kind !== "selecting") return;
     messagingState.setThreadingFromMessages(
@@ -475,6 +487,7 @@
   onCreateThread={handleCreateThread}
   onForwardSelection={handleForwardSelection}
   onMoveSelection={onMoveSelection ? handleMoveSelection : undefined}
+  onDeleteSelection={onDeleteSelection ? handleDeleteSelection : undefined}
   onSelectCreateThread={handleSelectCreateThread}
   onRemoveImage={removeImageFile}
   onThreadNameChange={(name) => (messagingState.name = name)}

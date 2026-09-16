@@ -29,6 +29,26 @@
 />
 
 <Story
+  name="MultiDelete"
+  args={{
+    open: true,
+    count: 3,
+    otherAuthors: [],
+    onConfirm: async () => {},
+  }}
+/>
+
+<Story
+  name="MultiDeleteOthersAndMine"
+  args={{
+    open: true,
+    count: 5,
+    otherAuthors: ["Bob", "Carol"],
+    onConfirm: async () => {},
+  }}
+/>
+
+<Story
   name="Closed"
   args={{
     open: false,

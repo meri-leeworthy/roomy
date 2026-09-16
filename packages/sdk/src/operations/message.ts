@@ -296,6 +296,67 @@ export async function deleteMessage(
 }
 
 /**
+ * Options for deleting multiple messages.
+ */
+export interface DeleteMessagesOptions {
+  /** The room containing the messages */
+  roomId: Ulid;
+  /** The IDs of the messages to delete */
+  messageIds: Ulid[];
+}
+
+/**
+ * Result of deleting multiple messages.
+ */
+export interface DeleteMessagesResult {
+  /** The IDs of the delete events, one per deleted message. */
+  ids: Ulid[];
+}
+
+/**
+ * Delete several messages from one room.
+ *
+ * `DeleteMessageSchema` is single-`messageId`, so this emits one event per
+ * message — the same shape {@link moveMessages} takes for the same reason.
+ * The batching that keeps it to a single round-trip happens in the caller
+ * (app-lite's `deleteMessages` mutation sends them as one `sendEvents` call).
+ *
+ * @param options - Message delete options
+ * @param sendEvent - Function to send each event
+ * @returns The IDs of the emitted delete events
+ *
+ * @example
+ * ```ts
+ * const result = await deleteMessages({
+ *   roomId: "01H...",
+ *   messageIds: ["01J...", "01K..."],
+ * }, sendEvent);
+ * ```
+ */
+export async function deleteMessages(
+  options: DeleteMessagesOptions,
+  sendEvent: (event: Event) => Promise<void>,
+): Promise<DeleteMessagesResult> {
+  const ids: Ulid[] = [];
+
+  for (const messageId of options.messageIds) {
+    const id = newUlid();
+    ids.push(id);
+
+    const event: Event = {
+      id,
+      room: options.roomId,
+      $type: "space.roomy.message.deleteMessage.v0",
+      messageId,
+    };
+
+    await sendEvent(event);
+  }
+
+  return { ids };
+}
+
+/**
  * Options for reordering a message.
  */
 export interface ReorderMessageOptions {

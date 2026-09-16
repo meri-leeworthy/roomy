@@ -12,6 +12,10 @@
   import { createRoomMetadataQuery } from "$lib/queries/room-metadata";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { updateSeen } from "$lib/mutations/update-seen";
+  import { deleteMessage, deleteMessages } from "$lib/mutations/message";
+  import DeleteMessageDialog from "@roomy/design/components/content/thread/message/DeleteMessageDialog.svelte";
+  import { auth } from "$lib/auth.svelte";
+  import { toast } from "@foxui/core";
   import ChatArea from "$lib/components/chat/ChatArea.svelte";
   import ChatInputArea from "$lib/components/chat/ChatInputArea.svelte";
   import RoomPickerModal from "$lib/components/chat/RoomPickerModal.svelte";
@@ -55,6 +59,66 @@
     moveTargets = messages;
     moveSourceRoom = roomId;
     isMoveModalOpen = true;
+  }
+
+  // ── Delete confirmation ─────────────────────────────────────────────────
+  // Same ownership rationale as the forward/move modals: one dialog serves the
+  // per-message toolbar delete (raised through ChatArea → here) and select
+  // mode's admin batch delete (raised through ChatInputArea → here), so it
+  // outlives whichever subtree raised it.
+  let deleteTargets = $state<Message[]>([]);
+  let isDeleteConfirmOpen = $state(false);
+
+  function openDeleteConfirm(messages: Message[]) {
+    if (messages.length === 0) return;
+    deleteTargets = messages;
+    isDeleteConfirmOpen = true;
+  }
+
+  /** Other authors in the selection — the admin case, where deleting removes
+   *  someone else's words. Deduped by DID; falls back to the DID when no
+   *  profile name resolved. */
+  const deleteOtherAuthors = $derived.by(() => {
+    const names = new Map<string, string>();
+    for (const m of deleteTargets) {
+      if (!m.authorDid || m.authorDid === currentUserDid) continue;
+      if (!names.has(m.authorDid)) {
+        names.set(m.authorDid, m.authorName ?? m.authorDid);
+      }
+    }
+    return Array.from(names.values());
+  });
+
+  /**
+   * Confirm the delete. A single message from the per-message toolbar keeps
+   * the original single-event path; anything else — including a one-message
+   * *selection* — is sent as ONE `sendEvents` batch of delete events, so the
+   * select-mode teardown below applies to every selection size.
+   *
+   * No optimistic removal: queries hold `staleTime: Infinity`, so the messages
+   * leave the timeline from the server's `#messageDiff` remove ops.
+   */
+  async function confirmDelete() {
+    const targets = deleteTargets;
+    if (targets.length === 0) return;
+    const selecting = messagingState.current.kind === "selecting";
+
+    if (targets.length === 1 && !selecting) {
+      await deleteMessage(effectiveSpaceId, roomId, targets[0]!.id);
+      return;
+    }
+
+    await deleteMessages(
+      effectiveSpaceId,
+      roomId,
+      targets.map((m) => m.id),
+    );
+    toast.success(
+      `Deleted ${targets.length} message${targets.length > 1 ? "s" : ""}`,
+    );
+    // Leave select mode once the selection is consumed, matching the forward
+    // and move flows.
+    if (selecting) messagingState.setNormal();
   }
 
   useTopicSubscription(
@@ -250,6 +314,8 @@
   // Defaults false while the query loads: an unknown viewer gets no Move.
   const roomSpaceMetaQuery = createSpaceMetadataQuery(() => effectiveSpaceId);
   const isAdmin = $derived(roomSpaceMetaQuery.data?.isAdmin ?? false);
+  /** Current user's DID — distinguishes "my own message" from moderation. */
+  const currentUserDid = $derived(auth.userDid);
 </script>
 
 <SeoMeta
@@ -294,7 +360,7 @@
     <div class="relative flex-1 min-h-0">
       <!-- Chat view - always rendered but visibility toggled -->
       <div class="absolute inset-0 flex flex-col" class:hidden={channelActiveTab !== "Chat"}>
-        <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} onForward={openForward} onMove={openMove} /> 
+        <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} onForward={openForward} onMove={openMove} onRequestDelete={openDeleteConfirm} /> 
       </div>
 
       <!-- Threads view - always rendered but visibility toggled -->
@@ -310,12 +376,12 @@
            previous room's text. Remounting re-seeds from the recalled per-room
            composer document (draft string + blocks). -->
       {#key roomId}
-        <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} onForwardSelection={openForward} onMoveSelection={isAdmin ? openMove : undefined} />
+        <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} onForwardSelection={openForward} onMoveSelection={isAdmin ? openMove : undefined} onDeleteSelection={isAdmin ? openDeleteConfirm : undefined} />
       {/key}
     {/if}
   {:else}
     <!-- Thread rooms only have chat view -->
-    <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} onForward={openForward} onMove={openMove} />
+    <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} onForward={openForward} onMove={openMove} onRequestDelete={openDeleteConfirm} />
     {#key roomId}
       <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} onForwardSelection={openForward} />
     {/key}
@@ -339,4 +405,16 @@
       messageIds={moveTargets.map((m) => m.id)}
     />
   {/if}
+
+  <DeleteMessageDialog
+    bind:open={isDeleteConfirmOpen}
+    authorName={deleteTargets[0]?.authorName}
+    isAdminDelete={deleteTargets.length === 1 &&
+      !!deleteTargets[0] &&
+      deleteTargets[0].authorDid !== currentUserDid &&
+      isAdmin}
+    count={deleteTargets.length}
+    otherAuthors={deleteOtherAuthors}
+    onConfirm={confirmDelete}
+  />
 </div>

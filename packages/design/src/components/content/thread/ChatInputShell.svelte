@@ -18,6 +18,7 @@
     IconForward,
     IconCheckSquare,
     IconMove,
+    IconTrash,
   } from "../../../icons";
 
   type Props = {
@@ -68,6 +69,8 @@
     onForwardSelection: () => void;
     /** Selecting: move the selected messages to another room (admin only). */
     onMoveSelection?: () => void;
+    /** Selecting: delete the selected messages (admin only). */
+    onDeleteSelection?: () => void;
     /** Selecting: create a thread from the selected messages. */
     onSelectCreateThread: () => void;
     /** Remove a preview image by index. */
@@ -109,6 +112,7 @@
     onCreateThread,
     onForwardSelection,
     onMoveSelection,
+    onDeleteSelection,
     onSelectCreateThread,
     onRemoveImage,
     onThreadNameChange,
@@ -216,6 +220,17 @@
             >
               <IconMove class="size-4" />
               Move
+            </Button>
+          {/if}
+          {#if onDeleteSelection}
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={selectedCount === 0}
+              onclick={onDeleteSelection}
+            >
+              <IconTrash class="size-4" />
+              Delete
             </Button>
           {/if}
           <Button
