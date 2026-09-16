@@ -87,6 +87,10 @@ export interface RespondOptions extends Omit<OmpOptions, "resume"> {
   /** How long a lock may go without a heartbeat before it is considered
    *  stale and taken over (ms). Default 120000. */
   lockTtlMs?: number;
+  /** How often the drain timer polls the queue for work left by other
+   *  processes, including a stranded `active` job behind a stale lock (ms).
+   *  Default 5000. Test-only overridable seam; production uses 5s. */
+  drainIntervalMs?: number;
   /** Approx char threshold for each streamed thinking chunk. Default 2000. */
   thinkingChunkSize?: number;
   /** Path to a file whose contents are appended to omp's system prompt on every
@@ -257,9 +261,26 @@ export async function respond(
   // Drain work enqueued by other processes (cron `queue push`): without
   // this, a job pushed while the responder is idle would sit until the next
   // stdin event. 5s poll keeps lock churn negligible (peek is one tiny read).
+  //
+  // A job stranded in `active` by a dead holder is not in `enqueued`, so the
+  // `enqueued > 0` check alone would never trigger a pump here — and if the
+  // holder died while its lock was still within TTL (the lock has not yet gone
+  // stale), the boot heal is also a no-op. The orphan would then sit forever
+  // with no external stdin event to reclaim it. Extend the predicate to pump
+  // whenever a foreign-dead holder's `active` job remains outstanding; the
+  // pump's `acquire()` then takes over the stale lock and `requeueStaleActive`
+  // heals the job back to the queue head. `lock.info()` is one tiny read, so
+  // the extra check keeps the 5s poll's lock churn negligible.
+  const drainIntervalMs = opts.drainIntervalMs ?? 5_000;
   const drainTimer = setInterval(() => {
-    if (queue.status().enqueued.length > 0) void pump();
-  }, 5_000);
+    const state = queue.status();
+    if (state.enqueued.length > 0) {
+      void pump();
+      return;
+    }
+    const lockInfo = lock.info();
+    if (state.active && lockInfo && lockInfo.stale) void pump();
+  }, drainIntervalMs);
   drainTimer.unref();
 
   const rl = createInterface({ input: process.stdin });
