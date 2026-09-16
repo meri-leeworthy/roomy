@@ -1,6 +1,7 @@
 import type { BridgeRepository } from "./db/repository.ts";
 import { ATPROTO_BRIDGE_DID, PORT } from "./env.ts";
 import { createLogger } from "./logger.ts";
+import { isBackfillRunning } from "./services/backfill.ts";
 
 const log = createLogger("api");
 
@@ -80,9 +81,64 @@ function route(
 			return jsonResponse({ bridges });
 		}
 
+		case "/backfill/progress": {
+			const spaceDid = url.searchParams.get("spaceDid");
+			const guildId = url.searchParams.get("guildId");
+			const channels = buildBackfillProgressPayload(repo, {
+				spaceDid: spaceDid ?? undefined,
+				guildId: guildId ?? undefined,
+			});
+			return jsonResponse({ channels });
+		}
+
 		default:
 			return jsonResponse({ error: "Not found" }, 404);
 	}
+}
+
+/**
+ * Serialize per-(channel, space) backfill progress for the REST endpoint.
+ *
+ * Honest-by-construction: Discord's history is unbounded and there is no
+ * message-count API, so a "remaining / percent" figure cannot be computed
+ * without walking the full history — the payload deliberately omits any
+ * denominator. Per-channel state comes from the durable `backfill_progress`
+ * rows (survive restarts); `running` reflects the in-process registry only,
+ * so after a restart nothing is reported as running until the boot backfill
+ * re-schedules it.
+ */
+export function buildBackfillProgressPayload(
+	repo: BridgeRepository,
+	scope?: { spaceDid?: string; guildId?: string },
+): Array<{
+	spaceDid: string;
+	channelId: string;
+	guildId: string | null;
+	kind: "channel" | "thread" | null;
+	channelName: string | null;
+	phase: "phase1" | "phase2" | "complete";
+	messagesSynced: number;
+	messagesSkipped: number;
+	cursor: string | null;
+	running: boolean;
+	updatedAt: number;
+}> {
+	const rows = repo
+		.listBackfillProgress(scope?.spaceDid)
+		.filter((p) => !scope?.guildId || p.guildId === scope.guildId);
+	return rows.map((p) => ({
+		spaceDid: p.spaceDid,
+		channelId: p.channelId,
+		guildId: p.guildId,
+		kind: p.kind,
+		channelName: p.channelName,
+		phase: p.phase,
+		messagesSynced: p.messagesSynced,
+		messagesSkipped: p.messagesSkipped,
+		cursor: repo.getChannelCursor(p.spaceDid, p.channelId)?.lastMessageId ?? null,
+		running: isBackfillRunning(p.spaceDid, p.channelId),
+		updatedAt: p.updatedAt,
+	}));
 }
 
 function corsHeaders(): Record<string, string> {

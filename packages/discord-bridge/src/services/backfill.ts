@@ -7,6 +7,7 @@ import type {
 import {
 	CHANNEL_TYPES,
 	isChannelPublic,
+	mappingKindForChannel,
 	MESSAGE_CHANNEL_TYPES,
 	PRIVATE_THREAD,
 	THREAD_TYPES,
@@ -21,6 +22,26 @@ import { ensureRoomyChannel } from "./room-sync.ts";
 const log = createLogger("backfill");
 
 const activeBackfills = new Set<string>();
+
+/**
+ * Phase-1 bound: the most recent window backfilled first, in batches of
+ * PHASE1_PAGE_SIZE, newest-first. The window stops once PHASE1_MESSAGE_BOUND
+ * messages have been ingested for a (channel, space) pair, or when it reaches
+ * the start of the channel's history (a short/empty page) — whichever comes
+ * first. Falsifiable rule: Phase 1 ingests at most PHASE1_MESSAGE_BOUND
+ * messages per (channel, space) pair; it marks the pair complete on the spot
+ * when the whole history fit inside the bound.
+ */
+export const PHASE1_MESSAGE_BOUND = 1_000;
+const PHASE1_PAGE_SIZE = 100;
+
+/** True while the Phase-2 remainder walk is running in the background. */
+let phase2Running = false;
+
+/** True when a backfill (window or walk) is in flight for this pair. */
+export function isBackfillRunning(spaceDid: string, channelId: string): boolean {
+	return activeBackfills.has(`${channelId}:${spaceDid}`);
+}
 
 /** Sleep for a given number of milliseconds. */
 function delay(ms: number): Promise<void> {
@@ -77,7 +98,8 @@ export async function runBackfill(
 	}
 
 	// Backfill is per (channel, space) — each pair has its own cursor.
-	const tasks: Array<{ channelId: string; spaceDid: string }> = [];
+	const tasks: Array<{ channelId: string; spaceDid: string; guildId: string }> =
+		[];
 	for (const config of configs) {
 		// Capacity enforcement: skip configs whose bridged guild is over the
 		// space's member capacity (backfill is the main cost driver).
@@ -90,7 +112,7 @@ export async function runBackfill(
 		}
 		const channelIds = await channelsForConfig(discord, repo, config);
 		for (const channelId of channelIds) {
-			tasks.push({ channelId, spaceDid: config.spaceDid });
+			tasks.push({ channelId, spaceDid: config.spaceDid, guildId: config.guildId });
 		}
 	}
 
@@ -101,34 +123,137 @@ export async function runBackfill(
 
 	log.info(`Backfilling ${tasks.length} (channel, space) pairs`);
 
-	// Replay is serial (TASK-151). This loop re-sends historical Discord
-	// messages through the LIVE `sendEvents` path, so it is indistinguishable
-	// to the appserver from real-time traffic — including for push. Run
-	// concurrently, it starves the live path *and* multiplies the replay
-	// (the channel loop and the archived-thread sweep both replay). Running
-	// one (channel, space) pair at a time bounds replay to a single stream of
-	// writes, so real-time messages interleave immediately instead of queueing
-	// behind a parallel replay.
-	const results: Array<PromiseSettledResult<void>> = [];
+	// ── Phase 1: bounded recent window, serial (TASK-151) ────────────────
+	// For each pair with no durable progress yet, ingest the most recent
+	// PHASE1_MESSAGE_BOUND messages so the space is immediately usable, then
+	// let Phase 2 walk the rest in the background. Pairs that already have a
+	// progress row or cursor (interrupted previous run, legacy mid-walk,
+	// completed) are left to Phase 2 — re-running the window would redo work
+	// or reset the boundary mid-flight. The per-pair guard in
+	// `activeBackfills` keeps this pass from overlapping a running walk.
 	for (const t of tasks) {
+		const key = `${t.channelId}:${t.spaceDid}`;
+		if (activeBackfills.has(key)) continue;
+		const progress = repo.getBackfillProgress(t.spaceDid, t.channelId);
+		const cursor = repo.getChannelCursor(t.spaceDid, t.channelId);
+		if (progress || cursor) continue;
+		activeBackfills.add(key);
 		try {
-			await backfillChannel(discord, repo, roomy, t.channelId, t.spaceDid);
-			results.push({ status: "fulfilled", value: undefined });
+			await backfillRecentWindow(
+				discord,
+				repo,
+				roomy,
+				t.channelId,
+				t.spaceDid,
+				t.guildId,
+				"channel",
+			);
 		} catch (reason) {
-			results.push({ status: "rejected", reason });
+			log.error(
+				`Phase-1 backfill failed for ${t.channelId} → ${t.spaceDid}`,
+				reason,
+			);
+		} finally {
+			activeBackfills.delete(key);
 		}
 	}
 
-	const succeeded = results.filter((r) => r.status === "fulfilled").length;
-	const failed = results.filter((r) => r.status === "rejected").length;
-	log.info(`Backfill complete: ${succeeded} succeeded, ${failed} failed`);
+	// ── Phase 2: the remainder, in the background ────────────────────────
+	// Resumable from the durable walk cursor, so a restart doesn't redo the
+	// window or the already-walked pages.
+	schedulePhase2(discord, repo, roomy, configs, tasks);
+}
 
-	// Deprioritized: fetch public archived threads and backfill.
-	try {
-		await ensureAndBackfillArchivedThreads(discord, repo, roomy, configs);
-	} catch (err) {
-		log.error("ensureAndBackfillArchivedThreads failed", err);
+/**
+ * Kick off the Phase-2 remainder walk in the background. Serial (one
+ * (channel, space) pair at a time, TASK-151); after the top-level channels,
+ * sweeps active threads the window may have truncated, then the
+ * deprioritized archived-thread sweep.
+ */
+function schedulePhase2(
+	discord: DiscordDataSource,
+	repo: BridgeRepository,
+	roomy: RoomyGateway,
+	configs: BridgeConfig[],
+	phase1Tasks: Array<{ channelId: string; spaceDid: string; guildId: string }>,
+): void {
+	if (phase2Running) {
+		log.debug("Phase 2 already running; skipping duplicate schedule");
+		return;
 	}
+	phase2Running = true;
+	void (async () => {
+		try {
+			// Top-level channels (same enumeration as Phase 1), plus active
+			// threads that are bridged — their recent window may have been
+			// truncated at the bound too.
+			const tasks = [...phase1Tasks];
+			for (const config of configs) {
+				if (
+					!(await getCapacityGate().isEnabled(
+						config.guildId,
+						config.spaceDid,
+					))
+				) {
+					continue;
+				}
+				try {
+					const threads = await discord.getActiveThreads(config.guildId);
+					for (const thread of threads) {
+						if (!repo.getRoomyId(config.spaceDid, "thread", thread.id)) {
+							continue;
+						}
+						tasks.push({
+							channelId: thread.id,
+							spaceDid: config.spaceDid,
+							guildId: config.guildId,
+						});
+					}
+				} catch (err) {
+					log.error(
+						`Phase 2: failed to list active threads for ${config.spaceDid}`,
+						err,
+					);
+				}
+			}
+
+			let succeeded = 0;
+			let failed = 0;
+			for (const t of tasks) {
+				try {
+					await backfillChannel(
+						discord,
+						repo,
+						roomy,
+						t.channelId,
+						t.spaceDid,
+						t.guildId,
+					);
+					succeeded++;
+				} catch (reason) {
+					failed++;
+					log.error(
+						`Phase-2 backfill failed for ${t.channelId} → ${t.spaceDid}`,
+						reason,
+					);
+				}
+			}
+			log.info(
+				`Phase-2 backfill complete: ${succeeded} succeeded, ${failed} failed`,
+			);
+
+			// Deprioritized: fetch public archived threads and backfill.
+			try {
+				await ensureAndBackfillArchivedThreads(discord, repo, roomy, configs);
+			} catch (err) {
+				log.error("ensureAndBackfillArchivedThreads failed", err);
+			}
+		} catch (err) {
+			log.error("Phase-2 backfill failed", err);
+		} finally {
+			phase2Running = false;
+		}
+	})();
 }
 
 async function ensureRoomyRooms(
@@ -352,14 +477,20 @@ export async function ensureRoomyThreads(
 
 					created++;
 
-					// Backfill this active thread's messages
-					await backfillChannel(
+					// Backfill this active thread's recent window (Phase 1).
+					// The Phase-2 walk (scheduled by runBackfill) covers the
+					// remainder for threads truncated at the bound. Skip if
+					// another backfill is already walking this thread.
+					const threadKey = `${threadId}:${spaceDid}`;
+					if (activeBackfills.has(threadKey)) continue;
+					await backfillRecentWindow(
 						discord,
 						repo,
 						roomy,
 						threadId,
 						spaceDid,
 						guildId,
+						"thread",
 					);
 				} catch (err) {
 					log.error(
@@ -463,6 +594,163 @@ export async function backfillSingleChannel(
 	}
 }
 
+/**
+ * Phase 1: the bounded recent window for one (channel, space) pair.
+ *
+ * Pages the channel newest-first via `before`-pagination and ingests up to
+ * PHASE1_MESSAGE_BOUND messages — the most recent ones — so the space is
+ * immediately usable. Ends when the page returns fewer than
+ * PHASE1_PAGE_SIZE messages (the whole history fit → pair is `complete` on
+ * the spot) or when the bound is reached (→ `phase2` with `windowBoundary`
+ * set to the oldest message ingested; the Phase-2 walk covers everything
+ * strictly below it).
+ *
+ * Invariants:
+ * - Falsifiable bound: this function ingests at most PHASE1_MESSAGE_BOUND
+ *   messages per (channel, space).
+ * - Advance-on-success-only / stall guard (mirrors the walk): `before` only
+ *   moves after a successful page, and a page that fails to be strictly
+ *   older than the previous `before` stops the window instead of looping.
+ * - The caller holds this pair's guard in `activeBackfills` (or has verified
+ *   no other backfill is running for it).
+ *
+ * `channel_cursors.last_message_id` is written monotonically (never
+ * regressed): the live path updates it with each live message, and the walk
+ * only ever pushes it up.
+ */
+export async function backfillRecentWindow(
+	discord: DiscordDataSource,
+	repo: BridgeRepository,
+	roomy: RoomyGateway,
+	channelId: string,
+	spaceDid: string,
+	guildId: string,
+	kind: "channel" | "thread" | null,
+): Promise<void> {
+	const existing = repo.getBackfillProgress(spaceDid, channelId);
+	const channelName =
+		existing?.channelName ??
+		// Display-only: a transiently unresolvable name costs one call, not
+		// the retry backoff budget (the row simply carries null).
+		((await discord.resolveChannelName(channelId)) ?? null);
+
+	let synced = existing?.messagesSynced ?? 0;
+	let skipped = existing?.messagesSkipped ?? 0;
+	let before: string | undefined;
+	let oldestIngested: string | null = null;
+	let reachedStart = false;
+	let stalled = false;
+
+	const flush = (phase: "phase1" | "phase2" | "complete") => {
+		repo.upsertBackfillProgress({
+			spaceDid,
+			channelId,
+			guildId,
+			kind,
+			channelName,
+			phase,
+			messagesSynced: synced,
+			messagesSkipped: skipped,
+			windowBoundary: oldestIngested,
+			walkCursor: null,
+		});
+	};
+
+	flush("phase1");
+
+	for (;;) {
+		const page = await discord.getMessages(channelId, {
+			before,
+			limit: PHASE1_PAGE_SIZE,
+		});
+		if (page.length === 0) {
+			reachedStart = true;
+			break;
+		}
+		const oldest = page.at(-1);
+		if (!oldest) break;
+		// Stall guard: pages must be strictly older than the previous
+		// `before` — a sticky data source would otherwise loop forever.
+		if (before !== undefined && BigInt(oldest.id) >= BigInt(before)) {
+			stalled = true;
+			log.error(
+				`Phase-1 backfill stalled for ${channelId} → ${spaceDid}: page did not advance past ${before}; stopping`,
+			);
+			break;
+		}
+
+		for (const message of page) {
+			try {
+				const result = await ingestDiscordMessage(
+					message,
+					repo,
+					roomy,
+					guildId,
+					spaceDid,
+					(snowflake) => discord.resolveChannelName(snowflake),
+					true, // backfill — skips per-message cursor writes
+				);
+				synced += result.synced;
+				skipped += result.skipped;
+			} catch (err) {
+				log.error(
+					`Error processing message in Phase-1 backfill for channel ${channelId}`,
+					err,
+				);
+			}
+		}
+
+		if (oldestIngested === null || BigInt(oldest.id) < BigInt(oldestIngested)) {
+			oldestIngested = oldest.id;
+		}
+		flush("phase1");
+
+		// Newest-ingested cursor: monotonic max (never regresses what the
+		// live path wrote).
+		const newestId = page[0]?.id;
+		if (newestId !== undefined) {
+			const prev = repo.getChannelCursor(spaceDid, channelId)?.lastMessageId;
+			if (
+				prev === null ||
+				prev === undefined ||
+				BigInt(newestId) > BigInt(prev)
+			) {
+				repo.setChannelCursor(spaceDid, channelId, newestId);
+			}
+		}
+
+		if (page.length < PHASE1_PAGE_SIZE) {
+			reachedStart = true;
+			break;
+		}
+		if (synced + skipped >= PHASE1_MESSAGE_BOUND) break;
+		before = oldest.id;
+	}
+
+	if (reachedStart) {
+		flush("complete");
+		log.info(
+			`Channel ${channelId} → ${spaceDid} backfill complete in Phase 1: ${synced} synced, ${skipped} skipped`,
+		);
+		return;
+	}
+
+	if (stalled) {
+		// Failed to advance — keep what we have, leave the pair in phase2 so
+		// a later run can resume; a fixed data source will then catch up.
+		flush("phase2");
+		log.error(
+			`Channel ${channelId} → ${spaceDid} Phase 1 stalled after ${synced + skipped} messages`,
+		);
+		return;
+	}
+
+	flush("phase2");
+	log.info(
+		`Channel ${channelId} → ${spaceDid} Phase 1 reached bound (${PHASE1_MESSAGE_BOUND} messages); remaining history queued for Phase 2`,
+	);
+}
+
 export async function backfillChannel(
 	discord: DiscordDataSource,
 	repo: BridgeRepository,
@@ -508,16 +796,83 @@ export async function backfillChannel(
 		}
 
 		const cursor = repo.getChannelCursor(spaceDid, channelId);
-		// First-time backfill: start from the channel snowflake (which is older
-		// than any message in the channel). Resume: start from last cursor.
-		let afterCursor = cursor?.lastMessageId ?? channelId;
+		const progress = repo.getBackfillProgress(spaceDid, channelId);
+		if (progress?.phase === "complete") {
+			log.info(
+				`Channel ${channelId} → ${spaceDid} already backfilled (complete)`,
+			);
+			return;
+		}
+
+		// Brand-new pair (no progress row and no cursor): run the bounded
+		// recent window first (Phase 1), then walk the remainder below.
+		// Pairs with an existing row or cursor are mid-walk, legacy, or
+		// interrupted — Phase 2 resumes them without re-running the window.
+		if (!progress && !cursor) {
+			const cachedChannel = await discord.getChannel(channelId);
+			const kind = cachedChannel ? mappingKindForChannel(cachedChannel) : null;
+			await backfillRecentWindow(
+				discord,
+				repo,
+				roomy,
+				channelId,
+				spaceDid,
+				guildId,
+				kind,
+			);
+		}
+
+		// The window covered the whole history (it ended on a short/empty
+		// page) → the pair is complete; nothing left to walk.
+		if (repo.getBackfillProgress(spaceDid, channelId)?.phase === "complete") {
+			log.info(
+				`Channel ${channelId} → ${spaceDid} fully backfilled by the Phase-1 window`,
+			);
+			return;
+		}
+
+		// ── Phase 2: walk the remainder (resumes across restarts) ─────────
+		const progress2 = repo.getBackfillProgress(spaceDid, channelId);
+		const boundary = progress2?.windowBoundary ?? null;
+
+		let afterCursor: string;
+		if (progress2?.walkCursor) {
+			afterCursor = progress2.walkCursor;
+		} else if (progress2) {
+			// Interrupted window (phase1) or window done / walk not started
+			// (phase2): start below everything — the boundary guard skips the
+			// already-ingested top.
+			afterCursor = channelId;
+		} else {
+			// Legacy pair (mid-walk from a pre-progress release): resume from
+			// the newest ingested message, exactly like the old single-phase
+			// walk.
+			afterCursor = cursor?.lastMessageId ?? channelId;
+		}
 
 		log.info(
-			`Backfilling channel ${channelId} → ${spaceDid} (cursor: ${cursor?.lastMessageId ?? "none"})`,
+			`Backfilling channel ${channelId} → ${spaceDid} (phase ${progress2?.phase ?? "legacy"}, from ${afterCursor})`,
 		);
 
+		const baseSynced = progress2?.messagesSynced ?? 0;
+		const baseSkipped = progress2?.messagesSkipped ?? 0;
 		let totalSynced = 0;
 		let totalSkipped = 0;
+		let walkStalled = false;
+
+		// Progress-row identity; only resolved for rows that don't exist yet
+		// (legacy pairs) — existing rows already carry name/kind/guild.
+		let identityKind = progress2?.kind ?? null;
+		let identityName = progress2?.channelName ?? null;
+		if (!progress2) {
+			const cachedChannel = await discord.getChannel(channelId);
+			if (cachedChannel) identityKind = mappingKindForChannel(cachedChannel);
+			identityName =
+				(await resolveChannelFieldWithRetry(() =>
+					discord.resolveChannelName(channelId),
+				)) ?? null;
+		}
+		const identityGuildId = progress2?.guildId ?? guildId;
 
 		while (true) {
 			const messages = await discord.getMessages(channelId, {
@@ -532,6 +887,12 @@ export async function backfillChannel(
 			const sortedMessages = [...messages].reverse();
 
 			for (const message of sortedMessages) {
+				// Everything at/above the Phase-1 boundary was already ingested
+				// by the window — never re-process it.
+				if (boundary !== null && BigInt(message.id) >= BigInt(boundary)) {
+					totalSkipped++;
+					continue;
+				}
 				try {
 					const result = await ingestDiscordMessage(
 						message,
@@ -554,17 +915,77 @@ export async function backfillChannel(
 
 			// Advance cursor at page boundary (not per-message) so a crash in
 			// the middle of a page doesn't lose the unprocessed messages.
-			const lastMessage = sortedMessages.at(-1);
-			if (!lastMessage) break;
-			const oldestInBatch = lastMessage;
-			afterCursor = oldestInBatch.id;
-			repo.setChannelCursor(spaceDid, channelId, afterCursor);
+			const oldestInBatch = sortedMessages.at(-1);
+			if (!oldestInBatch) break;
+			const nextCursor = oldestInBatch.id;
+
+			// Stall guard: a page whose oldest message hasn't advanced past
+			// the cursor (sticky data source) would loop forever — stop and
+			// keep the pair resumable instead.
+			if (BigInt(nextCursor) <= BigInt(afterCursor)) {
+				walkStalled = true;
+				log.error(
+					`Backfill stalled for ${channelId} → ${spaceDid}: cursor ${afterCursor} did not advance; stopping`,
+				);
+				break;
+			}
+			afterCursor = nextCursor;
+
+			repo.upsertBackfillProgress({
+				spaceDid,
+				channelId,
+				guildId: identityGuildId,
+				kind: identityKind,
+				channelName: identityName,
+				phase: "phase2",
+				messagesSynced: baseSynced + totalSynced,
+				messagesSkipped: baseSkipped + totalSkipped,
+				windowBoundary: boundary,
+				walkCursor: afterCursor,
+			});
+
+			// Newest-ingested cursor is a monotonic max: never regress what
+			// the Phase-1 window / live path already wrote.
+			const prevCursor = repo.getChannelCursor(spaceDid, channelId)
+				?.lastMessageId;
+			if (
+				prevCursor === null ||
+				prevCursor === undefined ||
+				BigInt(afterCursor) > BigInt(prevCursor)
+			) {
+				repo.setChannelCursor(spaceDid, channelId, afterCursor);
+			}
 
 			if (messages.length < 100) break;
+			// Phase-1 boundary reached from below: everything strictly below
+			// it is ingested — the window covered the rest.
+			const newestInBatch = messages[0];
+			if (
+				boundary !== null &&
+				newestInBatch &&
+				BigInt(newestInBatch.id) >= BigInt(boundary)
+			) {
+				break;
+			}
+		}
+
+		if (!walkStalled) {
+			repo.upsertBackfillProgress({
+				spaceDid,
+				channelId,
+				guildId: identityGuildId,
+				kind: identityKind,
+				channelName: identityName,
+				phase: "complete",
+				messagesSynced: baseSynced + totalSynced,
+				messagesSkipped: baseSkipped + totalSkipped,
+				windowBoundary: boundary,
+				walkCursor: afterCursor,
+			});
 		}
 
 		log.info(
-			`Channel ${channelId} → ${spaceDid} backfill done: ${totalSynced} synced, ${totalSkipped} skipped`,
+			`Channel ${channelId} → ${spaceDid} backfill done: ${baseSynced + totalSynced} synced, ${baseSkipped + totalSkipped} skipped${walkStalled ? " (stalled)" : ""}`,
 		);
 
 		// Capacity enforcement: refresh the decision after a backfill so a

@@ -149,6 +149,12 @@ export class FileDiscordDataSource implements DiscordDataSource {
 			filtered = filtered.filter((m) => BigInt(m.id) < BigInt(before));
 		}
 
+		// Discord REST returns the most recent messages for an unpaginated
+		// request; mirror that so every caller sees newest-first pages.
+		if (!opts.after && !opts.before) {
+			filtered.sort(newestFirst);
+		}
+
 		// Apply limit
 		const limit = opts.limit ?? 100;
 		return (
