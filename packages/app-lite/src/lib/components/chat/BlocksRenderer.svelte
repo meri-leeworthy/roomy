@@ -184,6 +184,16 @@
     return (block as { items?: { text: string; facets?: Facet[] }[] })
       .items ?? [];
   }
+  /**
+   * An ordered list's first item number. `undefined` leaves the `<ol>`
+   * without a `start` attribute, so it counts from 1 as HTML does by default.
+   */
+  function blockStart(block: Block): number | undefined {
+    const start = (block as { start?: number }).start;
+    return typeof start === "number" && Number.isInteger(start) && start >= 1
+      ? start
+      : undefined;
+  }
   function blockUri(block: Block): string {
     return (block as { uri?: string }).uri ?? "";
   }
@@ -215,7 +225,7 @@
       <pre class="bg-base-100 dark:bg-base-800 rounded-md p-2 my-1 overflow-x-auto text-sm"><code>{@html escapeHtml(blockText(block))}</code></pre>
     {:else if block.$type === "space.roomy.richtext.blocks#orderedList"}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <ol class="list-decimal pl-5 my-1 space-y-0.5">{@html renderListItems(blockItems(block))}</ol>
+      <ol class="list-decimal pl-5 my-1 space-y-0.5" start={blockStart(block)}>{@html renderListItems(blockItems(block))}</ol>
     {:else if block.$type === "space.roomy.richtext.blocks#unorderedList"}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <ul class="list-disc pl-5 my-1 space-y-0.5">{@html renderListItems(blockItems(block))}</ul>

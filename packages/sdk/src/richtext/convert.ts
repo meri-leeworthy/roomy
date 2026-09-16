@@ -280,7 +280,20 @@ function listBlockFromNode(
     }
     items.push(facets.length > 0 ? { text, facets } : { text });
   }
-  return { $type: blockType, items } as Block;
+  const base: Record<string, unknown> = { $type: blockType, items };
+  // An ordered list's first item number lives in `attrs.start`; it is only
+  // meaningful when it is not 1 (the default every renderer already applies).
+  const start = node.attrs?.start;
+  if (
+    blockType === "space.roomy.richtext.blocks#orderedList" &&
+    typeof start === "number" &&
+    Number.isInteger(start) &&
+    start >= 1 &&
+    start !== 1
+  ) {
+    base.start = start;
+  }
+  return base as Block;
 }
 
 /**
@@ -568,13 +581,21 @@ export function blocksToProseMirrorDoc(blocks: Block[]): ProseMirrorDoc {
         const list = block as {
           $type: "space.roomy.richtext.blocks#orderedList" | "space.roomy.richtext.blocks#unorderedList";
           items: { text: string; facets?: Facet[] }[];
+          start?: number;
         };
         const listType =
           list.$type === "space.roomy.richtext.blocks#orderedList"
             ? "orderedList"
             : "bulletList";
+        const start = list.start;
+        const carriesStart =
+          listType === "orderedList" &&
+          typeof start === "number" &&
+          Number.isInteger(start) &&
+          start >= 1;
         content.push({
           type: listType,
+          ...(carriesStart ? { attrs: { start } } : {}),
           content: list.items.map((item) => ({
             type: "listItem",
             content: [paragraphFromTextBlock(item.text, item.facets)],
@@ -946,6 +967,9 @@ export function markdownToBlocks(md: string): Block[] {
     const ordered = /^(\d+)[.)]\s+(.*)$/.exec(trimmed);
     if (ordered) {
       const items: { text: string; facets?: Facet[] }[] = [];
+      // The first line's number is the list's start; later lines only
+      // delimit items (markdown numbering is decorative past the first).
+      const start = Number(ordered[1]);
       while (i < lines.length) {
         const m = /^(\d+)[.)]\s+(.*)$/.exec(lines[i]!.trim());
         if (!m) break;
@@ -953,7 +977,11 @@ export function markdownToBlocks(md: string): Block[] {
         items.push(facets.length > 0 ? { text, facets } : { text });
         i++;
       }
-      blocks.push({ $type: "space.roomy.richtext.blocks#orderedList", items });
+      blocks.push(
+        Number.isInteger(start) && start > 1
+          ? { $type: "space.roomy.richtext.blocks#orderedList", items, start }
+          : { $type: "space.roomy.richtext.blocks#orderedList", items },
+      );
       continue;
     }
 

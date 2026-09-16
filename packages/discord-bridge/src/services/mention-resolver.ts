@@ -299,6 +299,9 @@ function parseBlocks(content: string, ctx: InlineCtx): Block[] {
 		const ordered = /^(\d+)[.)]\s+(.*)$/.exec(trimmed);
 		if (ordered) {
 			const items: { text: string; facets?: Facet[] }[] = [];
+			// The first line's number is the list's start (as in the SDK's
+			// markdown parser); Discord users can continue numbering a list.
+			const start = Number(ordered[1]);
 			while (i < lines.length) {
 				const ln = lines[i];
 				if (ln === undefined) break;
@@ -309,10 +312,15 @@ function parseBlocks(content: string, ctx: InlineCtx): Block[] {
 				items.push(listItem(text, facets));
 				i++;
 			}
-			blocks.push({
-				$type: "space.roomy.richtext.blocks#orderedList" as const,
-				items,
-			});
+			blocks.push(
+				Number.isInteger(start) && start > 1
+					? {
+							$type: "space.roomy.richtext.blocks#orderedList" as const,
+							items,
+							start,
+						}
+					: { $type: "space.roomy.richtext.blocks#orderedList" as const, items },
+			);
 			continue;
 		}
 

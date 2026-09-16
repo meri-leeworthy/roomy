@@ -171,8 +171,19 @@ export function blocksToDiscordMarkdown(blocks: Block[]): string {
 			}
 			case "space.roomy.richtext.blocks#orderedList":
 				if ("items" in block) {
+					// An ordered list carries its first item number in `start`;
+					// absent means 1.
+					const rawStart = "start" in block ? block.start : undefined;
+					const start =
+						typeof rawStart === "number" &&
+						Number.isInteger(rawStart) &&
+						rawStart >= 1
+							? rawStart
+							: 1;
 					block.items.forEach((item, i) => {
-						parts.push(`${i + 1}. ${renderInline(item.text, item.facets)}`);
+						parts.push(
+							`${start + i}. ${renderInline(item.text, item.facets)}`,
+						);
 					});
 				}
 				break;

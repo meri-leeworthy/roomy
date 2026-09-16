@@ -536,6 +536,22 @@ describe("Discord markdown → richtext", () => {
 		expect(items.map((i) => i.text)).toEqual(["one", "two"]);
 	});
 
+	test("carries a non-1 ordered list start from Discord markdown", () => {
+		const blocks = resolveMentionsToBlocks(
+			"2. second\n3. third",
+			[],
+			ctx(),
+			SPACE,
+		);
+		expect(blocks).toEqual([
+			{
+				$type: "space.roomy.richtext.blocks#orderedList",
+				items: [{ text: "second" }, { text: "third" }],
+				start: 2,
+			},
+		]);
+	});
+
 	test("parses a horizontal rule", () => {
 		const blocks = resolveMentionsToBlocks("a\n\n---\n\nb", [], ctx(), SPACE);
 		expect(blocks.map((b) => b.$type)).toContain(
