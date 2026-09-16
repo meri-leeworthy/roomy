@@ -163,6 +163,34 @@ describe("build_id fallback chain", () => {
     expect(resolveBuildId()).toBe("unknown");
   });
 
+  test("empty BUILD_ID falls through to RAILWAY_GIT_COMMIT_SHA", () => {
+    process.env.BUILD_ID = "";
+    process.env.RAILWAY_GIT_COMMIT_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    expect(resolveBuildId()).toBe("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+  });
+
+  test("whitespace BUILD_ID is not an identity", () => {
+    process.env.BUILD_ID = "   ";
+    process.env.RAILWAY_GIT_COMMIT_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    expect(resolveBuildId()).toBe("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+  });
+
+  test("empty RAILWAY_GIT_COMMIT_SHA yields unknown, never an empty string", () => {
+    process.env.BUILD_ID = "";
+    process.env.RAILWAY_GIT_COMMIT_SHA = "";
+    expect(resolveBuildId()).toBe("unknown");
+  });
+
+  test("empty RAILWAY_GIT_COMMIT_SHA alone yields unknown", () => {
+    process.env.RAILWAY_GIT_COMMIT_SHA = "";
+    expect(resolveBuildId()).toBe("unknown");
+  });
+
+  test("values are trimmed", () => {
+    process.env.BUILD_ID = " abc12345\n";
+    expect(resolveBuildId()).toBe("abc12345");
+  });
+
   test("build_id on the record follows the chain", () => {
     process.env.BUILD_ID = "abc12345";
     log.info("startup", "ready");

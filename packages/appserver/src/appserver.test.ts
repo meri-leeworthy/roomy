@@ -56,6 +56,11 @@ describe("createAppserver factory", () => {
     const healthBody = await health.json();
     expect(healthBody.status).toBe("ok");
     expect(healthBody.did).toBe("did:web:test.example");
+    // build_id is always present and never an empty string — the deploy-revision
+    // audit reads this field, and "" is indistinguishable from a real value on
+    // the wire. The chain itself is unit-tested in log.test.ts.
+    expect(healthBody.build_id).toBeTypeOf("string");
+    expect(healthBody.build_id).not.toBe("");
 
     // /.well-known/did.json returns the DID document
     const didDoc = await fetch(`${base}/.well-known/did.json`);
