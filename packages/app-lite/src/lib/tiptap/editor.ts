@@ -1,75 +1,15 @@
 import { mount, unmount } from "svelte";
-import { keymap } from "@tiptap/pm/keymap";
-import { splitBlock } from "@tiptap/pm/commands";
 import { PluginKey } from "@tiptap/pm/state";
 import Mention from "@tiptap/extension-mention";
 import SuggestionSelect from "@roomy/design/components/helper/SuggestionSelect.svelte";
 import UserMentionList from "./UserMentionList.svelte";
 import type { TypeaheadUser } from "@roomy/design/components/ui/user-typeahead/UserTypeahead.svelte";
-import { Extension, mergeAttributes } from "@tiptap/core";
+import { mergeAttributes } from "@tiptap/core";
 import type { MarkdownNodeSpec } from "tiptap-markdown";
 import type {
   SuggestionKeyDownProps,
   SuggestionProps,
 } from "@tiptap/suggestion";
-
-/* Keyboard Shortcuts: used to add and override existing shortcuts */
-type KeyboardShortcutHandlerProps = {
-  onEnter: () => void;
-  /**
-   * When true (chat), bare Enter sends the message. When false (e.g. a modal
-   * composer where a Send button submits), bare Enter inserts a new block
-   * like Shift/Cmd+Enter would.
-   */
-  sendOnEnter?: boolean;
-};
-
-export const initKeyboardShortcutHandler = ({
-  onEnter,
-  sendOnEnter = true,
-}: KeyboardShortcutHandlerProps) =>
-  Extension.create({
-    name: "keyboardShortcutHandler",
-    // Higher than StarterKit's default (100) so this keymap runs before the
-    // HardBreak extension's `Shift-Enter`/`Mod-Enter` → setHardBreak bindings,
-    // letting us override them with splitListItem/splitBlock (new block).
-    priority: 1000,
-    addProseMirrorPlugins() {
-      return [
-        keymap({
-          // Bare Enter sends the message (chat convention). In composer mode
-          // it instead splits the block (new paragraph/list item).
-          Enter: sendOnEnter
-            ? () => {
-                onEnter();
-                return true;
-              }
-            : (state, dispatch) => {
-                if (!this.editor.commands.splitListItem("listItem")) {
-                  splitBlock(state, dispatch);
-                }
-                return true;
-              },
-          // Shift/Cmd+Enter create a new block. In a list this means a new
-          // list item (splitListItem); elsewhere a new paragraph (splitBlock).
-          // This lets users build lists and stack multiple headers in one
-          // message without sending.
-          "Shift-Enter": (state, dispatch) => {
-            if (!this.editor.commands.splitListItem("listItem")) {
-              splitBlock(state, dispatch);
-            }
-            return true;
-          },
-          "Mod-Enter": (state, dispatch) => {
-            if (!this.editor.commands.splitListItem("listItem")) {
-              splitBlock(state, dispatch);
-            }
-            return true;
-          },
-        }),
-      ];
-    },
-  });
 
 /* Mention Extensions */
 export interface Item {

@@ -15,9 +15,11 @@
   import { Editor, Extension } from "@tiptap/core";
   import StarterKit from "@tiptap/starter-kit";
   import Placeholder from "@tiptap/extension-placeholder";
-  import { initUserMention, initSpaceContextMention } from "$lib/tiptap/editor";
+  import { type Item, initUserMention, initSpaceContextMention } from "$lib/tiptap/editor";
+  import { initKeyboardShortcutHandler } from "$lib/tiptap/keyboardShortcut";
   import { extractMentionDids } from "$lib/tiptap/mentions";
-  import { type Item, initKeyboardShortcutHandler } from "$lib/tiptap/editor";
+  import { MediaQuery } from "svelte/reactivity";
+  import { resolveSendOnEnter, TOUCH_PRIMARY_QUERY } from "$lib/input-device";
   import type { TypeaheadUser } from "@roomy/design/components/ui/user-typeahead/UserTypeahead.svelte";
   import { RichTextLink } from "$lib/tiptap/RichTextLink";
   import { cn } from "@roomy/design/utils";
@@ -67,7 +69,13 @@
      * false so they don't hijack the composer's clear/focus.
      */
     composer?: boolean;
-    /** When false, bare Enter inserts a new block instead of sending. */
+    /**
+     * Explicit override for bare Enter: true sends, false inserts a new block.
+     *
+     * Omitted (the usual case) → the input device decides, so a touch device
+     * keeps Return for newlines while a hardware keyboard keeps Enter-to-send.
+     * `resolveSendOnEnter` is the whole rule.
+     */
     sendOnEnter?: boolean;
   };
 
@@ -84,12 +92,20 @@
     disabled = false,
     processImageFile,
     composer = false,
-    sendOnEnter = true,
+    sendOnEnter,
   }: Props = $props();
 
   let element: HTMLDivElement | undefined = $state();
 
   let tiptap: Editor | undefined = $state();
+
+  /**
+   * The live touch-primary signal. `MediaQuery.current` re-reads
+   * `matchMedia`, and the shortcut handler reads this per keypress, so a
+   * tablet that grows a keyboard cover — or any pointer-capability change —
+   * changes what bare Enter does without rebuilding the editor or reloading.
+   */
+  const pointerCoarse = new MediaQuery(TOUCH_PRIMARY_QUERY);
 
   function flushTrailingAutolink() {
     if (!tiptap || !tiptap.state.selection.empty) return;
@@ -207,7 +223,10 @@
         autolink: true,
         defaultProtocol: "https",
       }),
-      initKeyboardShortcutHandler({ onEnter: wrappedOnEnter, sendOnEnter }),
+      initKeyboardShortcutHandler({
+        onEnter: wrappedOnEnter,
+        sendOnEnter: () => resolveSendOnEnter(sendOnEnter, pointerCoarse.current),
+      }),
       // `breaks: true` keeps single newlines (soft breaks) as hard breaks
       // instead of collapsing them to spaces — fixes newlines being stripped
       // when a message is re-parsed or edited.
