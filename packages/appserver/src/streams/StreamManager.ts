@@ -18,8 +18,11 @@ import {
 } from "../materialization/profiles.ts";
 import type { HappyViewConfig } from "../happyview.ts";
 import { toAppliedEvent } from "../materialization/toAppliedEvent.ts";
+import { canonicalMessageTimestamp } from "../materialization/sortIdx.ts";
 import { pokeEmbedSweeper } from "../embed/sweeper.ts";
 import { pokePushDispatcher } from "../push/dispatcher.ts";
+import { isPushFresh, PUSH_MAX_MESSAGE_AGE_MS } from "../push/freshness.ts";
+import type { PushJob } from "../push/types.ts";
 import { resolveReplyToAuthors } from "../queries/mentions.ts";
 import { decodeTime } from "ulidx";
 import { createStreamDid } from "./did.ts";
@@ -62,6 +65,8 @@ export class StreamManager {
   readonly #happyView: HappyViewConfig | null;
   /** Arbiter config. When set, new spaces are provisioned as real ATProto accounts. */
   readonly #arbiter: ArbiterConfig | null;
+  /** Push enqueue sink. Defaults to the process-wide dispatcher poke. */
+  readonly #pokePush: (jobs: PushJob[]) => void;
   /** The appserver's own DID (the arbiter policy owner + service record host). */
   readonly #ownDid: string;
   /** Live-event listeners, notified after each sendEvents batch. */
@@ -87,6 +92,12 @@ export class StreamManager {
       arbiter?: ArbiterConfig | null;
       /** The appserver's own DID (arbiter policy owner + service record host). */
       ownDid?: string;
+      /**
+       * Override the push enqueue sink. Production pokes the process-wide
+       * dispatcher; tests inject a collector to observe which messages the
+       * write path offers for push (freshness gate, TASK-151).
+       */
+      pokePush?: (jobs: PushJob[]) => void;
     },
   ) {
     this.#db = db;
@@ -99,6 +110,7 @@ export class StreamManager {
     this.#happyView = opts.happyView ?? null;
     this.#arbiter = opts.arbiter ?? null;
     this.#ownDid = opts.ownDid ?? "";
+    this.#pokePush = opts.pokePush ?? pokePushDispatcher;
   }
 
   /** The appserver's own DID (the arbiter recovery admin / policy owner). */
@@ -276,19 +288,55 @@ export class StreamManager {
               createMessageEvents.map((e) => e.id),
             )
           : undefined;
-        pokePushDispatcher(
-          createMessageEvents.map((e) => ({
+        // Freshness gate (TASK-151). `sendEvents` is the LIVE write path, but
+        // "live write" does not imply "live message": a replay of historical
+        // content (the Discord bridge's runBackfill, a client re-submitting an
+        // old event) lands here too, and every job poked from here produces an
+        // immediate push. Gate on the message's canonical age — the event ULID
+        // is fresh for a replay, so it cannot answer "is this new?". Stale
+        // messages are dropped from the poke entirely: no immediate push, and
+        // no digest batch seeded for engaged recipients.
+        //
+        // Canonical times come from `decodedEvents` (the full event, where the
+        // timestampOverride extension lives), matched to the applied events by
+        // id rather than by index.
+        const canonicalById = new Map<string, number>();
+        for (const e of decodedEvents) {
+          if (e.event.$type === "space.roomy.message.createMessage.v0") {
+            canonicalById.set(e.event.id, canonicalMessageTimestamp(e.event));
+          }
+        }
+        const now = Date.now();
+        const jobs: PushJob[] = [];
+        let staleSkipped = 0;
+        for (const e of createMessageEvents) {
+          const canonicalTimestamp = canonicalById.get(e.id) ?? decodeTime(e.id);
+          if (!isPushFresh({ canonicalTimestamp, messageId: e.id }, now)) {
+            staleSkipped++;
+            continue;
+          }
+          jobs.push({
             spaceId: streamDid,
             roomId: e.roomId!,
             messageId: e.id,
             authorDid: (e.details?.authorDid ?? e.user) as UserDid,
             timestamp: decodeTime(e.id),
+            canonicalTimestamp,
             mentions: e.details?.mentions as string[] | undefined,
             ...(replyToAuthors?.get(e.id)
               ? { repliedToDids: [replyToAuthors.get(e.id)!] }
               : {}),
-          })),
-        );
+          });
+        }
+        if (staleSkipped > 0) {
+          // Log the drop so a replay is visible in production rather than
+          // silently swallowed (this is the counter that would have named the
+          // 2026-09-16 flood within seconds).
+          log.info(
+            `[push-freshness] suppressed ${staleSkipped}/${createMessageEvents.length} stale message push(es) for ${streamDid} (older than ${PUSH_MAX_MESSAGE_AGE_MS}ms)`,
+          );
+        }
+        this.#pokePush(jobs);
       }
 
       // 8. Notify live-event listeners (e.g. sync stream subscriptions).

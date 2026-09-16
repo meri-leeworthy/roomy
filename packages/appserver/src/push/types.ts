@@ -22,6 +22,18 @@ export interface PushJob {
   authorDid: UserDid;
   /** Message timestamp in epoch milliseconds. */
   timestamp: number;
+  /**
+   * The message's **canonical** timestamp in epoch ms — the timestamp
+   * override extension when present (Discord-bridged messages carry the
+   * original Discord send time), else the event ULID time. Computed on the
+   * write path by `canonicalMessageTimestamp`.
+   *
+   * This is the only time value that distinguishes a genuinely new message
+   * from historical content ingested now: `timestamp` is derived from the
+   * event ULID, which is fresh for a replay. The freshness gate
+   * (`push/freshness.ts`) keys on this field — see TASK-151.
+   */
+  canonicalTimestamp?: number;
   /** DIDs mentioned in the message body (from the mentions extension). */
   mentions?: string[];
   /**

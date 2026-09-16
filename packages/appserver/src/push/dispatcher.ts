@@ -33,8 +33,10 @@ import {
 } from "../queries/pushSubscriptions.ts";
 import {
   markNotified,
+  resetNotificationState,
   selectDueDigests,
 } from "../queries/notificationState.ts";
+import { PUSH_MAX_DIGEST_AGE_MS } from "./freshness.ts";
 import { resolveEntityAvatar, resolveLatestRoomAuthor } from "./avatars.ts";
 import type { PushDelivery, PushJob, PushPayload } from "./types.ts";
 
@@ -137,7 +139,7 @@ async function runDispatcherLoop(): Promise<void> {
       }
       // Idle: run the Engaged digest sweep (catches 1h-elapsed batches even
       // with no new pokes), then wait for a poke or the periodic poll.
-      await runDigestSweep(db);
+      await _runDigestSweep(db);
       await waitForWake(IDLE_POLL_MS);
     } catch (err) {
       // Outer resilience: an unexpected throw must not permanently kill the
@@ -188,9 +190,36 @@ async function processBatch(db: DbLike, batch: PushJob[]): Promise<void> {
  * (both against the room's per-space DB) so the payload can carry `spaceId`
  * + an author name (via {@link resolveAuthorName}) + an avatar icon.
  */
-async function runDigestSweep(db: DbLike): Promise<void> {
+export async function _runDigestSweep(db: DbLike): Promise<void> {
   const due = await selectDueDigests(db, Date.now(), SWEEP_BATCH_LIMIT);
   if (due.length === 0) return;
+
+  // Freshness gate (TASK-151). A digest row whose batch *began* long ago is
+  // not a "you missed this" prompt — it is stale state that accumulated while
+  // nothing fired (the process was down, the room was never reopened, a
+  // replay seeded it). Firing it greets the user with hours-old messages, and
+  // every restart re-fires it, which is what made the 2026-09-16 flood look
+  // deploy-coupled. Drop the stale rows instead: they can never become
+  // current, and the user's unread counter is driven by `read_positions`, not
+  // by this table, so nothing user-visible is lost.
+  const now = Date.now();
+  // `first_unseen_at` is null-typed at the SQL boundary (the column is
+  // nullable), though the query filters those rows out. Treat an absent
+  // timestamp as stale: a digest row with no batch start has no batch to
+  // report.
+  const isStale = (row: { firstUnseenAt: number | null }): boolean =>
+    row.firstUnseenAt == null || now - row.firstUnseenAt > PUSH_MAX_DIGEST_AGE_MS;
+  const stale = due.filter(isStale);
+  const fresh = due.filter((row) => !isStale(row));
+  for (const row of stale) {
+    await resetNotificationState(db, row.userDid, row.roomId);
+  }
+  if (stale.length > 0) {
+    log.info(
+      `[push-freshness] dropped ${stale.length}/${due.length} stale digest batch(es) (first unseen older than ${PUSH_MAX_DIGEST_AGE_MS}ms)`,
+    );
+  }
+  if (fresh.length === 0) return;
 
   // The sweep row carries `(userDid, roomId, unseenCount)` but not the
   // spaceId. Resolve each room's owning space via the global `entity_space`
@@ -208,7 +237,7 @@ async function runDigestSweep(db: DbLike): Promise<void> {
     }
   >();
   const iconByRoom = new Map<string, string>();
-  for (const row of due) {
+  for (const row of fresh) {
     if (roomMeta.has(row.roomId)) continue;
     const spaceRow = await global
       .query("select space_did from entity_space where entity_id = ?")
@@ -246,7 +275,7 @@ async function runDigestSweep(db: DbLike): Promise<void> {
     }
   }
 
-  await mapWithConcurrency(due, CONCURRENCY, async (row) => {
+  await mapWithConcurrency(fresh, CONCURRENCY, async (row) => {
     const meta = roomMeta.get(row.roomId);
     const spaceId = meta?.spaceId ?? "";
     const payload: PushPayload = {

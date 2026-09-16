@@ -101,11 +101,23 @@ export async function runBackfill(
 
 	log.info(`Backfilling ${tasks.length} (channel, space) pairs`);
 
-	const results = await Promise.allSettled(
-		tasks.map((t) =>
-			backfillChannel(discord, repo, roomy, t.channelId, t.spaceDid),
-		),
-	);
+	// Replay is serial (TASK-151). This loop re-sends historical Discord
+	// messages through the LIVE `sendEvents` path, so it is indistinguishable
+	// to the appserver from real-time traffic — including for push. Run
+	// concurrently, it starves the live path *and* multiplies the replay
+	// (the channel loop and the archived-thread sweep both replay). Running
+	// one (channel, space) pair at a time bounds replay to a single stream of
+	// writes, so real-time messages interleave immediately instead of queueing
+	// behind a parallel replay.
+	const results: Array<PromiseSettledResult<void>> = [];
+	for (const t of tasks) {
+		try {
+			await backfillChannel(discord, repo, roomy, t.channelId, t.spaceDid);
+			results.push({ status: "fulfilled", value: undefined });
+		} catch (reason) {
+			results.push({ status: "rejected", reason });
+		}
+	}
 
 	const succeeded = results.filter((r) => r.status === "fulfilled").length;
 	const failed = results.filter((r) => r.status === "rejected").length;
