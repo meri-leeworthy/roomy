@@ -167,6 +167,41 @@ describe("build_id fallback chain", () => {
 		expect(resolveBuildId()).toBe("unknown");
 	});
 
+	// The Dockerfile's ENV expansion yields "" when the build arg is absent
+	// (`ENV BUILD_ID=${RAILWAY_GIT_COMMIT_SHA%...}` with an empty ARG). A raw
+	// `??` chain would take that "" and emit a present-but-empty build_id —
+	// indistinguishable from a real identity to every consumer downstream.
+	test("empty BUILD_ID falls through to RAILWAY_GIT_COMMIT_SHA", () => {
+		process.env.BUILD_ID = "";
+		process.env.RAILWAY_GIT_COMMIT_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+		expect(resolveBuildId()).toBe("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+	});
+
+	test("whitespace-only BUILD_ID falls through to RAILWAY_GIT_COMMIT_SHA", () => {
+		process.env.BUILD_ID = "   ";
+		process.env.RAILWAY_GIT_COMMIT_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+		expect(resolveBuildId()).toBe("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+	});
+
+	test("empty RAILWAY_GIT_COMMIT_SHA alone yields unknown, never an empty string", () => {
+		process.env.RAILWAY_GIT_COMMIT_SHA = "";
+		expect(resolveBuildId()).toBe("unknown");
+	});
+
+	test("a deploy carrying no git metadata names no commit, never a blank", () => {
+		// Both vars set to the Dockerfile's absent-arg expansion: the exact
+		// state of a platform deploy that injects no git metadata.
+		process.env.BUILD_ID = "";
+		process.env.RAILWAY_GIT_COMMIT_SHA = "";
+		const id = resolveBuildId();
+		expect(id).toBe("unknown");
+		expect(id).not.toBe("");
+
+		const log = createLogger("startup");
+		log.info("ready");
+		expect(JSON.parse(stdoutSpy.mock.calls[0]![0] as string).build_id).toBe("unknown");
+	});
+
 	test("build_id on the record follows the chain", () => {
 		process.env.BUILD_ID = "abc12345";
 		const log = createLogger("startup");
