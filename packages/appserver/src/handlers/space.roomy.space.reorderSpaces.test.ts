@@ -8,7 +8,6 @@ import { beforeEach, afterEach, describe, expect, test } from "bun:test";
 import { StreamDid, UserDid } from "@roomy-space/sdk";
 
 import { closeDb, openDb, openReadStateDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { reorderSpacesHandler } from "./space.roomy.space.reorderSpaces.ts";
 import { Router } from "../invalidation/router.ts";
 
@@ -32,7 +31,6 @@ async function readOrder(): Promise<SpaceOrderRow[]> {
 
 beforeEach(async () => {
   closeDb();
-  _resetHydrationInflight();
   Router.resetInstance();
 
   const db = openDb({ path: ":memory:" });
@@ -52,7 +50,6 @@ beforeEach(async () => {
 
 afterEach(() => {
   closeDb();
-  _resetHydrationInflight();
   Router.resetInstance();
 });
 

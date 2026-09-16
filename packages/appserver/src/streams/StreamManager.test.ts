@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { newUlid, StreamDid, UserDid, parseEvent } from "@roomy-space/sdk";
 import { Secp256k1Keypair } from "@atproto/crypto";
 import { closeDb, openDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import { StreamManager } from "./StreamManager.ts";
 import { storeStreamKey, getStreamSigningKey, listStreamOwners } from "./keys.ts";
@@ -23,7 +22,6 @@ let sm: StreamManager;
 
 beforeEach(async () => {
   closeDb();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
 
   // In-memory singleton so the events DB schema is initialized.

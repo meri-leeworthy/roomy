@@ -9,7 +9,6 @@
  */
 
 import { openReadStateDb, openSpaceDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import {
   deleteGrant,
   selectGrantForGrantor,
@@ -43,7 +42,6 @@ export const revokeBridgeTokenHandler: ProcedureHandler<
     );
   }
 
-  await hydrateUserMembership(userDid);
   const spaceDb = openSpaceDb(spaceId);
   await requireSpaceAccess(spaceDb, spaceId, userDid);
 

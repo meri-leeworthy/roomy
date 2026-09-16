@@ -225,7 +225,7 @@ export const prose: Record<string, EndpointProse> = {
     },
     notes: [
       "One SQL row, one ban check, no fan-out. Much cheaper than getMetadata.",
-      "No hydrateUserMembership needed — the ban table is space-scoped.",
+      "No per-user membership read — the ban table is space-scoped.",
     ],
   },
   "space.roomy.space.getActivityFeed": {

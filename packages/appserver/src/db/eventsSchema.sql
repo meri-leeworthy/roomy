@@ -11,7 +11,16 @@ create table if not exists stream_events (
     primary key (stream_id, idx)
 ) strict;
 
+-- Supports "events in the last N hours/day" counts (admin dashboard). Without
+-- it those are full table scans of the whole event log.
+create index if not exists idx_stream_events_created_at on stream_events(created_at);
+
 -- Per-stream metadata (latest event idx, etc.)
+--
+-- `latest_event` is the highest `idx` in the stream and doubles as a rollup:
+-- `idx` is assigned as max(idx)+1 and never deleted, so the stream holds
+-- exactly `latest_event + 1` events and the admin dashboard sums this column
+-- instead of counting the whole log.
 create table if not exists stream_state (
     stream_id text primary key,
     latest_event integer not null default 0

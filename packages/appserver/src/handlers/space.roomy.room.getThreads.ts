@@ -9,7 +9,6 @@
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
 import { getEngagedThreadIds, getReadPositions } from "../queries/readPositions.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
@@ -60,7 +59,6 @@ export const getRoomThreadsHandler: QueryHandler<
   const search = optionalString(params, "search") ?? null;
 
   if (userDid !== null) {
-    await hydrateUserMembership(userDid);
   }
 
   const db = await openSpaceDbForEntity(roomId);

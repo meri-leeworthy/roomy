@@ -10,7 +10,6 @@
  */
 
 import { openReadStateDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { selectJoinedSpaces, type SpaceRow } from "../queries/joinedSpaces.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
@@ -33,7 +32,6 @@ export const getSpacesHandler: QueryHandler<
     return { spaces: [] };
   }
 
-  await hydrateUserMembership(userDid);
 
   const params = rawParams as unknown as GetSpacesParams;
   const includeLeft = params.includeLeft === "true" || params.includeLeft === "1";

@@ -9,7 +9,6 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { Router } from "../invalidation/router.ts";
 import { _clearPolarCache, setPolar, type PolarConfig } from "../billing/polar.ts";
 import { createProCheckoutHandler } from "./space.roomy.pro.createCheckout.ts";
@@ -53,7 +52,6 @@ function auth(did: string | null) {
 
 beforeEach(() => {
   closeDb();
-  _resetHydrationInflight();
   Router.resetInstance();
   _clearPolarCache();
   setPolar(CONFIG);
@@ -64,7 +62,6 @@ afterEach(() => {
   resetFetch();
   setPolar(null);
   closeDb();
-  _resetHydrationInflight();
   Router.resetInstance();
 });
 

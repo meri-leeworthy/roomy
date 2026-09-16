@@ -9,7 +9,6 @@
 import { createAccessMemo, roomAccessMany, spaceAccess } from "../auth/access.ts";
 import { createFederationMemo, federatedRoomAccess } from "../auth/federation.ts";
 import { openReadStateDb, openSpaceDb, openGlobalDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { getReadPositions, getSpaceSidebarData, ensureReadPositions } from "../queries/readPositions.ts";
 import { queryActiveThreads, resolveThreadsByIds } from "../queries/userActiveThreads.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
@@ -92,9 +91,6 @@ export const getMetadataHandler: QueryHandler<
   const userDid = parseUserDid(auth);
   const spaceId = requireString(params, "spaceId");
 
-  if (userDid !== null) {
-    await hydrateUserMembership(userDid);
-  }
 
   const db = openSpaceDb(spaceId);
   const mainDb = openReadStateDb();

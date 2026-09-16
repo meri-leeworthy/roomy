@@ -32,7 +32,14 @@ afterEach(() => {
   // no-op
 });
 
-/** Insert one event row into the event-log DB (ctx.db IS the event-log DB). */
+/**
+ * Insert one event row into the event-log DB (ctx.db IS the event-log DB).
+ *
+ * Also advances `stream_state`, exactly as `StreamManager.sendEvents` does: it
+ * is the only writer in production, so a test that seeds the log by hand has to
+ * keep the same invariant (`latest_event` = the highest `idx`) for the rollup
+ * the dashboard reads to agree with the rows seeded here.
+ */
 function seedEvent(
   ctx: E2eContext,
   streamId: string,
@@ -44,6 +51,11 @@ function seedEvent(
     `insert into stream_events (stream_id, idx, user, payload, signature, event_type, created_at)
      values (?, ?, ?, x'', x'', ?, ?)`,
     [streamId, idx, USER_A, eventType, createdAt],
+  );
+  ctx.db.run(
+    `insert into stream_state (stream_id, latest_event) values (?, ?)
+     on conflict (stream_id) do update set latest_event = max(latest_event, excluded.latest_event)`,
+    [streamId, idx],
   );
 }
 

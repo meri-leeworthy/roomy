@@ -11,7 +11,6 @@
 
 import { createAccessMemo, roomAccessMany, type RoomAccess } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import {
   selectActivityFeed,
   type ActivityFeedItem,
@@ -43,7 +42,6 @@ export const getActivityFeedHandler: QueryHandler<
   })!;
   const cursor = optionalString(params, "cursor") ?? null;
 
-  await hydrateUserMembership(userDid);
   const mainDb = openReadStateDb();
 
   // Per-request memo: the feed spans multiple spaces/rooms but each

@@ -18,7 +18,6 @@ import { newUlid, StreamDid, UserDid } from "@roomy-space/sdk";
 import { createAppserver, type AppserverHandle } from "../appserver.ts";
 import { testAuthVerifier } from "../xrpc/auth.ts";
 import { closeDb, openDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 
 const SPACE = "did:web:send-events-test.example";
@@ -73,7 +72,6 @@ function makeCreateRoomEvent() {
 
 beforeEach(async () => {
   closeDb();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
 
   // Open the singleton event-log DB in-memory so handlers' internal
@@ -138,7 +136,6 @@ afterEach(async () => {
     handle = null;
   }
   closeDb();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
 });
 

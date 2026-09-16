@@ -7,7 +7,6 @@
 
 import { openSpaceDbForEntity } from "../db/db.ts";
 import { prioritiseLinksForRead } from "../embed/sweeper.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -43,11 +42,6 @@ export const getMessagesHandler: QueryHandler<
     "space.roomy.room.getMessages",
     { "roomy.room_id": roomId, "roomy.limit": limit },
     async (span) => {
-      if (userDid !== null) {
-        await withSpan("getMessages.hydrateMembership", {}, () =>
-          hydrateUserMembership(userDid),
-        );
-      }
 
       const db = await withSpan("getMessages.openDb", {}, async (s) => {
         const opened = await openSpaceDbForEntity(roomId);

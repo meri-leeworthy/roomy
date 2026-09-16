@@ -61,11 +61,29 @@ export const adminGetDashboardStatsHandler: QueryHandler<
   const todayStart = todayMidnight.getTime();
 
   // ── Activity stats ──────────────────────────────────────────────────────
-
-  const totalRow = await db
-    .query("SELECT count(*) AS n FROM stream_events")
+  //
+  // The event log is the largest table in the process and grows without bound,
+  // so nothing here may scan it. As written these three were O(all events):
+  // production p50 19.4s (2026-09-16 08:00Z, n=268), against a 30s DB request
+  // timeout, refreshed every 30s by the admin dashboard.
+  //
+  //   totalEvents  — `stream_state` has one row per stream, and `idx` is
+  //                  assigned as max(idx)+1 and never deleted, so a stream
+  //                  holds exactly `latest_event + 1` events. Summing that is
+  //                  exact and O(streams).
+  //   eventsToday  — a range on `created_at`, served by the covering index.
+  //   activeSpaces — a distinct-stream count over the recent slice. Written
+  //                  the obvious way (`count(DISTINCT stream_id)`) SQLite
+  //                  answers it by walking the whole `(stream_id, idx)`
+  //                  primary key, because that ordering lets it short-circuit
+  //                  DISTINCT — the `created_at` index is never consulted, so
+  //                  the query stays O(rows) (measured: 7.0s at 4M rows).
+  //                  Naming the index forces the recent slice first; the
+  //                  DISTINCT then runs over ~500 rows instead of millions.
+  const totalsRow = await db
+    .query("SELECT coalesce(sum(latest_event + 1), 0) AS n FROM stream_state")
     .get<{ n: number }>();
-  const totalEvents = totalRow?.n ?? 0;
+  const totalEvents = totalsRow?.n ?? 0;
 
   const todayRow = await db
     .query(
@@ -76,7 +94,11 @@ export const adminGetDashboardStatsHandler: QueryHandler<
 
   const activeRow = await db
     .query(
-      "SELECT count(DISTINCT stream_id) AS n FROM stream_events WHERE created_at >= ?",
+      `SELECT count(*) AS n FROM (
+         SELECT DISTINCT stream_id
+           FROM stream_events INDEXED BY idx_stream_events_created_at
+          WHERE created_at >= ?
+       )`,
     )
     .get<{ n: number }>(oneHourAgo);
   const activeSpaces = activeRow?.n ?? 0;

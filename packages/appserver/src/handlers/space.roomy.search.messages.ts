@@ -36,7 +36,6 @@
 import { createAccessMemo, resolveRoom, roomAccess } from "../auth/access.ts";
 import { federatedRoomAccess } from "../auth/federation.ts";
 import { openGlobalDb, openReadStateDb, openSpaceDb, openSpaceDbForEntity } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { selectJoinedSpaceDids } from "../queries/userSpaceMembership.ts";
 import { selectMessages } from "../queries/selectMessages.ts";
 import { encodeSparse } from "../search/bm25.ts";
@@ -110,7 +109,6 @@ export const searchMessagesHandler: QueryHandler<
   }
 
   if (userDid !== null) {
-    await hydrateUserMembership(userDid);
   }
 
   // Room-scoped search (roomId): resolve the room's owning space and the

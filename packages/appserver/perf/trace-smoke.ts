@@ -13,7 +13,6 @@ import { newUlid, UserDid } from "@roomy-space/sdk";
 import { createAppserver } from "../src/appserver.ts";
 import { testAuthVerifier } from "../src/xrpc/auth.ts";
 import { closeDb, openDb, openGlobalDb } from "../src/db/db.ts";
-import { _resetHydrationInflight } from "../src/hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../src/embed/sweeper.ts";
 
 process.env.OTEL_EXPORTER_OTLP_ENDPOINT ??= "http://127.0.0.1:14318";
@@ -22,7 +21,6 @@ const SPACE = "did:web:trace-smoke.example";
 const USER = UserDid.assert("did:plc:trace-smoke-user");
 const CHANNEL = newUlid();
 
-_resetHydrationInflight();
 _resetEmbedSweeper();
 
 const db = openDb({ path: ":memory:" });

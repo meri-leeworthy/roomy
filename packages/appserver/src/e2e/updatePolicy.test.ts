@@ -15,7 +15,6 @@ import { createAppserver, type AppserverHandle } from "../appserver.ts";
 import { testAuthVerifier } from "../xrpc/auth.ts";
 import { closeDb, openDb } from "../db/db.ts";
 import { _resetRateLimit } from "../xrpc/rateLimit.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import { _resetProfileStoreCache } from "../queries/profileStore.ts";
 import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
@@ -75,7 +74,6 @@ describe("space.roomy.space.updatePolicy", () => {
     try {
       closeDb();
       _resetRateLimit();
-      _resetHydrationInflight();
       _resetEmbedSweeper();
       _resetProfileStoreCache();
   _resetProfileNegativeCache();
@@ -127,7 +125,6 @@ describe("space.roomy.space.updatePolicy", () => {
     try {
       closeDb();
       _resetRateLimit();
-      _resetHydrationInflight();
       _resetEmbedSweeper();
       _resetProfileStoreCache();
   _resetProfileNegativeCache();

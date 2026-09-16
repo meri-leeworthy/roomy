@@ -27,9 +27,8 @@ export { attachCacheEvictionListener } from "./evictListener.ts";
 /**
  * NSIDs eligible for response caching. These three are:
  * - **Hot:** fetched by the sidebar, navigation, and every `SpaceRoomBadge`.
- * - **Expensive:** all run `hydrateUserMembership` + multiple access checks +
- *   read-position queries (`room.getMetadata` is the worst — 130+ SQL
- *   statements cold).
+ * - **Expensive:** all run multiple access checks + read-position queries
+ *   (`room.getMetadata` is the worst — 130+ SQL statements cold).
  * - **Fully covered by invalidation signals:** every field in their responses
  *   is invalidated by a modelled event or procedure emit (verified against
  *   `inferSignals.ts` and the procedure handlers post-`9579eea0`).
