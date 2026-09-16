@@ -45,6 +45,7 @@ export const desiredProperties = createDesiredPropertiesObject({
 		type: true,
 		guildId: true,
 		parentId: true,
+		position: true,
 		permissionOverwrites: true,
 		ownerId: true,
 	},

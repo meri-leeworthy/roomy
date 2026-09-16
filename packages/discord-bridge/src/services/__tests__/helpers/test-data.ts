@@ -24,6 +24,8 @@ export const CHANNEL_2 = "223456789012345678";
 export const CHANNEL_3 = "323456789012345678";
 export const THREAD = "423456789012345678";
 export const PARENT_CHANNEL = "523456789012345678";
+export const CATEGORY = "623456789012345678";
+export const CATEGORY_2 = "723456789012345678";
 
 // Generate valid ULID strings for test fixtures.
 export const ROOMY_CHANNEL_ULID = newUlid();
@@ -100,9 +102,27 @@ export function makeChannel(
 		guildId: hasGuildId ? overrides.guildId : GUILD,
 		parentId: hasParentId ? overrides.parentId : undefined,
 		ownerId: overrides.ownerId,
+		position: overrides.position,
 		permissionOverwrites: overrides.permissionOverwrites ?? undefined,
 		topic: overrides.topic ?? undefined,
 	};
+}
+
+/**
+ * Build a Discord guild-category fixture (type 4). A category is a grouping
+ * header, never a bridged room — only the initial structure sync reads one.
+ */
+export function makeCategory(
+	overrides: Partial<DiscordChannelData> = {},
+): DiscordChannelData {
+	return makeChannel({
+		id: overrides.id ?? CATEGORY,
+		type: overrides.type ?? 4, // GuildCategory
+		name: overrides.name ?? "general",
+		guildId: overrides.guildId ?? GUILD,
+		parentId: undefined,
+		...overrides,
+	});
 }
 
 /** Build a thread DiscordChannelData fixture. */
