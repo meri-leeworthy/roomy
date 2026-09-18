@@ -1,5 +1,5 @@
 /**
- * Error recovery for the ATProto client.
+ * Error recovery for app-lite.
  *
  * Problem: errors thrown by the ATProto OAuth client / agent (expired or
  * revoked tokens, failed token refreshes, service-auth failures) can leave
@@ -7,12 +7,28 @@
  * the only recovery is a page reload. In the installed PWA there is no way
  * to manually reload, so this is a breaking issue.
  *
- * Solution: detect ATProto session/auth errors and automatically reload the
- * page, which re-runs `init()` and re-attempts session restoration / token
- * refresh. Reloads are debounced and rate-limited so a *persistently* broken
- * session cannot cause an infinite reload loop; once the limit is hit we stop
- * auto-reloading and rely on the manual "Reload" button shown in the
- * `initError` UI.
+ * Second problem, same shape: a deploy replaces the hashed chunks under
+ * `/_app/immutable/`, and a tab opened before it holds an old document. The
+ * next dynamic import of a chunk invalidated by that deploy rejects; Vite's
+ * `__vitePreload` helper surfaces it as a `vite:preloadError` event on
+ * `window` (then rethrows). Nothing handled that event.
+ *
+ * SvelteKit covers part of this itself, and measurably wins the race for the
+ * part it covers: when a *navigation*'s node chunk fails, the router catches
+ * the rejection, sees `/_app/version.json` changed and does a full navigation
+ * to the intended URL (~60ms). The 600ms `RELOAD_DELAY_MS` below leaves that
+ * alone, so this handler only reloads where SvelteKit leaves the rejection
+ * unhandled — hover/tap *code preloading* and the app's own dynamic imports
+ * (`telemetry/faro.ts`, `sync.svelte.ts`, `nativeUpdate.svelte.ts`), which
+ * previously surfaced as unhandled rejections and dead-ended.
+ *
+ * Solution: detect those failures and automatically reload the page, which
+ * re-runs `init()` / re-attempts session restoration in the ATProto case, and
+ * fetches the current asset graph in the stale-deploy case. Every trigger
+ * shares ONE reload path (`scheduleReload`) so the cooldown and budget cannot
+ * be sidestepped, and a *persistently* broken state cannot cause an infinite
+ * reload loop; once the limit is hit we stop auto-reloading and rely on the
+ * manual "Reload" button shown in the `initError` UI.
  *
  * This module is client-only. It is safe to import during SSR — the installer
  * no-ops when `window` is undefined.
@@ -113,7 +129,11 @@ function persistTimestamps(ts: number[]): void {
   }
 }
 
-/** Clear the auto-reload budget. Call before a user-initiated reload. */
+/**
+ * Clear the auto-reload budget. Call when the reloads so far are demonstrably
+ * not a loop: before a user-initiated reload, or after a client-side
+ * navigation completed (see `noteSuccessfulNavigation`).
+ */
 export function resetReloadBudget(): void {
   if (typeof sessionStorage === "undefined") return;
   try {
@@ -124,13 +144,12 @@ export function resetReloadBudget(): void {
 }
 
 /**
- * If `err` is a recoverable ATProto error, schedule a debounced,
- * rate-limited page reload. Safe to call from hot paths (query/mutation
- * error callbacks, global handlers) — repeated calls coalesce into a single
- * reload.
+ * The single reload path. Every trigger (ATProto auth failure, stale deploy
+ * chunk) funnels through here, so the cooldown and the budget cannot be
+ * sidestepped by adding a new caller. Repeated calls coalesce into the one
+ * pending reload.
  */
-export function scheduleAutoReload(err: unknown): void {
-  if (!isRecoverableAtprotoError(err)) return;
+function scheduleReload(reason: string, detail: unknown): void {
   if (typeof window === "undefined" || typeof location === "undefined") return;
   if (reloading) return;
 
@@ -140,9 +159,9 @@ export function scheduleAutoReload(err: unknown): void {
   const recent = reloadTimestamps(now);
   if (recent.length >= MAX_RELOADS) {
     console.warn(
-      "[error-recovery] Recoverable ATProto error detected but auto-reload " +
-        "limit reached — refusing to reload automatically to avoid a loop.",
-      err,
+      `[error-recovery] ${reason} but the auto-reload limit is reached — ` +
+        "refusing to reload automatically to avoid a loop.",
+      detail,
     );
     return;
   }
@@ -152,9 +171,10 @@ export function scheduleAutoReload(err: unknown): void {
   reloading = true;
   lastReloadAt = now;
 
-  const label = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  const label =
+    detail instanceof Error ? `${detail.name}: ${detail.message}` : String(detail);
   console.warn(
-    `[error-recovery] Recoverable ATProto error detected — reloading page in ${RELOAD_DELAY_MS}ms.`,
+    `[error-recovery] ${reason} — reloading page in ${RELOAD_DELAY_MS}ms.`,
     label,
   );
 
@@ -169,9 +189,40 @@ export function scheduleAutoReload(err: unknown): void {
 }
 
 /**
- * Install global `error` and `unhandledrejection` listeners that trigger
- * auto-reload on recoverable ATProto errors. Call once, client-side, early
- * in app startup (e.g. from the root layout's `onMount`).
+ * If `err` is a recoverable ATProto error, schedule a debounced,
+ * rate-limited page reload. Safe to call from hot paths (query/mutation
+ * error callbacks, global handlers) — repeated calls coalesce into a single
+ * reload.
+ */
+export function scheduleAutoReload(err: unknown): void {
+  if (!isRecoverableAtprotoError(err)) return;
+  scheduleReload("Recoverable ATProto error detected", err);
+}
+
+/**
+ * A navigation that completed is proof that the running document's asset graph
+ * resolves, so the auto-reloads before it were deploy skew rather than a loop —
+ * the budget comes back. Without this, a user who hits several benign stale
+ * chunks inside the window stays stuck even though every reload worked.
+ *
+ * Only user-driven navigations (`link`, `popstate`) refill it. Programmatic
+ * ones must not: a reload is followed unattended by the post-login return-URL
+ * `goto` in `auth.svelte.ts`, and a stale-chunk error after *that* would refill
+ * the budget and reload again — an unbounded loop in a client a reload cannot
+ * fix, which is exactly what `MAX_RELOADS` exists to stop. The initial `enter`
+ * (hydration) is likewise excluded. The budget is a sliding `WINDOW_MS` window,
+ * so a refused client recovers on its own once the window passes.
+ */
+export function noteSuccessfulNavigation(type: string): void {
+  if (type !== "link" && type !== "popstate") return;
+  resetReloadBudget();
+}
+
+/**
+ * Install the global listeners that trigger auto-reload: `error` /
+ * `unhandledrejection` for recoverable ATProto errors, and Vite's
+ * `vite:preloadError` for dynamic imports invalidated by a deploy. Call once,
+ * client-side, early in app startup (e.g. from the root layout's `onMount`).
  */
 export function installGlobalErrorRecovery(): void {
   if (typeof window === "undefined") return;
@@ -183,5 +234,20 @@ export function installGlobalErrorRecovery(): void {
   window.addEventListener("error", (ev) => {
     // `ev.error` is the thrown Error (when available); fall back to message.
     scheduleAutoReload(ev.error ?? ev.message);
+  });
+
+  // Fired by Vite's `__vitePreload` helper, which also rethrows the original
+  // error (so it reaches the `error` listener above too — that one ignores it,
+  // since a module-load failure is not an ATProto error). Without this handler
+  // the rethrow surfaced nothing to the user and the navigation dead-ended.
+  //
+  // The event itself is the signal: Vite dispatches it only when a dynamic
+  // import (or one of its CSS preloads) was rejected. So the payload is for
+  // logging alone and is deliberately not matched against message text, which
+  // browsers word differently ("Failed to fetch dynamically imported module: …",
+  // "error loading dynamically imported module: …", "Importing a module script
+  // failed.").
+  window.addEventListener("vite:preloadError", (ev) => {
+    scheduleReload("Stale deploy chunk failed to load", "payload" in ev ? ev.payload : ev);
   });
 }
