@@ -15,8 +15,8 @@ describe("migrations", () => {
 	test("apply cleanly on a fresh database", () => {
 		const db = new Database(":memory:");
 		const result = runMigrations(db);
-		expect(result.applied).toEqual([1, 2, 3, 4, 5, 6]);
-		expect(result.current).toBe(6);
+		expect(result.applied).toEqual([1, 2, 3, 4, 5, 6, 7]);
+		expect(result.current).toBe(7);
 	});
 
 	test("are idempotent across re-runs", () => {
@@ -24,7 +24,7 @@ describe("migrations", () => {
 		runMigrations(db);
 		const second = runMigrations(db);
 		expect(second.applied).toEqual([]);
-		expect(second.current).toBe(6);
+		expect(second.current).toBe(7);
 	});
 });
 
