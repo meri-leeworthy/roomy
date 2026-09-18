@@ -4,13 +4,17 @@ import Icons from "unplugin-icons/vite";
 import { FileSystemIconLoader } from "unplugin-icons/loaders";
 import { defineConfig } from "vite";
 import packageJson from "./package.json";
+import { resolveBuildId } from "./src/lib/build-id.ts";
+
+// Resolved once, here, so the value inlined into the bundle (`__BUILD_ID__`)
+// and the value served as `/build.json` by src/routes/build.json/+server.ts
+// cannot diverge — both come from this one call.
+const BUILD_ID = resolveBuildId(process.env);
 
 export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(packageJson.version),
-    __BUILD_ID__: process.env.BUILD_ID
-      ? JSON.stringify(process.env.BUILD_ID)
-      : "undefined",
+    __BUILD_ID__: JSON.stringify(BUILD_ID),
   },
   plugins: [
     sveltekit(),

@@ -4,6 +4,32 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# ── Build identity ───────────────────────────────────────────────────────
+# The served bundle must be able to name its commit (it is exposed as
+# /build.json and inlined as __BUILD_ID__; see src/lib/build-id.ts). In the
+# Docker build `Dockerfile.app-lite` already sets BUILD_ID from
+# RAILWAY_GIT_COMMIT_SHA, so this only fills the gap for builds run outside
+# that image — a local `scripts/build-prod.sh`, where nothing supplies it yet.
+# First 8 chars, matching the Dockerfile's expansion and the appserver /
+# discord-bridge id format, so the three are comparable in one query.
+if [ -z "${BUILD_ID:-}" ] && [ -n "${RAILWAY_GIT_COMMIT_SHA:-}" ]; then
+  export BUILD_ID="${RAILWAY_GIT_COMMIT_SHA:0:8}"
+fi
+if [ -z "${BUILD_ID:-}" ] && command -v git >/dev/null 2>&1; then
+  BUILD_ID="$(git rev-parse HEAD 2>/dev/null || true)"
+  if [ -n "$BUILD_ID" ]; then
+    export BUILD_ID="${BUILD_ID:0:8}"
+    echo "BUILD_ID not supplied; using local git HEAD ${BUILD_ID} ($(git branch --show-current 2>/dev/null || echo detached))"
+  fi
+fi
+if [ -z "${BUILD_ID:-}" ]; then
+  # OPERATIONAL, not cosmetic: a deploy built without git metadata cannot be
+  # named afterwards. Report it loudly rather than serving a bundle whose
+  # commit no one can recover.
+  echo "WARNING: BUILD_ID is unset and no git commit could be resolved;" >&2
+  echo "         /build.json will report commit \"unknown\" for this build." >&2
+fi
+
 pnpm build
 
 target_url=${OAUTH_HOST:?"OAUTH_HOST must be set (e.g. https://app-lite.roomy.chat)"}
@@ -195,6 +221,32 @@ fi
 
 echo "All appserver RPC scopes and repo scopes present — verification passed"
 
+# ── Build-identity verification ─────────────────────────────────────────
+# The service is only nameable if the artifact says which commit it is. A
+# deploy whose bundle carries no id cannot be tied to a revision afterwards,
+# so fail the build here rather than publish an unnameable bundle (same
+# contract as the OAuth-scope verification above: test the artifact that ships,
+# not the intention). `build.json` is a prerendered route, so its absence means
+# the route did not make it into the output at all.
+if [ ! -f build-staging/build.json ]; then
+  echo "ERROR: build-staging/build.json is missing — the deployed bundle would" >&2
+  echo "       carry no build identity. Is src/routes/build.json/+server.ts present?" >&2
+  exit 1
+fi
+built_commit="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("build-staging/build.json","utf8")).commit)')"
+if [ -z "$built_commit" ]; then
+  echo "ERROR: build-staging/build.json has an empty commit — present but" >&2
+  echo "       meaningless, indistinguishable from a real id downstream." >&2
+  exit 1
+fi
+if [ "$built_commit" = "unknown" ]; then
+  # Not fatal: a rebuild of already-built source, or a build in an environment
+  # with no git metadata, is legitimate. It must still be visible in the log.
+  echo "WARNING: this build reports commit \"unknown\" — the bundle cannot name" >&2
+  echo "         its commit, so a later deploy-revision audit cannot either." >&2
+else
+  echo "Build identity: commit ${built_commit} (served as /build.json)"
+fi
 echo "Done! OAuth metadata written to build-staging/oauth-client-metadata.json"
 
 # ── Publish atomically ──────────────────────────────────────────────────
