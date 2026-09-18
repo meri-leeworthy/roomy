@@ -160,6 +160,11 @@
     "group": "Spaces"
   },
   {
+    "nsid": "space.roomy.space.getLinks",
+    "kind": "query",
+    "group": "Spaces"
+  },
+  {
     "nsid": "space.roomy.space.getRoles",
     "kind": "query",
     "group": "Spaces"
@@ -226,6 +231,11 @@
   },
   {
     "nsid": "space.roomy.room.getThreads",
+    "kind": "query",
+    "group": "Rooms"
+  },
+  {
+    "nsid": "space.roomy.room.getLinks",
     "kind": "query",
     "group": "Rooms"
   },

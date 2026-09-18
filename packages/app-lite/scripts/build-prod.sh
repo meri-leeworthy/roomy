@@ -72,6 +72,8 @@ SCOPE+=" rpc:space.roomy.search.rooms?aud=*"
 SCOPE+=" rpc:space.roomy.user.getProfile?aud=*"
 SCOPE+=" rpc:space.roomy.user.getMembershipStatus?aud=*"
 SCOPE+=" rpc:space.roomy.embed.getLinkMetadata?aud=*"
+SCOPE+=" rpc:space.roomy.space.getLinks?aud=*"
+SCOPE+=" rpc:space.roomy.room.getLinks?aud=*"
 
 # ── Channel federation ───────────────────────────────────────────────────
 SCOPE+=" rpc:space.roomy.federation.getRequests?aud=*"

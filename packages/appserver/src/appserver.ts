@@ -46,6 +46,7 @@ import { getMembersHandler } from "./handlers/space.roomy.space.getMembers.ts";
 import { getMetadataHandler } from "./handlers/space.roomy.space.getMetadata.ts";
 import { getSpaceSummaryHandler } from "./handlers/space.roomy.space.getSpaceSummary.ts";
 import { getSpaceThreadsHandler } from "./handlers/space.roomy.space.getThreads.ts";
+import { getSpaceLinksHandler } from "./handlers/space.roomy.space.getLinks.ts";
 import { getRolesHandler } from "./handlers/space.roomy.space.getRoles.ts";
 import { getInvitesHandler } from "./handlers/space.roomy.space.getInvites.ts";
 import { getFederationRequestsHandler } from "./handlers/space.roomy.federation.getRequests.ts";
@@ -55,6 +56,7 @@ import { getFederationGrantsHandler } from "./handlers/space.roomy.federation.ge
 import { getRoomMetadataHandler } from "./handlers/space.roomy.room.getMetadata.ts";
 import { getRoomSummaryHandler } from "./handlers/space.roomy.room.getRoomSummary.ts";
 import { getRoomThreadsHandler } from "./handlers/space.roomy.room.getThreads.ts";
+import { getRoomLinksHandler } from "./handlers/space.roomy.room.getLinks.ts";
 import { getMessagesHandler } from "./handlers/space.roomy.room.getMessages.ts";
 import { getMessageHandler } from "./handlers/space.roomy.message.getMessage.ts";
 import { getReactionsHandler } from "./handlers/space.roomy.message.getReactions.ts";
@@ -323,6 +325,11 @@ export function buildRouter(
       paramsSchema: schemas.queries.getSpaceThreads.Params,
       outputSchema: schemas.queries.getSpaceThreads.Response,
     })
+    .query("space.roomy.space.getLinks", {
+      handler: getSpaceLinksHandler,
+      paramsSchema: schemas.queries.getSpaceLinks.Params,
+      outputSchema: schemas.queries.getSpaceLinks.Response,
+    })
     .query("space.roomy.space.getRoles", {
       handler: getRolesHandler,
       paramsSchema: schemas.queries.getRoles.Params,
@@ -392,6 +399,11 @@ export function buildRouter(
       handler: getRoomThreadsHandler,
       paramsSchema: schemas.queries.getRoomThreads.Params,
       outputSchema: schemas.queries.getRoomThreads.Response,
+    })
+    .query("space.roomy.room.getLinks", {
+      handler: getRoomLinksHandler,
+      paramsSchema: schemas.queries.getRoomLinks.Params,
+      outputSchema: schemas.queries.getRoomLinks.Response,
     })
     .query("space.roomy.room.getMessages", {
       handler: getMessagesHandler,

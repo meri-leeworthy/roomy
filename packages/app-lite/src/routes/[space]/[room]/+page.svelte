@@ -21,6 +21,7 @@
   import RoomPickerModal from "$lib/components/chat/RoomPickerModal.svelte";
   import type { Message } from "$lib/queries/messages";
   import ChannelBoardView from "$lib/components/thread/ChannelBoardView.svelte";
+  import LinksView from "$lib/components/thread/LinksView.svelte";
   import SeoMeta from "$lib/components/seo/SeoMeta.svelte";
   import { resolveBlobUrl } from "$lib/utils";
 
@@ -271,7 +272,7 @@
   // The Chat/Threads tab is per-entry state: it starts in Chat on every room
   // visit, so navigating from a channel in Threads view to another channel
   // always lands in Chat.
-  const channelTabList = ["Chat", "Threads"] as const;
+  const channelTabList = ["Chat", "Threads", "Links"] as const;
   let channelActiveTab = $state<(typeof channelTabList)[number]>("Chat");
 
   // Reset to Chat whenever the room changes. Navigating between rooms reuses
@@ -292,6 +293,8 @@
       channelActiveTab = "Chat";
     } else if (page.url.hash === "#threads") {
       channelActiveTab = "Threads";
+    } else if (page.url.hash === "#links") {
+      channelActiveTab = "Links";
     }
   });
 
@@ -366,6 +369,11 @@
       <!-- Threads view - always rendered but visibility toggled -->
       <div class="absolute inset-0" class:hidden={channelActiveTab !== "Threads"}>
         <ChannelBoardView />
+      </div>
+
+      <!-- Links view - always rendered but visibility toggled -->
+      <div class="absolute inset-0" class:hidden={channelActiveTab !== "Links"}>
+        <LinksView />
       </div>
     </div>
 

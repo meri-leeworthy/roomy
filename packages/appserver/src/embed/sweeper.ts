@@ -26,7 +26,7 @@
  */
 
 import type { DbLike } from "../db/types.ts";
-import type { Ulid } from "@roomy-space/sdk";
+import type { StreamDid, Ulid } from "@roomy-space/sdk";
 import {
   enrichLinkAcrossSpaces,
   findPendingLinks,
@@ -45,6 +45,7 @@ import type {
   InvalidationEvent,
   InvalidationRouter,
   MessageDiffOp,
+  QueryNsid,
 } from "../invalidation/types.ts";
 
 // ─── Configuration ──────────────────────────────────────────────────────
@@ -370,7 +371,7 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
         transientRetry.delete(url);
         // Emit per-URL invalidation routed to each space's per-space DB.
         for (const spaceDid of spaces) {
-          await emitEnrichmentInvalidation(openSpaceDb(spaceDid), [url]);
+          await emitEnrichmentInvalidation(openSpaceDb(spaceDid), spaceDid, [url]);
         }
       } else if (outcome?.status === "definitive") {
         // Settled no-data (page loaded but no OG/oEmbed, or a stable 4xx).
@@ -525,8 +526,14 @@ function waitForWake(ms: number): Promise<void> {
  * omitted (broadcast diffs can't be per-user) — the client derives
  * "did I react?" from `reaction.myReactionId`, so this doesn't affect rendering.
  */
+/** Build a query-invalidation signal for a links endpoint the enrichment updates. */
+function invalidate(nsid: QueryNsid, params: Record<string, string>): InvalidationEvent {
+  return { kind: "queryInvalidation", signal: { nsid, params } };
+}
+
 async function emitEnrichmentInvalidation(
   db: DbLike,
+  spaceDid: string,
   enrichedUrls: string[],
 ): Promise<void> {
   if (!sweeperRouter || enrichedUrls.length === 0) return;
@@ -592,7 +599,12 @@ async function emitEnrichmentInvalidation(
       kind: "messageDiff",
       signal: { roomId: roomId as Ulid, seq: 0, ops },
     });
+    // Enrichment just populated this room's cards — the room link index's
+    // enriched data changed.
+    signals.push(invalidate("space.roomy.room.getLinks", { roomId: roomId as string }));
   }
+  // The space link index gains the freshly-enriched card for this space.
+  signals.push(invalidate("space.roomy.space.getLinks", { spaceId: spaceDid }));
 
   statsEnrichmentDiffs += signals.length;
   sweeperRouter.emit(signals);
