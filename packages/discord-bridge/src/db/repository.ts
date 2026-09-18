@@ -509,11 +509,7 @@ export class BridgeRepository {
 	}
 
 	/** Get the most recent event errors for a space, oldest first. */
-	getEventErrors(
-		spaceDid: string,
-		limit = 100,
-		since?: number,
-	): EventError[] {
+	getEventErrors(spaceDid: string, limit = 100, since?: number): EventError[] {
 		const rows = this.db
 			.query<
 				{
@@ -591,8 +587,77 @@ export class BridgeRepository {
 		return row != null;
 	}
 
-	// === Profile sync queue (retry queue) ===
+	// === Initial structure sync (one-shot, TASK-140) ===
+	//
+	// The Discord guild's category structure + channel order is applied to a
+	// space's sidebar exactly once, at initial sync. These methods are the
+	// persisted guard that makes that true across restarts, reconnects, and
+	// re-runs of the backfill: the marker lives in the bridge's own DB, not in
+	// the space, because a check against the live sidebar cannot distinguish
+	// "not yet synced" from "an admin has since rearranged it" — and would
+	// re-apply the structure in the latter case, which is the ongoing re-sync
+	// this feature must not become.
 
+	/**
+	 * Claim the one-shot structure sync for (guild, space).
+	 *
+	 * Returns true only for the caller that creates the row — every later
+	 * caller gets false and must not write structure. The row is written
+	 * BEFORE the caller sends any event, so a crash between claim and write
+	 * leaves the claim set: at-most-once by construction, never twice.
+	 */
+	claimStructureSync(guildId: string, spaceDid: string): boolean {
+		const result = this.db
+			.prepare(
+				`INSERT INTO structure_sync (guild_id, space_did, claimed_at, applied_at)
+         VALUES (?, ?, ?, NULL)
+         ON CONFLICT(guild_id, space_did) DO NOTHING`,
+			)
+			.run(guildId, spaceDid, Date.now());
+		return result.changes > 0;
+	}
+
+	/**
+	 * Record that a claimed structure sync actually wrote its event. Distinct
+	 * from the claim so an unapplied claim (a sync that failed before sending)
+	 * is visible to operators — the structure is simply absent, and the claim
+	 * is left in place rather than rolled back, because once an event may have
+	 * reached the space a retry could apply the structure twice.
+	 */
+	markStructureSyncApplied(guildId: string, spaceDid: string): void {
+		this.db
+			.prepare(
+				`UPDATE structure_sync SET applied_at = ?
+         WHERE guild_id = ? AND space_did = ?`,
+			)
+			.run(Date.now(), guildId, spaceDid);
+	}
+
+	/**
+	 * Drop an UNWRITTEN claim — only safe on a path that provably sent no
+	 * event (no bridged channels to place), so the next backfill can still
+	 * perform the one initial sync. Never call this after a write.
+	 */
+	releaseStructureSync(guildId: string, spaceDid: string): void {
+		this.db
+			.prepare(
+				`DELETE FROM structure_sync
+         WHERE guild_id = ? AND space_did = ? AND applied_at IS NULL`,
+			)
+			.run(guildId, spaceDid);
+	}
+
+	/** Whether this (guild, space) has already been claimed for structure sync. */
+	hasClaimedStructureSync(guildId: string, spaceDid: string): boolean {
+		const row = this.db
+			.query<{ one: number }, [string, string]>(
+				"SELECT 1 AS one FROM structure_sync WHERE guild_id = ? AND space_did = ?",
+			)
+			.get(guildId, spaceDid);
+		return row !== null && row !== undefined;
+	}
+
+	// === Profile sync queue (retry queue) ===
 	enqueueProfileSync(
 		spaceDid: string,
 		discordUserId: string,

@@ -68,6 +68,65 @@ src/
 | MESSAGE_REACTION_REMOVE | `removeBridgedReaction.v0`      |                                                  |
 | (per-message)           | `updateProfile.v0`              | Hash-based change detection on author profile    |
 
+## Initial structure sync (one-shot)
+
+When a guild is first bridged, its **category structure and channel order** are
+mirrored into the space's sidebar: each Discord category becomes a Roomy
+sidebar category, and channels are placed in their category **in Discord
+`position` order**.
+
+This happens **once**, and never again. The Roomy sidebar belongs to the
+space's admins after the import, so a later Discord rename, move, or reorder —
+or a new channel — must not stomp their layout. There is deliberately no
+ongoing re-sync, no polling loop, and no periodic reconciliation.
+
+**What "once" means, mechanically.** `services/room-sync.ts`'s
+`syncInitialStructure` is called only from `runBackfill` — the initial-sync
+path (gateway `READY`, `/connect-roomy-space`, `/roomy-backfill`). The live
+gateway handlers (`handleChannelCreate`, `handleChannelUpdate`,
+`handleThreadCreate`) do **not** call it: those fire on ongoing Discord events,
+and a structure write there is exactly the re-sync this design rules out.
+
+`syncInitialStructure` is additionally guarded by a persisted marker in the
+bridge's own SQLite DB (`structure_sync`, migration 7), keyed by
+`(guild_id, space_did)`:
+
+- `claimStructureSync` inserts the row and returns whether the caller created
+  it. Only that caller writes structure; every later call — a reconnect, a
+  second backfill, a re-run of the slash command, a process restart — gets
+  `false` and sends nothing.
+- The claim is written **before** any event is sent, so the sync is
+  at-most-once by construction: a crash between claim and write cannot re-apply
+  the structure on the next run.
+- `applied_at` records that the event was actually sent. A claim with a null
+  `applied_at` means the sync failed before (or during) the write — the
+  structure is simply absent, and the claim stays set rather than being rolled
+  back, because a retry could otherwise apply it twice.
+- The one exception, `releaseStructureSync`, runs only on the path that
+  provably sent nothing (no bridged channels to place, e.g. the first backfill
+  ran before room creation succeeded), so the single initial sync still happens
+  once rooms exist.
+
+The guard lives in the bridge's DB rather than as a check against the live
+sidebar on purpose: a sidebar check cannot distinguish "not yet synced" from
+"an admin has since rearranged it", and would re-apply the structure in the
+latter case. Admin edits win — the bridge does not touch the sidebar after the
+initial import.
+
+**Merging, not overwriting.** The event is a `space.roomy.space.updateSidebar.v1`
+that merges into what's already there: existing categories are preserved and
+matched to Discord categories **by name** (Roomy category ids are assigned by
+whoever wrote the sidebar, so a name is the only handle the two systems share),
+existing children keep their place ahead of the appended Discord channels, and
+channels in no Discord category are appended to the first category — where the
+client renders orphans in its edit view.
+
+A Discord category is a grouping header, never a bridged room: `type 4` is
+excluded from room creation (`CATEGORY_TYPE` in `discord/data.ts`). Likewise
+threads are excluded from the structure read, because Discord reports a
+thread's `parent_id` as its *channel*, not its category — `parentId` is only a
+category on a non-thread channel.
+
 Events carry two extensions:
 
 - `discordMessageOrigin.v0` — debug breadcrumb (snowflake, channelId, guildId). Never read for sync decisions.

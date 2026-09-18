@@ -12,7 +12,12 @@ import { type Event, sync, transport } from "@roomy-space/sdk";
 import type { BridgeRepository } from "../db/repository.ts";
 import { BRIDGE_RECONNECT_BASE_MS, BRIDGE_RECONNECT_MAX_MS } from "../env.ts";
 import { createLogger } from "../logger.ts";
-import type { RoomyEventCallback, RoomyGateway } from "./gateway.ts";
+import type {
+	BridgeSidebar,
+	BridgeSidebarCategory,
+	RoomyEventCallback,
+	RoomyGateway,
+} from "./gateway.ts";
 import type { SpaceManager } from "./space-manager.ts";
 
 const log = createLogger("live-roomy");
@@ -74,6 +79,33 @@ export class LiveRoomyGateway implements RoomyGateway {
 			spaceId: spaceDid,
 			events: events.map((e) => ({ ...e })),
 		});
+	}
+
+	/**
+	 * Read the space's sidebar via `space.roomy.space.getMetadata`, reduced to
+	 * categories + their ordered children.
+	 *
+	 * Complete for this caller by construction: writing the sidebar requires
+	 * space admin (writeAuth's SPACE_MANAGE_TYPES), and an admin's view is the
+	 * whole space — every native channel reads as accessible via the admin
+	 * override, and federated channels are all shown to a receiving-space
+	 * admin. So the merge in room-sync.ts can treat this as the full sidebar
+	 * and preserve what it does not touch. Channels outside the config come
+	 * back under `orphans` (they render either way) and are intentionally not
+	 * turned into a category here.
+	 */
+	async getSidebar(spaceDid: string): Promise<BridgeSidebar> {
+		const meta = await this.#xrpc.query("space.roomy.space.getMetadata", {
+			spaceId: spaceDid,
+		});
+		const categories: BridgeSidebarCategory[] = meta.sidebar.categories.map(
+			(cat) => ({
+				...(cat.id !== undefined ? { id: cat.id } : {}),
+				name: cat.name,
+				children: cat.channels.map((ch) => ch.id),
+			}),
+		);
+		return { categories };
 	}
 
 	async subscribe(
@@ -150,7 +182,11 @@ export class LiveRoomyGateway implements RoomyGateway {
 			// arriving on this fresh connection chain from a clean base.
 			this.#processing.delete(spaceDid);
 			connection.unsubscribe({ kind: "stream", id: spaceDid });
-			connection.subscribe({ kind: "stream", id: spaceDid, cursor: freshCursor });
+			connection.subscribe({
+				kind: "stream",
+				id: spaceDid,
+				cursor: freshCursor,
+			});
 		});
 
 		connection.onFrame((frame: sync.SyncFrame) => {
@@ -241,9 +277,7 @@ export class LiveRoomyGateway implements RoomyGateway {
 			// Validate the payload has a $type before passing it to the
 			// callback — skip malformed events without aborting the batch.
 			if (!event || typeof event !== "object" || !("$type" in event)) {
-				log.warn(
-					`Skipping malformed event idx ${entry.idx} for ${spaceDid}`,
-				);
+				log.warn(`Skipping malformed event idx ${entry.idx} for ${spaceDid}`);
 				continue;
 			}
 
