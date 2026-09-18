@@ -43,7 +43,7 @@ function seedPrivateSpaceWithLinks(
   for (const [roomId, urlTag] of [
     [roomA, "https://room-a.example/1"],
     [roomB, "https://room-b.example/2"],
-  ]) {
+  ] as const) {
     seedRoom(ctx.db, roomId, OWNED, "space.roomy.channel");
     const msgId = newUlid();
     seedMessage(ctx.db, msgId, roomId, OWNED);
