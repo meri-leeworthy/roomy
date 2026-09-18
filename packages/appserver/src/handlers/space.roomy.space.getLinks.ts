@@ -17,7 +17,6 @@
 
 import { createAccessMemo, roomAccessMany } from "../auth/access.ts";
 import { openSpaceDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { cursorForRow, dedupeLinks, listLinks } from "../queries/links.ts";
 import { parseUserDid, requireSpaceRead } from "../xrpc/authGuards.ts";
 import { optionalInt, optionalString, requireString } from "../xrpc/params.ts";
@@ -51,12 +50,6 @@ export const getSpaceLinksHandler: QueryHandler<
     "space.roomy.space.getLinks",
     { "roomy.space_id": spaceId, "roomy.limit": limit },
     async (span) => {
-      if (userDid !== null) {
-        await withSpan("getLinks.hydrateMembership", {}, () =>
-          hydrateUserMembership(userDid),
-        );
-      }
-
       const db = openSpaceDb(spaceId);
       const memo = createAccessMemo();
       await withSpan("getLinks.requireRead", {}, () =>

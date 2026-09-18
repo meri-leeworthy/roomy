@@ -16,7 +16,6 @@
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
 import { openSpaceDbForEntity } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { cursorForRow, dedupeLinks, listLinks } from "../queries/links.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -51,12 +50,6 @@ export const getRoomLinksHandler: QueryHandler<
     "space.roomy.room.getLinks",
     { "roomy.room_id": roomId, "roomy.limit": limit },
     async (span) => {
-      if (userDid !== null) {
-        await withSpan("getLinks.hydrateMembership", {}, () =>
-          hydrateUserMembership(userDid),
-        );
-      }
-
       const db = await withSpan("getLinks.openDb", {}, async () =>
         openSpaceDbForEntity(roomId),
       );
