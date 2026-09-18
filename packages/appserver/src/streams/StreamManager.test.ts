@@ -205,6 +205,10 @@ describe("createStream", () => {
 
   test("provisions via the arbiter when configured", async () => {
     // A minimal mock arbiter that answers createArbiter / resetConfig / proxy.
+    // The proxy route is the *built-in* `town.muni.arbiter.proxy`: provisioning
+    // goes through the owner/manager route, which carries no scope gate. The
+    // scoped `*.arbiter.proxy` routes run the permission-set scope policy first
+    // and deny a `space.roomy.service/self` putRecord (the createSpace outage).
     const calls: string[] = [];
     const arbiterDid = "did:plc:arbiter-provisioned";
     const server = Bun.serve({
@@ -218,7 +222,7 @@ describe("createStream", () => {
         if (url.pathname.endsWith("/town.muni.arbiter.resetConfig")) {
           return Response.json({ ok: true });
         }
-        if (url.pathname.endsWith("/space.roomy.authComplete.arbiter.proxy")) {
+        if (url.pathname.endsWith("/town.muni.arbiter.proxy")) {
           return Response.json({});
         }
         return new Response("not found", { status: 404 });
@@ -243,7 +247,10 @@ describe("createStream", () => {
       // The arbiter was called for createArbiter, resetConfig, and proxy.
       expect(calls).toContain("/xrpc/town.muni.arbiter.createArbiter");
       expect(calls).toContain("/xrpc/town.muni.arbiter.resetConfig");
-      expect(calls).toContain("/xrpc/space.roomy.authComplete.arbiter.proxy");
+      expect(calls).toContain("/xrpc/town.muni.arbiter.proxy");
+      // Provisioning must not use a scoped route: its scope policy denies this
+      // write for every caller (it cannot see who is calling).
+      expect(calls).not.toContain("/xrpc/space.roomy.authComplete.arbiter.proxy");
     } finally {
       server.stop();
     }

@@ -155,9 +155,15 @@ shim until Phase 4).
      recovery admin). The default policy (`src/arbiter/policy.ts`) allows only
      the space itself and the appserver (the owner) to act on the space DID.
   4. The appserver proxies a `com.atproto.repo.putRecord` of
-     `space.roomy.service/self` (did = appserver) under the new account via
-     `space.roomy.authComplete.arbiter.proxy`, marking it as a Roomy space hosted by the
-     appserver.
+     `space.roomy.service/self` (did = appserver) under the new account via the
+     arbiter's **built-in** `town.muni.arbiter.proxy` route, marking it as a
+     Roomy space hosted by the appserver. It must NOT use a scoped
+     `<scope>.arbiter.proxy` route: those apply the permission-set lexicon's
+     scope policy over the inner request alone (no caller DID), and the
+     published `space.roomy.authComplete` policy admits only `space.roomy*` /
+     `network.cosmic*` NSIDs plus `uploadBlob`, `updateHandle`, and a
+     `putRecord` of `app.bsky.actor.profile` — so a `space.roomy.service`
+     `putRecord` is denied outright, before any policy layer sees the caller.
 - **Retain** `createStreamDid` and the `did_keys` storage only as a migration
   shim until Phase 4 completes, then remove.
 - The Roomy PDS is a new deployment requirement (the arbiter's "default PDS"
@@ -237,7 +243,7 @@ cheap check (it is not secret — `getMetadata` already exposes `isAdmin`):
 
 Per the user's note, the appserver doesn't act *under* its ATProto accounts
 today, so proxying is not yet needed. When it is, the appserver calls
-`space.roomy.authComplete.arbiter.proxy{arbiterDid: <space DID>, target: "<spaceDID>#atproto_pds", ...}`
+`town.muni.arbiter.proxy{arbiterDid: <space DID>, target: "<spaceDID>#atproto_pds", ...}`
 with a Phase 0 serviceAuth token, and the arbiter's policy gates it. No new
 appserver work beyond a `proxy` helper + Phase 0 auth.
 
