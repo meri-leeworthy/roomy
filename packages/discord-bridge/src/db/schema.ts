@@ -155,6 +155,37 @@ export const MIGRATIONS: Migration[] = [
       `);
 		},
 	},
+	{
+		version: 7,
+		name: "backfill_progress",
+		up(db) {
+			// Durable per-(space, channel) backfill progress so two-phase
+			// backfill survives restarts. Phase 1 (bounded recent window)
+			// writes window_boundary = the oldest message it ingested; the
+			// Phase 2 walk ingests everything strictly below it, resuming
+			// from walk_cursor. phase 'complete' means the channel's whole
+			// history has been ingested (or the pair was only ever short).
+			// Counts are ABSOLUTE (not deltas) so any row refresh can
+			// overwrite safely.
+			db.run(`
+        CREATE TABLE backfill_progress (
+          space_did        TEXT NOT NULL,
+          channel_id       TEXT NOT NULL,
+          guild_id         TEXT,
+          kind             TEXT CHECK (kind IN ('channel', 'thread')),
+          channel_name     TEXT,
+          phase            TEXT NOT NULL CHECK (phase IN ('phase1', 'phase2', 'complete')),
+          messages_synced  INTEGER NOT NULL DEFAULT 0,
+          messages_skipped INTEGER NOT NULL DEFAULT 0,
+          window_boundary  TEXT,
+          walk_cursor      TEXT,
+          updated_at       INTEGER NOT NULL,
+          PRIMARY KEY (space_did, channel_id)
+        );
+        CREATE INDEX idx_backfill_progress_guild ON backfill_progress (guild_id);
+      `);
+		},
+	},
 ];
 
 export function runMigrations(db: Database): {

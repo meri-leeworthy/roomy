@@ -14,10 +14,14 @@
  *   bun test src/services/__tests__/backfill.test.ts
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { faker } from "@faker-js/faker";
 import { newUlid } from "@roomy-space/sdk";
 import { BridgeRepository } from "../../db/repository.ts";
+import { startApi } from "../../api.ts";
 import type {
 	DiscordChannelData,
 	DiscordGuildData,
@@ -31,7 +35,13 @@ import {
 	resetCapacityGate,
 	setCapacityGate,
 } from "../../roomy/capacity.ts";
-import { backfillChannel, ensureAndBackfillArchivedThreads, ensureRoomyThreads } from "../backfill.ts";
+import {
+	PHASE1_MESSAGE_BOUND,
+	backfillChannel,
+	backfillRecentWindow,
+	ensureAndBackfillArchivedThreads,
+	ensureRoomyThreads,
+} from "../backfill.ts";
 import { expectToBeDefined } from "./utils.ts";
 
 // ─── Test constants ─────────────────────────────────────────────────────
@@ -548,6 +558,373 @@ describe("backfillChannel with faker-generated guild", () => {
 
 		// Cursor hasn't changed, so second run should add nothing
 		expect(secondRunCount).toBe(firstRunCount);
+	});
+});
+
+// ─── TASK-139: two-phase backfill (bounded Phase-1 window + Phase-2 walk) ─
+
+function buildFakeGuildForMessages(count: number) {
+	return createFakeGuild({
+		seed: 42,
+		channelCount: 1,
+		messagesPerChannel: count,
+	});
+}
+
+/**
+ * BF10: Phase-1 bound is falsifiable — a 2500-message channel is ingested
+ * at most PHASE1_MESSAGE_BOUND times by the window, then the Phase-2 walk
+ * covers the remainder.
+ */
+describe("two-phase backfill", () => {
+	beforeEach(() => {
+		faker.seed(42);
+	});
+
+	test("BF10: Phase-1 window is bounded to PHASE1_MESSAGE_BOUND messages", async () => {
+		const { guild, channels, messages } = buildFakeGuildForMessages(2500);
+		const discord = buildFakeDiscord(guild, channels, messages);
+		const repo = setupRepo();
+		const roomy = new MockRoomyGateway();
+		mapChannels(repo, channels);
+		const ch = channels[0];
+		expectToBeDefined(ch);
+
+		// Phase 1 — exactly the window call sites use this signature.
+		await backfillRecentWindow(
+			discord,
+			repo,
+			roomy,
+			ch.id,
+			SPACE,
+			GUILD,
+			"channel",
+		);
+
+		const afterWindow = countCreateMessageEvents(roomy, SPACE);
+
+		// Falsifiable bound: never more than PHASE1_MESSAGE_BOUND messages.
+		expect(afterWindow).toBeLessThanOrEqual(PHASE1_MESSAGE_BOUND);
+
+		let progress = repo.getBackfillProgress(SPACE, ch.id);
+		expectToBeDefined(progress);
+		expect(progress?.phase).toBe("phase2");
+		expect(progress?.messagesSynced).toBeLessThanOrEqual(
+			PHASE1_MESSAGE_BOUND,
+		);
+		expect(progress?.messagesSynced).toBeGreaterThanOrEqual(
+			PHASE1_MESSAGE_BOUND - 100, // 10% tolerance for natural ingest skips
+		);
+		expect(progress?.windowBoundary).toBeDefined();
+		expect(progress?.walkCursor).toBeNull();
+
+		// Phase 2 — the walk completes the remainder.
+		await backfillChannel(discord, repo, roomy, ch.id, SPACE, GUILD);
+
+		const total = countCreateMessageEvents(roomy, SPACE);
+		expect(total).toBeGreaterThanOrEqual(2500 - 250);
+		expect(total).toBeLessThanOrEqual(2500 + 1);
+
+		progress = repo.getBackfillProgress(SPACE, ch.id);
+		expect(progress?.phase).toBe("complete");
+		expect(progress?.messagesSynced).toBeGreaterThanOrEqual(2500 - 250);
+
+		// Cursor is at the newest ingested message (the window's top page).
+		const cursor = repo.getChannelCursor(SPACE, ch.id);
+		expect(cursor?.lastMessageId).toBe(
+			[...messages[ch.id] ?? []].sort(
+				(a, b) => Number(BigInt(b.id) - BigInt(a.id)),
+			)[0]?.id,
+		);
+	});
+
+	test("BF11: a channel that fits inside the bound is complete immediately after Phase 1", async () => {
+		const { guild, channels, messages } = buildFakeGuildForMessages(50);
+		const discord = buildFakeDiscord(guild, channels, messages);
+		const repo = setupRepo();
+		const roomy = new MockRoomyGateway();
+		mapChannels(repo, channels);
+		const ch = channels[0];
+		expectToBeDefined(ch);
+
+		await backfillRecentWindow(
+			discord,
+			repo,
+			roomy,
+			ch.id,
+			SPACE,
+			GUILD,
+			"channel",
+		);
+
+		const progress = repo.getBackfillProgress(SPACE, ch.id);
+		expectToBeDefined(progress);
+		expect(progress?.phase).toBe("complete");
+		expect(progress?.messagesSynced).toBe(50);
+		expect(progress?.walkCursor).toBeNull();
+		// The Phase-2 walk must be a no-op on an already-complete pair.
+		await backfillChannel(discord, repo, roomy, ch.id, SPACE, GUILD);
+		expect(countCreateMessageEvents(roomy, SPACE)).toBe(50);
+	});
+
+	test("BF12: progress survives restart and the Phase-2 walk resumes from the persisted cursor", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "roomy-backfill-"));
+		const dbPath = join(dir, "bridge.sqlite");
+		try {
+			const { guild, channels, messages } = buildFakeGuildForMessages(2050);
+			const discord = buildFakeDiscord(guild, channels, messages);
+			const roomy = new MockRoomyGateway();
+
+			// Repo "instance 1": Phase-1 window, then close (the pair is left
+			// in phase2, walk not started).
+			const repo1 = BridgeRepository.open(dbPath);
+			repo1.upsertBridgeConfig(GUILD, SPACE, "full");
+			mapChannels(repo1, channels);
+			const ch = channels[0];
+			expectToBeDefined(ch);
+			await backfillRecentWindow(
+				discord,
+				repo1,
+				roomy,
+				ch.id,
+				SPACE,
+				GUILD,
+				"channel",
+			);
+			expect(repo1.getBackfillProgress(SPACE, ch.id)?.phase).toBe("phase2");
+			repo1.close();
+
+			// "Restart": reopen the same file — the durable row must be there.
+			const repo2 = BridgeRepository.open(dbPath);
+			const persisted = repo2.getBackfillProgress(SPACE, ch.id);
+			expectToBeDefined(persisted);
+			expect(persisted?.phase).toBe("phase2");
+			expect(persisted?.messagesSynced).toBeGreaterThan(0);
+
+			// Simulate a crash mid-walk: the data source starts failing on
+			// the 3rd bottom-up page, so two walk pages land and the cursor
+			// persists right after the 2nd.
+			const allMessages = messages[ch.id] ?? [];
+			const crashAtPage = 3;
+			let afterPageCount = 0;
+			const crashingSource = new Proxy(discord, {
+				get(target, prop, _receiver) {
+					if (prop === "getMessages") {
+						return (channelId: string, opts: { after?: string }) => {
+							if (opts.after) {
+								afterPageCount++;
+								if (afterPageCount >= crashAtPage) {
+									throw new Error("simulated crash mid-walk");
+								}
+							}
+							return target.getMessages(channelId, opts);
+						};
+					}
+					// Keep `this` bound to the target so private fields resolve.
+					const value = Reflect.get(target, prop, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+
+			await expect(
+				backfillChannel(crashingSource, repo2, roomy, ch.id, SPACE, GUILD),
+			).rejects.toThrow("simulated crash mid-walk");
+
+			const interrupted = repo2.getBackfillProgress(SPACE, ch.id);
+			expectToBeDefined(interrupted);
+			expect(interrupted?.phase).toBe("phase2");
+			// Walk page 1 + page 2 ingested on top of the window's 1000.
+			expect(interrupted?.messagesSynced).toBe(1000 + 200);
+			// Boundary guard: the walk stopped mid-history, cursor = newest
+			// message of walk page 2 (id #200 of the channel).
+			const oldestFirst = [...allMessages].sort(
+				(a, b) => Number(BigInt(a.id) - BigInt(b.id)),
+			);
+			expect(interrupted?.walkCursor).toBe(oldestFirst[199]?.id ?? "");
+			repo2.close();
+
+			// "Restart" again: a fresh instance resumes from walkCursor and
+			// completes the remainder WITHOUT re-ingesting the window or the
+			// two walked pages.
+			const repo3 = BridgeRepository.open(dbPath);
+			const resumedSource = buildFakeDiscord(guild, channels, messages);
+			await backfillChannel(
+				resumedSource,
+				repo3,
+				roomy,
+				ch.id,
+				SPACE,
+				GUILD,
+			);
+
+			const done = repo3.getBackfillProgress(SPACE, ch.id);
+			expectToBeDefined(done);
+			expect(done?.phase).toBe("complete");
+			// Window 1000 + two walked pages 200 + resumed remainder 850.
+			expect(done?.messagesSynced).toBe(2050);
+			// Last walk page = the boundary-adjacent block m1001..m1100
+			// (50 below-boundary ingested, 50 boundary messages skipped),
+			// so the final cursor is the newest message of that block.
+			expect(done?.walkCursor).toBe(oldestFirst[1099]?.id ?? "");
+
+			// End-to-end the gateway saw exactly the 2050 messages' events.
+			expect(countCreateMessageEvents(roomy, SPACE)).toBeGreaterThanOrEqual(
+				2050 - 100,
+			);
+			expect(countCreateMessageEvents(roomy, SPACE)).toBeLessThanOrEqual(
+				2050 + 1,
+			);
+
+			// The pair's progress row after "restart" is per-channel correct.
+			expect(repo3.listBackfillProgress(SPACE).length).toBe(1);
+			repo3.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("BF13: stall guard stops both phases instead of looping", async () => {
+		const { guild, channels, messages } = buildFakeGuildForMessages(2000);
+		const discord = buildFakeDiscord(guild, channels, messages);
+		const ch = channels[0];
+		expectToBeDefined(ch);
+		const allMessages = messages[ch.id] ?? [];
+		const newestFirst = [...allMessages].sort(
+			(a, b) => Number(BigInt(b.id) - BigInt(a.id)),
+		);
+		const oldest100 = newestFirst.slice(-100).reverse(); // m1..m100, oldest-first
+
+		// Window-sticky source: every paginated call returns the same NEWEST
+		// page, so the Phase-1 window can never advance past page 1.
+		const windowSticky = new Proxy(discord, {
+			get(target, prop, _receiver) {
+				if (prop === "getMessages") {
+					return (
+						channelId: string,
+						opts: { before?: string; after?: string },
+					) => {
+						if (opts.before === undefined && opts.after === undefined) {
+							return target.getMessages(channelId, { limit: 100 });
+						}
+						return target.getMessages(channelId, { limit: 100 });
+					};
+				}
+				// Keep `this` on the target so private fields resolve.
+				const value = Reflect.get(target, prop, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		// Walk-sticky source: every bottom-up (after) page returns the same
+		// OLDEST 100 messages — below the boundary (so the boundary stop
+		// never fires) but never advancing, so the walk must hit its stall
+		// guard instead of looping.
+		const walkSticky = new Proxy(discord, {
+			get(target, prop, _receiver) {
+				if (prop === "getMessages") {
+					return (
+						channelId: string,
+						opts: { before?: string; after?: string },
+					) => {
+						if (opts.after) return oldest100;
+						return target.getMessages(channelId, { limit: 100 });
+					};
+				}
+				const value = Reflect.get(target, prop, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+
+		const repo = setupRepo();
+		const roomy = new MockRoomyGateway();
+		mapChannels(repo, channels);
+
+		// Step 1 — Phase-1 window must stall (never complete) on a sticky
+		// source, leaving the pair resumable in phase2.
+		await backfillRecentWindow(
+			windowSticky,
+			repo,
+			roomy,
+			ch.id,
+			SPACE,
+			GUILD,
+			"channel",
+		);
+		let progress = repo.getBackfillProgress(SPACE, ch.id);
+		expectToBeDefined(progress);
+		expect(progress?.phase).toBe("phase2");
+		expect(progress?.messagesSynced).toBe(100);
+		expect(progress?.walkCursor).toBeNull();
+
+		// Step 2 — the walk must stall on a sticky source too, ingesting the
+		// first page below the boundary then stopping instead of looping.
+		await backfillChannel(walkSticky, repo, roomy, ch.id, SPACE, GUILD);
+		progress = repo.getBackfillProgress(SPACE, ch.id);
+		expectToBeDefined(progress);
+		expect(progress?.phase).toBe("phase2");
+		expect(progress?.messagesSynced).toBe(200); // 100 window + 100 walk
+		expect(progress?.walkCursor).toBe(oldest100[0]?.id ?? "");
+	});
+
+	test("BF14: /backfill/progress endpoint returns durable per-channel payload", async () => {
+		const { guild, channels, messages } = buildFakeGuildForMessages(2500);
+		const discord = buildFakeDiscord(guild, channels, messages);
+		const repo = setupRepo();
+		const roomy = new MockRoomyGateway();
+		mapChannels(repo, channels);
+		const ch = channels[0];
+		expectToBeDefined(ch);
+
+		await backfillChannel(discord, repo, roomy, ch.id, SPACE, GUILD);
+		expect(repo.getBackfillProgress(SPACE, ch.id)?.phase).toBe("complete");
+
+		// Spin the real HTTP surface on an ephemeral port.
+		const prevPort = process.env.PORT;
+		process.env.PORT = "0";
+		let server:
+			| {
+					port: number | undefined;
+					stop(closeActiveConnections?: boolean): void;
+			  }
+			| undefined;
+		try {
+			server = startApi(repo, () => "app-id");
+			const res = await fetch(
+				`http://127.0.0.1:${server.port}/backfill/progress?spaceDid=${encodeURIComponent(SPACE)}`,
+			);
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as {
+				channels: Array<Record<string, unknown>>;
+			};
+			expect(Array.isArray(body.channels)).toBe(true);
+			expect(body.channels).toHaveLength(1);
+			const entry = body.channels[0];
+			if (!entry) throw new Error("expected one progress entry");
+			expect(entry.spaceDid).toBe(SPACE);
+			expect(entry.channelId).toBe(ch.id);
+			expect(entry.kind).toBe("channel");
+			expect(entry.channelName).toBe(ch.name);
+			expect(entry.phase).toBe("complete");
+			expect(typeof entry.messagesSynced).toBe("number");
+			expect((entry.messagesSynced as number)).toBeGreaterThanOrEqual(2250);
+			expect(typeof entry.messagesSkipped).toBe("number");
+			expect(typeof entry.cursor).toBe("string");
+			expect(entry.running).toBe(false);
+			expect(typeof entry.updatedAt).toBe("number");
+
+			// A space with no rows gets an empty list, not an error.
+			const emptyRes = await fetch(
+				"http://127.0.0.1:" +
+					server.port +
+					"/backfill/progress?spaceDid=did%3Aweb%3Anone",
+			);
+			expect(emptyRes.status).toBe(200);
+			const emptyBody = (await emptyRes.json()) as { channels: unknown[] };
+			expect(emptyBody.channels).toEqual([]);
+		} finally {
+			server?.stop(true);
+			if (prevPort === undefined) delete process.env.PORT;
+			else process.env.PORT = prevPort;
+		}
 	});
 });
 
