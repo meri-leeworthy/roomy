@@ -80,6 +80,10 @@
     }
   });
 
+  /** Threads inherit the parent channel's permissions, so the editor is only
+   * rendered for channels (native or federated). */
+  let showPermissions = $derived(kind === "Channel" || !!federated);
+
   /**
    * Threads have no permission settings: they inherit the parent channel's
    * (see `resolveRoom` in the appserver's auth/access.ts, which resolves a
@@ -101,8 +105,13 @@
     }
   });
 
-  // Fetch roles for permission diffing on save
-  const rolesQuery = createRolesQuery(() => spaceId);
+  // Fetch roles for permission diffing on save. The modal is always mounted
+  // (per viewed space) and getRoles 403s for non-members/admin, so gate on the
+  // modal being open with permissions shown (channels/federated only) — an
+  // unconditional query spams the appserver log on every space entry.
+  const rolesQuery = createRolesQuery(() => spaceId, {
+    enabled: () => open && showPermissions,
+  });
   // Current receiver grants for federated channels into this space — used to
   // diff receiver-grant changes in the federated edit mode below.
   const grantsQuery = createFederationGrantsQuery(() => spaceId, {
@@ -265,9 +274,6 @@
 
   let canDelete = $derived(!!id && !federated);
   let isCategory = $derived(!!id && "categoryId" in id);
-  /** Threads inherit the parent channel's permissions, so the editor is only
-   * rendered for channels (native or federated). */
-  let showPermissions = $derived(kind === "Channel" || !!federated);
 </script>
 
 {#snippet permissions()}
