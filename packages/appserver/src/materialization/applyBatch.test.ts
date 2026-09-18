@@ -454,85 +454,106 @@ describe("applyBatch", () => {
   // without a handler write (e.g. a future multi-writer / subscription
   // source) would never update user_space_membership, and getSpaces would
   // silently miss it.
-  test("live join/leave events write durable membership intent to the read-state DB", async () => {
-    const { db, asyncDb } = freshDb();
-    const { asyncDb: globalDb } = freshGlobalDb();
-    seedSpace(db, STREAM);
+  test("live join/leave events write durable membership intent to the read-state DB",
+    // These are REAL worker round-trips (applyBatch writes the read-state DB,
+    // then we read it back). Under `--isolate` full-suite contention a 2-core
+    // runner can exceed bun's default 5000 ms per-test timeout; when the
+    // timeout severs the async body mid-`await`, closeDb() in afterEach
+    // rejects the stranded read as an unhandled rejection. A generous timeout
+    // keeps the body on its promise instead of stranding it (TASK-128).
+    async () => {
+      const { db, asyncDb } = freshDb();
+      const { asyncDb: globalDb } = freshGlobalDb();
+      seedSpace(db, STREAM);
 
-    const joinEvent = {
-      $type: "space.roomy.space.joinSpace.v0",
-      id: newUlid(),
-    } as unknown as Event;
-    const leaveEvent = {
-      $type: "space.roomy.space.leaveSpace.v0",
-      id: newUlid(),
-    } as unknown as Event;
+      const joinEvent = {
+        $type: "space.roomy.space.joinSpace.v0",
+        id: newUlid(),
+      } as unknown as Event;
+      const leaveEvent = {
+        $type: "space.roomy.space.leaveSpace.v0",
+        id: newUlid(),
+      } as unknown as Event;
 
-    // Live join → membership row state 'joined'.
-    await applyBatch(
-      asyncDb,
-      STREAM,
-      [{ event: joinEvent, idx: 0 as StreamIndex, user: USER }],
-      { isBackfill: false },
-      globalDb,
-    );
-    const readState = openReadStateDb();
-    const joined = await readState
-      .query(
-        "select state, source, source_event_id from user_space_membership where user_did = ? and space_did = ?",
-      )
-      .get<{ state: string; source: string; source_event_id: string }>(USER, STREAM);
-    expect(joined?.state).toBe("joined");
-    expect(joined?.source).toBe("space.joinSpace");
-    expect(joined?.source_event_id).toBe(joinEvent.id);
+      // Live join → membership row state 'joined'.
+      await applyBatch(
+        asyncDb,
+        STREAM,
+        [{ event: joinEvent, idx: 0 as StreamIndex, user: USER }],
+        { isBackfill: false },
+        globalDb,
+      );
+      const readState = openReadStateDb();
+      const joined = await readState
+        .query(
+          "select state, source, source_event_id from user_space_membership where user_did = ? and space_did = ?",
+        )
+        .get<{ state: string; source: string; source_event_id: string }>(
+          USER,
+          STREAM,
+        );
+      expect(joined?.state).toBe("joined");
+      expect(joined?.source).toBe("space.joinSpace");
+      expect(joined?.source_event_id).toBe(joinEvent.id);
 
-    // Live leave → row flips to 'left'.
-    await applyBatch(
-      asyncDb,
-      STREAM,
-      [{ event: leaveEvent, idx: 1 as StreamIndex, user: USER }],
-      { isBackfill: false },
-      globalDb,
-    );
-    const left = await readState
-      .query(
-        "select state, source, source_event_id from user_space_membership where user_did = ? and space_did = ?",
-      )
-      .get<{ state: string; source: string; source_event_id: string }>(USER, STREAM);
-    expect(left?.state).toBe("left");
-    expect(left?.source).toBe("space.leaveSpace");
-    expect(left?.source_event_id).toBe(leaveEvent.id);
-  })
+      // Live leave → row flips to 'left'.
+      await applyBatch(
+        asyncDb,
+        STREAM,
+        [{ event: leaveEvent, idx: 1 as StreamIndex, user: USER }],
+        { isBackfill: false },
+        globalDb,
+      );
+      const left = await readState
+        .query(
+          "select state, source, source_event_id from user_space_membership where user_did = ? and space_did = ?",
+        )
+        .get<{ state: string; source: string; source_event_id: string }>(
+          USER,
+          STREAM,
+        );
+      expect(left?.state).toBe("left");
+      expect(left?.source).toBe("space.leaveSpace");
+      expect(left?.source_event_id).toBe(leaveEvent.id);
+    },
+    30_000,
+  );
 
   // Backfill/replay must NOT write membership: the boot recovery migration
   // already reduced the full historical log by ULID, and replay events are
   // not guaranteed to arrive in ULID order across streams — writing them
   // could overwrite the correct recovered state with an older event.
-  test("backfill join events do not write membership intent", async () => {
-    const { db, asyncDb } = freshDb();
-    const { asyncDb: globalDb } = freshGlobalDb();
-    seedSpace(db, STREAM);
+  test(
+    "backfill join events do not write membership intent",
+    async () => {
+      const { db, asyncDb } = freshDb();
+      const { asyncDb: globalDb } = freshGlobalDb();
+      seedSpace(db, STREAM);
 
-    const joinEvent = {
-      $type: "space.roomy.space.joinSpace.v0",
-      id: newUlid(),
-    } as unknown as Event;
-    await applyBatch(
-      asyncDb,
-      STREAM,
-      [{ event: joinEvent, idx: 0 as StreamIndex, user: USER }],
-      { isBackfill: true },
-      globalDb,
-    );
+      const joinEvent = {
+        $type: "space.roomy.space.joinSpace.v0",
+        id: newUlid(),
+      } as unknown as Event;
+      await applyBatch(
+        asyncDb,
+        STREAM,
+        [{ event: joinEvent, idx: 0 as StreamIndex, user: USER }],
+        { isBackfill: true },
+        globalDb,
+      );
 
-    const readState = openReadStateDb();
-    const row = await readState
-      .query(
-        "select 1 as n from user_space_membership where user_did = ? and space_did = ?",
-      )
-      .get<{ n: number }>(USER, STREAM);
-    expect(row?.n).toBeUndefined();
-  })
+      const readState = openReadStateDb();
+      const row = await readState
+        .query(
+          "select 1 as n from user_space_membership where user_did = ? and space_did = ?",
+        )
+        .get<{ n: number }>(USER, STREAM);
+      expect(row?.n).toBeUndefined();
+    },
+    // Worker-backed read-state round-trip: same stranding hazard as the
+    // live-join/leave test (see above, TASK-128).
+    30_000,
+  )
 });
 
 describe("applyBatch — rich-text link detection", () => {
