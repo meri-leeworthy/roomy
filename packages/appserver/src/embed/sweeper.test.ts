@@ -9,6 +9,7 @@ import {
   _resetEmbedSweeper,
   _startSweeperNoLoop,
   stopEmbedSweeper,
+  embedSweeperStats,
   type EmbedSweeperOpts,
 } from "./sweeper.ts";
 import { openDb, openGlobalDb, openSpaceDb, closeDb } from "../db/db.ts";
@@ -89,6 +90,7 @@ async function seedLinkMessageRoom(
   spaceDb: DbLike,
   globalDb: DbLike,
   ids: { room: string; message: string; url: string },
+  createdAt?: number,
 ): Promise<void> {
   // Room entity (its own room column is null — rooms don't belong to rooms).
   await spaceDb.run("insert into entities (id, stream_id) values (?, ?)", [
@@ -112,9 +114,12 @@ async function seedLinkMessageRoom(
     [ids.url],
   );
   // Global pending-links index row (the sweeper's work queue).
+  // Global pending-links index row (the sweeper's work queue). `createdAt`
+  // defaults to now; tests that exercise backlog-stall detection seed an
+  // older timestamp to simulate a backlog that has sat untouched.
   await globalDb.run(
     "insert into pending_links (space_did, message_id, url, created_at) values (?, ?, ?, ?)",
-    [SPACE_DID, ids.message, ids.url, Date.now()],
+    [SPACE_DID, ids.message, ids.url, createdAt ?? Date.now()],
   );
 }
 
@@ -429,6 +434,126 @@ describe("embed sweeper invalidation room resolution", () => {
         .query("select embed_json from comp_embed_link_data where entity = ?")
         .get<{ embed_json: string | null }>(newUrl);
       expect(newData?.embed_json).toBeTruthy();
+    } finally {
+      globalThis.fetch = realFetch;
+      await stopEmbedSweeper();
+    }
+    _resetEmbedSweeper();
+  });
+
+  test("backlogStuck flags a backlog that is entirely parked in transient backoff", async () => {
+    // The production stall (TASK-179): a 5k-row `pending_links` backlog whose
+    // every link had already burned through the 1m/5m/30m/2h/6h transient
+    // schedule. `inFlight` reads 0 and `dbBackoffActive` is false, so the
+    // obvious in-memory signals look idle while the backlog goes nowhere.
+    // The stall flag must be set, and the oldest row must be old enough.
+    const { globalDb, spaceDb } = freshWorker();
+    const { router } = captureRouter();
+    const url = "https://example.com/stuck";
+    // Seed the row as OLD so it exceeds the stall age threshold.
+    await seedLinkMessageRoom(
+      spaceDb,
+      globalDb,
+      { room: "01KVRRRRRRRRRRRRRRRRRRRRRR", message: "01KVMMMMMMMMMMMMMMMMMMMMMM", url },
+      Date.now() - 60 * 60_000,
+    );
+
+    const realFetch = globalThis.fetch;
+    // 503 → transient, so the URL is parked in backoff and stays pending.
+    globalThis.fetch = ((
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> =>
+      Promise.resolve(new Response("Service Unavailable", { status: 503 }))) as typeof globalThis.fetch;
+
+    try {
+      await stopEmbedSweeper();
+      _startSweeperNoLoop({ globalDb, invalidationRouter: router });
+
+      // Cycle 1: attempts the link, classifies transient, parks it.
+      await sweepCycle(globalDb);
+      expect(embedSweeperStats().backlogStuck).toBe(false);
+
+      // Cycle 2: the backlog is non-empty (the row is still pending) but the
+      // only link is in backoff, so nothing is selected — the stall.
+      await sweepCycle(globalDb);
+      const stats = embedSweeperStats();
+      expect(stats.backlogStuck).toBe(true);
+      expect(stats.backlogStuckSince).toBeGreaterThan(0);
+      expect(stats.backlogStuckSkipped).toBeGreaterThan(0);
+
+      // The row is still in the DB backlog, so `pending` (countPendingLinks)
+      // is 1 while the sweeper is doing nothing — exactly the production
+      // shape the gauge fix must expose.
+      const n = await globalDb
+        .query("select count(*) as n from pending_links")
+        .get<{ n: number }>();
+      expect(n?.n).toBe(1);
+    } finally {
+      globalThis.fetch = realFetch;
+      await stopEmbedSweeper();
+    }
+    _resetEmbedSweeper();
+  });
+
+  test("a cycle that selects work clears the stall flag", async () => {
+    // The stall flag must reflect current reality: once the queue moves (a
+    // link is selected for enrichment), the flag clears. Otherwise operators
+    // would see a permanently-stuck backlog after a transient dip.
+    const { globalDb, spaceDb } = freshWorker();
+    const { router } = captureRouter();
+    const oldUrl = "https://example.com/clear-old";
+    const freshUrl = "https://example.com/clear-fresh";
+    await seedLinkMessageRoom(
+      spaceDb,
+      globalDb,
+      { room: "01KVRRRRRRRRRRRRRRRRRRRRRR", message: "01KVMMMMMMMMMMMMMMMMMMMMMM", url: oldUrl },
+      Date.now() - 60 * 60_000,
+    );
+    await seedLinkMessageRoom(
+      spaceDb,
+      globalDb,
+      { room: "01KVRRRRRRRRRRRRRRRRRRRRR2", message: "01KVNNNNNNNNNNNNNNNNNNNNNN", url: freshUrl },
+      Date.now() - 60 * 60_000,
+    );
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((
+      input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      const u = String(input);
+      if (u.includes("clear-old")) {
+        return Promise.resolve(new Response("Service Unavailable", { status: 503 }));
+      }
+      return Promise.resolve(
+        new Response(
+          '<html><head><meta property="og:title" content="Cleared" /></head></html>',
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        ),
+      );
+    }) as typeof globalThis.fetch;
+
+    try {
+      await stopEmbedSweeper();
+      _startSweeperNoLoop({ globalDb, invalidationRouter: router });
+
+      // Drive the backlog into the stalled state twice so the flag is set.
+      await sweepCycle(globalDb); // both links selected; old → parked
+      await sweepCycle(globalDb); // fresh link enriched; old still parked
+      await sweepCycle(globalDb); // nothing but the parked link left
+      expect(embedSweeperStats().backlogStuck).toBe(true);
+
+      // A new link arrives (a fresh poke). The next cycle selects it, which
+      // proves the queue is moving — the flag must clear.
+      const newUrl = "https://example.com/clear-poked";
+      await seedLinkMessageRoom(spaceDb, globalDb, {
+        room: "01KVRRRRRRRRRRRRRRRRRRRRR3",
+        message: "01KVO000000000000000000000",
+        url: newUrl,
+      });
+      await sweepCycle(globalDb);
+      expect(embedSweeperStats().backlogStuck).toBe(false);
     } finally {
       globalThis.fetch = realFetch;
       await stopEmbedSweeper();

@@ -586,33 +586,44 @@ export async function createAppserver(
   // backend. This is what surfaces a worker backlog (e.g. the system-worker
   // N+1) as a visible trend rather than a manual /health/pool curl.
   const metricsTimer = setInterval(() => {
-    const pool = poolStats();
-    const cache = queryCache?.stats ?? { hits: 0, misses: 0, evictions: 0, size: 0 };
-    const embed = embedSweeperStats();
-    const search = searchIndexerStats();
-    const backfill = searchBackfillStats();
-    log.info("[metrics] snapshot", {
-      pool: pool
-        ? {
-            size: pool.size,
-            spaceWorkers: pool.spaceWorkers.map((w) => w.pending),
-            globalWorker: pool.globalWorker.pending,
-            readStateWorker: pool.readStateWorker.pending,
-            eventsWorker: pool.eventsWorker.pending,
-          }
-        : null,
-      cache,
-      embed: {
-        pending: embed.priorityQueue ?? 0,
-        inFlight: embed.inFlight ?? 0,
-        enrichedNull: embed.enrichedNull ?? 0,
-        dbBackoff: embed.dbBackoffActive ?? false,
-      },
-      search: {
-        queue: search.queueLength ?? 0,
-        backfilled: backfill.backfilled ?? 0,
-      },
-    });
+    // Fire-and-forget: the callback must stay synchronous, and the DB count
+    // is the one async part. Failures are swallowed below so a DB hiccup
+    // can't turn a metrics snapshot into an unhandled rejection.
+    void (async () => {
+      const pool = poolStats();
+      const cache = queryCache?.stats ?? { hits: 0, misses: 0, evictions: 0, size: 0 };
+      const embed = embedSweeperStats();
+      const search = searchIndexerStats();
+      const backfill = searchBackfillStats();
+      // Backlog from the DB (same source as /health/embed), plus the
+      // in-memory queue under its own key. Logging both makes the
+      // "backlog non-empty but sweeper idle" state self-evident.
+      const pending = await countPendingLinks(openGlobalDb()).catch(() => -1);
+      log.info("[metrics] snapshot", {
+        pool: pool
+          ? {
+              size: pool.size,
+              spaceWorkers: pool.spaceWorkers.map((w) => w.pending),
+              globalWorker: pool.globalWorker.pending,
+              readStateWorker: pool.readStateWorker.pending,
+              eventsWorker: pool.eventsWorker.pending,
+            }
+          : null,
+        cache,
+        embed: {
+          pending,
+          priorityQueue: embed.priorityQueue ?? 0,
+          inFlight: embed.inFlight ?? 0,
+          enrichedNull: embed.enrichedNull ?? 0,
+          dbBackoff: embed.dbBackoffActive ?? false,
+          backlogStuck: embed.backlogStuck ?? false,
+        },
+        search: {
+          queue: search.queueLength ?? 0,
+          backfilled: backfill.backfilled ?? 0,
+        },
+      });
+    })();
   }, 30 * 1000);
   metricsTimer.unref();
 
@@ -737,10 +748,31 @@ export async function createAppserver(
   const cacheMisses = metrics.gauge("roomy_cache_misses_total", "Query response cache misses.");
   const cacheEvictions = metrics.gauge("roomy_cache_evictions_total", "Query response cache evictions.");
   const cacheSize = metrics.gauge("roomy_cache_size", "Query response cache entries.");
-  const embedPending = metrics.gauge("roomy_embed_pending", "Embed links awaiting enrichment.");
+  // `roomy_embed_pending` carries the DB BACKLOG — the count /health/embed
+  // reports — by re-reading it in this scrape handler (see below). It must
+  // NOT come from `embedSweeperStats().priorityQueue`: that is the in-memory
+  // set of freshly-poked URLs, which reads 0 when the backlog is stuck in
+  // transient-retry backoff, so a Grafana alert on this gauge could never
+  // fire. The in-memory queue keeps its own name below.
+  const embedPending = metrics.gauge(
+    "roomy_embed_pending",
+    "Rows in the global pending_links backlog awaiting enrichment (same value as /health/embed's `pending`).",
+  );
+  const embedPriorityQueue = metrics.gauge(
+    "roomy_embed_priority_queue",
+    "Freshly-detected embed URLs waiting in the in-memory priority queue (NOT the DB backlog).",
+  );
   const embedInFlight = metrics.gauge("roomy_embed_in_flight", "Embed enrichments currently in flight.");
   const embedEnrichedNull = metrics.gauge("roomy_embed_enriched_null", "Embed links enriched to null (no card).");
   const embedDbBackoff = metrics.gauge("roomy_embed_db_backoff", "1 when the embed sweeper is in DB backoff.");
+  const embedBacklogStuck = metrics.gauge(
+    "roomy_embed_backlog_stuck",
+    "1 when the embed backlog is non-empty but the sweeper is selecting nothing (all pending links in transient-retry backoff).",
+  );
+  const embedBacklogStuckSince = metrics.gauge(
+    "roomy_embed_backlog_stuck_since_seconds",
+    "Unix timestamp when the embed backlog stall began (0 when not stuck).",
+  );
   const searchQueue = metrics.gauge("roomy_search_indexer_queue", "Search indexer queue length.");
   const searchBackfilled = metrics.gauge("roomy_search_backfilled", "Search backfill progress.");
   const pushQueued = metrics.gauge("roomy_push_queued", "Push dispatcher queued messages.");
@@ -861,10 +893,26 @@ export async function createAppserver(
         cacheEvictions.set({}, cache.evictions);
         cacheSize.set({}, cache.size);
         const embed = embedSweeperStats();
-        embedPending.set({}, embed.priorityQueue ?? 0);
+        // `roomy_embed_pending` is the DB backlog, not the in-memory priority
+        // queue (see the gauge's definition above). Re-read the count on each
+        // scrape so the gauge equals /health/embed's `pending` by construction.
+        // One indexed `count(*)` per scrape on the global worker, on the same
+        // DB/worker the /health/embed route already counts on each request.
+        // Measured on a 21,756-row pending_links: well under 1ms.
+        try {
+          embedPending.set({}, await countPendingLinks(openGlobalDb()));
+        } catch {
+          // DB unavailable — leave the last value rather than publish a lie.
+        }
+        embedPriorityQueue.set({}, embed.priorityQueue ?? 0);
         embedInFlight.set({}, embed.inFlight ?? 0);
         embedEnrichedNull.set({}, embed.enrichedNull ?? 0);
         embedDbBackoff.set({}, embed.dbBackoffActive ? 1 : 0);
+        embedBacklogStuck.set({}, embed.backlogStuck ? 1 : 0);
+        embedBacklogStuckSince.set(
+          {},
+          embed.backlogStuck ? Math.floor(embed.backlogStuckSince / 1000) : 0,
+        );
         const search = searchIndexerStats();
         searchQueue.set({}, search.queueLength ?? 0);
         const backfill = searchBackfillStats();

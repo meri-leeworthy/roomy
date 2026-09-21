@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createAppserver, type AppserverHandle } from "./appserver.ts";
 import { testAuthVerifier } from "./xrpc/auth.ts";
-import { closeDb } from "./db/db.ts";
+import { closeDb, openGlobalDb } from "./db/db.ts";
 import { _resetEmbedSweeper } from "./embed/sweeper.ts";
 import { recordProcessStart } from "./fatal.ts";
 import { _resetProfileStoreCache } from "./queries/profileStore.ts";
@@ -124,6 +124,52 @@ describe("createAppserver factory", () => {
     expect(body).toMatch(/^roomy_process_starts_total \d+$/m);
   });
 
+  test("roomy_embed_pending equals /health/embed's pending (both read the DB backlog)", async () => {
+    // The bug this guards (TASK-179): the gauge was set from the in-memory
+    // priority queue (`embedSweeperStats().priorityQueue`), which reads 0 when
+    // the backlog is parked in transient backoff — so a Grafana alert on
+    // `roomy_embed_pending` could never fire on a 5k-row stalled backlog.
+    // It must carry the DB backlog, exactly as /health/embed reports it.
+    handle = await createAppserver({
+      port: ephemeralPort(),
+      authVerifier: testAuthVerifier,
+      dbPath: ":memory:",
+      readStateDbPath: ":memory:",
+      quiet: true,
+      ownDid: "did:web:test.example",
+      serviceEndpoint: "http://test.example",
+      disableBackgroundWorkers: true,
+    });
+    const base = `http://localhost:${handle.port}`;
+
+    // Seed a backlog directly into the global `pending_links` index the
+    // gauge and the health route both count.
+    const global = openGlobalDb();
+    for (let i = 0; i < 3; i++) {
+      await global.run(
+        "insert into pending_links (space_did, message_id, url, created_at) values (?, ?, ?, ?)",
+        ["did:web:test.example", `01KVMMMMMMMMMMMMMMMMMMMMM${i}`, `https://example.com/${i}`, Date.now()],
+      );
+    }
+
+    const health = (await (await fetch(`${base}/health/embed`)).json()) as {
+      pending: number;
+    };
+    const metrics = await (await fetch(`${base}/metrics`)).text();
+
+    // Parse the gauge value out of the Prometheus text exposition.
+    const m = metrics.match(/^roomy_embed_pending (\d+)$/m);
+    expect(m).not.toBeNull();
+    const gauge = Number(m![1]);
+
+    expect(health.pending).toBe(3);
+    expect(gauge).toBe(health.pending);
+
+    // The in-memory priority queue must NOT be what the backlog gauge carries:
+    // it is exposed under its own name and is 0 here (nothing was poked).
+    expect(metrics).toMatch(/^roomy_embed_priority_queue 0$/m);
+  });
+
   test("getConnectionTicket works with test auth header", async () => {
     handle = await createAppserver({
       port: ephemeralPort(),
@@ -185,7 +231,6 @@ describe("createAppserver factory", () => {
     handle = await createAppserver({
       port: ephemeralPort(),
       authVerifier: testAuthVerifier,
-      dbPath: ":memory:",
       readStateDbPath: ":memory:",
       quiet: true,
       disableBackgroundWorkers: true,

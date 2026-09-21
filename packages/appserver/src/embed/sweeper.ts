@@ -55,6 +55,15 @@ const SWEEP_BATCH = 25;
 /** How often to poll for pending links while idle (no pokes). */
 const IDLE_POLL_MS = 30_000;
 /**
+ * Age (ms) past which a non-empty, unselected backlog counts as STALLED
+ * rather than merely waiting. A backlog whose oldest row is this old while
+ * nothing is in flight and a cycle selected nothing means transient-retry
+ * backoff is pinning the whole queue. Verified in production: ~5 retry
+ * attempts per pending link, backoff capped at 6h, so the queue selects
+ * nothing for hours at a time and the backlog never drains. Tunable via env.
+ */
+const STALL_AGE_MS = Number(process.env.EMBED_STALL_AGE_MS ?? 30 * 60_000);
+/**
  * Max concurrent outbound embed-service fetches per sweep batch. Bounded so
  * a large pending batch can't flood the embed service, while still draining
  * far faster than strictly sequential (a batch of 25 finishes in
@@ -97,6 +106,19 @@ let wake: (() => void) | null = null;
 let dbErrorCount = 0;
 /** Timestamp (ms) until which the sweeper should skip fetching and just idle. */
 let dbBackoffUntil = 0;
+/**
+ * Backlog-stall signal. Set on a cycle where the DB backlog is non-empty,
+ * a batch was selected but every pending link was skipped by the transient
+ * backoff, and the oldest pending row is older than {@link STALL_AGE_MS}.
+ * That is the "the whole backlog is in transient backoff, so the sweeper
+ * does nothing" state — invisible to `pending`/`inFlight` (both read 0/false
+ * in-memory while 5k rows sit in `pending_links`). `since` is when the stall
+ * began (ms); `skipped` counts cycles that saw it. Exposed on /health/embed
+ * and as a Prometheus gauge so an alert can fire on the stalled backlog.
+ */
+let backlogStuck = false;
+let backlogStuckSince = 0;
+let backlogStuckSkipped = 0;
 /**
  * Priority queue of freshly-detected live link URLs. Drained before the
  * oldest-first backlog so a newly posted link is enriched within seconds
@@ -155,6 +177,18 @@ export function embedSweeperStats(): {
   enrichmentDiffs: number;
   dbErrorCount: number;
   dbBackoffActive: boolean;
+  /**
+   * True when the backlog is non-empty but the sweeper is selecting nothing
+   * (every pending link is inside transient-retry backoff) and the oldest
+   * pending row is older than {@link STALL_AGE_MS}. This is the signal the
+   * `pending`/`inFlight` pair cannot express: a stuck 5k-row backlog looks
+   * idle. See /health/embed and `roomy_embed_backlog_stuck`.
+   */
+  backlogStuck: boolean;
+  /** Epoch-ms the stall began (0 when not stuck). */
+  backlogStuckSince: number;
+  /** Sweep cycles that observed the stall. */
+  backlogStuckSkipped: number;
 } {
   return {
     priorityQueue: priorityLinks.size,
@@ -164,6 +198,9 @@ export function embedSweeperStats(): {
     enrichmentDiffs: statsEnrichmentDiffs,
     dbErrorCount,
     dbBackoffActive: Date.now() < dbBackoffUntil,
+    backlogStuck,
+    backlogStuckSince,
+    backlogStuckSkipped,
   };
 }
 
@@ -415,6 +452,47 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
     else markDbOk(); // a successful write cycle → DB is healthy again
   }
 
+  // Stall detection: a cycle that selected NO links out of a NON-EMPTY
+  // backlog is doing no work, and the obvious in-memory signals stay silent
+  // about it (`inFlight` 0, `dbBackoffActive` false). If the oldest pending
+  // row is also older than STALL_AGE_MS, transient-retry backoff is pinning
+  // the whole queue and the backlog will not drain. Record it so an operator
+  // (or a Grafana alert on `roomy_embed_backlog_stuck`) can see it.
+  //
+  // This second query runs ONLY on a cycle that selected nothing — i.e. while
+  // stalled, roughly one cheap indexed `min(created_at)` per idle poll — not
+  // on every cycle, so it costs nothing while the sweeper is healthy.
+  if (pending.length === 0 && !backlogStuck) {
+    try {
+      const row = await globalDb
+        .query(`select min(created_at) as oldest from pending_links`)
+        .get<{ oldest: number | null }>();
+      const oldest = row?.oldest;
+      if (oldest != null && Date.now() - oldest > STALL_AGE_MS) {
+        backlogStuck = true;
+        backlogStuckSince = Date.now();
+        backlogStuckSkipped = 0;
+        log.warn(
+          `[embed-sweeper] backlog stalled: oldest pending link is ${Math.round(
+            (Date.now() - oldest) / 60_000,
+          )}m old and the last cycle selected nothing (all pending links are in transient-retry backoff)`,
+        );
+      }
+    } catch (err) {
+      log.debug("[embed-sweeper] backlog-age probe failed:", err);
+    }
+  }
+
+  // Keep the stall flag current, and count the cycles it persisted for. A
+  // cycle that selects work (pending > 0) proves the queue is moving again —
+  // clear the stall so `backlogStuck` reflects current reality, not history.
+  if (pending.length > 0) {
+    backlogStuck = false;
+    backlogStuckSkipped = 0;
+  } else if (backlogStuck) {
+    backlogStuckSkipped++;
+  }
+
   // A full batch means there may be more pending — signal the loop to run
   // again without waiting.
   return pending.length >= SWEEP_BATCH;
@@ -644,6 +722,9 @@ export function _resetEmbedSweeper(): void {
   statsEnrichedOk = 0;
   statsEnrichedNull = 0;
   statsEnrichmentDiffs = 0;
+  backlogStuck = false;
+  backlogStuckSince = 0;
+  backlogStuckSkipped = 0;
 }
 
 /**
