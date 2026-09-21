@@ -70,6 +70,22 @@ function makeCreateRoomEvent() {
   };
 }
 
+/** A createMessage in `roomId` carrying a reply attachment at `target`. */
+function makeReplyEvent(roomId: string, target: string) {
+  return {
+    id: newUlid(),
+    $type: "space.roomy.message.createMessage.v0",
+    room: roomId,
+    body: { mimeType: "text/plain", data: { $bytes: Buffer.from("reply").toString("base64") } },
+    extensions: {
+      "space.roomy.extension.attachments.v0": {
+        $type: "space.roomy.extension.attachments.v0",
+        attachments: [{ $type: "space.roomy.attachment.reply.v0", target }],
+      },
+    },
+  };
+}
+
 beforeEach(async () => {
   closeDb();
   _resetEmbedSweeper();
@@ -109,6 +125,16 @@ beforeEach(async () => {
   await space.run(
     "insert into comp_room (entity, label, default_access) values (?, 'space.roomy.channel', 'readwrite')",
     [CHANNEL],
+  );
+  // The global entity→space index. Reads (`getMessage`, and any other
+  // handler opening a per-space DB from a bare entity id) resolve the space
+  // through it, so an entity missing from it is a 404 "not found" regardless
+  // of what the per-space DB holds — seeding it here is what makes the read
+  // assertions below exercise the real path instead of the harness's gaps.
+  const global = openDb().global!();
+  await global.run(
+    "insert or ignore into entity_space (entity_id, space_did) values (?, ?)",
+    [CHANNEL, SPACE],
   );
 
   handle = await createAppserver({
@@ -390,5 +416,88 @@ describe("space.roomy.space.sendEvents", () => {
     // Clean up so the shared pool isn't left rebuilding.
     await db.spaceRebuildAbort!(SPACE);
     expect(await db.isSpaceRebuilding!(SPACE)).toBe(false);
+  });
+
+  /**
+   * A reply whose target is the room it lives in. This is the production
+   * defect: the reply edge is written, then `message.getMessage` resolves the
+   * target as a message and 400s forever, so the client's reply preview
+   * refetches a permanent failure.
+   */
+  test("a reply targeting a room (not a message) is rejected and never logged", async () => {
+    const res = await authedFetch(USER)(
+      `${baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          spaceId: SPACE,
+          events: [makeReplyEvent(CHANNEL, CHANNEL)],
+        }),
+      },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string; message?: string };
+    expect(body.error).toBe("InvalidRequest");
+    expect(body.message).toContain("is not a message");
+
+    // Nothing landed: the event log is the source of truth for
+    // materialization, so rejecting before the write is what keeps the bad
+    // reply edge out of the DB entirely.
+    const db = openDb();
+    const eventRows = await db
+      .query("select idx from stream_events where stream_id = ?")
+      .all<{ idx: number }>(SPACE);
+    expect(eventRows).toHaveLength(0);
+  });
+
+  /**
+   * The end-to-end consequence, asserted on the real surface: a reply to a
+   * room is refused, and `getMessage` on a room id keeps answering the 400
+   * the client was seeing. The second half documents WHY the first half is
+   * necessary — it is the same predicate, on the read side.
+   */
+  test("getMessage on a room id 400s; a reply to a message is accepted", async () => {
+    // The read side, unchanged: this is the failure the writer must prevent.
+    const bad = await authedFetch(USER)(
+      `${baseUrl}/xrpc/space.roomy.message.getMessage?messageId=${CHANNEL}`,
+    );
+    expect(bad.status).toBe(400);
+    const badBody = (await bad.json()) as { message?: string };
+    expect(badBody.message).toContain("is not a message");
+
+    // A genuine message, then a reply to it: allowed, and the reply survives
+    // the round trip with its reply edge materialized.
+    const target = makeCreateMessageEvent(CHANNEL);
+    const first = await authedFetch(USER)(
+      `${baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({ spaceId: SPACE, events: [target] }),
+      },
+    );
+    expect(first.status).toBe(200);
+
+    const reply = makeReplyEvent(CHANNEL, target.id);
+    const second = await authedFetch(USER)(
+      `${baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({ spaceId: SPACE, events: [reply] }),
+      },
+    );
+    expect(second.status).toBe(200);
+
+    const db = openDb();
+    const edge = await db
+      .forSpace!(SPACE)
+      .query("select tail from edges where head = ? and label = 'reply'")
+      .get<{ tail: string }>(reply.id);
+    expect(edge?.tail).toBe(target.id);
+
+    // And the target now resolves on the read path the client uses.
+    const good = await authedFetch(USER)(
+      `${baseUrl}/xrpc/space.roomy.message.getMessage?messageId=${target.id}`,
+    );
+    expect(good.status).toBe(200);
   });
 });

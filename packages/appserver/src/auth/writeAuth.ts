@@ -117,6 +117,23 @@ const ROOM_WRITE_TYPES = new Set([
 // `checkMoveMessages` below — space admin, plus a destination-room guard.
 
 /**
+ * Message events that may carry a `space.roomy.attachment.reply.v0`.
+ *
+ * The reply's `target` is a bare ULID with no type attached, and nothing in
+ * the write path checked it: the materialiser inserts the `reply` edge
+ * unconditionally (`insert or ignore`, so even a non-existent target is
+ * silently dropped), and `message.getMessage` REJECTS a non-message target
+ * with a 400. A reply aimed at, say, the room it lives in therefore
+ * materialises fine and then renders as a permanently failing reply preview
+ * — the client asks `getMessage` for a room id four times and gets 400 four
+ * times. See {@link checkReplyTargets}.
+ */
+const REPLY_TARGET_TYPES = new Set([
+  "space.roomy.message.createMessage.v0",
+  "space.roomy.message.editMessage.v0",
+]);
+
+/**
  * Room-write events that additionally require author-or-admin check.
  */
 const MESSAGE_AUTHOR_TYPES = new Set([
@@ -366,6 +383,81 @@ async function checkMoveMessages(
       "InvalidRequest",
       `Destination room ${toRoomId} is not in this space`,
     );
+  }
+  return undefined;
+}
+
+/**
+ * Authorize the reply targets attached to a message event.
+ *
+ * A `space.roomy.attachment.reply.v0` carries a bare `target` ULID. The
+ * materialiser writes the `reply` edge for it unconditionally, but
+ * `message.getMessage` resolves the target as a *message* and returns
+ * `400 InvalidRequest "Entity <id> is not a message (no room)"` for anything
+ * else — a room, a user, an embed entity. The result is a message whose reply
+ * preview can never resolve, refetched on every render.
+ *
+ * Two distinct cases, both rejected here so the bad edge is never written:
+ *
+ *   - the target does not exist at all. The materialiser's `insert or ignore`
+ *     silently drops the edge, so the reply renders as "Reply unavailable"
+ *     with no clue why.
+ *   - the target exists but is not a message. A message is the only entity
+ *     type that carries a `room` (every other entity — room, user, space,
+ *     attachment — has `room` null), which is exactly the predicate
+ *     `getMessage` uses to make the same call. Keeping the two in step is
+ *     what makes this an admission-time check rather than a heuristic.
+ *
+ * A target in a *different* room is allowed: cross-room replies are
+ * legitimate (the search handler denormalises them, and the client resolves
+ * them by id). Only the not-a-message case is refused.
+ */
+async function checkReplyTargets(
+  db: DbLike,
+  event: { $type: string; [k: string]: unknown },
+): Promise<WriteAuthResult> {
+  if (!REPLY_TARGET_TYPES.has(event.$type)) return undefined;
+
+  const extensions = event.extensions;
+  if (typeof extensions !== "object" || extensions === null) return undefined;
+  const attachmentsExt = (
+    extensions as Record<string, unknown>
+  )["space.roomy.extension.attachments.v0"];
+  if (typeof attachmentsExt !== "object" || attachmentsExt === null) {
+    return undefined;
+  }
+  const attachments = (attachmentsExt as Record<string, unknown>).attachments;
+  if (!Array.isArray(attachments)) return undefined;
+
+  for (const att of attachments) {
+    if (typeof att !== "object" || att === null) continue;
+    const a = att as Record<string, unknown>;
+    if (a.$type !== "space.roomy.attachment.reply.v0") continue;
+    const target = a.target;
+    if (typeof target !== "string" || target === "") {
+      return denied(
+        400,
+        "InvalidRequest",
+        "Reply attachment is missing a 'target' message id",
+      );
+    }
+    const row = await db
+      .query("select room from entities where id = ?")
+      .get<{ room: string | null }>(target);
+    if (row === null) {
+      return denied(
+        400,
+        "InvalidRequest",
+        `Reply target ${target} is not a message (no such entity)`,
+      );
+    }
+    if (!row.room) {
+      return denied(
+        400,
+        "InvalidRequest",
+        `Reply target ${target} is not a message (no room)`,
+      );
+    }
   }
   return undefined;
 }
@@ -698,7 +790,9 @@ export async function checkWriteAuth(
     if (typeof roomId !== "string") {
       return denied(400, "InvalidRequest", `Event is missing required 'room' field`);
     }
-    return await requireRoomWriteCheck(db, roomId, callerDid, globalDb, dbResolver);
+    const roomResult = await requireRoomWriteCheck(db, roomId, callerDid, globalDb, dbResolver);
+    if (roomResult) return roomResult;
+    return await checkReplyTargets(db, event);
   }
 
   // ── Message move (space admin + destination guard) ──
@@ -724,7 +818,9 @@ export async function checkWriteAuth(
     if (typeof messageId !== "string") {
       return denied(400, "InvalidRequest", `Event is missing required 'messageId' field`);
     }
-    return await checkMessageAuthorOrAdmin(db, messageId, callerDid, spaceId);
+    const authorResult = await checkMessageAuthorOrAdmin(db, messageId, callerDid, spaceId);
+    if (authorResult) return authorResult;
+    return await checkReplyTargets(db, event);
   }
 
   // ── Room creation (split by kind) ──

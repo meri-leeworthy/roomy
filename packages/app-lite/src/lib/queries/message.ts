@@ -12,29 +12,42 @@ type MessageList = typeof schemas.queries.getMessages.Message.infer[];
  * Single-message query. Hydrates from the room messages cache if the
  * message is already present, so reply previews don't trigger an extra
  * HTTP fetch when the target is on screen.
+ *
+ * Two guards keep a *deterministically* failing lookup from being issued:
+ * one for the corrupt-reply case (below), and `retry: false` for the rest —
+ * a deleted message 404s and a non-message target 400s, and neither becomes
+ * true by asking again.
  */
 export function createMessageQuery(
   messageId: () => string,
   roomId: () => string | undefined,
   options?: { enabled?: boolean },
 ) {
-  return createQuery<Message>(() => ({
-    queryKey: queryKey("space.roomy.message.getMessage", {
-      messageId: messageId(),
-    }),
-    enabled: options?.enabled ?? true,
-    queryFn: () =>
-      px().query("space.roomy.message.getMessage", {
-        messageId: messageId(),
-      }),
-    initialData: () => {
-      const room = roomId();
-      if (!room) return undefined;
-      const list = queryClient.getQueryData<MessageList>(
-        queryKey("space.roomy.room.getMessages", { roomId: room }),
-      );
-      const hit = list?.find((m) => m.id === messageId());
-      return hit as Message | undefined;
-    },
-  }));
+  return createQuery<Message>(() => {
+    const target = messageId();
+    const room = roomId();
+    // A reply whose target IS the room it lives in is not a message:
+    // `getMessage` resolves targets as messages and answers `400 InvalidRequest
+    // "Entity <id> is not a message (no room)"`. Messages carrying exactly
+    // this in production are historical — the writer that produced them is
+    // fixed at the appserver — so this only ever suppresses the request for
+    // data that already exists. Asking burns a round-trip and logs a 400 on
+    // every render of that reply, and the answer can never change.
+    const targetIsOwnRoom = room !== undefined && room !== "" && room === target;
+    return {
+      queryKey: queryKey("space.roomy.message.getMessage", { messageId: target }),
+      enabled: (options?.enabled ?? true) && !targetIsOwnRoom,
+      queryFn: () =>
+        px().query("space.roomy.message.getMessage", { messageId: target }),
+      retry: false,
+      initialData: () => {
+        if (!room) return undefined;
+        const list = queryClient.getQueryData<MessageList>(
+          queryKey("space.roomy.room.getMessages", { roomId: room }),
+        );
+        const hit = list?.find((m) => m.id === target);
+        return hit as Message | undefined;
+      },
+    };
+  });
 }

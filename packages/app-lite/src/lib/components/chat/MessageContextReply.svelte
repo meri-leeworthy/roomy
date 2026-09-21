@@ -85,7 +85,7 @@
       {@html messageContentToPlaintext(previewContent, previewMime)}
     </span>
   </div>
-{:else if target.isPending}
+{:else if target.isPending && target.isEnabled}
   <div class="h-5"></div>
 {:else}
   <span class="italic text-base-400">Reply unavailable</span>

@@ -829,3 +829,171 @@ describe("auth/writeAuth — service self-write", () => {
     expect(result?.status).toBe(403);
   });
 });
+
+describe("auth/writeAuth — reply targets must be messages", () => {
+  /** A createMessage carrying a single reply attachment at `target`. */
+  function replyEvent(roomId: string, target: string) {
+    return {
+      id: newUlid(),
+      $type: "space.roomy.message.createMessage.v0",
+      room: roomId,
+      body: { mimeType: "text/plain", data: "hi" },
+      extensions: {
+        "space.roomy.extension.attachments.v0": {
+          $type: "space.roomy.extension.attachments.v0",
+          attachments: [
+            { $type: "space.roomy.attachment.reply.v0", target },
+          ],
+        },
+      },
+    };
+  }
+
+  /** A message entity: an entity carrying a `room`. */
+  async function seedMessage(
+    db: DbLike,
+    messageId: string,
+    roomId: string,
+  ): Promise<void> {
+    await db.run(
+      "insert into entities (id, stream_id, room) values (?, ?, ?)",
+      [messageId, SPACE, roomId],
+    );
+  }
+
+  test("a reply to another message is allowed", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+    const target = newUlid();
+    await seedMessage(db, target, CHANNEL);
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      USER,
+      replyEvent(CHANNEL, target),
+    );
+    expect(result).toBeUndefined();
+  });
+
+  test("a reply to a message in another room is allowed", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    const OTHER_ROOM = newUlid();
+    await seedChannel(db, OTHER_ROOM, SPACE, "readwrite");
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+    const target = newUlid();
+    await seedMessage(db, target, OTHER_ROOM);
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      USER,
+      replyEvent(CHANNEL, target),
+    );
+    expect(result).toBeUndefined();
+  });
+
+  // The production signature this fixes: a message whose reply target is the
+  // room it lives in. `getMessage` resolves such a target as a message and
+  // 400s ("is not a message (no room)"), so the reply preview refetches a
+  // permanent failure. Nothing rejected it at write time before this check.
+  test("a reply targeting the room itself is rejected with 400", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      USER,
+      replyEvent(CHANNEL, CHANNEL),
+    );
+    expect(result).toBeDefined();
+    expect(result!.status).toBe(400);
+    expect(result!.message).toContain("is not a message");
+  });
+
+  test("a reply targeting a user entity is rejected with 400", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      USER,
+      replyEvent(CHANNEL, USER),
+    );
+    expect(result).toBeDefined();
+    expect(result!.status).toBe(400);
+  });
+
+  test("a reply targeting a nonexistent entity is rejected with 400", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+
+    const result = await checkWriteAuth(
+      db,
+      SPACE,
+      USER,
+      replyEvent(CHANNEL, "01NOTAMESSAGE0000000000000"),
+    );
+    expect(result).toBeDefined();
+    expect(result!.status).toBe(400);
+    expect(result!.message).toContain("is not a message");
+  });
+
+  test("editMessage replacing attachments with a bad reply target is rejected", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+    const messageId = newUlid();
+    await seedMessage(db, messageId, CHANNEL);
+    await addEdge(db, messageId, USER, "author");
+
+    const result = await checkWriteAuth(db, SPACE, USER, {
+      ...replyEvent(CHANNEL, CHANNEL),
+      $type: "space.roomy.message.editMessage.v0",
+      messageId,
+    });
+    expect(result).toBeDefined();
+    expect(result!.status).toBe(400);
+  });
+
+  test("attachments with no reply still pass", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+
+    const result = await checkWriteAuth(db, SPACE, USER, {
+      id: newUlid(),
+      $type: "space.roomy.message.createMessage.v0",
+      room: CHANNEL,
+      body: { mimeType: "text/plain", data: "hi" },
+      extensions: {
+        "space.roomy.extension.attachments.v0": {
+          $type: "space.roomy.extension.attachments.v0",
+          attachments: [{ $type: "space.roomy.attachment.link.v0", uri: "https://x.test" }],
+        },
+      },
+    });
+    expect(result).toBeUndefined();
+  });
+});
