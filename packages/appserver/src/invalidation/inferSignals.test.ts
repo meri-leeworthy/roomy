@@ -211,15 +211,49 @@ describe("inferSignals: message events", () => {
       expect(roomDiff!.signal.threadUnreadDeltas).toBeUndefined();
     }
 
-    // Still invalidates room metadata (recentThreads) and space metadata
-    // (author's activeThreads). The getSpaces broadcast is gone — the
-    // roomMetadataDiff handles the unread-count patch instead.
+    // The new message is the room's latest activity, so the boards get a
+    // `roomActivityDiff` — a broadcast patch of the one row that moved —
+    // instead of a per-message `#invalidate` that forces every reader to
+    // refetch the whole board.
+    const activityDiff = signals.find((s) => s.kind === "roomActivityDiff");
+    expect(activityDiff).toBeDefined();
+    if (activityDiff?.kind === "roomActivityDiff") {
+      expect(activityDiff.signal.spaceId).toBe(STREAM_DID);
+      expect(activityDiff.signal.roomId).toBe(ROOM_ID);
+      expect(activityDiff.signal.kind).toBe("channel");
+      expect(activityDiff.signal.activity.latestMessage?.id).toBe(EVENT_ID);
+      expect(activityDiff.signal.activity.latestMessage?.content).toBe("hello");
+      expect(activityDiff.signal.activity.latestMembers.map((m) => m.did)).toEqual([
+        USER_DID,
+      ]);
+    }
+
+    // The boards' CACHED bodies are still stale, so they are evicted from the
+    // server-side response cache — but WITHOUT a client frame, because each
+    // connected client patches from the activity diff above. That distinction
+    // is the whole point of the flag: a fresh page load has no diff to apply
+    // and must not be served the stale body, while a live client must not be
+    // told to refetch.
     const nsids = invalidatedNsids(signals);
     expect(nsids).toContain("space.roomy.space.getThreads");
     expect(nsids).toContain("space.roomy.room.getMetadata");
     expect(nsids).toContain("space.roomy.room.getThreads");
     expect(nsids).toContain("space.roomy.space.getMetadata");
     expect(nsids).not.toContain("space.roomy.space.getSpaces");
+    // The activity feed hydrates media/embeds the diff does not carry, so it
+    // stays a real (frame-sending) invalidation.
+    expect(nsids).toContain("space.roomy.space.getActivityFeed");
+
+    const evictOnlyNsids = signals
+      .filter(
+        (s): s is { kind: "queryInvalidation"; signal: QueryInvalidation } =>
+          s.kind === "queryInvalidation" && s.signal.cacheEvictionOnly === true,
+      )
+      .map((s) => s.signal.nsid);
+    expect(evictOnlyNsids).toContain("space.roomy.room.getThreads");
+    expect(evictOnlyNsids).toContain("space.roomy.room.getMetadata");
+    expect(evictOnlyNsids).toContain("space.roomy.space.getThreads");
+    expect(evictOnlyNsids).not.toContain("space.roomy.space.getActivityFeed");
   });
 
   it("createMessage uses a pre-fetched messageSnapshots map and skips the DB read", async () => {

@@ -52,6 +52,23 @@ export interface QueryInvalidation {
    * Server cache uses this to evict only per-user entries.
    */
   affectedUser?: UserDid;
+  /**
+   * Evict the server-side response cache WITHOUT sending a `#invalidate`
+   * frame to connected clients.
+   *
+   * The two consumers want different things. The server cache must be evicted
+   * on every change (a client loading the page fresh has no diff frame to
+   * apply — it would otherwise be served a stale body for up to the cache
+   * TTL). A connected client, however, is already patchable from a diff frame,
+   * so an invalidation frame for it is pure refetch cost.
+   *
+   * Emit this for queries whose client-side freshness is delivered by a diff
+   * (see `RoomActivityDiff`) but whose *cached* response body is still stale —
+   * `space.getThreads` and `room.getMetadata` on `createMessage`, whose
+   * board/`recentThreads` ordering is patched client-side by the activity
+   * diff while the server cache still needs the eviction.
+   */
+  cacheEvictionOnly?: boolean;
 }
 
 /** A message-level add/update/remove within a room. */
@@ -150,11 +167,70 @@ export interface MentionDiff {
   ops: MessageDiffOp[];
 }
 
+/**
+ * A room's latest-activity facts, broadcast when a message lands in it.
+ *
+ * This is what keeps the activity-ordered *board* views (`space.getThreads`,
+ * `room.getThreads`) and `room.getMetadata.recentThreads` ordered and
+ * up to date without refetching them on every message: the client upserts the
+ * row it describes and moves it to the front of its board.
+ *
+ * It is deliberately a **broadcast** (one frame to every subscriber of the
+ * room / its parent channel / the space), unlike `RoomMetadataDiff`, which is
+ * caller-scoped and therefore sent once per affected user. Folding these
+ * structural, identical-for-everyone fields into that per-user frame would put
+ * a copy of the board row on the wire once per reader.
+ *
+ * It carries no caller-scoped field: `unreadCount` / `unread` stay with
+ * `RoomMetadataDiff` (which knows the delta) and `unreadThreadCount` with its
+ * channel patch.
+ */
+export interface RoomActivityDiff {
+  spaceId: StreamDid;
+  roomId: Ulid;
+  /** Room kind — the board renders channels and threads differently. */
+  kind: "thread" | "channel";
+  name?: string;
+  /** Parent channel (threads only) — the client patches that channel's boards. */
+  parentChannelId?: string;
+  parentChannelName?: string;
+  activity: RoomActivityDiffActivity;
+}
+
+/**
+ * The changed halves of a board row's `activity` object.
+ *
+ * `latestMembers` carries only the participants *this message* added (the
+ * author). The server's board aggregates the room's newest 3 authors; after a
+ * single new message that list is exactly this author followed by the previous
+ * participants, so the client reproduces it by merging (dedupe by DID, cap 3)
+ * rather than the server re-aggregating every message in the room.
+ */
+export interface RoomActivityDiffActivity {
+  latestTimestamp?: string;
+  latestMembers: ReadonlyArray<{
+    did: string;
+    name: string | null;
+    avatar: string | null;
+  }>;
+  latestMessage?: {
+    id: string;
+    content: string;
+    author: {
+      did: string;
+      name: string | null;
+      avatar: string | null;
+    };
+    timestamp?: string;
+  };
+}
+
 /** The union of what the invalidation system can emit. */
 export type InvalidationEvent =
   | { kind: "queryInvalidation"; signal: QueryInvalidation }
   | { kind: "messageDiff"; signal: MessageDiff }
   | { kind: "roomMetadataDiff"; signal: RoomMetadataDiff }
+  | { kind: "roomActivityDiff"; signal: RoomActivityDiff }
   | { kind: "mentionDiff"; signal: MentionDiff };
 
 

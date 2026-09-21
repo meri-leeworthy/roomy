@@ -13,6 +13,7 @@
 export * as messageDiff from "./messageDiff";
 export * as mention from "./mention";
 export * as roomMetadataDiff from "./roomMetadataDiff";
+export * as roomActivityDiff from "./roomActivityDiff";
 export * as invalidate from "./invalidate";
 export * as errorFrame from "./error";
 export * as clientMessage from "./clientMessage";

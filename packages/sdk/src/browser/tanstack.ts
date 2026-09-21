@@ -88,6 +88,10 @@ export function createTanstackCacheAdapter(
   }
 
   return {
+    get<T>(key: QueryKey): T | undefined {
+      return queryClient.getQueryData<T>(key as unknown[]);
+    },
+
     invalidate(key: QueryKey): void {
       // Fire-and-forget by contract: `invalidateQueries` resolves when the
       // triggered refetch settles, and errors surface through TanStack's

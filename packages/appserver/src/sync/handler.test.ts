@@ -6,6 +6,7 @@ import type {
   AppliedEvent,
 } from "../invalidation/types.ts";
 import type { DecodedStreamEvent, Event, StreamDid, StreamIndex, UserDid, Ulid } from "@roomy-space/sdk";
+import { schemas, type } from "@roomy-space/sdk";
 import { SyncManager, type StreamEventSource, type SyncDbAccess } from "./handler.ts";
 import type { DbLike } from "../db/types.ts";
 
@@ -852,6 +853,128 @@ describe("SyncManager", () => {
     router.emitSignals([messageDiff(ROOM_ID, 1)]);
     await flush();
     expect(socket.sentFrames.length).toBe(0);
+  });
+
+  test("a cacheEvictionOnly invalidation never reaches a connection", async () => {
+    // These exist for the server-side response cache (whose eviction listener
+    // sees every signal); the client is kept fresh by a diff frame instead, so
+    // sending it a refetch instruction is the exact cost the flag avoids.
+    const router = new MockRouter();
+    const { manager } = makeManager(router as unknown as InvalidationRouter);
+
+    const socket = new MockSocket(USER_A);
+    manager.register(socket as unknown as SyncSocket);
+
+    await sub(socket, { type: "sub", topic: "room", id: ROOM_ID });
+    socket.sentFrames.length = 0;
+
+    router.emitSignals([
+      {
+        kind: "queryInvalidation",
+        signal: {
+          nsid: "space.roomy.room.getMetadata",
+          params: { roomId: ROOM_ID },
+          cacheEvictionOnly: true,
+        },
+      },
+    ]);
+    await flush();
+
+    expect(socket.sentFrames.length).toBe(0);
+
+    manager.destroy();
+  });
+
+  test("a roomActivityDiff frame reaches the room, parent channel, and space topics once", async () => {
+    const router = new MockRouter();
+    const { manager } = makeManager(router as unknown as InvalidationRouter);
+
+    const PARENT = "01KR32FDQCCCEB8FEK76SQST9X" as Ulid;
+    const socket = new MockSocket(USER_A);
+    manager.register(socket as unknown as SyncSocket);
+    await sub(socket, { type: "sub", topic: "room", id: ROOM_ID });
+    await sub(socket, { type: "sub", topic: "space", id: SPACE_ID });
+    socket.sentFrames.length = 0;
+
+    const latestMessage = {
+      id: "01KR32FDQCCCEB8FEK76SQST9Z",
+      content: "hello",
+      author: { did: USER_A, name: "User A", avatar: null },
+      timestamp: "2026-09-21T10:00:00.000Z",
+    };
+    router.emitSignals([
+      {
+        kind: "roomActivityDiff",
+        signal: {
+          spaceId: SPACE_ID,
+          roomId: ROOM_ID,
+          kind: "thread",
+          parentChannelId: PARENT,
+          activity: {
+            latestTimestamp: "2026-09-21T10:00:00.000Z",
+            latestMembers: [{ did: USER_A, name: "User A", avatar: null }],
+            latestMessage,
+          },
+        },
+      },
+    ]);
+    await flush();
+
+    // One frame, not one per matching topic (the connection holds both).
+    expect(socket.sentFrames.length).toBe(1);
+    const frame = socket.sentFrames[0]!;
+    expect(frame.header.t).toBe("#roomActivityDiff");
+
+    // The frame must satisfy the published wire schema — that is the contract
+    // the client's SyncRouter validates before patching its cache.
+    const parsed = schemas.frames.roomActivityDiff.Body(frame.body);
+    expect(parsed instanceof type.errors).toBe(false);
+    if (parsed instanceof type.errors) return;
+    expect(parsed.roomId).toBe(ROOM_ID);
+    expect(parsed.parentChannelId).toBe(PARENT);
+    expect(parsed.activity.latestMessage?.content).toBe("hello");
+
+    manager.destroy();
+  });
+
+  test("roomActivityDiff is withheld from a connection that cannot read the room", async () => {
+    // The frame carries a message preview and its author, so a connection
+    // watching the SPACE topic must not receive the row for a room it has no
+    // access to. An unknown room resolves to no per-space DB, which is the
+    // same "no access" answer the HTTP read path gives.
+    const router = new MockRouter();
+    const { manager } = makeManager(router as unknown as InvalidationRouter);
+
+    const socket = new MockSocket(USER_A);
+    manager.register(socket as unknown as SyncSocket);
+    await sub(socket, { type: "sub", topic: "space", id: SPACE_ID });
+    socket.sentFrames.length = 0;
+
+    router.emitSignals([
+      {
+        kind: "roomActivityDiff",
+        signal: {
+          spaceId: SPACE_ID,
+          roomId: "01KR32FDQCCCEB8FEK76SQST9W" as Ulid,
+          kind: "channel",
+          activity: {
+            latestTimestamp: "2026-09-21T10:00:00.000Z",
+            latestMembers: [{ did: USER_B, name: null, avatar: null }],
+            latestMessage: {
+              id: "01KR32FDQCCCEB8FEK76SQST9V",
+              content: "secret",
+              author: { did: USER_B, name: null, avatar: null },
+              timestamp: "2026-09-21T10:00:00.000Z",
+            },
+          },
+        },
+      },
+    ]);
+    await flush();
+
+    expect(socket.sentFrames.length).toBe(0);
+
+    manager.destroy();
   });
 
   test("multiple events in one batch are all delivered", async () => {

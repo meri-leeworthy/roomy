@@ -408,19 +408,38 @@ console.log(`  frames per client: ${perClient.join(", ")}`);
 console.log(`  frame kinds (client 0): ${[...kindCounts.entries()].map(([k, n]) => `${k}:${n}`).join(" ") || "(none)"}`);
 console.log(`  #invalidate nsids (client 0): ${[...nsidCounts.entries()].map(([k, n]) => `${k}:${n}`).join(" ") || "(none)"}`);
 
-// The follow-up reads the invalidation frames force, per client. This is the
-// load the fanout adds to the appserver: one HTTP read per distinct invalidated
-// query key, per client.
-const FOLLOW_UPS: Array<{ name: string; path: string }> = [
-  { name: "room.getMetadata", path: `/xrpc/space.roomy.room.getMetadata?roomId=${encodeURIComponent(HOT)}` },
-  { name: "room.getThreads", path: `/xrpc/space.roomy.room.getThreads?roomId=${encodeURIComponent(HOT)}` },
-  { name: "space.getThreads", path: `/xrpc/space.roomy.space.getThreads?spaceId=${encodeURIComponent(SPACE)}` },
-  { name: "space.getActivityFeed", path: `/xrpc/space.roomy.space.getActivityFeed?limit=50` },
-];
+// The follow-up reads the frames force, per client. This is the load the
+// fanout adds to the appserver: one HTTP read per distinct query key a frame
+// tells the client to refetch.
+//
+// Derived from the frames just observed rather than from a fixed list — a
+// hardcoded list keeps reporting the endpoints a diff replaced, which makes the
+// probe unable to see the very change it exists to measure. A `#invalidate`
+// names one key; the diff frames (`#messageDiff`, `#roomMetadataDiff`,
+// `#roomActivityDiff`) patch their entries directly and cost no read.
+const READ_PATHS: Record<string, string> = {
+  "space.roomy.room.getMetadata": `/xrpc/space.roomy.room.getMetadata?roomId=${encodeURIComponent(HOT)}`,
+  "space.roomy.room.getMessages": `/xrpc/space.roomy.room.getMessages?roomId=${encodeURIComponent(HOT)}&limit=50`,
+  "space.roomy.room.getThreads": `/xrpc/space.roomy.room.getThreads?roomId=${encodeURIComponent(HOT)}`,
+  "space.roomy.space.getThreads": `/xrpc/space.roomy.space.getThreads?spaceId=${encodeURIComponent(SPACE)}`,
+  "space.roomy.space.getActivityFeed": `/xrpc/space.roomy.space.getActivityFeed?limit=50`,
+  "space.roomy.space.getMetadata": `/xrpc/space.roomy.space.getMetadata?spaceId=${encodeURIComponent(SPACE)}`,
+  "space.roomy.space.getSpaces": `/xrpc/space.roomy.space.getSpaces`,
+};
+
+const observedNsids = new Set<string>();
+for (const f of framesByClient[0] ?? []) {
+  if (f.header["t"] !== "#invalidate") continue;
+  observedNsids.add(String((f.body as { nsid?: string }).nsid ?? "?"));
+}
+const followUps = [...observedNsids]
+  .map((nsid) => ({ name: nsid, path: READ_PATHS[nsid] }))
+  .filter((c): c is { name: string; path: string } => c.path !== undefined);
+
 let followUpMs = 0;
 let followUpRtt = 0;
 const followUpDetail: string[] = [];
-for (const c of FOLLOW_UPS) {
+for (const c of followUps) {
   rttThisRequest = 0;
   recording = true;
   const t0 = performance.now();
@@ -431,14 +450,14 @@ for (const c of FOLLOW_UPS) {
   followUpDetail.push(`${c.name} ${rttThisRequest}rtt`);
 }
 console.log(
-  `  refetch storm per client: ${FOLLOW_UPS.length} requests, ${(followUpMs / CLIENTS).toFixed(1)}ms summed server-side, ${followUpRtt} DB round-trips (${followUpDetail.join(", ")})`,
+  `  refetch storm per client: ${followUps.length} requests, ${(followUpMs / CLIENTS).toFixed(1)}ms summed server-side, ${followUpRtt} DB round-trips (${followUpDetail.join(", ") || "none"})`,
 );
-console.log(`  => ${CLIENTS} clients x ${FOLLOW_UPS.length} reads = ${CLIENTS * FOLLOW_UPS.length} HTTP requests per message`);
+console.log(`  => ${CLIENTS} clients x ${followUps.length} reads = ${CLIENTS * followUps.length} HTTP requests per message`);
 
 for (const ws of clients) ws.close();
 
 console.log(
-  `\nJSON ${JSON.stringify({ label: LABEL, rooms: ROOMS, messages: MESSAGES, members: MEMBERS, clients: CLIENTS, iterations: ITERATIONS, read: readSummary, fanout: { framesPerClient: perClient, invalidates: Object.fromEntries(nsidCounts), writeMs: Number(writeMs.toFixed(1)) } })}`,
+  `\nJSON ${JSON.stringify({ label: LABEL, rooms: ROOMS, messages: MESSAGES, members: MEMBERS, clients: CLIENTS, iterations: ITERATIONS, read: readSummary, fanout: { framesPerClient: perClient, frameKinds: Object.fromEntries(kindCounts), invalidates: Object.fromEntries(nsidCounts), followUpReads: followUps.map((c) => c.name), followUpRtt, writeMs: Number(writeMs.toFixed(1)) } })}`,
 );
 
 await handle.close();

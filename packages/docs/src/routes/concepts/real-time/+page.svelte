@@ -71,6 +71,7 @@
     <tbody>
       <tr><td><code>#messageDiff</code></td><td>1</td><td>Message add/update/remove for a subscribed room</td></tr>
       <tr><td><code>#roomMetadataDiff</code></td><td>1</td><td>Unread-count delta for a room, per affected user</td></tr>
+      <tr><td><code>#roomActivityDiff</code></td><td>1</td><td>Board re-ordering: the room that moved, with its new latest-activity fields</td></tr>
       <tr><td><code>#invalidate</code></td><td>1</td><td>Signal that a query's data is stale</td></tr>
       <tr><td><code>#streamEvents</code></td><td>1</td><td>Batch of raw stream events (backfill or live) for a stream subscription</td></tr>
       <tr><td><code>#error</code></td><td>-1</td><td>Error frame (closes connection)</td></tr>
@@ -125,6 +126,37 @@
   delta: number;   // +1 per message
   seq: number;
 &#125;</code></pre>
+
+  <h3>#roomActivityDiff</h3>
+
+  <p>Board re-ordering, <strong>broadcast</strong> to every connection subscribed to the room, its parent channel, or the space. A message makes its room the most recently active one, which re-orders <code>room.getThreads</code>, <code>space.getThreads</code> and <code>room.getMetadata.recentThreads</code> — these views carry the room's latest-activity fields and a latest-first ordering, so the row is <em>upserted and moved to the front</em> rather than merely refetched. The frame carries the whole board row subset, so the client needs no HTTP round-trip. <code>space.getActivityFeed</code> is <em>not</em> patched (its items hydrate embeds per message) and still refetches.</p>
+
+  <p>No field here is caller-scoped: <code>unreadCount</code> / <code>unread</code> on the board rows are absent, and are patched from <code>#roomMetadataDiff</code>, whose <code>delta</code> is per-user. Both frames accompany the same event. Delivery re-checks room access, because the frame carries a message preview and its author.</p>
+
+  <p>Patching is only faithful when the room is already on the client's cached first page and the message actually advanced the room's <code>latestTimestamp</code> (a bridge-imported message with an older <code>timestampOverride</code> does not move the board). Otherwise the client falls back to invalidating that query — the pre-diff behaviour.</p>
+
+  <pre><code>// Header: &#123; op: 1, t: "#roomActivityDiff" &#125;
+// Body:
+&#123;
+  spaceId: string;
+  roomId: string;
+  kind: "thread" | "channel";
+  name?: string;
+  parentChannelId?: string;      // threads only
+  parentChannelName?: string;
+  activity: &#123;
+    latestTimestamp?: string;
+    latestMembers: Array&lt;&#123; did: string; name: string | null; avatar: string | null &#125;&gt;;
+    latestMessage?: &#123;
+      id: string;
+      content: string;
+      author: &#123; did: string; name: string | null; avatar: string | null &#125;;
+      timestamp?: string;
+    &#125;;
+  &#125;;
+&#125;</code></pre>
+
+  <p><code>latestMembers</code> is the participants <em>this message added</em> (its author), not the room's whole list — the board shows the newest 3 distinct authors, so the client merges by DID and caps at 3 rather than replacing. Consequently this frame carries no <code>seq</code>: diff ordering is stamped per connection at delivery, and only <code>#messageDiff</code> / <code>#roomMetadataDiff</code> participate in gap detection.</p>
 
   <h3>#invalidate</h3>
 
@@ -195,7 +227,7 @@
       </tr>
     </thead>
     <tbody>
-      <tr><td>createMessage in room X</td><td><code>room:X</code></td><td><code>#messageDiff</code> (add) + <code>#roomMetadataDiff</code> (delta +1) + <code>#invalidate</code> room.getMetadata, room.getThreads, space.getMetadata (author)</td></tr>
+      <tr><td>createMessage in room X</td><td><code>room:X</code> + parent channel + <code>space:Y</code></td><td><code>#messageDiff</code> (add) + <code>#roomMetadataDiff</code> (delta +1) + <code>#roomActivityDiff</code> + <code>#invalidate</code> space.getActivityFeed, space.getMetadata (author)</td></tr>
       <tr><td>editMessage in room X</td><td><code>room:X</code></td><td><code>#messageDiff</code> (update) + <code>#invalidate</code> room.getMetadata</td></tr>
       <tr><td>deleteMessage in room X</td><td><code>room:X</code></td><td><code>#messageDiff</code> (remove)</td></tr>
       <tr><td>forwardMessages into room X</td><td><code>room:X</code></td><td><code>#messageDiff</code> (add) + <code>#roomMetadataDiff</code> (delta +1)</td></tr>

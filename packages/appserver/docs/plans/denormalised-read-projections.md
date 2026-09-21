@@ -1,8 +1,8 @@
 # Denormalised read projections
 
 **Date:** 2026-09-21
-**Status:** Round 1 — plan + prototype (`room_access` projection), measured
-**Task:** TASK-173
+**Status:** R1 merged (`room_access` projection); R2 merged (`#roomActivityDiff`)
+**Task:** TASK-173 (R1), TASK-174 (R2)
 
 ## Summary
 
@@ -294,16 +294,26 @@ per-space fan-out; that is R3 below, and its shape is different.
 in `room.getMetadata` / `room.getThreads`, and 38 → 1 in the `roomAccessMany`
 paths (`space.getMetadata`, `space.getActivityFeed`, `space.getThreads`).
 
-**R2 — cut the invalidations that force the refetches.** This is where the
-fanout actually shrinks, and R1 is what makes it safe:
-- `room.getMetadata` and `room.getThreads` are invalidated by *every*
-  `createMessage` (`inferSignals.ts:411-412`), but `roomMetadataDiff` already
-  patches `unreadCount` and the thread-activity fields they carry. Drop the two
-  invalidations, extend `roomMetadataDiff` to carry `recentThreads` ordering.
-- `space.getThreads` is invalidated per message (`:417`); it re-orders on
-  latest activity. Same treatment: a diff, not an invalidation.
-- Expected: 5 invalidations → 2 (activity feed, author-scoped metadata), i.e.
-  **16 refetches per message → 8**.
+**R2 — cut the invalidations that force the refetches (DONE — see §Results R2).**
+This is where the fanout actually shrinks, and R1 is what makes it safe:
+- `room.getMetadata` and `room.getThreads` were invalidated by *every*
+  `createMessage`, as was `space.getThreads` — all three reorder on latest
+  activity. They now receive a **`roomActivityDiff`**: one broadcast frame
+  carrying the single board row that moved (room, latest timestamp, preview,
+  newest author), which the client upserts and moves to the front.
+- The boards' *cached bodies* are still stale, so they are **evicted from the
+  server response cache without a client frame** (`cacheEvictionOnly`) — a
+  fresh page load has no diff to apply and must not be served the old order,
+  while a live client must not be told to refetch.
+- Result: 5 invalidations → 2 (activity feed, author-scoped metadata), i.e.
+  **20 refetches per message → 8** (4 clients × 5 → 4 × 2), and **91 → 34 DB
+  round-trips per client**.
+
+The plan expected this to be "a diff, not an invalidation" via
+`roomMetadataDiff`. It is a **separate broadcast frame** instead: that frame is
+caller-scoped (sent once per affected user), so folding structural,
+identical-for-everyone board fields into it would put the same board row on the
+wire once per reader.
 
 **R3 — `space.getThreads` / `getActivityFeed` projection.** `fetchRoomActivity`
 (`threadActivity.ts:230`) reads every message in scope to pick the latest per
@@ -340,7 +350,7 @@ The query cache is disabled in the probe (`disableQueryCache: true`) so the
 projection is measured on its own rather than being masked by the in-memory
 cache.
 
-## Results
+## Results — R1
 
 Probe: `perf/probe-projections.ts`, fixture = 12 channels + 12 threads, 1200
 messages in the hot channel, 100 readers, 4 sync clients, 30 iterations. Query
@@ -442,6 +452,105 @@ Eight new tests, all defending observable behaviour rather than implementation:
 The projection tests were mutation-checked: corrupting `space_id` in the
 projection reader fails 5 of them, confirming they exercise the projected path
 rather than passing through the fallback.
+
+## Results — R2
+
+R2 replaces the ordering-driven invalidations a `createMessage` emits with a
+**`#roomActivityDiff`** broadcast, plus a **cache-eviction-only** invalidation
+for the same queries. Measured with the same probe (fixture: 20 rooms, 12
+threads, 1200 messages in the hot channel, 100 readers, 4 sync clients, 30
+iterations), `--label r2-before` vs `--label r2-after`:
+
+| per client, one live message | before | after |
+|---|---:|---:|
+| frames | **7** | **5** |
+| `#invalidate` frames | **5** | **2** |
+| refetch storm (HTTP reads) | **5** | **2** |
+| refetch storm (DB round-trips) | **91** | **34** (−63 %) |
+| across 4 clients (reads) | 20 | **8** (−60 %) |
+
+The two remaining invalidations are `space.getActivityFeed` (its items hydrate
+media/link-embeds per message — a shape the activity diff does not carry, so it
+stays a refetch) and the author-scoped `space.getMetadata` (`activeThreads`).
+
+Frame set, before and after:
+
+```
+before: #messageDiff:1  #roomMetadataDiff:1  #invalidate:5
+after:  #messageDiff:1  #roomMetadataDiff:1  #roomActivityDiff:1  #invalidate:2
+```
+
+The invalidated NSIDs that disappeared are exactly the three boards:
+`room.getMetadata`, `room.getThreads`, `space.getThreads`. A batch of N
+messages in one room collapses to **one** activity diff (verified end-to-end),
+because each is a superseding snapshot of the same row.
+
+### The probe had to be fixed to see this
+
+`perf/probe-projections.ts` derived its "refetch storm" from a **hardcoded**
+list of the four endpoints the old invalidations named. It therefore kept
+printing ~16 requests per message regardless of the frames actually received —
+it could not observe the change it exists to measure. It now derives the
+follow-up reads from the observed `#invalidate` frames (and reports the frame
+kinds), so the number moves with the code. This is why the R1 table above and
+this one are computed the same way but not comparable across the two commits.
+
+### Why a new frame instead of extending `roomMetadataDiff`
+
+The plan called for extending `roomMetadataDiff`. That frame is **per-user** —
+`#routeRoomMetadataDiff` sends one copy to each affected user's connections,
+because its unread delta is caller-scoped. The board fields are the opposite:
+identical for every reader. Folding them in would put the same board row on the
+wire once per reader, so they ride a **broadcast** frame instead (one per
+connection subscribed to the room, its parent channel, or the space).
+
+Consequently the per-user board field — each row's `unreadCount` / `unread` —
+is patched from the *metadata* frame (which knows that user's delta), not from
+the activity diff. The two frames arrive together for the same event, so neither
+leaves the other's fields stale.
+
+### Pagination: the diff can fail, and says so
+
+Both boards are infinite queries. A patch is only faithful when the room is on
+the cached first page (otherwise the room must displace a row the client never
+loaded) **and** the message advances the room's `latestTimestamp` — the board
+column is the room's MAX message time, so a Discord-bridged message carrying an
+old `timestampOverride` does not move the row. In either case the applicator
+returns `undefined` and the router **invalidates that query instead** — the
+pre-diff behaviour. `CacheAdapter` gained `get` for this: choosing between
+patch and refetch requires seeing the previous value.
+
+This is what keeps the optimisation honest: the client never asserts an order
+the server would not return.
+
+### Tests
+
+`bun test --cwd packages/appserver`: **1074 pass, 1 skip, 0 fail**; `tsc
+--noEmit`: 0 errors. `pnpm --filter @roomy-space/sdk test`: **224 pass**;
+`pnpm --filter app-lite check`: 0 errors.
+
+- `invalidation/inferSignals.test.ts` — createMessage emits a `roomActivityDiff`
+  carrying the new message, and the three boards are evicted **without** a
+  client frame while the activity feed is not.
+- `invalidation/router.test.ts` — a batch keeps only the **last** activity diff
+  per room (a superseding snapshot, unlike the delta-carrying
+  `roomMetadataDiff`), and keeps different rooms separate.
+- `sync/handler.test.ts` — a `cacheEvictionOnly` signal never reaches a
+  connection; a `roomActivityDiff` reaches the room + parent + space topics
+  **once**, validated against the published frame schema; and it is withheld
+  from a connection that cannot read the room (the frame carries a message
+  preview and its author).
+- `sdk/src/sync/roomActivityDiff.test.ts` (11) — the patchers move the row to
+  the front keeping the page length, merge the author into `latestMembers` to
+  reproduce the server's 3-newest aggregate, and return a **miss** for the
+  unrepresentable cases (room not on the cached page, non-advancing timestamp).
+- `sdk/src/sync/router.test.ts` — patches a cached board, invalidates one it
+  cannot patch, and leaves uncached ones alone.
+- `e2e/roomActivityFanout.test.ts` (2) — through the real write path: one
+  message produces **zero** board invalidations and one activity diff that
+  satisfies the wire schema; a 5-message batch produces **one** diff carrying
+  the last message. Verified to fail on pre-R2 code (the diff frame never
+  arrives, so the test times out).
 
 
 ## Assessment: decoupling the `sendEvents` 200 from materialisation

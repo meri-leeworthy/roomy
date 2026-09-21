@@ -23,6 +23,7 @@ import type {
   InvalidationEvent,
   InvalidationRouter,
   QueryNsid,
+  RoomActivityDiff,
 } from "../invalidation/types.ts";
 import { allowsPublicJoin, roomAccess, spaceAccess } from "../auth/access.ts";
 import { federatedRoomAccess } from "../auth/federation.ts";
@@ -480,6 +481,8 @@ export class SyncManager {
         this.#routeMentionDiff(event.signal);
       } else if (event.kind === "roomMetadataDiff") {
         this.#routeRoomMetadataDiff(event.signal);
+      } else if (event.kind === "roomActivityDiff") {
+        this.#routeRoomActivityDiff(event.signal);
       } else if (event.kind === "queryInvalidation") {
         this.#routeQueryInvalidation(event.signal);
       }
@@ -509,10 +512,16 @@ export class SyncManager {
     // until they reconnect. The access decision is memoized with a short TTL
     // (see #canReceiveRoomContent) so the hot path doesn't do a DB round-trip
     // per frame per connection.
-    void this.#deliverMessageDiff(signal.roomId, connIds, frame);
+    void this.#deliverRoomFrame(signal.roomId, connIds, frame);
   }
 
-  async #deliverMessageDiff(
+  /**
+   * Deliver a room-scoped content frame to the connections that may still read
+   * the room. Shared by `#messageDiff` (message bodies) and
+   * `#roomActivityDiff` (message previews) — both carry message content, so
+   * both need the same delivery-time re-check.
+   */
+  async #deliverRoomFrame(
     roomId: string,
     connIds: Set<number>,
     frame: Frame,
@@ -523,6 +532,48 @@ export class SyncManager {
       if (!(await this.#canReceiveRoomContent(roomId, conn.did))) continue;
       conn.send(frame);
     }
+  }
+
+  /**
+   * Deliver a room-activity patch to every connection watching one of the
+   * boards it reorders: the room itself, its parent channel (threads only —
+   * the parent's board and `recentThreads` both list the thread), and the
+   * space (the space index board).
+   *
+   * One frame per connection, not one per topic: a client typically has all
+   * three topics at once, and the frame is identical for each.
+   *
+   * Delivery is gated on room read access, exactly like `#messageDiff`. The
+   * frame carries a message preview and its author, so a connection watching
+   * the space topic must not receive the row for a room it cannot read — and
+   * the check (memoised per user+room) also stops a revoked user from
+   * continuing to receive previews mid-connection.
+   */
+  #routeRoomActivityDiff(signal: RoomActivityDiff): void {
+    const connIds = new Set<number>();
+    const topics = [topicKey("room", signal.roomId), topicKey("space", signal.spaceId)];
+    if (signal.parentChannelId) {
+      topics.push(topicKey("room", signal.parentChannelId));
+    }
+    for (const topic of topics) {
+      for (const connId of this.#topicIndex.get(topic) ?? []) connIds.add(connId);
+    }
+    if (connIds.size === 0) return;
+
+    const frame = messageFrame("#roomActivityDiff", {
+      spaceId: signal.spaceId,
+      roomId: signal.roomId,
+      kind: signal.kind,
+      ...(signal.name != null ? { name: signal.name } : {}),
+      ...(signal.parentChannelId != null
+        ? { parentChannelId: signal.parentChannelId }
+        : {}),
+      ...(signal.parentChannelName != null
+        ? { parentChannelName: signal.parentChannelName }
+        : {}),
+      activity: signal.activity,
+    });
+    void this.#deliverRoomFrame(signal.roomId, connIds, frame);
   }
 
   #routeMentionDiff(
@@ -597,8 +648,15 @@ export class SyncManager {
       nsid: QueryNsid;
       params: Record<string, string>;
       affectedUser?: UserDid;
+      cacheEvictionOnly?: boolean;
     },
   ): void {
+    // Cache-only signals exist for the server-side response cache (which the
+    // eviction listener handles). The client is being kept fresh by a diff
+    // frame instead, so telling it to refetch is exactly the cost this flag
+    // exists to avoid.
+    if (signal.cacheEvictionOnly) return;
+
     const topics = topicsForSignal(signal);
 
     // getSpaces has no specific topic — broadcast to ALL connections

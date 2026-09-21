@@ -22,7 +22,7 @@ function mockConnection(): {
   };
 }
 
-function mockAdapter(): {
+function mockAdapter(cached: Map<string, unknown> = new Map()): {
   adapter: CacheAdapter;
   invalidate: ReturnType<typeof vi.fn>;
   patch: ReturnType<typeof vi.fn>;
@@ -32,6 +32,11 @@ function mockAdapter(): {
   const patch = vi.fn((_key: QueryKey, _patcher: CachePatcher<never>) => {});
   const patchAll = vi.fn((_key: QueryKey, _patcher: CachePatcher<never>) => {});
   const adapter: CacheAdapter = {
+    // Keyed by the canonical JSON form of the query key, so a test seeds a
+    // "cached entry" for the key a router is about to read.
+    get<T>(key: QueryKey): T | undefined {
+      return cached.get(JSON.stringify(key)) as T | undefined;
+    },
     invalidate,
     patch<T>(_key: QueryKey, patcher: CachePatcher<T>) {
       patch(_key, patcher as unknown as CachePatcher<never>);
@@ -129,10 +134,12 @@ describe("SyncRouter", () => {
       }),
     );
 
-    // One frame → two exact-key patch calls (room.getMetadata,
-    // space.getMetadata) + a prefix-matched patchAll (getSpaces — any
-    // param variant, e.g. `?includeLeft=true`).
-    expect(patch).toHaveBeenCalledTimes(2);
+    // room.getMetadata + space.getMetadata + the space board's unread row =
+    // three exact-key patch calls; getSpaces is prefix-matched via patchAll.
+    // The board row (space.getThreads) is patched from THIS frame rather than
+    // the broadcast #roomActivityDiff, because unreadCount/unread are
+    // caller-scoped and only this per-user frame carries the delta.
+    expect(patch).toHaveBeenCalledTimes(3);
     expect(patchAll).toHaveBeenCalledTimes(1);
 
     const keys = patch.mock.calls.map((c) => c[0] as QueryKey);
@@ -142,6 +149,10 @@ describe("SyncRouter", () => {
     ]);
     expect(keys[1]).toEqual([
       "space.roomy.space.getMetadata",
+      { spaceId: "did:web:space.example.com" },
+    ]);
+    expect(keys[2]).toEqual([
+      "space.roomy.space.getThreads",
       { spaceId: "did:web:space.example.com" },
     ]);
     // getSpaces patching is prefix-matched, not exact-key.
@@ -214,9 +225,11 @@ describe("SyncRouter", () => {
     );
 
     // room.getMetadata (thread) + room.getMetadata (parent channel) +
-    // space.getMetadata = three exact-key patch calls; getSpaces is
-    // prefix-matched via patchAll.
-    expect(patch).toHaveBeenCalledTimes(3);
+    // space.getMetadata + the space board row + the parent channel's thread
+    // board row = five exact-key patch calls; getSpaces is prefix-matched via
+    // patchAll. Both boards' rows are patched here because their unread fields
+    // are caller-scoped (absent from the broadcast #roomActivityDiff).
+    expect(patch).toHaveBeenCalledTimes(5);
     expect(patchAll).toHaveBeenCalledTimes(1);
     expect(patchAll.mock.calls[0]?.[0]).toEqual([
       "space.roomy.space.getSpaces",
@@ -235,6 +248,16 @@ describe("SyncRouter", () => {
     expect(keys[2]).toEqual([
       "space.roomy.space.getMetadata",
       { spaceId: "did:web:space.example.com" },
+    ]);
+    // The space index board's row for the THREAD (not the channel).
+    expect(keys[3]).toEqual([
+      "space.roomy.space.getThreads",
+      { spaceId: "did:web:space.example.com" },
+    ]);
+    // The parent channel's thread board.
+    expect(keys[4]).toEqual([
+      "space.roomy.room.getThreads",
+      { roomId: "01CHANNEL" },
     ]);
 
     // The parent-channel patcher bumps unreadThreadCount.
@@ -306,7 +329,132 @@ describe("SyncRouter", () => {
     expect(onValidationError.mock.calls[0]?.[0]?.frameType).toBe("#invalidate");
   });
 
-  it("delegates unknown frame types to onUnknownFrame", () => {
+  it("patches the cached boards from a #roomActivityDiff and leaves them alone when uncached", () => {
+    const spaceKey = JSON.stringify([
+      "space.roomy.space.getThreads",
+      { spaceId: "did:web:space.example.com" },
+    ]);
+    const roomKey = JSON.stringify([
+      "space.roomy.room.getThreads",
+      { roomId: "01CHANNEL" },
+    ]);
+    const board = {
+      id: "01THREAD",
+      kind: "thread",
+      activity: {
+        latestTimestamp: "2026-09-21T07:00:00.000Z",
+        latestMembers: [],
+      },
+    };
+    const cached = new Map<string, unknown>([
+      [spaceKey, { pages: [{ rooms: [board] }], pageParams: [undefined] }],
+      [roomKey, { pages: [{ threads: [board] }], pageParams: [undefined] }],
+    ]);
+    const { conn, emit } = mockConnection();
+    const { adapter, invalidate, patch } = mockAdapter(cached);
+    const router = new SyncRouter(conn as SyncConnection, adapter);
+    router.start();
+
+    emit(
+      makeFrame("#roomActivityDiff", {
+        spaceId: "did:web:space.example.com",
+        roomId: "01THREAD",
+        kind: "thread",
+        parentChannelId: "01CHANNEL",
+        activity: {
+          latestTimestamp: "2026-09-21T10:00:00.000Z",
+          latestMembers: [{ did: "did:plc:newcomer", name: null, avatar: null }],
+        },
+      }),
+    );
+
+    // Both boards were patched from their cached page; nothing was invalidated
+    // — that is the whole point of the diff.
+    expect(invalidate).not.toHaveBeenCalled();
+    const patchedKeys = patch.mock.calls.map((c) => c[0] as QueryKey);
+    expect(patchedKeys).toContainEqual([
+      "space.roomy.space.getThreads",
+      { spaceId: "did:web:space.example.com" },
+    ]);
+    expect(patchedKeys).toContainEqual([
+      "space.roomy.room.getThreads",
+      { roomId: "01CHANNEL" },
+    ]);
+    // The parent channel's recentThreads list is patched too.
+    expect(patchedKeys).toContainEqual([
+      "space.roomy.room.getMetadata",
+      { roomId: "01CHANNEL" },
+    ]);
+
+    // The board patch moved the room to the front with the new activity.
+    const spacePatcher = patch.mock.calls.find(
+      (c) => (c[0] as QueryKey)[0] === "space.roomy.space.getThreads",
+    )![1] as CachePatcher<{ pages: Array<{ rooms: typeof board[] }> }>;
+    const result = spacePatcher(cached.get(spaceKey) as never)!;
+    expect(result.pages[0]!.rooms[0]!.activity.latestTimestamp).toBe(
+      "2026-09-21T10:00:00.000Z",
+    );
+  });
+
+  it("invalidates a cached board it cannot patch, and skips boards that aren't cached", () => {
+    // The thread is absent from the cached space board (so a patch would be an
+    // approximation) — the router must refetch it instead. No room board is
+    // cached at all, so there is nothing to correct there.
+    const spaceKey = JSON.stringify([
+      "space.roomy.space.getThreads",
+      { spaceId: "did:web:space.example.com" },
+    ]);
+    const cached = new Map<string, unknown>([
+      [
+        spaceKey,
+        {
+          pages: [
+            {
+              rooms: [
+                {
+                  id: "01OTHER",
+                  kind: "thread",
+                  activity: { latestTimestamp: "2026-09-21T09:00:00.000Z", latestMembers: [] },
+                },
+              ],
+            },
+          ],
+          pageParams: [undefined],
+        },
+      ],
+    ]);
+    const { conn, emit } = mockConnection();
+    const { adapter, invalidate, patch } = mockAdapter(cached);
+    const router = new SyncRouter(conn as SyncConnection, adapter);
+    router.start();
+
+    emit(
+      makeFrame("#roomActivityDiff", {
+        spaceId: "did:web:space.example.com",
+        roomId: "01THREAD",
+        kind: "thread",
+        parentChannelId: "01CHANNEL",
+        activity: {
+          latestTimestamp: "2026-09-21T10:00:00.000Z",
+          latestMembers: [{ did: "did:plc:newcomer", name: null, avatar: null }],
+        },
+      }),
+    );
+
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate.mock.calls[0]?.[0]).toEqual([
+      "space.roomy.space.getThreads",
+      { spaceId: "did:web:space.example.com" },
+    ]);
+    // The uncached room board is left alone — no invalidation, no patch.
+    expect(
+      patch.mock.calls.some(
+        (c) => (c[0] as QueryKey)[0] === "space.roomy.room.getThreads",
+      ),
+    ).toBe(false);
+  });
+
+  it("ignores unknown frame types to onUnknownFrame", () => {
     const { conn, emit } = mockConnection();
     const { adapter } = mockAdapter();
     const onUnknownFrame = vi.fn();

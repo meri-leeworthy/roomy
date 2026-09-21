@@ -378,6 +378,81 @@ describe("Router", () => {
     expect(events[0]).toHaveLength(1);
   });
 
+  it("keeps only the LAST roomActivityDiff per room (a superseding snapshot, not a delta)", () => {
+    const router = new Router();
+    const { events, listener } = collect();
+    router.subscribe(listener);
+
+    const activity = (messageId: string, ts: string): InvalidationEvent => ({
+      kind: "roomActivityDiff",
+      signal: {
+        spaceId: STREAM_DID,
+        roomId: "01ROOM" as Ulid,
+        kind: "channel",
+        activity: {
+          latestTimestamp: ts,
+          latestMembers: [{ did: USER_DID, name: null, avatar: null }],
+          latestMessage: {
+            id: messageId,
+            content: messageId,
+            author: { did: USER_DID, name: null, avatar: null },
+            timestamp: ts,
+          },
+        },
+      },
+    });
+
+    // Three messages in one room — each diff is a full snapshot of the room's
+    // latest activity, so only the newest is true. Collapsing keeps the first
+    // slot (emission order) but holds the LAST payload.
+    router.emit([
+      activity("01MSG1", "2026-09-21T10:00:00.000Z"),
+      activity("01MSG2", "2026-09-21T10:01:00.000Z"),
+      activity("01MSG3", "2026-09-21T10:02:00.000Z"),
+    ]);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toHaveLength(1);
+    const kept = events[0]![0]!;
+    expect(kept.kind).toBe("roomActivityDiff");
+    if (kept.kind === "roomActivityDiff") {
+      expect(kept.signal.activity.latestMessage?.id).toBe("01MSG3");
+      expect(kept.signal.activity.latestTimestamp).toBe("2026-09-21T10:02:00.000Z");
+    }
+  });
+
+  it("keeps roomActivityDiffs for DIFFERENT rooms separate", () => {
+    const router = new Router();
+    const { events, listener } = collect();
+    router.subscribe(listener);
+
+    const activity = (roomId: string, messageId: string): InvalidationEvent => ({
+      kind: "roomActivityDiff",
+      signal: {
+        spaceId: STREAM_DID,
+        roomId: roomId as Ulid,
+        kind: "channel",
+        activity: {
+          latestTimestamp: "2026-09-21T10:00:00.000Z",
+          latestMembers: [],
+          latestMessage: {
+            id: messageId,
+            content: messageId,
+            author: { did: USER_DID, name: null, avatar: null },
+            timestamp: "2026-09-21T10:00:00.000Z",
+          },
+        },
+      },
+    });
+
+    router.emit([
+      activity("01ROOM1AAAAAAAAAAAAAA000", "01MSG1"),
+      activity("01ROOM2BBBBBBBBBBBBBB000", "01MSG2"),
+    ]);
+
+    expect(events[0]).toHaveLength(2);
+  });
+
   it("keeps invalidations that differ by affectedUser separate", async () => {
     const router = new Router();
     const { events, listener } = collect();

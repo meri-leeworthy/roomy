@@ -260,15 +260,38 @@ export function dedupeSignals(
 ): InvalidationEvent[] {
   if (signals.length < 2) return [...signals];
   const seen = new Set<string>();
+  /** Index of the kept activity diff for each (space, room) — see below. */
+  const activityAt = new Map<string, number>();
   const out: InvalidationEvent[] = [];
   for (const signal of signals) {
-    if (signal.kind !== "queryInvalidation") {
+    if (signal.kind === "queryInvalidation") {
+      const key = `${signal.signal.nsid}\u0000${signal.signal.affectedUser ?? ""}\u0000${canonicalParams(signal.signal.params)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       out.push(signal);
       continue;
     }
-    const key = `${signal.signal.nsid}\u0000${signal.signal.affectedUser ?? ""}\u0000${canonicalParams(signal.signal.params)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    // `roomActivityDiff` is a superseding STATE SNAPSHOT — the board row as it
+    // stands after this message — not an incremental op. A batch of N messages
+    // in one room therefore emits N snapshots of which only the last is true
+    // (the room's newest activity wins), so keep the last per (space, room),
+    // replacing the earlier one IN PLACE to preserve emission order.
+    //
+    // This is safe for exactly the reason `roomMetadataDiff` is exempt: that
+    // frame carries a DELTA, where dropping one would silently lose an
+    // increment, whereas dropping a superseded snapshot loses nothing.
+    if (signal.kind === "roomActivityDiff") {
+      const { spaceId, roomId } = signal.signal;
+      const key = `${spaceId}\u0000${roomId}`;
+      const at = activityAt.get(key);
+      if (at === undefined) {
+        activityAt.set(key, out.length);
+        out.push(signal);
+      } else {
+        out[at] = signal;
+      }
+      continue;
+    }
     out.push(signal);
   }
   return out;

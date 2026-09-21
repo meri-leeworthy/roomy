@@ -16,7 +16,8 @@ import { type } from "arktype";
 import { Body as InvalidateBody } from "../schemas/frames/invalidate";
 import { Body as MessageDiffBody } from "../schemas/frames/messageDiff";
 import { Body as RoomMetadataDiffBody } from "../schemas/frames/roomMetadataDiff";
-import type { CacheAdapter } from "../cache/adapter";
+import { Body as RoomActivityDiffBody } from "../schemas/frames/roomActivityDiff";
+import type { CacheAdapter, QueryKey } from "../cache/adapter";
 import { queryKey } from "../cache/query-key";
 import { applyMessageDiff, type Message } from "./diff";
 import {
@@ -29,12 +30,25 @@ import {
   type GetSpacesResponse,
   type SpaceMetadataResponse,
 } from "./roomMetadataDiff";
+import {
+  patchSpaceBoard,
+  patchRoomBoard,
+  patchRecentThreads,
+  patchSpaceBoardUnread,
+  patchRoomBoardUnread,
+  type RoomActivityPatch,
+  type InfiniteData,
+  type SpaceThreadsData,
+  type RoomThreadsData,
+} from "./roomActivityDiff";
 import type { SyncConnection, SyncFrame, Unsubscribe } from "./connection";
 
 const GET_MESSAGES_NSID = "space.roomy.room.getMessages" as const;
 const ROOM_METADATA_NSID = "space.roomy.room.getMetadata" as const;
 const GET_SPACES_NSID = "space.roomy.space.getSpaces" as const;
 const SPACE_METADATA_NSID = "space.roomy.space.getMetadata" as const;
+const SPACE_THREADS_NSID = "space.roomy.space.getThreads" as const;
+const ROOM_THREADS_NSID = "space.roomy.room.getThreads" as const;
 
 export interface SyncRouterOptions {
   /**
@@ -163,9 +177,90 @@ export class SyncRouter {
         queryKey(SPACE_METADATA_NSID, { spaceId: parsed.spaceId }),
         (prev) => patchSpaceMetadata(prev, parsed.roomId, patch),
       );
+      // The boards render `unreadCount`/`unread` per row too, and those fields
+      // are absent from #roomActivityDiff (they are caller-scoped) — so patch
+      // them from this per-user frame, exactly like the sidebar above. A
+      // message in a thread bumps the THREAD's row, not the channel's, so the
+      // space board is patched with the room that actually received it.
+      this.#adapter.patch<Parameters<typeof patchSpaceBoardUnread>[0]>(
+        queryKey(SPACE_THREADS_NSID, { spaceId: parsed.spaceId }),
+        (prev) => patchSpaceBoardUnread(prev, parsed.roomId, parsed.delta),
+      );
+      if (parsed.parentChannelId) {
+        this.#adapter.patch<Parameters<typeof patchRoomBoardUnread>[0]>(
+          queryKey(ROOM_THREADS_NSID, { roomId: parsed.parentChannelId }),
+          (prev) => patchRoomBoardUnread(prev, parsed.roomId, parsed.delta),
+        );
+      }
+      return;
+    }
+
+    if (t === "#roomActivityDiff") {
+      const parsed = RoomActivityDiffBody(frame.body);
+      if (parsed instanceof type.errors) {
+        this.#opts.onValidationError?.({
+          frameType: t,
+          summary: parsed.summary,
+          raw: frame.body,
+        });
+        return;
+      }
+      this.#applyRoomActivityDiff(parsed);
       return;
     }
 
     this.#opts.onUnknownFrame?.(frame);
+  }
+
+  /**
+   * Apply a `#roomActivityDiff`: the room's board row moved to the front of
+   * every activity-ordered view that shows it.
+   *
+   * Each view is either patched in place or invalidated, never both:
+   *   - the space board and the parent channel's thread board are PAGES, and a
+   *     patch is only faithful when the room is on the cached first page and
+   *     the message advanced its timestamp (see `roomActivityDiff.ts`). When it
+   *     isn't, the query is invalidated — the pre-diff behaviour.
+   *   - `recentThreads` exists only on the parent channel's metadata, and only
+   *     for threads, so a channel message leaves it untouched.
+   */
+  #applyRoomActivityDiff(patch: RoomActivityPatch): void {
+    this.#applyOrInvalidate<InfiniteData<SpaceThreadsData>>(
+      queryKey(SPACE_THREADS_NSID, { spaceId: patch.spaceId }),
+      (prev) => patchSpaceBoard(prev, patch),
+    );
+
+    // Threads only: the parent channel's board and its in-chat thread list.
+    const parentId = patch.parentChannelId;
+    if (!parentId) return;
+
+    this.#applyOrInvalidate<InfiniteData<RoomThreadsData>>(
+      queryKey(ROOM_THREADS_NSID, { roomId: parentId }),
+      (prev) => patchRoomBoard(prev, patch),
+    );
+
+    const parentMetaKey = queryKey(ROOM_METADATA_NSID, { roomId: parentId });
+    this.#adapter.patch<RoomMetadataResponse>(parentMetaKey, (prev) =>
+      patchRecentThreads(prev, patch),
+    );
+  }
+
+  /**
+   * Patch a cached entry from a diff, or invalidate it when the diff cannot
+   * represent the resulting state (the applicator returns `undefined`).
+   *
+   * Reading first is what makes the choice possible: an absent entry needs
+   * neither (nothing is cached to correct), while a present-but-unapplicable
+   * one must refetch rather than be left with a stale order.
+   */
+  #applyOrInvalidate<T>(key: QueryKey, apply: (prev: T | undefined) => T | undefined): void {
+    const prev = this.#adapter.get<T>(key);
+    if (prev === undefined) return;
+    const next = apply(prev);
+    if (next === undefined) {
+      this.#adapter.invalidate(key);
+      return;
+    }
+    this.#adapter.patch<T>(key, () => next);
   }
 }

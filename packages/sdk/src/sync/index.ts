@@ -32,3 +32,11 @@ export {
   patchSpaces,
   patchSpaceMetadata,
 } from "./roomMetadataDiff";
+export {
+  patchSpaceBoard,
+  patchRoomBoard,
+  patchRecentThreads,
+  patchSpaceBoardUnread,
+  patchRoomBoardUnread,
+  type RoomActivityPatch,
+} from "./roomActivityDiff";

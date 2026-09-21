@@ -38,6 +38,17 @@ export type CachePatcher<T> = (prev: T | undefined) => T | undefined;
  */
 export interface CacheAdapter {
   /**
+   * Read the cached value for the exact key, or `undefined` when absent.
+   *
+   * Needed by routers that must choose between patching an entry and
+   * invalidating it: a diff can only be applied when the entry is cached AND
+   * the diff can represent the resulting state (see `#roomActivityDiff`, whose
+   * paginated boards cannot always express a move). Deciding that requires
+   * seeing the previous value, which the write-only `patch` cannot provide.
+   */
+  get<T>(key: QueryKey): T | undefined;
+
+  /**
    * Mark every cached entry whose key starts with `key` as stale,
    * triggering whatever refetch behaviour the underlying cache is
    * configured with.

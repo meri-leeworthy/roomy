@@ -26,6 +26,7 @@ import { openReadStateDb, openSpaceDb, tryOpenGlobalDb } from "../db/db.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
 import { getRoomReadPositionUsers } from "../queries/readPositions.ts";
 import { getMentionedDidsForMessage, resolveReplyToAuthors } from "../queries/mentions.ts";
+import { readRoomBoardFacts, roomActivityDiff } from "./roomActivity.ts";
 
 // ─── Public API ─────────────────────────────────────────────────────────
 
@@ -71,6 +72,25 @@ function invalidate(
   return {
     kind: "queryInvalidation",
     signal: { nsid, params, affectedUser },
+  };
+}
+
+/**
+ * Invalidate for the server-side response cache ONLY — no `#invalidate` frame
+ * is sent to connected clients.
+ *
+ * Used where a query's cached *body* is stale but connected clients are kept
+ * fresh by a diff frame instead: the client patches from the diff (no refetch),
+ * while a client loading the page fresh has no diff to apply and must not be
+ * served the stale cached body. See `QueryInvalidation.cacheEvictionOnly`.
+ */
+function evictOnly(
+  nsid: QueryNsid,
+  params: Record<string, string>,
+): InvalidationEvent {
+  return {
+    kind: "queryInvalidation",
+    signal: { nsid, params, cacheEvictionOnly: true },
   };
 }
 
@@ -405,20 +425,36 @@ async function handleCreateMessage(
     }
   }
 
-  // recentThreads / room.getThreads may have changed (the new message is
-  // the latest activity in the room). Unread count is handled by the diff
-  // above, so this invalidation is only for the thread-activity fields.
-  signals.push(invalidate("space.roomy.room.getMetadata", { roomId }));
-  signals.push(invalidate("space.roomy.room.getThreads", { roomId }));
+  // The new message is now this room's latest activity, which reorders the
+  // activity-ordered views: the boards (`space.getThreads`, `room.getThreads`)
+  // and `room.getMetadata.recentThreads`. Those are ORDERED LISTS, so a diff
+  // rather than an invalidation is what keeps them fresh — broadcast the one
+  // row that moved and let each client move it, instead of making every reader
+  // refetch every board (see `RoomActivityDiff`).
+  if (message) {
+    const facts = await readRoomBoardFacts(
+      db ?? openSpaceDb(event.streamDid),
+      roomId,
+    );
+    signals.push({
+      kind: "roomActivityDiff",
+      signal: roomActivityDiff(spaceId, roomId, facts, message),
+    });
+  }
 
-  // The space index board (space.getThreads) re-orders on new activity
-  // (latest timestamp per room) and gains/clears unread dots for every
-  // subscriber — broadcast, not caller-scoped.
-  signals.push(invalidate("space.roomy.space.getThreads", { spaceId }));
+  // The boards' CACHED bodies are still stale (their ordering changed), so the
+  // server-side response cache must drop them — but a connected client is
+  // patching from the diff above and must not be told to refetch. Evict
+  // without a frame.
+  signals.push(evictOnly("space.roomy.room.getMetadata", { roomId }));
+  signals.push(evictOnly("space.roomy.room.getThreads", { roomId }));
+  signals.push(evictOnly("space.roomy.space.getThreads", { spaceId }));
 
   // A new message is a new activity-feed item (and bumps the feed's unread
-  // counts for every subscriber). The activity feed is a global per-user
-  // query, so invalidate with no params — broadcast to all users.
+  // counts for every subscriber). The feed hydrates full message media/link
+  // embeds per item, which the activity diff does not carry, so it stays a
+  // broadcast invalidation. The activity feed is a global per-user query, so
+  // invalidate with no params — broadcast to all users.
   signals.push(invalidate("space.roomy.space.getActivityFeed", {}));
 
   // A message in a thread may update the author's `activeThreads` in the

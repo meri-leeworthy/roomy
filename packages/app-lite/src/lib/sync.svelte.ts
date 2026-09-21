@@ -144,6 +144,15 @@ export function createSyncContext(deps: {
         if (typeof body.roomId === "string" && typeof body.seq === "number") {
           onMessageDiff?.(body.roomId, body.seq);
         }
+      } else if (t === "#roomActivityDiff") {
+        const body = frame.body as {
+          spaceId?: string;
+          roomId?: string;
+          kind?: string;
+        };
+        log(
+          `[roomActivityDiff] spaceId=${body.spaceId} roomId=${body.roomId} kind=${body.kind}`,
+        );
       } else if (t === "#invalidate") {
         const body = frame.body as { nsid?: string; params?: unknown };
         log(
