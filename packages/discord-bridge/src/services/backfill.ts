@@ -17,7 +17,7 @@ import { createLogger } from "../logger.ts";
 import { getCapacityGate } from "../roomy/capacity.ts";
 import type { RoomyGateway } from "../roomy/gateway.ts";
 import { ingestDiscordMessage } from "./message-ingestion.ts";
-import { ensureRoomyChannel } from "./room-sync.ts";
+import { ensureRoomyChannel, syncInitialStructure } from "./room-sync.ts";
 
 const log = createLogger("backfill");
 
@@ -95,6 +95,21 @@ export async function runBackfill(
 		await ensureRoomyThreads(discord, repo, roomy, configs);
 	} catch (err) {
 		log.error("ensureRoomyThreads failed", err);
+	}
+
+	// One-shot: apply the guild's category structure + channel order to each
+	// bridged space's sidebar. Runs HERE — on the initial-sync path (gateway
+	// READY, /connect-roomy-space, /roomy-backfill) — and nowhere else. The
+	// live channel handlers deliberately do not call it (see room-sync.ts),
+	// so an ongoing Discord channel event cannot re-sync or re-order the
+	// structure. `syncInitialStructure` additionally no-ops once the
+	// (guild, space) marker is set, which covers a second backfill run and a
+	// process restart. Ordered AFTER room creation so every bridged channel
+	// already has its Roomy room id to place in a category.
+	try {
+		await syncInitialStructure(discord, repo, roomy, configs);
+	} catch (err) {
+		log.error("syncInitialStructure failed", err);
 	}
 
 	// Backfill is per (channel, space) — each pair has its own cursor.

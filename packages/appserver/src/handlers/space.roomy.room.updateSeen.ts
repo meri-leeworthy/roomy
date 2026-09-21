@@ -9,7 +9,6 @@
 import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
 import { resetNotificationState } from "../queries/notificationState.ts";
 import { isThread, upsertUserThreadActivity } from "../queries/userActiveThreads.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import type { AuthCtx, ProcedureHandler, QueryParams } from "../xrpc/types.ts";
@@ -50,35 +49,13 @@ export const updateSeenHandler: ProcedureHandler<UpdateSeenBody, void> = async (
     );
   }
 
-  // Warm this user's space materializers in the background. We deliberately do
-  // NOT await: recording a read position only needs the on-disk materialisation
-  // (which persists across restarts), so blocking here on a cold
-  // re-materialise is what made the first `updateSeen` for a space slow. The reads
-  // below run against whatever is already materialised; a mid-backfill space
-  // just yields a slightly stale watermark that self-corrects as live messages
-  // arrive.
-  void hydrateUserMembership(userDid).catch(() => {});
-
   const db = await openSpaceDbForEntity(roomId);
   if (!db) {
     throw new XrpcError(404, "NotFound", `Room not found: ${roomId}`);
   }
   const mainDb = openReadStateDb();
-  let access: Awaited<ReturnType<typeof requireRoomRead>>;
-  try {
-    access = await requireRoomRead(db, roomId, userDid);
-  } catch (err) {
-    // The room may not be materialised yet on a cold (lazy) space if no read
-    // handler ran first. Fall back to awaiting hydration once, then retry —
-    // hydrateUserMembership dedups in-flight, so this shares the background
-    // call kicked off above rather than doing the work twice.
-    if (err instanceof XrpcError && err.status === 404) {
-      await hydrateUserMembership(userDid);
-      access = await requireRoomRead(db, roomId, userDid);
-    } else {
-      throw err;
-    }
-  }
+  const access: Awaited<ReturnType<typeof requireRoomRead>> =
+    await requireRoomRead(db, roomId, userDid);
 
   let seenUpTo: string;
   let unreadCount: number;

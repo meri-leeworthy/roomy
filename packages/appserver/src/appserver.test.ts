@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createAppserver, type AppserverHandle } from "./appserver.ts";
 import { testAuthVerifier } from "./xrpc/auth.ts";
 import { closeDb } from "./db/db.ts";
-import { _resetHydrationInflight } from "./hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "./embed/sweeper.ts";
 import { recordProcessStart } from "./fatal.ts";
 import { _resetProfileStoreCache } from "./queries/profileStore.ts";
@@ -19,7 +18,6 @@ let handle: AppserverHandle | null = null;
 beforeEach(() => {
   // Reset all process-wide singletons so each test gets a clean appserver.
   closeDb();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
   _resetProfileStoreCache();
   _resetProfileNegativeCache();
@@ -56,6 +54,11 @@ describe("createAppserver factory", () => {
     const healthBody = await health.json();
     expect(healthBody.status).toBe("ok");
     expect(healthBody.did).toBe("did:web:test.example");
+    // build_id is always present and never an empty string — the deploy-revision
+    // audit reads this field, and "" is indistinguishable from a real value on
+    // the wire. The chain itself is unit-tested in log.test.ts.
+    expect(healthBody.build_id).toBeTypeOf("string");
+    expect(healthBody.build_id).not.toBe("");
 
     // /.well-known/did.json returns the DID document
     const didDoc = await fetch(`${base}/.well-known/did.json`);
@@ -167,10 +170,9 @@ describe("createAppserver factory", () => {
 
     const base = `http://localhost:${handle.port}`;
 
-    // Anonymous (no X-Test-Did) → empty spaces list without a remote event backend.
-    // Authenticated callers trigger hydrateUserMembership which needs a remote event backend,
-    // so we test the anonymous path here; the authenticated path requires a
-    // remote event backend and is covered by integration tests.
+    // Anonymous (no X-Test-Did) → empty spaces list without a remote event
+    // backend. The authenticated path needs a remote event backend and is
+    // covered by integration tests.
     const res = await fetch(
       `${base}/xrpc/space.roomy.space.getSpaces?includeLeft=false`,
     );
@@ -256,8 +258,8 @@ function seedMinimalSpace(spaceId: string, userDid: string): void {
     `update comp_space set sidebar_config = '{}' where entity = ?`,
     [spaceId],
   );
-  // User entity so hydrateUserMembership has an FK target for joinedSpace
-  // edges without trying to resolve the DID via PLC (no server in tests).
+  // User entity so membership edges have an FK target without trying to
+  // resolve the DID via PLC (no server in tests).
   sp.run("insert or ignore into entities (id, stream_id) values (?, ?)", [userDid, userDid]);
 }
 

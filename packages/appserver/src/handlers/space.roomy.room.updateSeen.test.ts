@@ -11,7 +11,6 @@ import { beforeEach, afterEach, describe, expect, test } from "bun:test";
 import { StreamDid, UserDid, newUlid } from "@roomy-space/sdk";
 
 import { closeDb, openDb, openReadStateDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { updateSeenHandler } from "./space.roomy.room.updateSeen.ts";
 
 const USER = UserDid.assert("did:plc:seen-user");
@@ -36,7 +35,6 @@ let msgB: string;
 beforeEach(async () => {
   closeDb();
 
-  _resetHydrationInflight();
 
   // In-memory singleton so the handler's internal openDb() sees this DB.
   const db = openDb({ path: ":memory:" });
@@ -74,7 +72,6 @@ beforeEach(async () => {
 afterEach(() => {
   closeDb();
 
-  _resetHydrationInflight();
 });
 
 describe("updateSeen", () => {

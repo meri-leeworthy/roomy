@@ -11,7 +11,6 @@
 
 import { createAccessMemo, roomAccessMany } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
 import { getEngagedThreadIds, getReadPositions } from "../queries/readPositions.ts";
 import { parseUserDid, requireSpaceRead } from "../xrpc/authGuards.ts";
@@ -73,11 +72,6 @@ export const getSpaceThreadsHandler: QueryHandler<
     "space.roomy.space.getThreads",
     { "roomy.space_id": spaceId, "roomy.limit": limit },
     async (span) => {
-      if (userDid !== null) {
-        await withSpan("getThreads.hydrateMembership", {}, () =>
-          hydrateUserMembership(userDid),
-        );
-      }
 
       const db = openSpaceDb(spaceId);
       const mainDb = openReadStateDb();

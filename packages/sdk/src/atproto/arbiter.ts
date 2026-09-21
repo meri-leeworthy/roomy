@@ -6,9 +6,9 @@ import { ArbiterProxyError } from "../transport/errors";
  *
  * A space's stewarded account lives on a PDS the client does not hold
  * credentials for. The only way to reach that PDS is through the space's
- * arbiter, via the `town.muni.arbiter.proxy` procedure: the caller mints a
+ * arbiter, via the `space.roomy.authComplete.arbiter.proxy` procedure: the caller mints a
  * short-lived serviceAuth token (`aud` = the arbiter server DID, `lxm` =
- * `town.muni.arbiter.proxy`), sends the proxy request to the arbiter server,
+ * `space.roomy.authComplete.arbiter.proxy`), sends the proxy request to the arbiter server,
  * and the arbiter evaluates it against the space's Rego policy — which grants
  * the space's Roomy admins access — then proxies it to the stewarded account's
  * PDS authenticated as that account.
@@ -131,7 +131,7 @@ export class ArbiterClient {
 
   /**
    * Mint a fresh serviceAuth token scoped to the given arbiter server DID +
-   * the `town.muni.arbiter.proxy` method.
+   * the `space.roomy.authComplete.arbiter.proxy` method.
    *
    * A new token is minted for every request: the arbiter enforces single-use
    * (replay protection on the token `jti`), so a token must never be sent
@@ -141,7 +141,7 @@ export class ArbiterClient {
     const exp = Math.floor(Date.now() / 1000) + TOKEN_LIFETIME_SEC;
     const resp = await this.#agent.com.atproto.server.getServiceAuth({
       aud: arbiterDid,
-      lxm: "town.muni.arbiter.proxy",
+      lxm: "space.roomy.authComplete.arbiter.proxy",
       exp,
     });
     return resp.data.token;
@@ -149,7 +149,7 @@ export class ArbiterClient {
 
   /**
    * Run an XRPC operation against a stewarded account's PDS, proxied through
-   * the space's arbiter's `town.muni.arbiter.proxy` procedure. Returns the
+   * the space's arbiter's `space.roomy.authComplete.arbiter.proxy` procedure. Returns the
    * body of the inner XRPC response (or throws if the operation or its proxy
    * fails).
    */
@@ -157,7 +157,7 @@ export class ArbiterClient {
     const arbiter = await this.resolveArbiter(spaceDid);
     const token = await this.#getProxyToken(arbiter.did);
     const res = await fetch(
-      `${arbiter.url}/xrpc/town.muni.arbiter.proxy`,
+      `${arbiter.url}/xrpc/space.roomy.authComplete.arbiter.proxy`,
       {
         method: "POST",
         headers: {

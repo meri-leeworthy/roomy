@@ -29,6 +29,9 @@ import {
 	type Block,
 	type Facet,
 	type FacetFeature,
+	Did,
+	Ulid,
+	type,
 	utf8ByteLength,
 } from "@roomy-space/sdk";
 import { createLogger } from "../logger.ts";
@@ -299,6 +302,9 @@ function parseBlocks(content: string, ctx: InlineCtx): Block[] {
 		const ordered = /^(\d+)[.)]\s+(.*)$/.exec(trimmed);
 		if (ordered) {
 			const items: { text: string; facets?: Facet[] }[] = [];
+			// The first line's number is the list's start (as in the SDK's
+			// markdown parser); Discord users can continue numbering a list.
+			const start = Number(ordered[1]);
 			while (i < lines.length) {
 				const ln = lines[i];
 				if (ln === undefined) break;
@@ -309,10 +315,15 @@ function parseBlocks(content: string, ctx: InlineCtx): Block[] {
 				items.push(listItem(text, facets));
 				i++;
 			}
-			blocks.push({
-				$type: "space.roomy.richtext.blocks#orderedList" as const,
-				items,
-			});
+			blocks.push(
+				Number.isInteger(start) && start > 1
+					? {
+							$type: "space.roomy.richtext.blocks#orderedList" as const,
+							items,
+							start,
+						}
+					: { $type: "space.roomy.richtext.blocks#orderedList" as const, items },
+			);
 			continue;
 		}
 
@@ -446,7 +457,16 @@ function parseInline(
 			const displayName = ctx.channelNames.get(snowflake) ?? snowflake;
 			const features: FacetFeature[] = [...inherited];
 			const roomyRoomId = ctx.roomyRoomIds.get(snowflake);
-			if (roomyRoomId) {
+			// Only emit a `#roomRef` for a validated (DID, ULID) pair. A
+			// non-DID space or non-ULID room id (stale mapping, malformed
+			// bridge state) would otherwise be persisted here and trusted by
+			// every later reader's internal-link prefetch, which would fire
+			// 404 `getSpaceSummary` queries for it.
+			if (
+				roomyRoomId &&
+				!(Did(ctx.spaceDid) instanceof type.errors) &&
+				!(Ulid(roomyRoomId) instanceof type.errors)
+			) {
 				features.push(
 					{
 						$type: "space.roomy.richtext.facet#roomRef" as const,

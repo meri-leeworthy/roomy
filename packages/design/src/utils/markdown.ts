@@ -1,9 +1,32 @@
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { Did, Ulid, type } from "@roomy-space/sdk";
 
 // Known Roomy domains — bare links to these are treated as internal space/room
-// references and replaced with rich badge components.
-const ROOMY_DOMAINS = new Set(["roomy.space", "a.roomy.space", "roomy.chat"]);
+// references and replaced with rich badge components. Static membership table.
+const ROOMY_DOMAINS: Record<string, true> = {
+  "roomy.space": true,
+  "a.roomy.space": true,
+  "roomy.chat": true,
+};
+
+/**
+ * A bare relative path or Roomy-domain URL is an internal space/room link
+ * only when it carries a valid (DID, ULID?) pair on its path — `/did:plc:…`
+ * or `/did:plc:…/01ABC…`. This rejects app routes (`/watch`, `/profile`,
+ * `/blog`, …) and non-DID path segments (`roomy.space/muni-town`) so they're
+ * never marked internal, which is what would otherwise make the badge
+ * prefetch fire 404 `getSpaceSummary` queries. Mirrors the guard in
+ * `parseInternalLinkHref` (app-lite).
+ */
+function isSpaceRoomPath(pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  const [spaceId, roomId] = parts;
+  if (!spaceId || spaceId === "user") return false;
+  if (Did(spaceId) instanceof type.errors) return false;
+  if (roomId && Ulid(roomId) instanceof type.errors) return false;
+  return true;
+}
 
 marked.use({
   renderer: {
@@ -18,17 +41,19 @@ marked.use({
         : "";
 
       // Mark internal links (starting with /) so the client can replace them
-      // with rich badge components for space/room references.
-      const isInternalLink = !isExternal && href?.startsWith("/");
+      // with rich badge components for space/room references. Only when the
+      // path carries a valid (DID, ULID?) pair — see isSpaceRoomPath.
+      const isInternalLink = !isExternal && href?.startsWith("/") && isSpaceRoomPath(href ?? "");
       const internalAttr = isInternalLink ? ' data-roomy-internal-link="true"' : "";
 
       // Also mark bare links to known Roomy domains (roomy.space, roomy.chat)
-      // so they get the same badge treatment.
+      // so they get the same badge treatment — again only for valid
+      // space/room paths, never app routes or non-DID segments.
       let roomyDomainAttr = "";
       if (isExternal && href) {
         try {
           const url = new URL(href);
-          if (ROOMY_DOMAINS.has(url.hostname)) {
+          if (url.hostname in ROOMY_DOMAINS && isSpaceRoomPath(url.pathname)) {
             roomyDomainAttr = ' data-roomy-internal-link="true"';
           }
         } catch {

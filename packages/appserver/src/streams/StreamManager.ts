@@ -262,9 +262,13 @@ export class StreamManager {
       // 6b. Poke the embed sweeper and the push dispatcher for createMessage
       // events. Both are process-wide background loops the materialiser pokes
       // but never drives inline: embed enrichment and push delivery are
-      // network-bound and must not block sendEvents. sendEvents is only ever
-      // called with live events (the StreamManager owns the only write path),
-      // so there is no backfill gate here.
+      // network-bound and must not block sendEvents.
+      //
+      // `sendEvents` is NOT a live-only path, and it never was: the Discord
+      // bridge replays history through it (backfillChannel →
+      // ingestDiscordMessage). Assuming otherwise is what let the 2026-09-16
+      // replay flood through — see the freshness gate below, which is the
+      // backfill gate this comment used to claim was unnecessary.
       const createMessageEvents = appliedEvents.filter(
         (e) =>
           e.type === "space.roomy.message.createMessage.v0" &&

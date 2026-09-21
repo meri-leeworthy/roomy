@@ -23,7 +23,6 @@ import { createAppserver, type AppserverHandle } from "../appserver.ts";
 import { testAuthVerifier } from "../xrpc/auth.ts";
 import { closeDb, openDb } from "../db/db.ts";
 import { _resetRateLimit } from "../xrpc/rateLimit.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper, stopEmbedSweeper } from "../embed/sweeper.ts";
 import { stopSearchIndexer, _resetSearchIndexer } from "../search/indexer.ts";
 import { stopSearchBackfill, _resetSearchBackfill } from "../search/backfill.ts";
@@ -66,7 +65,6 @@ export async function startAppserver(): Promise<E2eContext> {
   await stopSearchBackfill();
   closeDb();
   _resetRateLimit();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
   _resetSearchIndexer();
   _resetSearchBackfill();
@@ -130,7 +128,6 @@ export async function startAppserver(): Promise<E2eContext> {
   // Register teardown so Bun cleans up after the test.
   afterEach(async () => {
     await handle.close();
-    _resetHydrationInflight();
     _resetEmbedSweeper();
     _resetSearchIndexer();
     _resetSearchBackfill();

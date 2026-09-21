@@ -150,6 +150,7 @@ function invalidateRoom(roomId: Ulid, spaceId: StreamDid): InvalidationEvent[] {
   return [
     invalidate("space.roomy.room.getMetadata", { roomId }),
     invalidate("space.roomy.room.getThreads", { roomId }),
+    invalidate("space.roomy.room.getLinks", { roomId }),
     // Space sidebar may show unread counts for this room.
     invalidate("space.roomy.space.getMetadata", { spaceId }),
     invalidate("space.roomy.space.getSpaces", {}),
@@ -411,6 +412,11 @@ async function handleCreateMessage(
   signals.push(invalidate("space.roomy.room.getMetadata", { roomId }));
   signals.push(invalidate("space.roomy.room.getThreads", { roomId }));
 
+  // A new message may carry a previously-unseen link, which changes the
+  // room's and the space's link index (newest-first ordering + a new URL).
+  signals.push(invalidate("space.roomy.room.getLinks", { roomId }));
+  signals.push(invalidate("space.roomy.space.getLinks", { spaceId }));
+
   // The space index board (space.getThreads) re-orders on new activity
   // (latest timestamp per room) and gains/clears unread dots for every
   // subscriber — broadcast, not caller-scoped.
@@ -492,6 +498,9 @@ async function handleEditMessage(
   signals.push(
     invalidate("space.roomy.space.getThreads", { spaceId: event.streamDid }),
   );
+  // An edit may add/remove link attachments, changing both link indexes.
+  signals.push(invalidate("space.roomy.room.getLinks", { roomId }));
+  signals.push(invalidate("space.roomy.space.getLinks", { spaceId: event.streamDid }));
   // An edited message may change the activity feed's rendered item.
   signals.push(invalidate("space.roomy.space.getActivityFeed", {}));
 
@@ -524,6 +533,8 @@ async function handleDeleteMessage(
     // The space index board (space.getThreads) may drop this room or reorder
     // it when its latest message is deleted — broadcast invalidation.
     invalidate("space.roomy.space.getThreads", { spaceId: event.streamDid }),
+    // The deleted message may have been the only share of a link.
+    invalidate("space.roomy.space.getLinks", { spaceId: event.streamDid }),
     // A deleted message may remove an activity-feed item.
     invalidate("space.roomy.space.getActivityFeed", {}),
   ];
@@ -640,6 +651,7 @@ async function handleMoveMessages(
   signals.push(invalidate("space.roomy.room.getMessages", { roomId: sourceRoomId }));
   signals.push(invalidate("space.roomy.room.getMessages", { roomId: toRoomId }));
   signals.push(invalidate("space.roomy.space.getThreads", { spaceId }));
+  signals.push(invalidate("space.roomy.space.getLinks", { spaceId }));
   signals.push(invalidate("space.roomy.space.getActivityFeed", {}));
 
   return signals;

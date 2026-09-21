@@ -13,7 +13,14 @@
  *   appserver is the recovery admin, so it may do this). Performs no policy
  *   evaluation, so it works while the arbiter is offline.
  * - `town.muni.arbiter.proxy` — drive the policy pipeline over an inner XRPC
- *   request, proxying it to the steward's PDS as the stewarded account.
+ *   request, proxying it to the steward's PDS as the stewarded account. This is
+ *   the built-in *owner/manager* route: it carries no scope gate, so the
+ *   account's installed policy alone decides. The appserver uses it because it
+ *   is the recovery admin of every account it provisions (the default policy
+ *   admits the recovery admin). The scoped `<scope>.arbiter.proxy` routes are
+ *   for OAuth'd end users and additionally require the scope to be trusted and
+ *   the scope's permission-set lexicon to allow the inner request — a narrow
+ *   allowlist that does not cover the appserver's provisioning writes.
  */
 
 import { mintServiceAuth } from "../auth/serviceAuth.ts";
@@ -130,8 +137,10 @@ export async function resetConfig(
 
 /**
  * Proxy an inner XRPC request through the arbiter's policy via
- * `town.muni.arbiter.proxy`. The policy decides whether the request is
- * proxied to the steward's PDS as the stewarded account.
+ * `town.muni.arbiter.proxy` (the built-in owner/manager route; see the module
+ * comment for why the appserver does not use a scoped `*.arbiter.proxy`
+ * route). The policy decides whether the request is proxied to the steward's
+ * PDS as the stewarded account.
  */
 export async function proxy(
   config: ArbiterConfig,

@@ -7,7 +7,6 @@
  */
 
 import { openSpaceDbForEntity } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { resolveProfiles } from "../queries/profileStore.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -37,9 +36,6 @@ export const getReactionsHandler: QueryHandler<
   const userDid = parseUserDid(auth);
   const messageId = requireString(params, "messageId");
 
-  if (userDid !== null) {
-    await hydrateUserMembership(userDid);
-  }
 
   const db = await openSpaceDbForEntity(messageId);
   if (!db) {

@@ -42,6 +42,15 @@ RUN pnpm --filter @roomy-space/sdk build
 # Bun version pinned to .bun-version (1.3.14).
 FROM oven/bun:1.3.14 AS runtime
 
+# Build identity for log records + /health (see
+# packages/appserver/src/telemetry/build.ts). Docker does NOT propagate ENV
+# across stages, so the pair declared in the build stage above is invisible
+# here: ARG RAILWAY_GIT_COMMIT_SHA and the derived BUILD_ID must be
+# re-declared in the stage that actually runs, or the process reports
+# build_id "unknown". ARG is scoped per-stage for exactly this reason.
+ARG RAILWAY_GIT_COMMIT_SHA
+ENV BUILD_ID=${RAILWAY_GIT_COMMIT_SHA%"${RAILWAY_GIT_COMMIT_SHA#??*??????}"}
+
 # Install Litestream for continuous SQLite WAL replication to S3-compatible
 # storage (Railway S3 bucket). Mirrors the discord-bridge setup.
 ARG LITESTREAM_VERSION=0.3.13

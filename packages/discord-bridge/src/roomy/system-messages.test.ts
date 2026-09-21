@@ -19,6 +19,7 @@ function makeGateway(): {
 			sent.push({ spaceDid, event });
 		},
 		sendEvents: async () => {},
+		getSidebar: async () => ({ categories: [] }),
 		subscribe: async () => {},
 		unsubscribe: async () => {},
 		disconnectAll: async () => {},
@@ -95,6 +96,7 @@ describe("sendSystemMessage", () => {
 				throw new Error("XRPC failed (503)");
 			},
 			sendEvents: async () => {},
+			getSidebar: async () => ({ categories: [] }),
 			subscribe: async () => {},
 			unsubscribe: async () => {},
 			disconnectAll: async () => {},

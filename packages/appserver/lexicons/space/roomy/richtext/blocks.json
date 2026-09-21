@@ -92,13 +92,14 @@
     },
     "orderedList": {
       "type": "object",
-      "description": "An ordered (numbered) list.",
+      "description": "An ordered (numbered) list. `start` is the number of the first item; it is omitted when the list starts at 1.",
       "required": ["items"],
       "properties": {
         "items": {
           "type": "array",
           "items": { "type": "ref", "ref": "space.roomy.richtext.blocks#listItem" }
-        }
+        },
+        "start": { "type": "integer", "minimum": 1 }
       }
     },
     "unorderedList": {

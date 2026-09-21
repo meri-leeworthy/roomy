@@ -17,7 +17,6 @@ import { StreamDid, UserDid, newUlid, toBytes } from "@roomy-space/sdk";
 import type { Event } from "@roomy-space/sdk";
 import { ulid } from "ulidx";
 import { openDb, closeDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import { StreamManager } from "./StreamManager.ts";
 import type { DbLike } from "../db/types.ts";
@@ -51,7 +50,6 @@ let poked: PushJob[][];
 
 beforeEach(async () => {
   closeDb();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
   poked = [];
   db = openDb({ path: ":memory:" });

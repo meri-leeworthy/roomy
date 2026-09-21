@@ -241,6 +241,18 @@ describe("blocksToDiscordMarkdown", () => {
 			).toBe("1. first\n2. second");
 		});
 
+		test("ordered list starting past 1 keeps its numbering", () => {
+			expect(
+				blocksToDiscordMarkdown([
+					{
+						$type: "space.roomy.richtext.blocks#orderedList",
+						items: [{ text: "second" }, { text: "third" }],
+						start: 2,
+					},
+				]),
+			).toBe("2. second\n3. third");
+		});
+
 		test("image emits its uri", () => {
 			expect(
 				blocksToDiscordMarkdown([

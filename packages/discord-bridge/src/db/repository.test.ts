@@ -15,16 +15,16 @@ describe("migrations", () => {
 	test("apply cleanly on a fresh database", () => {
 		const db = new Database(":memory:");
 		const result = runMigrations(db);
-		expect(result.applied).toEqual([1, 2, 3, 4, 5, 6, 7]);
-		expect(result.current).toBe(7);
+		expect(result.applied).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+		expect(result.current).toBe(8);
 	});
 
 	test("are idempotent across re-runs", () => {
 		const db = new Database(":memory:");
-		runMigrations(db);
+		const first = runMigrations(db);
 		const second = runMigrations(db);
 		expect(second.applied).toEqual([]);
-		expect(second.current).toBe(7);
+		expect(second.current).toBe(8);
 	});
 });
 
@@ -333,9 +333,19 @@ describe("pending_room_creations", () => {
 describe("event_errors", () => {
 	test("logs and retrieves errors for a space", () => {
 		const r = repo();
-		r.logEventError(SPACE_A, 42, "space.roomy.message.createMessage.v0", "boom");
+		r.logEventError(
+			SPACE_A,
+			42,
+			"space.roomy.message.createMessage.v0",
+			"boom",
+		);
 		r.logEventError(SPACE_A, 43, "space.roomy.message.editMessage.v0", "nope");
-		r.logEventError(SPACE_B, 1, "space.roomy.message.createMessage.v0", "other");
+		r.logEventError(
+			SPACE_B,
+			1,
+			"space.roomy.message.createMessage.v0",
+			"other",
+		);
 
 		const errors = r.getEventErrors(SPACE_A);
 		expect(errors.length).toBe(2);
@@ -357,5 +367,41 @@ describe("event_errors", () => {
 		const filtered = r.getEventErrors(SPACE_A, 100, after + 1);
 		expect(filtered.length).toBe(1);
 		expect(filtered[0]?.errorMessage).toBe("new");
+	});
+});
+
+describe("structure_sync", () => {
+	test("only the first claim wins, scoped per (guild, space)", () => {
+		const r = repo();
+
+		expect(r.claimStructureSync(GUILD, SPACE_A)).toBe(true);
+		expect(r.claimStructureSync(GUILD, SPACE_A)).toBe(false);
+		expect(r.hasClaimedStructureSync(GUILD, SPACE_A)).toBe(true);
+		// A different space, or a different guild, is an independent sync.
+		expect(r.claimStructureSync(GUILD, SPACE_B)).toBe(true);
+		expect(r.claimStructureSync("guild-2", SPACE_A)).toBe(true);
+	});
+
+	test("a released claim can be re-claimed", () => {
+		const r = repo();
+		r.claimStructureSync(GUILD, SPACE_A);
+		expect(r.hasClaimedStructureSync(GUILD, SPACE_A)).toBe(true);
+
+		r.releaseStructureSync(GUILD, SPACE_A);
+		expect(r.hasClaimedStructureSync(GUILD, SPACE_A)).toBe(false);
+		expect(r.claimStructureSync(GUILD, SPACE_A)).toBe(true);
+	});
+
+	test("an applied claim is never released", () => {
+		const r = repo();
+		r.claimStructureSync(GUILD, SPACE_A);
+		r.markStructureSyncApplied(GUILD, SPACE_A);
+
+		// releaseStructureSync exists only for the no-write path; after a
+		// write it must not reopen the sync, or the structure could be
+		// applied a second time.
+		r.releaseStructureSync(GUILD, SPACE_A);
+		expect(r.hasClaimedStructureSync(GUILD, SPACE_A)).toBe(true);
+		expect(r.claimStructureSync(GUILD, SPACE_A)).toBe(false);
 	});
 });

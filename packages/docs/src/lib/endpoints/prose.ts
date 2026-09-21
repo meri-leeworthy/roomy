@@ -225,7 +225,7 @@ export const prose: Record<string, EndpointProse> = {
     },
     notes: [
       "One SQL row, one ban check, no fan-out. Much cheaper than getMetadata.",
-      "No hydrateUserMembership needed — the ban table is space-scoped.",
+      "No per-user membership read — the ban table is space-scoped.",
     ],
   },
   "space.roomy.space.getActivityFeed": {
@@ -250,6 +250,27 @@ export const prose: Record<string, EndpointProse> = {
       "Cursor format is {timestamp}::{roomId} (opaque to clients).",
       "Items are materialized at write time into the activity_item table.",
       "Deleted rooms and inaccessible rooms are silently excluded.",
+    ],
+  },
+  "space.roomy.space.getLinks": {
+    description:
+      "Paginated, newest-first, URL-deduped index of every link shared anywhere in a space, filtered by the caller's read access. A link whose containing room the caller cannot read is omitted — a links view is a cross-room read and must not leak a room the caller cannot read.",
+    auth: "Caller must have read access to the space itself.",
+    params: [
+      { name: "spaceId", type: "string", required: true, description: "DID of the space stream." },
+      { name: "limit", type: "int", required: false, default: "50", description: "Links per page (1-100)." },
+      { name: "cursor", type: "string", required: false, description: "Opaque cursor from previous response." },
+    ],
+    outputSchema: {
+      type: "object",
+      properties: {
+        links: { type: "Array<LinkRow>", description: "Links. Each has: url, roomId, messageId, embed (enriched card, absent when the embed service had no data)." },
+        cursor: { type: "string | undefined", description: "Present when more pages are available." },
+      },
+    },
+    notes: [
+      "A URL shared in two readable rooms appears once (the newest occurrence), so the space index shows each URL a single time.",
+      "Each link returns the real room id, not the message id — the same two-hop join the embed sweeper uses.",
     ],
   },
   "space.roomy.space.createSpace": {
@@ -495,6 +516,27 @@ export const prose: Record<string, EndpointProse> = {
     },
     notes: [
       "Uses a per-request access memo to avoid re-querying space-level membership for each thread.",
+    ],
+  },
+  "space.roomy.room.getLinks": {
+    description:
+      "Paginated, newest-first, URL-deduped index of every link shared in a single room, filtered by the caller's read access. A links view is a cross-room read, so the caller's read access is enforced as for room.getThreads.",
+    auth: "Caller must have read access to the room.",
+    params: [
+      { name: "roomId", type: "string", required: true, description: "ULID of the channel entity." },
+      { name: "limit", type: "int", required: false, default: "50", description: "Links per page (1-100)." },
+      { name: "cursor", type: "string", required: false, description: "Opaque cursor from previous response." },
+    ],
+    outputSchema: {
+      type: "object",
+      properties: {
+        links: { type: "Array<LinkRow>", description: "Links. Each has: url, roomId, messageId, embed (enriched card, absent when the embed service had no data)." },
+        cursor: { type: "string | undefined", description: "Present when more pages are available." },
+      },
+    },
+    notes: [
+      "Each link returns the real room id (not the message id) — the same two-hop join the embed sweeper's invalidation uses.",
+      "The enriched card is null-safe: absent when the embed service had no data.",
     ],
   },
   "space.roomy.room.updateSeen": {

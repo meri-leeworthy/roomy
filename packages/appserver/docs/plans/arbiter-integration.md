@@ -56,7 +56,7 @@ the concrete phases, and the migration strategy for existing DIDs.
     imports an **existing** account by proving control via app password.
   - `town.muni.arbiter.resetPolicy{arbiterDid, policy}` — recovery-admin-only
     install of the root Rego policy.
-  - `town.muni.arbiter.proxy{arbiterDid, target, method, nsid, parameters, body}`
+  - `space.roomy.authComplete.arbiter.proxy{arbiterDid, target, method, nsid, parameters, body}`
     — the catch-all: evaluate the Rego policy over the inner request; on allow,
     proxy to `target` (`did#service`) authenticated as the steward.
 - **Authn:** caller authenticates with a **serviceAuth JWT** (`aud` =
@@ -155,9 +155,15 @@ shim until Phase 4).
      recovery admin). The default policy (`src/arbiter/policy.ts`) allows only
      the space itself and the appserver (the owner) to act on the space DID.
   4. The appserver proxies a `com.atproto.repo.putRecord` of
-     `space.roomy.service/self` (did = appserver) under the new account via
-     `town.muni.arbiter.proxy`, marking it as a Roomy space hosted by the
-     appserver.
+     `space.roomy.service/self` (did = appserver) under the new account via the
+     arbiter's **built-in** `town.muni.arbiter.proxy` route, marking it as a
+     Roomy space hosted by the appserver. It must NOT use a scoped
+     `<scope>.arbiter.proxy` route: those apply the permission-set lexicon's
+     scope policy over the inner request alone (no caller DID), and the
+     published `space.roomy.authComplete` policy admits only `space.roomy*` /
+     `network.cosmic*` NSIDs plus `uploadBlob`, `updateHandle`, and a
+     `putRecord` of `app.bsky.actor.profile` — so a `space.roomy.service`
+     `putRecord` is denied outright, before any policy layer sees the caller.
 - **Retain** `createStreamDid` and the `did_keys` storage only as a migration
   shim until Phase 4 completes, then remove.
 - The Roomy PDS is a new deployment requirement (the arbiter's "default PDS"

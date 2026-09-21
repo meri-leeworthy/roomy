@@ -39,6 +39,11 @@
         px().query("space.roomy.space.getSpaceSummary", {
           spaceId,
         }),
+      // A "Space not found" 404 (e.g. a stale internal link) will never
+      // succeed on retry; TanStack's default `retry: 3` turns one miss into
+      // four appserver requests. Transport-level retries live in
+      // DirectXrpcClient. Matches invites/bridge-tokens.
+      retry: false,
     }),
     () => queryClient,
   );
@@ -49,6 +54,7 @@
       queryFn: () =>
         px().query("space.roomy.room.getRoomSummary", { roomId: roomId ?? "" }),
       enabled: !!roomId,
+      retry: false,
     }),
     () => queryClient,
   );

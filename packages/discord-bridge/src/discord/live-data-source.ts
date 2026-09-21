@@ -55,9 +55,61 @@ function sleep(ms: number): Promise<void> {
  * Bounded retry for one archived-thread page fetch. Backfill paginates
  * through the whole guild, so a single transient REST failure must cost
  * retry latency — not the parent channel's remaining history.
+ *
+ * Retries apply ONLY to statuses that can plausibly succeed on a second try:
+ * rate-limited (429), server-side (5xx), and network-level (999 / unknown).
+ * Deterministic 4xx client errors (403 Missing Access on a mapped parent
+ * channel the bot cannot read, 400 on a non-thread-capable channel type, 404
+ * after the channel was deleted) are rejected before Discord executes the
+ * request — backoff cannot change the outcome, so failing fast (and letting
+ * the backfill loop isolate the parent channel) is strictly better than
+ * burning the whole retry budget on a known-constant answer.
  */
 const THREAD_PAGE_RETRY_ATTEMPTS = 3;
 const THREAD_PAGE_RETRY_BASE_DELAY_MS = 500;
+
+/** Type guard: the error carries a `.cause` property. */
+function hasCause(error: unknown): error is { cause: unknown } {
+	return typeof error === "object" && error !== null && "cause" in error;
+}
+
+/** Max chars of a Discord error body to inline into a log line. */
+const MAX_BODY_CHARS = 200;
+
+/**
+ * Pull the real HTTP status (and error body) out of a discordeno REST error.
+ *
+ * discordeno swallows the response: every non-2xx is rethrown as
+ * `Error("Failed to send request to discord.")` with the actual result
+ * (`{ ok, status, body }` — or `{ ok, status, error }` for a failed
+ * 429 budget / a network failure, status 999) attached as `error.cause`.
+ * Without this, the status code that discriminates a deterministic failure
+ * from a transient one never reaches the logs.
+ */
+function discordFailureDetail(err: unknown): {
+	status: number | undefined;
+	body: string | undefined;
+} {
+	if (!hasCause(err)) return { status: undefined, body: undefined };
+	const { cause } = err;
+	if (typeof cause !== "object" || cause === null) return { status: undefined, body: undefined };
+	if (!("status" in cause)) return { status: undefined, body: undefined };
+	const { status } = cause;
+	if (typeof status !== "number") return { status: undefined, body: undefined };
+	const body =
+		"body" in cause && typeof cause.body === "string"
+			? cause.body
+			: "error" in cause && typeof cause.error === "string"
+				? cause.error
+				: undefined;
+	return { status, body };
+}
+
+/** True when retrying can plausibly succeed (transient status or unknown). */
+function isRetryableDiscordStatus(status: number | undefined): boolean {
+	if (status === undefined) return true;
+	return status === 429 || status === 999 || status >= 500;
+}
 
 export class LiveDiscordDataSource implements DiscordDataSource {
 	#bot: DiscordBot;
@@ -137,6 +189,10 @@ export class LiveDiscordDataSource implements DiscordDataSource {
 		// Backfill paginates through this loop for a whole guild, so a single
 		// transient REST failure must not abort the parent channel's history:
 		// retry with a bounded backoff, and only log/throw once exhausted.
+		// Deterministic 4xx client errors (e.g. 403 Missing Access on a mapped
+		// parent the bot cannot read, 404 after channel deletion) are NOT
+		// retried — they cannot succeed, and failing fast keeps the per-parent
+		// cost to one attempt while the real status/body is put in the log.
 		let lastError: unknown;
 		for (let attempt = 1; attempt <= THREAD_PAGE_RETRY_ATTEMPTS; attempt++) {
 			try {
@@ -155,9 +211,34 @@ export class LiveDiscordDataSource implements DiscordDataSource {
 				};
 			} catch (err) {
 				lastError = err;
+				const { status, body } = discordFailureDetail(err);
+				const detail =
+					status === undefined
+						? "(no HTTP status)"
+						: `(discord status ${status}${
+								body
+									? `: ${
+											body.length <= MAX_BODY_CHARS
+												? body
+												: `${body.slice(0, MAX_BODY_CHARS)}…`
+										}`
+									: ""
+							})`;
+				const context = `getPublicArchivedThreads failed for channel ${channelId} (before=${opts.before ?? "-"}, limit=${opts.limit ?? 100}) ${detail}`;
+
+				// Non-retryable: the request was rejected before execution. One
+				// clear attempt, one clear error line — backoff can't help.
+				if (!isRetryableDiscordStatus(status)) {
+					log.error(
+						`${context}, attempt ${attempt}; not retrying (non-retryable)`,
+						err,
+					);
+					throw err;
+				}
+
 				if (attempt < THREAD_PAGE_RETRY_ATTEMPTS) {
 					log.warn(
-						`getPublicArchivedThreads failed for channel ${channelId} (before=${opts.before ?? "-"}, limit=${opts.limit ?? 100}), attempt ${attempt}/${THREAD_PAGE_RETRY_ATTEMPTS}; retrying`,
+						`${context}, attempt ${attempt}/${THREAD_PAGE_RETRY_ATTEMPTS}; retrying`,
 						err,
 					);
 					await sleep(

@@ -14,7 +14,6 @@
  */
 
 import { openSpaceDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { optionalString, requireString } from "../xrpc/params.ts";
@@ -37,7 +36,6 @@ export const getMembersHandler: QueryHandler<
   const spaceId = requireString(params, "spaceId");
   const search = optionalString(params, "search");
 
-  await hydrateUserMembership(userDid);
 
   const db = openSpaceDb(spaceId);
   await requireSpaceAccess(db, spaceId, userDid);

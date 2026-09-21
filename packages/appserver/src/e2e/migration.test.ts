@@ -19,7 +19,6 @@ import { join } from "node:path";
 import { createAppserver } from "../appserver.ts";
 import { testAuthVerifier } from "../xrpc/auth.ts";
 import { closeDb, openDb, openReadStateDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import { _resetSearchIndexer } from "../search/indexer.ts";
 import { _resetSearchBackfill } from "../search/backfill.ts";
@@ -68,7 +67,6 @@ describe("e2e: read-state schema migration on an existing DB", () => {
   afterEach(async () => {
     await handle?.close();
     closeDb();
-    _resetHydrationInflight();
     _resetEmbedSweeper();
     _resetSearchIndexer();
     _resetSearchBackfill();

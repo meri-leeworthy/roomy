@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { newUlid, StreamDid, UserDid, parseEvent } from "@roomy-space/sdk";
 import { Secp256k1Keypair } from "@atproto/crypto";
 import { closeDb, openDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import { StreamManager } from "./StreamManager.ts";
 import { storeStreamKey, getStreamSigningKey, listStreamOwners } from "./keys.ts";
@@ -23,7 +22,6 @@ let sm: StreamManager;
 
 beforeEach(async () => {
   closeDb();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
 
   // In-memory singleton so the events DB schema is initialized.
@@ -207,6 +205,10 @@ describe("createStream", () => {
 
   test("provisions via the arbiter when configured", async () => {
     // A minimal mock arbiter that answers createArbiter / resetConfig / proxy.
+    // The proxy route is the *built-in* `town.muni.arbiter.proxy`: provisioning
+    // goes through the owner/manager route, which carries no scope gate. The
+    // scoped `*.arbiter.proxy` routes run the permission-set scope policy first
+    // and deny a `space.roomy.service/self` putRecord (the createSpace outage).
     const calls: string[] = [];
     const arbiterDid = "did:plc:arbiter-provisioned";
     const server = Bun.serve({
@@ -246,6 +248,9 @@ describe("createStream", () => {
       expect(calls).toContain("/xrpc/town.muni.arbiter.createArbiter");
       expect(calls).toContain("/xrpc/town.muni.arbiter.resetConfig");
       expect(calls).toContain("/xrpc/town.muni.arbiter.proxy");
+      // Provisioning must not use a scoped route: its scope policy denies this
+      // write for every caller (it cannot see who is calling).
+      expect(calls).not.toContain("/xrpc/space.roomy.authComplete.arbiter.proxy");
     } finally {
       server.stop();
     }

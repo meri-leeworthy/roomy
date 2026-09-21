@@ -1,11 +1,10 @@
 /**
  * Schema for `space.roomy.space.updatePolicy` (procedure).
  *
- * Reinstalls the appserver's latest arbiter policy on a space's stewarded
- * account. Requires admin access on the space. The appserver, as the arbiter
- * recovery admin, calls `town.muni.arbiter.resetPolicy` with the current
- * default policy (which allows the space's Roomy admins to act under the
- * space's account).
+ * Re-applies the reference arbiter config on a space's stewarded account.
+ * Requires admin access on the space. The appserver, as the arbiter recovery
+ * admin, calls `town.muni.arbiter.resetConfig` with the reference config
+ * (the same config newly-provisioned spaces get).
  */
 import { type } from "arktype";
 

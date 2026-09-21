@@ -35,9 +35,9 @@ export const getSpaceSummaryHandler: QueryHandler<
   const db = openSpaceDb(spaceId);
 
   // Ban check only — badges don't need membership/admin status, and public
-  // spaces are readable anonymously. No hydrateUserMembership: the ban table
-  // is space-scoped, not personal-stream-scoped, so it's populated by the
-  // space's materializer and readable without hydration.
+  // spaces are readable anonymously. The ban table is space-scoped, so it's
+  // populated by the space's materializer and readable without any per-user
+  // membership read.
   const access = await spaceAccess(db, spaceId, userDid);
   if (access.isBanned) {
     throw new XrpcError(403, "Forbidden", "Caller is banned from this space");

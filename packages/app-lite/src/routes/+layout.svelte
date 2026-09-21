@@ -1,7 +1,7 @@
 <script lang="ts">
   import "../app.css";
   import { onMount, untrack } from "svelte";
-  import { onNavigate } from "$app/navigation";
+  import { afterNavigate, onNavigate } from "$app/navigation";
   import { QueryClientProvider } from "@tanstack/svelte-query";
   import { queryClient } from "$lib/client";
   import { auth, init, updateProfile } from "$lib/auth.svelte";
@@ -17,6 +17,7 @@
   import { restoreScrollPositionsFromStorage, saveScrollPositionsToStorage } from "$lib/components/chat/scroll-position.svelte";
   import {
     installGlobalErrorRecovery,
+    noteSuccessfulNavigation,
     resetReloadBudget,
   } from "$lib/error-recovery";
   import { serverBar } from "$lib/components/layout/server-bar.svelte";
@@ -132,6 +133,15 @@
     if (!navigation.to?.url.pathname.includes("/settings")) {
       settingsBar.expanded = false;
     }
+  });
+
+  // A completed user-driven navigation proves the running document's asset
+  // graph resolves, so the auto-reloads before it were deploy skew rather than
+  // a loop — hand the budget back (see `noteSuccessfulNavigation`). Without
+  // this, hitting `MAX_RELOADS` benign stale chunks inside the window leaves a
+  // user who could have recovered refusing to reload for the rest of it.
+  afterNavigate((navigation) => {
+    noteSuccessfulNavigation(navigation.type);
   });
 
   // Fetch ATProto profile as soon as we're authenticated.

@@ -251,10 +251,18 @@ set.
 materialises them inline via `applyBatch`, emits invalidation signals, pokes the
 embed sweeper, and notifies stream listeners. A parallel poke to the
 `PushDispatcher` is added in step 6b of `sendEvents()` (alongside
-`pokeEmbedSweeper()`), for live `createMessage` events only. The poke builds
-`PushJob[]` from the `AppliedEvent[]` already computed for invalidation,
-reusing `toAppliedEvent`'s `authorDid` (which handles the `authorOverride`
-extension for bridged messages).
+`pokeEmbedSweeper()`), for `createMessage` events. The poke builds `PushJob[]`
+from the `AppliedEvent[]` already computed for invalidation, reusing
+`toAppliedEvent`'s `authorDid` (which handles the `authorOverride` extension
+for bridged messages).
+
+> **Correction (2026-09-16).** This section originally read "for live
+> `createMessage` events only", on the assumption that `sendEvents` is a
+> live-only path. That assumption was false — the Discord bridge replays
+> history through the same endpoint — and relying on it caused the push flood
+> described in `docs/push-freshness-gate.md`. The poke is now age-gated
+> (`push/freshness.ts`); see `push-freshness-gate.md` for the mechanism and
+> evidence.
 
 This keeps push out of the hot materialisation path: `sendEvents` only enqueues
 a small job; all DB lookups + network delivery happen in the background loop.

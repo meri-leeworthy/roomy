@@ -20,6 +20,7 @@
   import ToggleGroup from "@roomy/design/components/ui/toggle-group/ToggleGroup.svelte";
   import { IconEdit } from "@roomy/design/icons";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
+  import HandleDomainDialog from "$lib/components/settings/HandleDomainDialog.svelte";
 
   const spaceId = $derived(page.params.space!);
   const metaQuery = createSpaceMetadataQuery(() => spaceId);
@@ -51,6 +52,7 @@
   let handleSaving = $state(false);
   let spaceHandle = $state("");
   let currentHandle = $state<string | null>(null);
+  let showHandleDomainHelp = $state(false);
 
   // Load the PDS's available handle suffixes + the current handle when the
   // admin opens the page.
@@ -325,18 +327,16 @@
             {/if}
             <p class="text-sm text-base-500 dark:text-base-400">
               {#if handleDomains.length === 1}
-                Set a handle for this space on its account. It must end in
-                {handleDomains[0]}.
-              {:else if handleDomains.length > 1}
-                Set a handle for this space on its account. It must end in one
-                of {handleDomains.join(", ")}.
+                Set a handle for this space. It must end in
+                <code>{handleDomains[0]}</code> or you can use a
+                <button
+                  type="button"
+                  class="text-inherit underline underline-offset-2 cursor-pointer hover:text-base-800 dark:hover:text-base-200"
+                  onclick={() => (showHandleDomainHelp = true)}>custom domain</button
+                >.
               {:else}
                 Set a handle for this space on its account.
               {/if}
-            </p>
-            <p class="text-sm text-base-500 dark:text-base-400">
-              <strong>Note:</strong> This feature is experimental and may not be
-              fully functional yet.
             </p>
             <div class="flex items-center gap-2">
               <Input
@@ -362,6 +362,8 @@
             {/if}
           </div>
         </div>
+
+        <HandleDomainDialog bind:open={showHandleDomainHelp} did={spaceId} />
         {/if}
       </form>
     {/if}

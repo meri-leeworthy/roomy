@@ -39,6 +39,8 @@ const OTHER_USER = "did:plc:bob";
 const CHANNEL = "01CHANNEL00000000000000000";
 const THREAD = "01THREAD000000000000000000";
 const ROLE = "01ROLE0000000000000000000";
+const SECOND_THREAD = "01THREAD00000000000000000B";
+const OTHER_CHANNEL = "01CHANNEL0000000000000000B";
 
 async function seedSpace(db: DbLike, spaceId = SPACE): Promise<void> {
   await db.run("insert into entities (id, stream_id) values (?, ?)", [
@@ -580,5 +582,130 @@ describe("auth/access — roomAccessMany parity", () => {
   test("empty input returns empty map", async () => {
     const { asyncDb: db } = freshDb();
     expect((await roomAccessMany(db, [], USER)).size).toBe(0);
+  });
+});
+
+// ─── room_access read projection (TASK-173) ───────────────────────────────
+//
+// The projection pre-joins a room's owning space and canonical parent channel.
+// Its contract is: a room served from a WARMED projection resolves exactly as
+// it does from the live tables, and an access-level change written directly to
+// `comp_room` is observed immediately (the projection deliberately does not
+// cache `default_access`, because that is a security input any writer of
+// comp_room can change and the projection is not maintained during replay).
+
+describe("room_access projection", () => {
+  /** Populate the projection for the seeded rooms, as a live event would. */
+  async function warm(db: DbLike, roomIds: string[]): Promise<void> {
+    const ph = roomIds.map(() => "?").join(",");
+    await db.run(
+      `insert or replace into room_access (room_id, space_id, parent_channel_id)
+       select e.id, e.stream_id, p.head
+         from entities e
+         left join edges p
+                on p.tail = e.id and p.label = 'link'
+               and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+        where e.id in (${ph})`,
+      ...roomIds,
+    );
+  }
+
+  test("a projected room resolves identically to an unprojected one", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+    await seedChannel(db, CHANNEL, SPACE, "read");
+    await seedThread(db, THREAD, CHANNEL, SPACE);
+    await seedThreadWithAccess(db, SECOND_THREAD, CHANNEL, SPACE, "readwrite");
+
+    // Cold (no projection rows): live-path resolution.
+    const coldChannel = await roomAccess(db, CHANNEL, USER);
+    const coldThread = await roomAccess(db, THREAD, USER);
+    const coldClamped = await roomAccess(db, SECOND_THREAD, USER);
+
+    await warm(db, [CHANNEL, THREAD, SECOND_THREAD]);
+
+    const warmChannel = await roomAccess(db, CHANNEL, USER);
+    const warmThread = await roomAccess(db, THREAD, USER);
+    const warmClamped = await roomAccess(db, SECOND_THREAD, USER);
+
+    for (const [cold, warm] of [
+      [coldChannel, warmChannel],
+      [coldThread, warmThread],
+      [coldClamped, warmClamped],
+    ] as const) {
+      expect(warm).toEqual(cold);
+    }
+    // The thread inherits the channel's MORE RESTRICTIVE access either way.
+    expect(warmClamped.defaultAccess).toBe("read");
+  });
+
+  test("an access change to comp_room is observed with a warmed projection", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    await warm(db, [CHANNEL]);
+
+    expect((await roomAccess(db, CHANNEL, USER)).canRead).toBe(true);
+
+    // A writer that does NOT touch the projection — a replayed updateRoom
+    // inside a boot gap, or any out-of-band write. The projection must not be
+    // able to serve a stale authorisation decision here.
+    await db.run("update comp_room set default_access = 'none' where entity = ?", [CHANNEL]);
+
+    const after = await roomAccess(db, CHANNEL, USER);
+    expect(after.defaultAccess).toBe("none");
+    expect(after.canRead).toBe(false);
+  });
+
+  test("a channel re-parented in the live tables is not served stale", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+
+    // Project the thread BEFORE it has a parent link — the read warms its own
+    // row, so this is exactly the state a warmed miss produces.
+    await seedChannel(db, THREAD, SPACE, "readwrite");
+    await roomAccess(db, THREAD, USER);
+
+    // Now link it to the channel. A live event maintains the projection; this
+    // write bypasses that on purpose to pin the observable behaviour.
+    await db.run(
+      `insert into edges (head, tail, label, payload)
+         values (?, ?, 'link', json_object('canonical_parent', 1))`,
+      [CHANNEL, THREAD],
+    );
+
+    const projected = await roomAccess(db, THREAD, USER);
+    // Without maintenance the projection still says "no parent"; the point of
+    // this test is that the ACCESS value is nonetheless live, so the room
+    // still resolves as readable rather than being wrongly denied.
+    expect(projected.canRead).toBe(true);
+    expect(projected.defaultAccess).toBe("readwrite");
+  });
+
+  test("roomAccessMany and roomAccess agree for projected and unprojected rooms", async () => {
+    const { asyncDb: db } = freshDb();
+    await seedSpace(db);
+    await seedUser(db, USER);
+    await addEdge(db, SPACE, USER, "member");
+    await seedChannel(db, CHANNEL, SPACE, "readwrite");
+    await seedThread(db, THREAD, CHANNEL, SPACE);
+    await seedChannel(db, OTHER_CHANNEL, SPACE, "none");
+
+    // Project only the channel and thread; leave OTHER_CHANNEL to the fallback.
+    await warm(db, [CHANNEL, THREAD]);
+
+    const ids = [CHANNEL, THREAD, OTHER_CHANNEL];
+    const batched = await roomAccessMany(db, ids, USER);
+    for (const id of ids) {
+      expect(batched.get(id)).toEqual(await roomAccess(db, id, USER));
+    }
+    expect(batched.get(OTHER_CHANNEL)!.canRead).toBe(false);
   });
 });

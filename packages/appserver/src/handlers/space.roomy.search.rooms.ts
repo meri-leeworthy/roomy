@@ -20,7 +20,6 @@
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { fetchRoomActivity } from "../queries/threadActivity.ts";
 import { getEngagedThreadIds, getReadPositions } from "../queries/readPositions.ts";
 import { parseUserDid, requireSpaceRead } from "../xrpc/authGuards.ts";
@@ -86,7 +85,6 @@ export const searchRoomsHandler: QueryHandler<
   const limit = optionalInt(params, "limit", { min: 1, max: 100, default: 20 })!;
 
   if (userDid !== null) {
-    await hydrateUserMembership(userDid);
   }
 
   const db = openSpaceDb(spaceId);

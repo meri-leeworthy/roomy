@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { StreamDid } from "@roomy-space/sdk";
 import { Secp256k1Keypair } from "@atproto/crypto";
 import { closeDb, openDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import { createStreamDid } from "./did.ts";
 import { getStreamSigningKey, listStreamOwners, storeStreamKey } from "./keys.ts";
@@ -22,7 +21,6 @@ let origPlcUrl: string | undefined;
 
 beforeEach(async () => {
   closeDb();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
 
   db = openDb({ path: ":memory:" });

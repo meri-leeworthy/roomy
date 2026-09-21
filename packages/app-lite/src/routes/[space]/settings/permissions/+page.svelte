@@ -31,7 +31,11 @@
   const metaQuery = createSpaceMetadataQuery(() => spaceId);
   const isAdmin = $derived(metaQuery.data?.isAdmin ?? false);
 
-  const rolesQuery = createRolesQuery(() => spaceId);
+  // getRoles 403s for non-members — only query once metadata confirms we're a
+  // member (a non-member who opens the settings route shouldn't spam 403s).
+  const rolesQuery = createRolesQuery(() => spaceId, {
+    enabled: () => !!metaQuery.data?.isMember,
+  });
   const membersQuery = createMembersQuery(() => spaceId);
 
   const spaceMembers = $derived.by<TypeaheadUser[]>(() => {

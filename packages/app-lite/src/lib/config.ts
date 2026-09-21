@@ -5,6 +5,7 @@ const APPSERVER_RPCS = [
   "space.roomy.space.getMetadata",
   "space.roomy.space.getSpaceSummary",
   "space.roomy.space.getThreads",
+  "space.roomy.space.getLinks",
   "space.roomy.space.getRoles",
   "space.roomy.space.getMembers",
   "space.roomy.space.getInvites",
@@ -12,6 +13,7 @@ const APPSERVER_RPCS = [
   "space.roomy.room.getRoomSummary",
   "space.roomy.room.getMessages",
   "space.roomy.room.getThreads",
+  "space.roomy.room.getLinks",
   "space.roomy.message.getMessage",
   "space.roomy.message.getReactions",
   "space.roomy.user.getProfile",
@@ -121,17 +123,15 @@ export const OAUTH_SCOPE = [
   "blob:*/*",
   "repo:space.roomy.upload.v0", // Grant all actions (create, update, delete)
   `repo:space.roomy.user.profile`,
+  "include:space.roomy.authComplete",
   `repo:${CONFIG.profileSpaceNsid}`,
   // Allow calling getServiceAuth on the appserver's PDS to obtain
   // service auth tokens for direct (non-proxied) XRPC calls.
   `rpc:com.atproto.server.getServiceAuth?aud=${CONFIG.appserverDid}`,
   // Allow obtaining serviceAuth tokens targeted at any arbiter server (the
   // arbiter DID is discovered per space from its service record), so the
-  // client can call `town.muni.arbiter.proxy` directly (acting on a space's
+  // client can call `space.roomy.authComplete.arbiter.proxy` directly (acting on a space's
   // stewarded account). aud=* because the arbiter DID is per-space.
   `rpc:com.atproto.server.getServiceAuth?aud=*`,
-  // The actual proxied method the token is minted for. aud=* because the
-  // arbiter DID (and thus the token's aud) is discovered per space.
-  `rpc:town.muni.arbiter.proxy?aud=*`,
   ...APPSERVER_RPCS.map((nsid) => `rpc:${nsid}?aud=*`),
 ].join(" ");

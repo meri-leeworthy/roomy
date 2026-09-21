@@ -20,7 +20,6 @@ import {
   type Event,
 } from "@roomy-space/sdk";
 import { closeDb, openDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import { reMaterializeFromLocalEvents } from "./reMaterialize.ts";
 import { applyBatch } from "../materialization/applyBatch.ts";
@@ -31,7 +30,6 @@ let db: DbLike;
 
 beforeEach(async () => {
   closeDb();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
 
   // In-memory event-log DB; derived DBs (per-space/global/readstate) are

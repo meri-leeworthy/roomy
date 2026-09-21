@@ -123,6 +123,124 @@ describe("richtext convert — blocks ↔ ProseMirror round-trip", () => {
     ]);
   });
 
+  it("carries a non-1 ordered-list start from the editor into the block", () => {
+    // Typing `2. ` makes tiptap set attrs.start = 2 on the orderedList node.
+    const doc = {
+      type: "doc",
+      content: [
+        {
+          type: "orderedList",
+          attrs: { start: 2 },
+          content: [
+            {
+              type: "listItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "item" }] },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    expect(proseMirrorDocToBlocks(doc)).toEqual([
+      {
+        $type: "space.roomy.richtext.blocks#orderedList",
+        items: [{ text: "item" }],
+        start: 2,
+      },
+    ]);
+  });
+
+  it("omits start=1, matching the default every renderer already applies", () => {
+    const doc = {
+      type: "doc",
+      content: [
+        {
+          type: "orderedList",
+          attrs: { start: 1 },
+          content: [
+            {
+              type: "listItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "item" }] },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    // `start` absent, not `start: 1` — the block stays byte-identical to what
+    // pre-`start` writers produced, so old and new records compare equal.
+    expect(proseMirrorDocToBlocks(doc)).toEqual([
+      {
+        $type: "space.roomy.richtext.blocks#orderedList",
+        items: [{ text: "item" }],
+      },
+    ]);
+  });
+
+  it("restores a non-1 start when rebuilding the editor doc", () => {
+    const doc = blocksToProseMirrorDoc([
+      {
+        $type: "space.roomy.richtext.blocks#orderedList",
+        items: [{ text: "first" }, { text: "second" }],
+        start: 2,
+      },
+    ]);
+    expect(doc.content?.[0]?.type).toBe("orderedList");
+    expect(doc.content?.[0]?.attrs?.start).toBe(2);
+  });
+
+  it("round-trips a non-1 start through both directions", () => {
+    const blocks: Block[] = [
+      {
+        $type: "space.roomy.richtext.blocks#orderedList",
+        items: [{ text: "first" }, { text: "second" }],
+        start: 2,
+      },
+      { $type: "space.roomy.richtext.blocks#text", text: "after" },
+    ];
+    const back = proseMirrorDocToBlocks(blocksToProseMirrorDoc(blocks));
+    expect(back).toEqual(blocks);
+    // A list with no `start` must stay without one — no `start: 1` invented.
+    const plain: Block[] = [
+      { $type: "space.roomy.richtext.blocks#orderedList", items: [{ text: "a" }] },
+    ];
+    expect(proseMirrorDocToBlocks(blocksToProseMirrorDoc(plain))).toEqual(plain);
+  });
+
+  it("ignores a malformed start rather than emitting an invalid one", () => {
+    // Blocks are `unknown` at runtime (`deserializeBody` only checks that the
+    // document has a `blocks` array), so a stored block can carry anything.
+    // ProseMirror's orderedList requires start >= 1: degrade, don't propagate.
+    for (const start of [0, -3, 1.5, Number.NaN]) {
+      const doc = blocksToProseMirrorDoc([
+        {
+          $type: "space.roomy.richtext.blocks#orderedList",
+          items: [{ text: "a" }],
+          start,
+        } as Block,
+      ]);
+      expect(doc.content?.[0]?.attrs?.start).toBeUndefined();
+    }
+  });
+
+  it("takes the ordered list's start from the first markdown line", () => {
+    expect(markdownToBlocks("2. first\n3. second")).toEqual([
+      {
+        $type: "space.roomy.richtext.blocks#orderedList",
+        items: [{ text: "first" }, { text: "second" }],
+        start: 2,
+      },
+    ]);
+    expect(markdownToBlocks("1. first\n2. second")).toEqual([
+      {
+        $type: "space.roomy.richtext.blocks#orderedList",
+        items: [{ text: "first" }, { text: "second" }],
+      },
+    ]);
+  });
+
   it("channelThreadMention emits only a #roomRef facet (no nested #link)", () => {
     // A #channel mention must not also carry a `#link` facet over the same
     // range: the renderer turns `#roomRef` into a clickable `class="mention"`

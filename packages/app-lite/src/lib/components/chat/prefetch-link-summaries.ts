@@ -108,11 +108,15 @@ export function prefetchInternalLinkSummaries(
     void queryClient.ensureQueryData({
       queryKey: queryKey(SPACE_SUMMARY, { spaceId }),
       queryFn: () => pxClient.query(SPACE_SUMMARY, { spaceId }),
+      // A "Space not found" 404 will never succeed on retry; don't turn one
+      // miss into the default four appserver requests.
+      retry: false,
     });
     if (roomId) {
       void queryClient.ensureQueryData({
         queryKey: queryKey(ROOM_SUMMARY, { roomId }),
         queryFn: () => pxClient.query(ROOM_SUMMARY, { roomId }),
+        retry: false,
       });
     }
   }
@@ -146,11 +150,15 @@ export function prefetchInternalLinkSummariesFromBlocks(
     void queryClient.ensureQueryData({
       queryKey: queryKey(SPACE_SUMMARY, { spaceId }),
       queryFn: () => pxClient.query(SPACE_SUMMARY, { spaceId }),
+      // A "Space not found" 404 will never succeed on retry; don't turn one
+      // miss into the default four appserver requests.
+      retry: false,
     });
     if (roomId) {
       void queryClient.ensureQueryData({
         queryKey: queryKey(ROOM_SUMMARY, { roomId }),
         queryFn: () => pxClient.query(ROOM_SUMMARY, { roomId }),
+        retry: false,
       });
     }
   }

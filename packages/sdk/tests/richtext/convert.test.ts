@@ -233,6 +233,33 @@ describe("derivations", () => {
     ]);
   });
 
+  test("extractInternalLinkTargets rejects non-DID spaceId and non-ULID roomId", () => {
+    // Mirrors the `parseInternalLinkHref` guard: a facet naming a non-DID
+    // space (stale Discord snowflake, bare word, app route) or a non-ULID
+    // room must not surface as a prefetch target — an unvalidated one would
+    // fire 404 getSpaceSummary queries.
+    const blocks = [
+      { $type: "space.roomy.richtext.blocks#text", text: "a", facets: [
+        { index: { byteStart: 0, byteEnd: 1 }, features: [
+          { $type: "space.roomy.richtext.facet#roomRef", spaceId: "muni-town", roomId: "01KZBRQMEP2FTE079YRVDFKGTA" },
+        ] },
+      ] },
+      { $type: "space.roomy.richtext.blocks#text", text: "b", facets: [
+        { index: { byteStart: 0, byteEnd: 1 }, features: [
+          { $type: "space.roomy.richtext.facet#roomRef", spaceId: "did:plc:space", roomId: "not-ulid" },
+        ] },
+      ] },
+      { $type: "space.roomy.richtext.blocks#text", text: "c", facets: [
+        { index: { byteStart: 0, byteEnd: 1 }, features: [
+          { $type: "space.roomy.richtext.facet#roomRef", spaceId: "did:plc:space", roomId: "01KZBRQMEP2FTE079YRVDFKGTA" },
+        ] },
+      ] },
+    ] as unknown as Parameters<typeof extractInternalLinkTargets>[0];
+    expect(extractInternalLinkTargets(blocks)).toEqual([
+      { spaceId: "did:plc:space", roomId: "01KZBRQMEP2FTE079YRVDFKGTA" },
+    ]);
+  });
+
   // `deserializeBody` validates only that the document has a `blocks` array —
   // individual blocks are `unknown` at runtime, so a stored message can carry
   // a malformed one. The derivations must degrade, never throw: a throw mid-

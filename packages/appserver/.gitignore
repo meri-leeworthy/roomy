@@ -1,2 +1,5 @@
 **/_apalache-out
 specs/traces
+# arbiter config migration script output
+arbiter-config-migration.jsonl
+policy/default.record.json

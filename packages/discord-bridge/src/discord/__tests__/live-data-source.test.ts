@@ -1,7 +1,7 @@
 /**
  * Unit tests for LiveDiscordDataSource.getPublicArchivedThreads.
  *
- * Covers the two behaviors the archived-thread backfill depends on:
+ * Covers the behaviors the archived-thread backfill depends on:
  *   1. The snowflake cursor must survive discordeno's `before` encoding.
  *      @discordeno/rest routes.cjs builds the URL as
  *      `before=${new Date(before).toISOString()}`, so the value we pass
@@ -11,6 +11,10 @@
  *      on the second page of every archived-thread backfill.
  *   2. A transient REST failure is retried with backoff, so one bad page
  *      costs retry latency, not the parent channel's remaining history.
+ *   3. A deterministic 4xx client error (403 Missing Access on a mapped
+ *      parent channel the bot cannot read, 404 after deletion) fails fast —
+ *      retrying it cannot change the outcome, and the discordeno wrapper
+ *      (which hides the real status in `error.cause`) is surfaced.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -27,6 +31,16 @@ function snowflakeEpochMs(snowflake: string): number {
 	return Number(BigInt(snowflake) >> 22n) + DISCORD_EPOCH_MS;
 }
 
+/**
+ * Build an error shaped like discordeno's REST wrapper: fixed message,
+ * actual response result (status + body) attached as `cause`.
+ */
+function discordError(status: number, body: string): Error {
+	const err = new Error("Failed to send request to discord.");
+	Object.assign(err, { cause: { ok: false, status, body } });
+	return err;
+}
+
 interface FakeBot {
 	helpers: {
 		getPublicArchivedThreads: (
@@ -40,7 +54,15 @@ interface FakeBot {
 	};
 }
 
-function makeDataSource(failFirst: number): {
+/**
+ * Scripted data source. `failFirst` failures are thrown before the first
+ * success; `errorFor(attempt)` lets a test script the failure shape (e.g. a
+ * discordeno wrapper carrying a 403 cause) instead of a bare Error.
+ */
+function makeDataSource(
+	failFirst: number,
+	errorFor?: (attempt: number) => Error,
+): {
 	ds: LiveDiscordDataSource;
 	calls: Array<{ before: number | undefined; limit: number | undefined }>;
 } {
@@ -53,7 +75,9 @@ function makeDataSource(failFirst: number): {
 				calls.push({ before: options?.before, limit: options?.limit });
 				if (remainingFailures > 0) {
 					remainingFailures--;
-					throw new Error("simulated REST failure");
+					throw errorFor
+						? errorFor(calls.length)
+						: new Error("simulated REST failure");
 				}
 				return {
 					threads: [{ id: SNOWFLAKE, type: 11, name: "archived" }],
@@ -122,5 +146,58 @@ describe("LiveDiscordDataSource.getPublicArchivedThreads", () => {
 			ds.getPublicArchivedThreads(CHANNEL, { limit: 100 }),
 		).rejects.toThrow("simulated REST failure");
 		expect(calls).toHaveLength(3); // bounded — no unbounded retry loop
+	});
+
+	/**
+	 * TASK-156: the prod signature — a first-page failure with no cursor on
+	 * a channel the bot cannot read. Discord answers `403 Missing Access`
+	 * (code 50001); discordeno wraps it in "Failed to send request to
+	 * discord." with the status only in `cause`. This is deterministic:
+	 * backoff cannot fix a permission denial, so it must fail after ONE
+	 * attempt, not burn the whole 3-attempt budget (and previously made the
+	 * same indistinguishable generic error 3× per parent channel per boot).
+	 */
+	test("fails fast on a deterministic 4xx — 403 Missing Access, no retry", async () => {
+		const { ds, calls } = makeDataSource(10, () =>
+			discordError(403, '{"message": "Missing Access", "code": 50001}'),
+		);
+
+		await expect(
+			ds.getPublicArchivedThreads(CHANNEL, { limit: 100 }),
+		).rejects.toThrow("Failed to send request to discord.");
+		expect(calls).toHaveLength(1); // deterministic — exactly one attempt
+	});
+
+	test("fails fast on a deterministic 4xx — 404 Unknown Channel, no retry", async () => {
+		const { ds, calls } = makeDataSource(10, () =>
+			discordError(404, '{"message": "Unknown Channel", "code": 10003}'),
+		);
+
+		await expect(
+			ds.getPublicArchivedThreads(CHANNEL, { limit: 100 }),
+		).rejects.toThrow("Failed to send request to discord.");
+		expect(calls).toHaveLength(1);
+	});
+
+	test("retries a rate-limited (429) page, then succeeds", async () => {
+		const { ds, calls } = makeDataSource(2, () =>
+			discordError(429, "rate limited"),
+		);
+
+		const page = await ds.getPublicArchivedThreads(CHANNEL, { limit: 100 });
+
+		expect(calls).toHaveLength(3); // 2 rate-limits + success
+		expect(page.threads).toHaveLength(1);
+	});
+
+	test("retries a 5xx server error, then succeeds", async () => {
+		const { ds, calls } = makeDataSource(2, () =>
+			discordError(500, "internal server error"),
+		);
+
+		const page = await ds.getPublicArchivedThreads(CHANNEL, { limit: 100 });
+
+		expect(calls).toHaveLength(3);
+		expect(page.threads).toHaveLength(1);
 	});
 });

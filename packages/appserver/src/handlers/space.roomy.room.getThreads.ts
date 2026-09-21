@@ -7,9 +7,8 @@
  * Supports cursor-based pagination via `limit` and `cursor` params.
  */
 
-import { createAccessMemo, roomAccess } from "../auth/access.ts";
+import { createAccessMemo, roomAccessMany } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
 import { getEngagedThreadIds, getReadPositions } from "../queries/readPositions.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
@@ -60,7 +59,6 @@ export const getRoomThreadsHandler: QueryHandler<
   const search = optionalString(params, "search") ?? null;
 
   if (userDid !== null) {
-    await hydrateUserMembership(userDid);
   }
 
   const db = await openSpaceDbForEntity(roomId);
@@ -87,9 +85,14 @@ export const getRoomThreadsHandler: QueryHandler<
     : new Set<string>();
 
   const threads: ThreadRow[] = [];
+  // One batched access pass for every thread in the page, instead of a
+  // `roomAccess` round-trip per thread. With the `room_access` projection
+  // (TASK-173) this is a single per-space read for the whole page rather than
+  // N sequential reads (measured: 13 threads → 1 round-trip).
+  const accessByThread = await roomAccessMany(db, threadIds, userDid, memo);
   for (const t of all) {
-    const acc = await roomAccess(db, t.id, userDid, memo);
-    if (!acc.canRead) continue;
+    const acc = accessByThread.get(t.id);
+    if (!acc?.canRead) continue;
     const members = t.latestMembers.map((m) => ({
       did: m.did,
       name: m.name,

@@ -193,7 +193,7 @@ describe("resolveMentionsToBlocks", () => {
 	describe("channel mentions", () => {
 		test("emits #name text + roomRef facet when room is mapped", () => {
 			const channelNames = new Map([["12345", "general"]]);
-			const roomyRoomIds = new Map([["12345", "01JQROOMY1"]]);
+			const roomyRoomIds = new Map([["12345", "01M2MVKGY484EH9770QFFFPGN5"]]);
 			const summary = facetSummary(
 				"Check <#12345>",
 				[],
@@ -201,9 +201,9 @@ describe("resolveMentionsToBlocks", () => {
 			);
 			expect(summary.text).toBe("Check #general");
 			expect(summary.roomRefs).toEqual([
-				{ spaceId: SPACE, roomId: "01JQROOMY1" },
+				{ spaceId: SPACE, roomId: "01M2MVKGY484EH9770QFFFPGN5" },
 			]);
-			expect(summary.links).toEqual([`/${SPACE}/01JQROOMY1`]);
+			expect(summary.links).toEqual([`/${SPACE}/01M2MVKGY484EH9770QFFFPGN5`]);
 		});
 
 		test("emits plain #name text when room is not mapped", () => {
@@ -216,6 +216,47 @@ describe("resolveMentionsToBlocks", () => {
 
 		test("uses snowflake when channel name not in map", () => {
 			expect(blockText("<#99999>", [], ctx())).toBe("#99999");
+		});
+
+		test("does not emit roomRef for a non-ULID mapped room id", () => {
+			// A stale/malformed mapping that isn't a valid ULID must not be
+			// persisted as a `#roomRef` — every later reader's internal-link
+			// prefetch would trust it and fire 404 getSpaceSummary queries.
+			const channelNames = new Map([["12345", "general"]]);
+			const roomyRoomIds = new Map([["12345", "not-a-ulid"]]);
+			const summary = facetSummary(
+				"Check <#12345>",
+				[],
+				ctx({ channelNames, roomyRoomIds }),
+			);
+			expect(summary.text).toBe("Check #general");
+			expect(summary.roomRefs).toEqual([]);
+			expect(summary.links).toEqual([]);
+		});
+
+		test("does not emit roomRef for a non-DID spaceDid", () => {
+			const channelNames = new Map([["12345", "general"]]);
+			const roomyRoomIds = new Map([["12345", "01M2MVKGY484EH9770QFFFPGN5"]]);
+			const blocks = resolveMentionsToBlocks(
+				"Check <#12345>",
+				[],
+				ctx({ channelNames, roomyRoomIds }),
+				"muni-town",
+			);
+			expect(blocks.map(blockTextOf).join("")).toBe("Check #general");
+			const roomRefFeatures: string[] = [];
+			for (const block of blocks) {
+				if ("facets" in block && block.facets) {
+					for (const f of block.facets) {
+						for (const feat of f.features) {
+							if (feat.$type === "space.roomy.richtext.facet#roomRef") {
+								roomRefFeatures.push(feat.$type);
+							}
+						}
+					}
+				}
+			}
+			expect(roomRefFeatures).toEqual([]);
 		});
 	});
 
@@ -244,7 +285,7 @@ describe("resolveMentionsToBlocks", () => {
 				{ id: BigInt("222"), username: "bob", globalName: null },
 			];
 			const channelNames = new Map([["333", "general"]]);
-			const roomyRoomIds = new Map([["333", "01JQROOMY2"]]);
+			const roomyRoomIds = new Map([["333", "01M2MVKGY7CV074D0DV1A9CT49"]]);
 			const summary = facetSummary(
 				"<@111> and <@!222> check <#333> <:wave:444>",
 				mentions,
@@ -256,7 +297,7 @@ describe("resolveMentionsToBlocks", () => {
 				"did:discord:222",
 			]);
 			expect(summary.roomRefs).toEqual([
-				{ spaceId: SPACE, roomId: "01JQROOMY2" },
+				{ spaceId: SPACE, roomId: "01M2MVKGY7CV074D0DV1A9CT49" },
 			]);
 		});
 
@@ -534,6 +575,22 @@ describe("Discord markdown → richtext", () => {
 		const ul = blocks[0];
 		const items = ul && "items" in ul ? ul.items : [];
 		expect(items.map((i) => i.text)).toEqual(["one", "two"]);
+	});
+
+	test("carries a non-1 ordered list start from Discord markdown", () => {
+		const blocks = resolveMentionsToBlocks(
+			"2. second\n3. third",
+			[],
+			ctx(),
+			SPACE,
+		);
+		expect(blocks).toEqual([
+			{
+				$type: "space.roomy.richtext.blocks#orderedList",
+				items: [{ text: "second" }, { text: "third" }],
+				start: 2,
+			},
+		]);
 	});
 
 	test("parses a horizontal rule", () => {

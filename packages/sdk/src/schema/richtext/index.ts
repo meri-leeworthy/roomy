@@ -167,6 +167,11 @@ export type ListItem = typeof ListItem.infer;
 export const OrderedListBlock = type({
   $type: "'space.roomy.richtext.blocks#orderedList'",
   items: ListItem.array(),
+  /**
+   * The first item's number. Omitted when the list starts at 1 — the HTML
+   * default, and the value tiptap's own `renderHTML` declines to write.
+   */
+  "start?": "number.integer>=1",
 });
 export type OrderedListBlock = typeof OrderedListBlock.infer;
 

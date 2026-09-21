@@ -8,7 +8,6 @@
  */
 
 import { openReadStateDb, openSpaceDb } from "../db/db.ts";
-import { hydrateUserMembership } from "../hydration/userHydration.ts";
 import { selectGrantsForSpace } from "../queries/bridgeTokens.ts";
 import { parseUserDid, requireSpaceAccess } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -33,7 +32,6 @@ export const getBridgeTokensHandler: QueryHandler<
   }
   const spaceId = requireString(params, "spaceId");
 
-  await hydrateUserMembership(userDid);
   const spaceDb = openSpaceDb(spaceId);
   await requireSpaceAccess(spaceDb, spaceId, userDid);
 

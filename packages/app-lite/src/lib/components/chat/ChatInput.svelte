@@ -273,7 +273,7 @@
             // same one the rendered message uses — hardcoding a base-* colour
             // here would diverge from the preview it is meant to be.
             "text-sm font-normal",
-            "w-full outline-none",
+            "w-full max-w-full outline-none",
             "max-h-[30vh] overflow-y-auto",
           ),
         },
@@ -340,7 +340,7 @@
   id="chat-input"
   onpaste={handlePaste}
   bind:this={element}
-  class="flex-1 min-w-0 relative"
+  class="flex-1 min-w-0 w-full relative"
   role="region"
   aria-label="Chat editor"
 ></div>

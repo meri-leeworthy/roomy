@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { StreamDid, UserDid } from "@roomy-space/sdk";
 
 import { closeDb, openDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
-import { _resetHydrationInflight } from "../hydration/userHydration.ts";
 import { Router } from "../invalidation/router.ts";
 import { _setAdminDids } from "../admin.ts";
 import {
@@ -96,7 +95,6 @@ async function makeMember(userDid: string, spaceDid: StreamDid = SPACE): Promise
 
 beforeEach(async () => {
   closeDb();
-  _resetHydrationInflight();
   Router.resetInstance();
   _clearPolarCache();
   setPolar(CONFIG);
@@ -109,7 +107,6 @@ afterEach(() => {
   resetFetch();
   setPolar(null);
   closeDb();
-  _resetHydrationInflight();
   Router.resetInstance();
 });
 

@@ -19,7 +19,6 @@ import { createAppserver, getRegisteredNsids } from "../src/appserver.ts";
 import { testAuthVerifier } from "../src/xrpc/auth.ts";
 import { closeDb, openDb } from "../src/db/db.ts";
 import { closeReadStateDb } from "../src/db/readStateDb.ts";
-import { _resetHydrationInflight } from "../src/hydration/userHydration.ts";
 import { _resetEmbedSweeper } from "../src/embed/sweeper.ts";
 import { _setAdminDids } from "../src/admin.ts";
 import { newUlid } from "@roomy-space/sdk";
@@ -514,7 +513,6 @@ async function main() {
   closeDb();
   closeReadStateDb();
   _resetMaterializerRegistry();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
 
   // Open in-memory DB
@@ -653,7 +651,6 @@ async function main() {
   closeDb();
   closeReadStateDb();
   _resetMaterializerRegistry();
-  _resetHydrationInflight();
   _resetEmbedSweeper();
 }
 

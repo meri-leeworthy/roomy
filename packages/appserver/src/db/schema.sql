@@ -353,3 +353,17 @@ create table if not exists materialization_cursor (
   stream_id text primary key,
   materialized_to integer not null default -1
 ) strict;
+
+-- Denormalised read projection (TASK-173): the room→space→parent→access facts
+-- `auth/access.ts:resolveRoom` would otherwise re-derive per room, per request,
+-- per caller. Declared here as well as in schema-space.sql because this file is
+-- the in-memory schema used by unit tests (toAsyncDb), which exercise handlers
+-- and access checks directly rather than through the worker's schema loader.
+-- Purely additive and idempotent on both paths.
+create table if not exists room_access (
+  room_id           text primary key,
+  space_id          text not null,
+  parent_channel_id text
+) strict;
+
+create index if not exists idx_room_access_space on room_access(space_id);

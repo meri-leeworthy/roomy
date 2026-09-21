@@ -157,6 +157,28 @@ export const MIGRATIONS: Migration[] = [
 	},
 	{
 		version: 7,
+		name: "structure_sync",
+		up(db) {
+			// One-shot guard for the initial Discord→Roomy structure sync
+			// (categories + channel order). A row exists from the moment the
+			// (guild, space) structure sync is CLAIMED — before any event is
+			// sent — so the sync is at-most-once by construction: a crash
+			// mid-sync cannot re-apply it on the next backfill. `applied_at`
+			// is null while a claim is unapplied; see BridgeRepository
+			// .claimStructureSync for why the claim is not rolled back.
+			db.run(`
+        CREATE TABLE structure_sync (
+          guild_id   TEXT NOT NULL,
+          space_did  TEXT NOT NULL,
+          claimed_at INTEGER NOT NULL,
+          applied_at INTEGER,
+          PRIMARY KEY (guild_id, space_did)
+        );
+      `);
+		},
+	},
+	{
+		version: 8,
 		name: "backfill_progress",
 		up(db) {
 			// Durable per-(space, channel) backfill progress so two-phase
