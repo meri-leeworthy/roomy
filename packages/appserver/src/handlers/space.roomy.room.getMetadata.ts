@@ -5,7 +5,7 @@
  * getLinkedRooms query). Stage-1: unread fields are 0/null.
  */
 
-import { createAccessMemo, roomAccess } from "../auth/access.ts";
+import { createAccessMemo, roomAccessMany } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDbForEntity } from "../db/db.ts";
 import { getChannelUnreadThreadCount, getReadPosition, getReadPositions, type ReadPosition } from "../queries/readPositions.ts";
 import { listThreadActivity } from "../queries/threadActivity.ts";
@@ -91,18 +91,26 @@ export const getRoomMetadataHandler: QueryHandler<
     // checks (all threads share the same parent space) into a single set
     // of queries for the whole request.
     const candidates = threadActivity.filter((t) => t.id !== roomId);
-    const accessByIndex = await Promise.all(
-      candidates.map((t) => roomAccess(db, t.id, userDid, memo)),
+    // One batched access pass across every candidate thread, rather than a
+    // `roomAccess` call per thread. `roomAccess` is memoised but not batched:
+    // each distinct thread is its own round-trip. With the `room_access`
+    // projection (TASK-173) the whole page collapses to one per-space read.
+    const threadAccess = await roomAccessMany(
+      db,
+      candidates.map((t) => t.id),
+      userDid,
+      memo,
     );
-    const accessible = candidates
-      .map((t, i) => ({ thread: t, access: accessByIndex[i]! }))
-      .filter(({ access }) => access.canRead);
+    const accessible = candidates.filter(
+      (t) => threadAccess.get(t.id)?.canRead ?? false,
+    );
     const threadPositions = await getReadPositions(
       mainDb,
       userDid,
-      accessible.map(({ thread }) => thread.id),
+      accessible.map((t) => t.id),
     );
-    for (const { thread, access } of accessible) {
+    for (const thread of accessible) {
+      const access = threadAccess.get(thread.id)!;
       const pos = threadPositions.get(thread.id);
       recentThreads.push(stripNulls({
         id: thread.id,

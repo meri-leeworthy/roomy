@@ -342,10 +342,32 @@ create index if not exists idx_activity_item_global
 -- Per-stream materialization cursor. Tracks the highest event idx that has
 -- been applied to the materialized views for each stream. Lives in the
 -- per-space DB so each space DB is self-describing about its own
--- re-materialization progress: deleting a corrupted space DB and replaying
--- the local event log for that stream restores it without touching any
+-- re-materialization progress: deleting a corrupted space DB and replaying the
+-- local event log for that stream restores it without touching any
 -- other space.
 create table if not exists materialization_cursor (
   stream_id text primary key,
   materialized_to integer not null default -1
 ) strict;
+
+-- Denormalised read projection (TASK-173): the room→space→parent→access facts
+-- that `auth/access.ts:resolveRoom` re-derives per room, per request, per
+-- caller. Those three queries are 36 of the ~50 DB round-trips
+-- `room.getThreads` spends (measured in perf/probe-projections.ts).
+--
+-- Maintained on LIVE events only — `applyBatch` appends the upsert to the
+-- per-event transaction it already opens, so maintenance costs zero extra
+-- worker round-trips and is atomic with the event that dirtied it.
+-- Rematerialisation (isBackfill) never writes it; the read path warms any
+-- missing row on first access, so a blue-green rebuild heals lazily.
+--
+-- Purely additive: declared here so every existing per-space DB gains it at
+-- next open (the schema file is exec'd on every open regardless of version),
+-- with no SPACE_SCHEMA_VERSION bump and therefore no forced rebuild.
+create table if not exists room_access (
+  room_id           text primary key,
+  space_id          text not null,
+  parent_channel_id text
+) strict;
+
+create index if not exists idx_room_access_space on room_access(space_id);

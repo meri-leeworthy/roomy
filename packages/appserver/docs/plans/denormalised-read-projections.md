@@ -1,0 +1,592 @@
+# Denormalised read projections
+
+**Date:** 2026-09-21
+**Status:** Round 1 — plan + prototype (`room_access` projection), measured
+**Task:** TASK-173
+
+## Summary
+
+The appserver's read cost is dominated not by scans but by **per-item access
+resolution**: `roomAccess` runs 1–3 SQL round-trips *per room*, and the read
+handlers that list rooms run it per room. `room.getMetadata` and
+`room.getThreads` each spend **36 of their ~50 DB round-trips** re-deriving the
+same room→space→parent→default_access facts for the same rooms, on every
+request, for every caller. That is the join being paid per read.
+
+Meanwhile a **single live message emits 7 WebSocket frames per subscribed
+client**, 5 of which are `#invalidate` frames that each force an HTTP refetch.
+With 4 subscribers that is 16 refetches per message, each of which re-runs the
+above per-room access resolution. This is the fanout Meri asked about: 5
+invalidations → 5 full read endpoints → ~137 DB round-trips *per client*.
+
+This document plans denormalised projections for the read side, and reports the
+round-1 prototype: a `room_access` projection maintained on live events and
+warmed on read miss, measured before/after.
+
+## Context: what is actually slow (measured, not assumed)
+
+Production, last 7 days (Mimir `roomy_xrpc_request_duration_seconds`):
+
+| endpoint | req / 7d | p50 | p95 |
+|---|---:|---:|---:|
+| `space.getActivityFeed` | 410,958 | 40 ms | 3,125 ms |
+| `space.sendEvents` | 156,545 | 145 ms | 227 ms |
+| `room.getMessages` | 155,361 | 21 ms | 69 ms |
+| `space.getMetadata` | 115,070 | 41 ms | 279 ms |
+| `space.getSpaces` | 76,937 | 9 ms | 96 ms |
+| `room.getMetadata` | 56,637 | 7 ms | 349 ms |
+| `room.getThreads` | 26,488 | 10 ms | 450 ms |
+| `space.getThreads` | 3,414 | 10 ms | 3,439 ms |
+
+Two things stand out. First, the **mean/p50 are small but the tails are 10–100×
+the median** — `room.getMetadata` p50 7 ms against p95 349 ms. Second, the
+process-local query cache is only **29.6 % hit rate** (`roomy_cache_hits_total`
+181 / `roomy_cache_misses_total` 431 per hour, `roomy_cache_size` 204), so the
+cache is not absorbing this.
+
+Local probe (`perf/probe-projections.ts`, 12 channels + 12 threads, 1200
+messages, 100 readers), DB round-trips per request split by destination worker:
+
+| endpoint | p50 | db-rtt | of which `space` worker |
+|---|---:|---:|---:|
+| `room.getMetadata` | 1.87 ms | **53** | 47 |
+| `room.getThreads` | 3.12 ms | **50** | 46 |
+| `space.getThreads` | 15.90 ms | 19 | 14 |
+| `space.getActivityFeed` | 2.34 ms | 15 | 11 |
+| `room.getMessages` | 1.12 ms | 11 | 8 |
+| `space.getMetadata` | 2.35 ms | 19 | 10 |
+
+Per-statement attribution for `room.getThreads` (1 request, 50 round-trips):
+
+```
+  13  select e.stream_id as space_id, cr.default_access ... where e.id = ?     <- resolveRoom
+  13  select head from edges where tail = ? and label = 'link' ...             <- resolveRoom (parent)
+  12  select default_access from comp_room where entity = ?                    <- resolveRoom (parent access)
+   1  select ... from entities e join comp_room cr ... limit 13                <- the actual thread list
+   1  select e.room, max(coalesce(cc.timestamp, ...)) ... group by e.room      <- activity
+   ...
+```
+
+**36 of 50 round-trips are `roomAccess` re-deriving room facts for 13 threads**
+(`auth/access.ts:resolveRoom`). Nothing about those facts changed between
+threads, or between requests.
+
+### The fanout
+
+Measured on the same probe, one live `createMessage` with 4 subscribed sync
+clients:
+
+```
+  sendEvents latency: 22.9ms
+  frames per client: 7
+  frame kinds: #messageDiff:1  #roomMetadataDiff:1  #invalidate:5
+  #invalidate nsids: room.getMetadata, room.getThreads, space.getThreads,
+                     space.getActivityFeed, space.getMetadata
+  => 4 clients x 4 reads = 16 HTTP requests per message
+  refetch storm per client: 137 DB round-trips
+```
+
+`#messageDiff` is free (it patches the client cache). The other **6 frames are
+5 invalidations + 1 unread diff**, and 4 of the 5 invalidations land on
+endpoints that carry the per-room access N+1 above. That is the amplification:
+one 22 ms write becomes 16 reads totalling ~550 DB round-trips across 4 clients.
+
+Note `space.getMetadata` is invalidated **only for the message author**
+(`inferSignals.ts:428`, `affectedUser = event.user`) — the probe's single
+client is the author, so it sees 5. For a non-author client it is 4.
+
+### Scaling
+
+`space.getThreads` at 19 round-trips moves 7 ms → 42 ms when the hot channel
+grows 500 → 4000 messages, with the round-trip count unchanged. That is
+`threadActivity.ts`'s latest-message query, which has **no `LIMIT` per group**:
+it reads every message in every room in scope to pick one per room. Isolated:
+500 messages → 1.46 ms; 8000 → 13.16 ms, returning **8001 rows to keep 2**.
+
+## The projection: `room_access`
+
+### Why this one first
+
+It is the only cost on the list that is
+(a) paid on **every** room-listing read, (b) **O(rooms)** rather than O(1),
+(c) **not** already cached (the query cache is per-`(nsid, params, did)` and
+29.6 % hit rate), and (d) derived from a **small, event-stable input set** —
+`entities.stream_id`, `comp_room.default_access`, and the canonical `link`
+edge. A projection here is cheap to maintain and cannot drift far.
+
+The other candidates are ranked in §Staging below.
+
+### Schema
+
+Added to `src/db/schema-space.sql` (per-space DB — the projection is
+space-scoped, like everything it derives from), and to `src/db/schema.sql`
+(the in-memory schema `toAsyncDb` uses, since unit tests exercise access checks
+directly rather than through the worker's schema loader):
+
+```sql
+create table if not exists room_access (
+  room_id           text primary key,
+  space_id          text not null,
+  parent_channel_id text
+) strict;
+
+create index if not exists idx_room_access_space on room_access(space_id);
+```
+
+Purely additive, so every existing per-space DB gains it at next open — the
+schema file is exec'd on every open regardless of version
+(`worker.ts:initializeVersionedSchema`) — with **no `SPACE_SCHEMA_VERSION` bump
+and therefore no forced blue-green rebuild**.
+
+### What is projected, and what deliberately is not
+
+The projection carries the **structural** half of `resolveRoom`'s answer:
+`space_id` (from `entities.stream_id`) and `parent_channel_id` (from the
+canonical `'link'` edge, whose `json_extract` predicate was the most expensive
+of the three queries).
+
+`default_access` is **not** projected — it is always read live from `comp_room`,
+batched across the room ids and their parent ids. This is not caution for its
+own sake; it is a correctness requirement discovered during this round:
+
+> **Finding.** The first implementation projected `default_access`, and the
+> e2e suite failed `space.roomy.search.messages > room scope enforces read
+> access for non-members` — a room whose `comp_room.default_access` was set to
+> `none` still returned search results to a non-member. The projection had
+> cached an authorisation input in a table the live-event path could not keep
+> up to date for a write that didn't go through it.
+
+`default_access` is a **security input that any writer of `comp_room` can
+change**, and the projection is only maintained on the live write path (never
+during replay, per the constraint). A replayed `updateRoom` inside a boot gap,
+or any out-of-band write, would serve a stale access decision. Structure is
+safe to project because it changes only through room/link lifecycle events, and
+because a stale structural row is recoverable — the fallback is always the live
+table. **A projection that is wrong about authorisation is not worth the query
+it saves.**
+
+### Maintenance
+
+**Live events upsert.** The projection is written from `applyBatch`'s
+per-event chunk loop as **one extra statement inside the per-event transaction
+that already exists** — measured at **zero additional worker round-trips**
+(§Results). The statement re-derives rows for just the rooms the event touched:
+
+```sql
+insert into room_access (room_id, space_id, parent_channel_id)
+select e.id, e.stream_id, p.head
+  from entities e
+  left join edges p on p.tail = e.id and p.label = 'link'
+       and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+ where e.id in (?, ...)
+   and e.stream_id is not null
+on conflict (room_id) do update set
+  space_id = excluded.space_id, parent_channel_id = excluded.parent_channel_id
+```
+
+Affected rooms per event type — the **complete** set of events that write the
+projection's inputs, derived by reading the SDK materialisers rather than
+guessing:
+
+| event | SDK source |
+|---|---|
+| `room.createRoom.v0` | `events/room.ts:60-77` |
+| `room.updateRoom.v0` | `events/room.ts:109-140` |
+| `room.deleteRoom.v0` | `events/room.ts:145-168` |
+| `room.restoreRoom.v0` | `events/room.ts:145-168` |
+| `link.createRoomLink.v0` | `events/link.ts:26` |
+| `link.removeRoomLink.v0` | `events/link.ts:80` |
+| `query.spaceMeta.v0` (synthetic) | `events/synthetic.ts:180-250` |
+
+**Rematerialisation deletes instead.** `maintainRoomAccess` takes `isBackfill`
+and, when set, issues `delete from room_access where ...` rather than an
+upsert. Population during replay is out of scope, as required — but a replayed
+*structural* change must not leave a stale row behind, and a delete is
+invalidation rather than population. The next read warms the row from the
+replayed data. `applyBatch` passes `true` from `reMaterializeFromLocalEvents`
+(`reMaterialize.ts:263-265`) and `false` from `StreamManager.sendEvents`
+(`StreamManager.ts:245`).
+
+Verified end-to-end (throwaway harness, output in §Results): after a
+replayed batch the table has **0 rows**, and the first read afterwards returns
+the correct answer and warms the row; after a live batch it has the expected
+rows immediately.
+
+### Read path — the projection is a cache, warmed on miss
+
+`resolveRoom` (`auth/access.ts`) reads the projection; on a hit it takes
+`space_id`/`parent_channel_id` from it and reads the live `default_access` for
+the room and (if any) its parent. On a **miss** it falls back to the live
+tables, then **writes the row it just derived** (the warm), so the next read
+hits. Read-path warming precedent already exists in this codebase
+(`ensureReadPositions`, `queries/readPositions.ts`).
+
+`roomAccessMany` (`access.ts`) takes its structure from one batched projection
+read and its access values from one batched `comp_room` read — replacing the
+three queries the pre-projection path needed (room rows, parent links, parent
+access).
+
+Every projection read **fails soft**: a handle without the table (a sync
+adapter whose schema predates it) is treated as a miss and degrades to the
+pre-projection path, logged once per process. The projection is an
+optimisation, so it must never be a correctness dependency.
+
+Two call sites had to change for the projection to pay off at all: both
+`room.getThreads` and `room.getMetadata` resolved access in a
+`for` / `Promise.all` loop of individual `roomAccess` calls. `roomAccess` is
+memoised but **not** batched, so each distinct thread was its own round-trip.
+Both now use `roomAccessMany`, collapsing the page to one access pass.
+
+### Why not a once-per-batch write at the end of materialisation
+
+Attempted and rejected on measurement, as asked. Two variants:
+
+- **Per-batch (a separate post-loop transaction).** Costs one extra worker
+  round-trip per batch, and — because `applyBatch` never throws and advances
+  `materialization_cursor` past failed chunks (`applyBatch.ts:411-429`) — a
+  projection written in a *separate* transaction from the event that dirtied it
+  can be left stale by exactly the failure mode the cursor tolerates.
+- **Per-event (inside the existing transaction) — chosen.** Measured at **0
+  additional worker round-trips** (§Results), and atomically consistent with
+  the write that dirtied it.
+
+So: the once-per-batch variant is *not* cheaper, and it is less correct. The
+per-event statement inside the existing transaction wins on both axes, which
+is why code simplicity never had to be traded against cost.
+
+## What this does NOT do
+
+- **It does not touch rematerialisation.** No projection is written with
+  `isBackfill: true`. A blue-green rebuild produces a DB with an empty
+  `room_access`; the first read per room warms it.
+- **It does not make the fanout smaller.** It makes each refetch cheaper. The
+  5 invalidations per message are a separate change (§Staging R2).
+- **It does not fold caller-scoped fields in.** `canRead`/`canWrite` stay
+  computed per request from the caller's roles/bans/membership.
+
+## Rejected designs
+
+**Caller-scoped access projection** (`(user_did, room_id) → canRead/canWrite`).
+Tempting — it would collapse the whole `computeRoomAccess` chain — but the key
+space is `users × rooms × spaces`, and the invalidation set is every role
+assignment, role-permission edit, ban, join, leave and room-policy change. The
+existing query cache already tries the equivalent thing at
+`(nsid, params, did)` granularity and only hits 29.6 %. The per-caller half is
+also the *cheap* half once the room facts are projected: role grants are one
+batched query, and space access is already memoised per request
+(`auth/access.ts:createAccessMemo`).
+
+**Projecting the rendered sidebar / thread list itself.** Rejected: the payload
+is caller-scoped (`unreadCount`, `lastRead`, `activeThreads`, access-filtered
+channel sets), so the projection key would be per-caller, and the invalidation
+set is every message (unread), every read receipt, every role change. High
+write amplification, low hit rate.
+
+**Materialising the activity window per room into a wide row.** Already done —
+`activity_item` is a projection of exactly this kind (one row per room, rolling
+5-message window). The remaining cost in `getActivityFeed` is not the window
+but the per-message hydration (media, link embeds, reactions) across a
+per-space fan-out; that is R3 below, and its shape is different.
+
+## Staging
+
+**R1 — `room_access` projection (this round).** Collapses 36 of ~50 round-trips
+in `room.getMetadata` / `room.getThreads`, and 38 → 1 in the `roomAccessMany`
+paths (`space.getMetadata`, `space.getActivityFeed`, `space.getThreads`).
+
+**R2 — cut the invalidations that force the refetches.** This is where the
+fanout actually shrinks, and R1 is what makes it safe:
+- `room.getMetadata` and `room.getThreads` are invalidated by *every*
+  `createMessage` (`inferSignals.ts:411-412`), but `roomMetadataDiff` already
+  patches `unreadCount` and the thread-activity fields they carry. Drop the two
+  invalidations, extend `roomMetadataDiff` to carry `recentThreads` ordering.
+- `space.getThreads` is invalidated per message (`:417`); it re-orders on
+  latest activity. Same treatment: a diff, not an invalidation.
+- Expected: 5 invalidations → 2 (activity feed, author-scoped metadata), i.e.
+  **16 refetches per message → 8**.
+
+**R3 — `space.getThreads` / `getActivityFeed` projection.** `fetchRoomActivity`
+(`threadActivity.ts:230`) reads every message in scope to pick the latest per
+room (measured: 8001 rows → 2 at 8000 messages). The fix is a
+`room_activity` projection — `(room_id) → latest_message_id, latest_ts,
+recent_authors` — maintained on createMessage/deleteMessage/moveMessages, which
+is the same shape as the existing `activity_item` and can share its update path.
+
+**R4 — `selectMessages` embed/reaction pre-join.** Lower value than expected:
+measured at 20k messages with 4000 reactions and 5000 link embeds, the base
+rows cost 0.119 ms and the reactions batch 0.494 ms. Not the bottleneck; defer
+until the page size grows.
+
+**Not staged: `getMessages` pagination.** Its cost is flat in room size
+(`idx_entities_room_sort`, measured 0.103 ms for the base query) and 11
+round-trips total. There is no join to move.
+
+## Measurement
+
+`perf/probe-projections.ts` (new) measures both halves per run:
+
+- **Read cost** — p50/p95/p99/max per endpoint, plus DB round-trips by
+  destination worker, via a `WorkerLink.prototype.send` interceptor (the
+  technique from `probe-sendevents.ts:92-105`).
+- **Fanout** — opens N real sync connections, subscribes `room:` + `space:`
+  topics, sends one live message through the real HTTP write path, counts
+  frames per client and by type, then issues and times the follow-up reads the
+  invalidations imply.
+
+Run: `APPSERVER_TEST_MODE=true RATE_LIMIT_DISABLED=true bun run
+packages/appserver/perf/probe-projections.ts --label <before|after>`
+
+The query cache is disabled in the probe (`disableQueryCache: true`) so the
+projection is measured on its own rather than being masked by the in-memory
+cache.
+
+## Results
+
+Probe: `perf/probe-projections.ts`, fixture = 12 channels + 12 threads, 1200
+messages in the hot channel, 100 readers, 4 sync clients, 30 iterations. Query
+cache disabled so the projection is measured on its own.
+
+### Read cost
+
+| endpoint | p50 before | p50 after | **db-rtt before** | **db-rtt after** | reduction |
+|---|---:|---:|---:|---:|---:|
+| `room.getMetadata` | 1.87 ms | 1.92 ms | **53** | **21** | **−60 %** |
+| `room.getThreads` | 3.12 ms | 1.42 ms | **50** | **18** | **−64 %** |
+| `space.getThreads` | 15.90 ms | 13.81 ms | 19 | 18 | −5 % |
+| `space.getActivityFeed` | 2.34 ms | 1.96 ms | 15 | 15 | 0 % |
+| `space.getMetadata` | 2.35 ms | 2.38 ms | 19 | 19 | 0 % |
+| `room.getMessages` | 1.12 ms | 1.48 ms | 11 | 11 | 0 % |
+
+Per-destination split after: `room.getMetadata` 15 space / 5 readstate / 1
+global; `room.getThreads` 14 space / 3 readstate / 1 global. The `space`-worker
+column is where the projection acts; readstate and global are untouched.
+
+> **Method note — read these as round-trip counts, not latencies.** p50 moves
+> by well under a millisecond because with 12 threads the workload is small
+> enough that ~35 saved round-trips cost ~0.5 ms of worker time. Round-trips
+> are the machine-independent measure, and they are what scales: the removed
+> work is ~3 round-trips *per room listed*, so the saving grows with the
+> sidebar, while the remaining count does not. Latency differences at this
+> fixture size are within run-to-run noise and should not be quoted as an
+> improvement.
+
+### Fanout (one live message, 4 subscribed clients)
+
+The frame set is **unchanged** — this round does not reduce fanout, only the
+cost of each refetch, exactly as scoped:
+
+```
+  frames per client: 7   (#messageDiff:1  #roomMetadataDiff:1  #invalidate:5)
+  => 4 clients x 4 reads = 16 HTTP requests per message
+```
+
+| refetch storm per client | before | after |
+|---|---:|---:|
+| DB round-trips | **137** | **72** (−47 %) |
+| `room.getMetadata` | 53 | 21 |
+| `room.getThreads` | 50 | 18 |
+| `space.getThreads` | 19 | 18 |
+| `space.getActivityFeed` | 15 | 15 |
+
+Across 4 clients that is ~550 → ~290 DB round-trips per single message posted.
+
+### Write-side cost of maintaining the projection
+
+Measured with a `WorkerLink.prototype.send` counter over one `applyBatch` of 5
+`createRoom` events (throwaway harness):
+
+| | worker round-trips | projection rows |
+|---|---:|---:|
+| projection step disabled | 12 | 0 |
+| projection step enabled | **12** | 5 |
+
+**Zero additional worker round-trips.** The statement rides inside the
+per-event transaction `applyBatch` already opens; only its payload grows.
+
+### Rematerialisation constraint (the hard one)
+
+Throwaway harness replaying a `createRoom` → `createRoom(thread)` →
+`createRoomLink` batch through the real `applyBatch`:
+
+```
+after remat (isBackfill:true):
+  projection rows: 0          <- remat populated nothing, as required
+  roomAccess(thread) canRead=true defaultAccess=readwrite parentChannelId=01M30S...
+  projection row after the read (warmed): did:plc:bg-space parent=01M30S...
+
+after a LIVE batch (isBackfill:false):
+  projection rows: 2          <- channel + thread, maintained inline
+  thread row: parent=01M30S...
+```
+
+The rebuild leaves the table empty; the first read is still correct and warms
+it. No backfill of projections is ever performed.
+
+### Tests
+
+`bun test --cwd packages/appserver`: **1064 pass, 1 skip, 0 fail** (baseline on
+`next` before this work: 1056 pass, 1 skip, 0 fail). `tsc --noEmit`: 0 errors.
+
+Eight new tests, all defending observable behaviour rather than implementation:
+
+- `queries/roomAccessProjection.test.ts` (4): a live event upserts with the
+  parent link; **the same event during backfill deletes rather than populates**;
+  events that cannot affect the projection produce no step; malformed/unknown
+  events are inert.
+- `auth/access.test.ts` (4): a projected room resolves **identically** to an
+  unprojected one (including the thread-clamps-to-parent rule); an access change
+  written directly to `comp_room` is observed with a warmed projection; a
+  re-parented room is not wrongly denied; `roomAccessMany` agrees with
+  `roomAccess` for projected and unprojected rooms side by side.
+
+The projection tests were mutation-checked: corrupting `space_id` in the
+projection reader fails 5 of them, confirming they exercise the projected path
+rather than passing through the fallback.
+
+
+## Assessment: decoupling the `sendEvents` 200 from materialisation
+
+Meri's observation 1 is correct in principle — `StreamManager.sendEvents`
+awaits the full materialisation before the XRPC router returns its empty 200
+(`router.ts:257-260`) — but the change is **not** a small one, and it interacts
+badly with three existing properties. This section is the assessment asked for;
+no code was changed for it.
+
+### Where the boundary actually is
+
+The write path is already two-phase, and the phases are already independent:
+
+1. **Append** — one atomic `transaction` on the dedicated events worker
+   (`StreamManager.ts:212`): N `insert into stream_events ... select max(idx)+1`,
+   a `stream_state` upsert, and a `start_idx` read. Different DB, different
+   worker, no shared transaction with anything below.
+2. **Materialise** — `applyBatch` into the per-space worker, plus global and
+   read-state writes, under a per-space savepoint mutex, then
+   `InvalidationRouter.onEventsApplied`, then the push poke, then the raw-event
+   listeners (`StreamManager.ts:220-350`).
+
+Everything in phase 2 runs before the 200 today. Phase 1 alone is ~1 round-trip;
+phase 2 is ~38 round-trips per event (`docs/sendevents-write-path-review.md:249`),
+plus profile hydration and the `resolveReplyToAuthors` batch.
+
+The natural cut is exactly between them, and the machinery to host the deferred
+half already exists: `#streamQueues` is already a per-stream promise chain
+(`StreamManager.ts:132-147`) that guarantees phase 2 runs in `idx` order per
+stream. Deferring means appending to that chain without awaiting it.
+
+### Guarantees that change
+
+| # | Guarantee today | After |
+|---|---|---|
+| 1 | **Read-your-writes for the sender.** `await sendEvents` ⇒ the per-space row exists. Asserted by `handlers/space.roomy.space.sendEvents.test.ts:154-167`. | Lost. Nothing in the 200 carries an idx or materialised watermark, so the sender's own immediate refetch can miss its message. |
+| 2 | **Diff-before-return.** `#messageDiff` is produced and delivered inline; the client reconciles its optimistic placeholder by ULID only when that frame arrives (`app-lite/src/lib/mutations/pending-sends.svelte.ts:89`). | The frame arrives later. Benign *because* the optimistic path exists — but the reconciliation window widens from "one request" to "one materialisation". |
+| 3 | **Push freshness bound.** Jobs are built at materialise time and dropped when canonical age > `PUSH_MAX_MESSAGE_AGE_MS` (5 min, `push/freshness.ts`). | Deferral past 5 min silently drops live pushes. Only bites under a backlog, but it fails *silently*. |
+| 4 | **Invariant: a live write materialises.** `isBackfill:false` is what enables unread bumps and diffs (`applyBundle` gates, `router.ts:61`). | Unchanged in intent — but the deferred work must still be tagged live. If a deferred batch were ever replayed through the boot path instead, it would be `isBackfill:true` and produce **no diff and no unread bump**. |
+| 5 | **409 on a rebuilding space.** `isSpaceRebuilding` is checked *before* the append, and the contract is deliberately "exactly-once or rejected, never double-applied" (`blue-green-read-serving.md:185-200`). | Survives only if the gate stays on the append side. If materialisation is deferred across a blue-green swap, the deferred batch lands on a DB that no longer exists. |
+
+### Failure modes
+
+- **Crash between append and materialise.** Today this is already survivable:
+  boot replay covers the gap (`reMaterialize.ts:162-178`, cursor at
+  `materialized_to + 1`). But it is currently a *narrow* race, and boot replay
+  is fire-and-forget and runs with `isBackfill:true` — so the recovered gap
+  produces **no WS diff and no unread bump**. Deferring makes this the normal
+  path rather than the exception.
+- **Backlog ⇒ stale reads with no signal.** A space whose materialisation
+  worker is saturated serves reads that silently lag the event log. Today the
+  saturation surfaces as write latency (a visible, bounded symptom); deferred,
+  it surfaces as correctness drift with no backpressure signal.
+- **Partial batch.** `applyBatch` never throws: it counts per-event failures
+  and advances `materialization_cursor` past them (`applyBatch.ts:277-284,
+  411-429`). A 200 returned *before* that batch runs means the caller is told
+  "accepted" for events that may be silently skipped. Today the 200 at least
+  follows the attempt.
+- **Double-apply risk on retry.** The XRPC caller's natural reaction to an
+  ambiguous result is to retry. The append is an unconditional insert into
+  `stream_events` keyed `(stream_id, idx)` (`eventsSchema.sql:4-13`) with idx
+  recomputed as `max(idx)+1`, so **a retried batch appends duplicates at new
+  idx** — this is already true today and is *worsened* by decoupling, because
+  the client now cannot distinguish "not yet materialised" from "not accepted".
+
+### Recommendation
+
+**Do not ship the decoupling as a latency fix.** Measured, it buys little and
+risks a lot:
+
+- `sendEvents` p50 in production is already **145 ms**, and the local probe
+  shows the *synchronous* write path completing in 22.9 ms with a realistic
+  fixture. The latency is not dominated by materialisation at this scale.
+- The write path's worst documented offender was third-party HTTP inside the
+  write (`sendevents-write-path-review.md`), already fixed; the remaining
+  N+1 (`checkWriteAuth` per event, `roomAccess` per room) is fixable *without*
+  changing the consistency contract, and `roomAccessMany` already exists.
+- The 5-min push freshness bound and the `isBackfill` split mean a deferred
+  path needs a third classification ("deferred-live") threaded through
+  `applyBundle`, `inferSignals` and the push gate before it is correct.
+
+**If it is pursued anyway**, the prerequisites, in order:
+1. **Make the 200 carry a watermark.** Return `{ idx }` (or `{ cursor }`) so a
+   caller can poll `space.roomy.sync.getEvents` for materialisation progress —
+   this restores guarantees 1 and 5. `materialization_cursor`
+   (`schema-space.sql:348`) is the right watermark; nothing on the read path
+   reads it today.
+2. **Make deferred work explicitly live.** A `materializeMode: "live" |
+   "backfill" | "deferred"` threaded to `applyBundle`, so a crash-recovered
+   deferred batch still emits diffs and unread bumps.
+3. **Bound the backlog and signal it.** A per-space queue depth exposed as a
+   metric (there is currently **no** metric for materialisation lag), with the
+   append returning 503 above a ceiling rather than drifting silently.
+4. **Idempotent append.** Dedupe on event ULID (`insert ... on conflict do
+   nothing` after a unique index on `(stream_id, event_id)`), so retries are
+   safe — a prerequisite for any "accepted but not applied" contract, and worth
+   doing independently.
+
+Steps 1 and 4 are worth doing regardless of whether the decoupling ships.
+
+## Question asked: does normal operation avoid rematerialisation?
+
+**Yes, and here is the code path that proves it.** `reMaterializeFromLocalEvents`
+is called once per boot, fire-and-forget (`index.ts:76`). For each stream it:
+
+1. checks the per-space schema (`reMaterialize.ts:114-115`, `checkSpaceSchema`);
+2. reads the per-space cursor (`:162-165`) and the log's `max(idx)` (`:168-172`);
+3. **skips when `materializedTo >= latest`** (`:175-178`) — no event read, no
+   materialisation.
+
+A healthy deployment therefore replays nothing and logs
+`re-materialization: all N streams already up to date` (`:188-193`). The
+cursor is advanced by every live write (`applyBatch.ts:422-429`), so the gap is
+normally zero.
+
+Three exceptions force work: a `SPACE_SCHEMA_VERSION` bump (full blue-green
+rebuild — measured at 655 s for 4,153 streams / 435,986 events,
+`blue-green-read-serving.md:256-263`), a genuine crash gap, and one **newly
+identified defect** (below).
+
+### Three documentation/code mismatches found (all pre-existing)
+
+1. **"Regenerated lazily on first access" is not implemented.**
+   `README.md:37-40`, `db.ts:122-125` and `worker.ts:321-323` all claim a
+   per-space DB is populated by re-materialising on first access.
+   `openSpaceDb` creates an empty schema'd file and returns
+   (`worker.ts:325-341`); no read handler replays. After a volume restore,
+   spaces serve **empty** until the alphabetical boot sweep reaches them.
+   `reMaterialize.ts:57-58` repeats the claim ("re-materialized on demand when
+   first accessed").
+2. **A live write can permanently strand history.** No write path checks for a
+   gap *below* the cursor. If a live `sendEvents` lands in a fresh/empty space
+   DB, `applyBatch` sets the cursor to that batch's max idx; a later boot sweep
+   then sees `materializedTo >= latest` and skips — so idx `0..N` is never
+   materialised by any path. Today this is masked because boot replay usually
+   runs first; **it becomes routine the moment writes stop waiting for
+   materialisation.**
+3. **Stale wipe comments.** `db.ts:26-30` ("a bump wipes and re-derives every
+   per-space DB") describes pre-blue-green behaviour; the worker never wipes on
+   mismatch (`worker.ts:343-348`). The per-space cost claim at
+   `reMaterialize.ts:130-131` ("one round-trip per space" for the entity_space
+   backfill) is also understated: the worker scans every entity row and inserts
+   per entity (`worker.ts:752-762`).
+
+Mismatches 1 and 2 are why the projection is designed as a **warm-on-read
+cache** rather than a rebuilt-per-remat table: any projection populated only
+during rematerialisation would inherit both defects.

@@ -14,6 +14,12 @@
  */
 
 import type { DbLike } from "../db/types.ts";
+import {
+  readRoomAccessProjection,
+  readRoomAccessProjectionMany,
+  roomAccessProjectionAvailable,
+  warmRoomAccessProjection,
+} from "../queries/roomAccessProjection.ts";
 
 export type DefaultAccess = "readwrite" | "read" | "none";
 
@@ -221,8 +227,62 @@ export interface RoomRow {
  *
  * Returns the resolved row plus the canonical parent channel ID (null when the
  * room is a channel itself, or has no canonical parent link).
+ *
+ * Reads the `room_access` projection first (TASK-173): it holds exactly the
+ * facts this function derives, pre-joined, so a hit replaces up to three
+ * queries with one. On a miss it falls back to the live tables and then WARMS
+ * the projection with what it computed — the projection doubles as a cache, so
+ * a row left empty by a blue-green rebuild (or a missed event) heals on first
+ * read instead of needing a backfill.
  */
 export async function resolveRoom(
+  db: DbLike,
+  roomId: string,
+): Promise<{ row: RoomRow | null; parentChannelId: string | null }> {
+  const projected = await readRoomAccessProjection(db, roomId);
+  if (projected !== null) {
+    // `default_access` is read live, never from the projection: it is a
+    // security input any writer of comp_room can change, and the projection is
+    // only maintained on the live event path (never during remat). Structure is
+    // safe to project; the authorisation input is not.
+    const ownAccess = await liveDefaultAccess(db, roomId);
+    const parentAccess = projected.parent_channel_id !== null
+      ? await liveDefaultAccess(db, projected.parent_channel_id)
+      : null;
+    return {
+      row: {
+        spaceId: projected.space_id,
+        defaultAccess: projected.parent_channel_id !== null
+          ? minAccess(normalizeDefaultAccess(parentAccess), normalizeDefaultAccess(ownAccess))
+          : normalizeDefaultAccess(ownAccess),
+      },
+      parentChannelId: projected.parent_channel_id,
+    };
+  }
+
+  const computed = await computeResolvedRoom(db, roomId);
+  if (computed.row !== null && (await roomAccessProjectionAvailable(db))) {
+    await warmRoomAccessProjection(db, [roomId]);
+  }
+  return computed;
+}
+
+/** One room's live `comp_room.default_access` (null when the row is absent). */
+async function liveDefaultAccess(
+  db: DbLike,
+  roomId: string,
+): Promise<string | null> {
+  const row = await db
+    .query("select default_access from comp_room where entity = ?")
+    .get<{ default_access: string | null }>(roomId);
+  return row?.default_access ?? null;
+}
+
+/**
+ * Derive `{ row, parentChannelId }` from the live tables — the pre-projection
+ * body of `resolveRoom`, kept as the miss fallback and the warm source.
+ */
+async function computeResolvedRoom(
   db: DbLike,
   roomId: string,
 ): Promise<{ row: RoomRow | null; parentChannelId: string | null }> {
@@ -472,46 +532,95 @@ export async function roomAccessMany(
   }
   if (pending.length === 0) return result;
 
-  const ph = pending.map(() => "?").join(",");
+  // 1. Structure (space + canonical parent) from the `room_access` projection:
+  //    one batched read replacing the room-row and parent-link queries the
+  //    pre-projection path needed. Misses fall back to the live tables below
+  //    and are warmed afterwards.
+  const projected = await readRoomAccessProjectionMany(db, pending);
+  const misses = pending.filter((roomId) => !projected.has(roomId));
 
-  // 1. entity + default_access for all pending rooms.
-  const roomRows = await db
-    .query(
-      `select e.id as id, e.stream_id as space_id, cr.default_access as default_access
-         from entities e
-         left join comp_room cr on cr.entity = e.id
-        where e.id in (${ph})`,
-    )
-    .all<{ id: string; space_id: string | null; default_access: string | null }>(...pending);
-  const roomById = new Map(roomRows.map((r) => [r.id, r]));
+  const roomById = new Map<string, { id: string; space_id: string | null }>();
+  const parentByRoom = new Map<string, string>();
+  const parentIds = new Set<string>();
 
-  // 2. canonical parent links for all pending rooms.
-  const parentRows = await db
-    .query(
-      `select tail, head from edges
-        where tail in (${ph})
-          and label = 'link'
-          and coalesce(json_extract(payload, '$.canonical_parent'), 0) = 1`,
-    )
-    .all<{ tail: string; head: string }>(...pending);
-  const parentByRoom = new Map(parentRows.map((r) => [r.tail, r.head]));
+  for (const [roomId, row] of projected) {
+    roomById.set(roomId, { id: roomId, space_id: row.space_id });
+    if (row.parent_channel_id !== null) {
+      parentByRoom.set(roomId, row.parent_channel_id);
+      parentIds.add(row.parent_channel_id);
+    }
+  }
 
-  // 3. parent-channel default_access for the distinct parent ids.
-  const parentIds = [...new Set(parentByRoom.values())];
-  const parentAccess = new Map<string, DefaultAccess>();
-  if (parentIds.length > 0) {
-    const pph = parentIds.map(() => "?").join(",");
-    const pRows = await db
+  if (misses.length > 0) {
+    const mph = misses.map(() => "?").join(",");
+
+    // 1a. entity + stream for the missed rooms (structure only).
+    const roomRows = await db
       .query(
-        `select entity, default_access from comp_room where entity in (${pph})`,
+        `select e.id as id, e.stream_id as space_id from entities e where e.id in (${mph})`,
       )
-      .all<{ entity: string; default_access: string | null }>(...parentIds);
-    for (const r of pRows) parentAccess.set(r.entity, normalizeDefaultAccess(r.default_access));
+      .all<{ id: string; space_id: string | null }>(...misses);
+    for (const r of roomRows) roomById.set(r.id, r);
+
+    // 1b. canonical parent links for the missed rooms.
+    const parentRows = await db
+      .query(
+        `select tail, head from edges
+          where tail in (${mph})
+            and label = 'link'
+            and coalesce(json_extract(payload, '$.canonical_parent'), 0) = 1`,
+      )
+      .all<{ tail: string; head: string }>(...misses);
+    for (const r of parentRows) {
+      parentByRoom.set(r.tail, r.head);
+      parentIds.add(r.head);
+    }
+
+    if (await roomAccessProjectionAvailable(db)) {
+      await warmRoomAccessProjection(db, misses);
+    }
+  }
+
+  // 1c. `default_access` is ALWAYS read live — never from the projection. It is
+  // a security input any writer of `comp_room` can change, and the projection
+  // is only maintained on the live event path (never during remat), so a
+  // replayed or out-of-band change would otherwise serve a stale access
+  // decision. Structure is safe to project; the authorisation input is not.
+  // One batched read covering both the rooms and their distinct parents.
+  const accessIds = [
+    ...new Set([...pending, ...parentIds].filter((id) => roomById.has(id) || parentIds.has(id))),
+  ];
+  const parentAccess = new Map<string, DefaultAccess>();
+  const ownAccessByRoom = new Map<string, DefaultAccess>();
+  if (accessIds.length > 0) {
+    const aph = accessIds.map(() => "?").join(",");
+    const accessRows = await db
+      .query(
+        `select entity, default_access from comp_room where entity in (${aph})`,
+      )
+      .all<{ entity: string; default_access: string | null }>(...accessIds);
+    for (const r of accessRows) {
+      parentAccess.set(r.entity, normalizeDefaultAccess(r.default_access));
+      ownAccessByRoom.set(r.entity, normalizeDefaultAccess(r.default_access));
+    }
+    // Rooms with no comp_room row fall back to the "no default_access" value.
+    for (const id of accessIds) {
+      if (!ownAccessByRoom.has(id)) ownAccessByRoom.set(id, "readwrite");
+      if (!parentAccess.has(id)) parentAccess.set(id, "readwrite");
+    }
   }
 
   // Space-level membership/admin/ban + public-join gate, once per distinct
-  // space (memoised across the whole request).
-  const spaceIds = [...new Set(roomRows.map((r) => r.space_id).filter((s): s is string => s !== null))];
+  // space (memoised across the whole request). Derived from the merged
+  // projection + fallback maps, not from the fallback query alone — rooms
+  // served by the projection never appear in `roomRows`.
+  const spaceIds = [
+    ...new Set(
+      pending
+        .map((roomId) => roomById.get(roomId)?.space_id)
+        .filter((s): s is string => s !== null && s !== undefined),
+    ),
+  ];
   const spaceBySpace = new Map<string, SpaceAccess>();
   const publicJoinBySpace = new Map<string, boolean>();
   for (const sid of spaceIds) {
@@ -569,8 +678,8 @@ export async function roomAccessMany(
     }
 
     // Effective default_access: threads inherit the more restrictive of the
-    // parent channel's and their own.
-    const ownAccess = normalizeDefaultAccess(row.default_access);
+    // parent channel's and their own (live values, both).
+    const ownAccess = ownAccessByRoom.get(roomId) ?? "readwrite";
     const effectiveAccess = parentChannelId !== null
       ? minAccess(parentAccess.get(parentChannelId) ?? "readwrite", ownAccess)
       : ownAccess;

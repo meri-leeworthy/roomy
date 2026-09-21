@@ -41,6 +41,7 @@ import {
 } from "../embed/enricher.ts";
 import { openReadStateDb } from "../db/db.ts";
 import { recordSpaceStats, selectMemberCount } from "../queries/spaceStats.ts";
+import { maintainRoomAccess } from "../queries/roomAccessProjection.ts";
 import {
   classifyMembershipEvent,
   setUserSpaceMembership,
@@ -234,6 +235,32 @@ export async function applyBatch(
         });
       }
 
+      // Denormalised read projection (TASK-173): maintain `room_access` for the
+      // rooms this event can have changed, INSIDE the same per-event
+      // transaction as the event's own statements. Appending one step here
+      // costs no extra worker round-trip (the transaction is already sent) and
+      // makes the projection atomic with the write that dirtied it — a
+      // separate post-loop transaction could be skipped by the same failure
+      // mode that lets the cursor advance past a failed chunk.
+      //
+      // Live events UPSERT; replay INVALIDATES (deletes). Population during
+      // rematerialisation is explicitly out of scope, but a replayed structural
+      // change must not leave a stale row behind, and the read path warms a
+      // missing row from the replayed data on first access. See
+      // queries/roomAccessProjection.ts.
+      const projectionStep = maintainRoomAccess(
+        e.event as unknown as Record<string, unknown>,
+        streamId,
+        opts.isBackfill,
+      );
+      if (projectionStep) {
+        chunkSteps.push({
+          type: "run",
+          sql: projectionStep.sql,
+          params: projectionStep.params,
+          derived: "space",
+        });
+      }
       chunkSteps.push({ type: "exec", sql: `release ${savepoint}`, derived: "none" });
 
       stats.applied++;
