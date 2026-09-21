@@ -72,6 +72,25 @@ export const CONFIG = {
     (import.meta.env.VITE_APPSERVER_WS_ORIGIN || "")
       .replace(/^ws(s?):\/\//, "http$1://")
       .replace(/\/+$/, "") || null,
+  /**
+   * The public web deployment of this app — the origin shareable links are
+   * rooted at, never the document origin. The desktop app is a Tauri webview
+   * served from a custom scheme (`tauri://localhost`), so a shareable link
+   * built from `location.origin` inside it is unopenable by its recipient.
+   *
+   * Two consumers: `share-url.ts` falls back to it when the document is not
+   * the web deployment, and it is the `PUBLIC_WEB_ORIGIN` marker that tells a
+   * build being served from its own configured origin that it may use
+   * `location.origin`. A build with no such marker (the desktop bundle) can
+   * therefore never mistake the webview for the public app — a static build
+   * serving at `http://localhost:5180` included.
+   *
+   * The default matches the `https` appLink host declared in
+   * `src-tauri/tauri.conf.json`: the desktop app's own statement of which web
+   * origin it belongs to.
+   */
+  publicWebOrigin: import.meta.env.VITE_PUBLIC_WEB_ORIGIN || "https://roomy.space",
+  publicWebOriginMarker: dynamicEnv.PUBLIC_WEB_ORIGIN || null,
   port: Number(import.meta.env.VITE_PORT) || 5180,
   usePublicClient: import.meta.env.VITE_OAUTH_PUBLIC_CLIENT === "true",
   profileSpaceNsid:

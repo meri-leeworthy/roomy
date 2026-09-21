@@ -155,6 +155,8 @@ env "${TEST_ENV[@]}" \
 VITE_APPSERVER_DID=did:web:localhost \
 VITE_APPSERVER_WS_ORIGIN=ws://127.0.0.1:$APPSERVER_PORT \
 VITE_OAUTH_PUBLIC_CLIENT=true \
+PUBLIC_WEB_ORIGIN=http://127.0.0.1:$APP_LITE_PORT \
+VITE_PUBLIC_WEB_ORIGIN=http://127.0.0.1:$APP_LITE_PORT \
 VITE_PORT=$APP_LITE_PORT \
   pnpm --filter app-lite exec vite dev --host 127.0.0.1 --port "$APP_LITE_PORT" &
 APP_LITE_PID=$!

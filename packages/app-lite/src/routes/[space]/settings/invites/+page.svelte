@@ -4,6 +4,7 @@
   import Button from "@roomy/design/components/ui/button/Button.svelte";
   import { createInvitesQuery } from "$lib/queries/invites";
   import { createInvite, revokeInvite } from "$lib/mutations/invite";
+  import { inviteUrl } from "$lib/share-links";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
 
   const spaceId = $derived(page.params.space!);
@@ -13,7 +14,7 @@
   let creating = $state(false);
 
   function urlFor(token: string): string {
-    return `${location.origin}/join?space=${encodeURIComponent(spaceId)}&invite=${encodeURIComponent(token)}`;
+    return inviteUrl(spaceId, token);
   }
 
   async function onCreate() {

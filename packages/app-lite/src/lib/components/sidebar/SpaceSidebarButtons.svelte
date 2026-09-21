@@ -7,6 +7,7 @@
   import { settingsBar } from "$lib/components/layout/settings-bar.svelte";
   import { spaceNavigation } from "$lib/components/layout/last-room.svelte";
   import { createFederationRequestsQuery } from "$lib/queries/federation";
+  import { shareUrl } from "$lib/share-links";
 
   let {
     spaceId = $bindable(),
@@ -60,7 +61,7 @@
     if (onInvite) {
       onInvite();
     } else if (allowPublicJoin && currentSpaceId) {
-      const url = new URL(page.url.href);
+      const url = shareUrl(page.url);
       url.pathname = `/${currentSpaceId}`;
       navigator.clipboard.writeText(url.href).then(() => {
         toast.success("Invite link copied to clipboard");

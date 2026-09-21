@@ -43,6 +43,17 @@ ENV OAUTH_HOST=$OAUTH_HOST
 ARG VITE_OAUTH_PUBLIC_CLIENT=true
 ENV VITE_OAUTH_PUBLIC_CLIENT=$VITE_OAUTH_PUBLIC_CLIENT
 
+# Public web deployment, read via $env/dynamic/public and inlined at build time
+# for adapter-static. Two roles: PUBLIC_WEB_ORIGIN marks this build as a web
+# deployment serving from that origin (shareable links then follow the
+# document); VITE_PUBLIC_WEB_ORIGIN overrides the public origin shareable links
+# fall back to (default https://roomy.space).
+ARG PUBLIC_WEB_ORIGIN
+ENV PUBLIC_WEB_ORIGIN=$PUBLIC_WEB_ORIGIN
+
+ARG VITE_PUBLIC_WEB_ORIGIN
+ENV VITE_PUBLIC_WEB_ORIGIN=$VITE_PUBLIC_WEB_ORIGIN
+
 # Uncomment if building on network with a custom certificate
 # COPY ./gitignore/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 # ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
@@ -78,6 +89,8 @@ RUN echo "[app-lite build debug] PUBLIC_PDS=$PUBLIC_PDS" && \
     echo "[app-lite build debug] PUBLIC_DISCORD_BRIDGE=$PUBLIC_DISCORD_BRIDGE" && \
     echo "[app-lite build debug] PUBLIC_BRIDGE_DID=$PUBLIC_BRIDGE_DID" && \
     echo "[app-lite build debug] VITE_APPSERVER_DID=$VITE_APPSERVER_DID" && \
+    echo "[app-lite build debug] PUBLIC_WEB_ORIGIN=$PUBLIC_WEB_ORIGIN" && \
+    echo "[app-lite build debug] VITE_PUBLIC_WEB_ORIGIN=$VITE_PUBLIC_WEB_ORIGIN" && \
     echo "[app-lite build debug] PUBLIC_FARO_URL=$PUBLIC_FARO_URL"
 
 RUN bash packages/app-lite/scripts/build-prod.sh

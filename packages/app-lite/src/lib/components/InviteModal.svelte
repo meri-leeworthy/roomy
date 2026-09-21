@@ -4,6 +4,7 @@
   import { toast } from "@foxui/core";
   import { createInvitesQuery } from "$lib/queries/invites";
   import { createInvite, revokeInvite } from "$lib/mutations/invite";
+  import { inviteUrl } from "$lib/share-links";
 
   let {
     open = $bindable(false),
@@ -27,7 +28,7 @@
   );
 
   function urlFor(token: string): string {
-    return `${location.origin}/join?space=${encodeURIComponent(spaceId)}&invite=${encodeURIComponent(token)}`;
+    return inviteUrl(spaceId, token);
   }
 
   async function onCreate() {
