@@ -611,11 +611,15 @@ export async function createAppserver(
           : null,
         cache,
         embed: {
+          // `pending` is the DB backlog (same source as /health/embed); the
+          // rest is in-memory sweeper state. Together they make the stall
+          // self-evident: pending > 0, inFlight 0, transientBackoff ~= pending.
           pending,
           priorityQueue: embed.priorityQueue ?? 0,
           inFlight: embed.inFlight ?? 0,
           enrichedNull: embed.enrichedNull ?? 0,
           dbBackoff: embed.dbBackoffActive ?? false,
+          transientBackoff: embed.transientBackoff ?? 0,
           backlogStuck: embed.backlogStuck ?? false,
         },
         search: {
@@ -765,6 +769,10 @@ export async function createAppserver(
   const embedInFlight = metrics.gauge("roomy_embed_in_flight", "Embed enrichments currently in flight.");
   const embedEnrichedNull = metrics.gauge("roomy_embed_enriched_null", "Embed links enriched to null (no card).");
   const embedDbBackoff = metrics.gauge("roomy_embed_db_backoff", "1 when the embed sweeper is in DB backoff.");
+  const embedTransientBackoff = metrics.gauge(
+    "roomy_embed_transient_backoff",
+    "Embed URLs currently skipped inside a transient-retry backoff window.",
+  );
   const embedBacklogStuck = metrics.gauge(
     "roomy_embed_backlog_stuck",
     "1 when the embed backlog is non-empty but the sweeper is selecting nothing (all pending links in transient-retry backoff).",
@@ -908,6 +916,7 @@ export async function createAppserver(
         embedInFlight.set({}, embed.inFlight ?? 0);
         embedEnrichedNull.set({}, embed.enrichedNull ?? 0);
         embedDbBackoff.set({}, embed.dbBackoffActive ? 1 : 0);
+        embedTransientBackoff.set({}, embed.transientBackoff ?? 0);
         embedBacklogStuck.set({}, embed.backlogStuck ? 1 : 0);
         embedBacklogStuckSince.set(
           {},

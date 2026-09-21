@@ -189,6 +189,12 @@ export function embedSweeperStats(): {
   backlogStuckSince: number;
   /** Sweep cycles that observed the stall. */
   backlogStuckSkipped: number;
+  /**
+   * Number of URLs the sweeper is currently skipping because they are inside
+   * a transient-retry backoff window. When this covers the whole backlog,
+   * `pending` stays high while nothing is selected — the observed stall.
+   */
+  transientBackoff: number;
 } {
   return {
     priorityQueue: priorityLinks.size,
@@ -201,7 +207,23 @@ export function embedSweeperStats(): {
     backlogStuck,
     backlogStuckSince,
     backlogStuckSkipped,
+    transientBackoff: activeBackoffSize(),
   };
+}
+
+/**
+ * Number of URLs currently parked in a transient-retry backoff window
+ * (`retryAt` in the future). Exposed on /health/embed and in the periodic
+ * metrics log so the stall is self-evident: `pending` large, `inFlight` 0,
+ * `transientBackoff` large.
+ */
+function activeBackoffSize(): number {
+  const now = Date.now();
+  let n = 0;
+  for (const retry of transientRetry.values()) {
+    if (retry.retryAt > now) n++;
+  }
+  return n;
 }
 
 /**

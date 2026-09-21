@@ -481,6 +481,8 @@ describe("embed sweeper invalidation room resolution", () => {
       expect(stats.backlogStuck).toBe(true);
       expect(stats.backlogStuckSince).toBeGreaterThan(0);
       expect(stats.backlogStuckSkipped).toBeGreaterThan(0);
+      // The parked link is what is holding up the backlog, and it is counted.
+      expect(stats.transientBackoff).toBe(1);
 
       // The row is still in the DB backlog, so `pending` (countPendingLinks)
       // is 1 while the sweeper is doing nothing — exactly the production
