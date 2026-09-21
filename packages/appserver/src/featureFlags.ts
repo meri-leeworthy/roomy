@@ -34,6 +34,11 @@ export const FEATURE_FLAGS: readonly FeatureFlagDef[] = [
     description:
       "Roomy Pro subscription page in user settings: Polar checkout link and membership status",
   },
+  {
+    key: "links-view",
+    description:
+      "Per-room and per-space link aggregation links view (third channel tab)",
+  },
 ];
 export const FEATURE_FLAG_KEYS: ReadonlySet<string> = new Set(
   FEATURE_FLAGS.map((f) => f.key),

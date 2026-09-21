@@ -6,22 +6,31 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { newUlid, Ulid, type Event } from "@roomy-space/sdk";
 import { BridgeRepository } from "../../db/repository.ts";
+import type { BridgeConfig } from "../../db/repository.ts";
+import { FileDiscordDataSource } from "../../discord/file-data-source.ts";
 import { MockRoomyGateway } from "../../roomy/mock-gateway.ts";
-import {
-	resetCapacityGate,
-	setCapacityGate,
-} from "../../roomy/capacity.ts";
+import type { RoomyGateway } from "../../roomy/gateway.ts";
+import { resetCapacityGate, setCapacityGate } from "../../roomy/capacity.ts";
 import {
 	ensureRoomyChannel,
 	handleChannelCreate,
 	handleRoomDelete,
 	handleRoomUpdate,
 	handleThreadCreate,
+	mergeGuildStructure,
+	readGuildStructure,
+	syncInitialStructure,
 } from "../room-sync.ts";
 import {
+	CATEGORY,
+	CATEGORY_2,
 	CHANNEL,
+	CHANNEL_2,
+	CHANNEL_3,
 	GUILD,
+	makeCategory,
 	makeChannel,
 	makeThread,
 	ROOMY_CHANNEL_ULID,
@@ -261,7 +270,10 @@ describe("handleThreadCreate", () => {
 	// event for that thread must not be re-created on Roomy, even if the
 	// thread→Roomy mapping hasn't been registered yet (REST/gateway race).
 	test("RO11: skips thread created by the bridge bot (echo prevention)", async () => {
-		const thread = makeThread({ parentId: CHANNEL, ownerId: "999999999999999999" });
+		const thread = makeThread({
+			parentId: CHANNEL,
+			ownerId: "999999999999999999",
+		});
 
 		await handleThreadCreate(thread, repo, roomy, "999999999999999999");
 
@@ -270,7 +282,10 @@ describe("handleThreadCreate", () => {
 
 	// RO12: A thread owned by a different user is still bridged.
 	test("RO12: bridges thread owned by another user", async () => {
-		const thread = makeThread({ parentId: CHANNEL, ownerId: "888888888888888888" });
+		const thread = makeThread({
+			parentId: CHANNEL,
+			ownerId: "888888888888888888",
+		});
 
 		await handleThreadCreate(thread, repo, roomy, "999999999999999999");
 
@@ -429,10 +444,483 @@ describe("room-sync — capacity enforcement", () => {
 	});
 
 	test("CAP03: ensureRoomyChannel creates no room when over capacity", async () => {
-		await ensureRoomyChannel(repo, roomy, CHANNEL, GUILD, "general", [
-			SPACE_A,
-		]);
+		await ensureRoomyChannel(repo, roomy, CHANNEL, GUILD, "general", [SPACE_A]);
 
 		expect(createRoomEvent(roomy, SPACE_A)).toBeUndefined();
+	});
+});
+
+// ─── Initial structure sync (one-shot, TASK-140) ────────────────────────
+
+/** The bridge config the structure tests operate on. */
+const fullConfig: BridgeConfig[] = [
+	{
+		guildId: GUILD,
+		spaceDid: SPACE_A,
+		mode: "full",
+		createdAt: 0,
+		updatedAt: 0,
+	},
+];
+const subsetConfig: BridgeConfig[] = [
+	{
+		guildId: GUILD,
+		spaceDid: SPACE_A,
+		mode: "subset",
+		createdAt: 0,
+		updatedAt: 0,
+	},
+];
+
+/** A guild with two categories and three channels, in Discord order. */
+function makeGuild() {
+	const channels = [
+		makeCategory({ id: CATEGORY, name: "announcements", position: 0 }),
+		makeChannel({
+			id: CHANNEL_3,
+			name: "rules",
+			parentId: CATEGORY,
+			position: 1,
+		}),
+		makeCategory({ id: CATEGORY_2, name: "chat", position: 2 }),
+		makeChannel({
+			id: CHANNEL_2,
+			name: "off-topic",
+			parentId: CATEGORY_2,
+			position: 4,
+		}),
+		makeChannel({
+			id: CHANNEL,
+			name: "general",
+			parentId: CATEGORY_2,
+			position: 3,
+		}),
+	];
+	return FileDiscordDataSource.fromData({
+		guild: { id: GUILD, channels },
+		channels,
+		messages: {},
+	});
+}
+
+/** Map three bridged channels to rooms, the way ensureRoomyRooms would. */
+function mapBridgedChannels(repo: BridgeRepository) {
+	const ids = new Map<string, Ulid>();
+	for (const channelId of [CHANNEL, CHANNEL_2, CHANNEL_3]) {
+		const roomyId = newUlid();
+		repo.registerMapping(SPACE_A, "channel", channelId, roomyId);
+		ids.set(channelId, roomyId);
+	}
+	return ids;
+}
+
+/**
+ * Fixed ids for the "space already has a sidebar" fixtures. Roomy category
+ * ids and child room ids cross the same `Ulid`-branded boundary the real
+ * sidebar does, so they are branded here rather than at each use.
+ */
+const EXISTING_CATEGORY_ID = Ulid.assert("01CCCCCCCCCCCCCCCCCCCCCCCC");
+const EXISTING_CHILD_ID = Ulid.assert("01DDDDDDDDDDDDDDDDDDDDDDDD");
+
+/** The Roomy room mapped to a Discord channel, asserting the mapping exists. */
+function roomOf(rooms: Map<string, Ulid>, channelId: string): Ulid {
+	const roomId = rooms.get(channelId);
+	if (roomId === undefined) {
+		throw new Error(`No Roomy room mapped for test channel ${channelId}`);
+	}
+	return roomId;
+}
+
+describe("mergeGuildStructure", () => {
+	test("orders a category's children by Discord position", () => {
+		const structure = {
+			categories: [{ id: CATEGORY_2, name: "chat", position: 2 }],
+			channels: [
+				makeChannel({ id: CHANNEL_2, parentId: CATEGORY_2, position: 4 }),
+				makeChannel({ id: CHANNEL, parentId: CATEGORY_2, position: 3 }),
+			],
+		};
+		const rooms = new Map([
+			[CHANNEL, "01AAAAAAAAAAAAAAAAAAAAAAAA"],
+			[CHANNEL_2, "01BBBBBBBBBBBBBBBBBBBBBBBB"],
+		]);
+
+		const merged = mergeGuildStructure([], structure, rooms);
+
+		expect(merged).toHaveLength(1);
+		expect(merged[0]?.name).toBe("chat");
+		// general is position 3, off-topic is position 4 — Discord order, not
+		// the order the channels arrived in.
+		expect(merged[0]?.children).toEqual([
+			"01AAAAAAAAAAAAAAAAAAAAAAAA",
+			"01BBBBBBBBBBBBBBBBBBBBBBBB",
+		]);
+	});
+
+	test("orders categories by Discord position", () => {
+		const structure = {
+			categories: [
+				{ id: CATEGORY, name: "announcements", position: 0 },
+				{ id: CATEGORY_2, name: "chat", position: 2 },
+			],
+			channels: [
+				makeChannel({ id: CHANNEL_3, parentId: CATEGORY, position: 1 }),
+				makeChannel({ id: CHANNEL, parentId: CATEGORY_2, position: 3 }),
+			],
+		};
+		const rooms = new Map([
+			[CHANNEL_3, "01AAAAAAAAAAAAAAAAAAAAAAAA"],
+			[CHANNEL, "01BBBBBBBBBBBBBBBBBBBBBBBB"],
+		]);
+
+		const merged = mergeGuildStructure([], structure, rooms);
+
+		expect(merged.map((c) => c.name)).toEqual(["announcements", "chat"]);
+	});
+
+	test("preserves existing categories and their children", () => {
+		const structure = {
+			categories: [{ id: CATEGORY, name: "announcements", position: 0 }],
+			channels: [
+				makeChannel({ id: CHANNEL_3, parentId: CATEGORY, position: 1 }),
+			],
+		};
+		const existing = [
+			{
+				id: EXISTING_CATEGORY_ID,
+				name: "roomy-native",
+				children: [EXISTING_CHILD_ID],
+			},
+		];
+
+		const merged = mergeGuildStructure(
+			existing,
+			structure,
+			new Map([[CHANNEL_3, "01AAAAAAAAAAAAAAAAAAAAAAAA"]]),
+		);
+
+		expect(merged).toHaveLength(2);
+		expect(merged[0]).toEqual(existing[0]);
+		expect(merged[1]?.name).toBe("announcements");
+		expect(merged[1]?.children).toEqual(["01AAAAAAAAAAAAAAAAAAAAAAAA"]);
+	});
+
+	test("merges a Discord category into an existing one of the same name", () => {
+		const structure = {
+			categories: [{ id: CATEGORY, name: "general", position: 0 }],
+			channels: [
+				makeChannel({ id: CHANNEL_3, parentId: CATEGORY, position: 1 }),
+			],
+		};
+		const existing = [
+			{
+				id: EXISTING_CATEGORY_ID,
+				name: "general",
+				children: [EXISTING_CHILD_ID],
+			},
+		];
+
+		const merged = mergeGuildStructure(
+			existing,
+			structure,
+			new Map([[CHANNEL_3, "01AAAAAAAAAAAAAAAAAAAAAAAA"]]),
+		);
+
+		expect(merged).toHaveLength(1);
+		expect(merged[0]?.id).toBe(EXISTING_CATEGORY_ID);
+		// The existing child is kept; the Discord channel is appended.
+		expect(merged[0]?.children).toEqual([
+			EXISTING_CHILD_ID,
+			"01AAAAAAAAAAAAAAAAAAAAAAAA",
+		]);
+	});
+
+	test("skips categories whose channels are all unbridged", () => {
+		const structure = {
+			categories: [
+				{ id: CATEGORY, name: "empty", position: 0 },
+				{ id: CATEGORY_2, name: "chat", position: 1 },
+			],
+			channels: [
+				makeChannel({ id: CHANNEL_2, parentId: CATEGORY }),
+				makeChannel({ id: CHANNEL, parentId: CATEGORY_2 }),
+			],
+		};
+
+		const merged = mergeGuildStructure(
+			[],
+			structure,
+			new Map([[CHANNEL, "01AAAAAAAAAAAAAAAAAAAAAAAA"]]),
+		);
+
+		expect(merged.map((c) => c.name)).toEqual(["chat"]);
+	});
+
+	test("places uncategorized channels in the first category", () => {
+		const structure = {
+			categories: [{ id: CATEGORY, name: "chat", position: 0 }],
+			channels: [
+				makeChannel({ id: CHANNEL, parentId: CATEGORY, position: 0 }),
+				makeChannel({ id: CHANNEL_2, parentId: undefined, position: 1 }),
+			],
+		};
+
+		const merged = mergeGuildStructure(
+			[],
+			structure,
+			new Map([
+				[CHANNEL, "01AAAAAAAAAAAAAAAAAAAAAAAA"],
+				[CHANNEL_2, "01BBBBBBBBBBBBBBBBBBBBBBBB"],
+			]),
+		);
+
+		expect(merged).toHaveLength(1);
+		expect(merged[0]?.children).toEqual([
+			"01AAAAAAAAAAAAAAAAAAAAAAAA",
+			"01BBBBBBBBBBBBBBBBBBBBBBBB",
+		]);
+	});
+
+	test("keeps a channel whose category is missing from the payload", () => {
+		// parentId points at a category the payload no longer reports — the
+		// room must still appear, not vanish from the sidebar.
+		const structure = {
+			categories: [],
+			channels: [makeChannel({ id: CHANNEL, parentId: "999999999999999999" })],
+		};
+
+		const merged = mergeGuildStructure(
+			[],
+			structure,
+			new Map([[CHANNEL, "01AAAAAAAAAAAAAAAAAAAAAAAA"]]),
+		);
+
+		expect(merged).toHaveLength(1);
+		expect(merged[0]?.children).toEqual(["01AAAAAAAAAAAAAAAAAAAAAAAA"]);
+	});
+});
+
+describe("syncInitialStructure", () => {
+	let repo: BridgeRepository;
+	let roomy: MockRoomyGateway;
+
+	beforeEach(() => {
+		repo = setupRepo();
+		roomy = new MockRoomyGateway();
+	});
+
+	function sidebarEvents() {
+		return eventsFromGateway(
+			roomy,
+			SPACE_A,
+			"space.roomy.space.updateSidebar.v1",
+		).filter(
+			(
+				e,
+			): e is Extract<Event, { $type: "space.roomy.space.updateSidebar.v1" }> =>
+				e.$type === "space.roomy.space.updateSidebar.v1",
+		);
+	}
+
+	test("ST01: writes categories and channel order derived from Discord position", async () => {
+		const rooms = mapBridgedChannels(repo);
+
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+
+		const events = sidebarEvents();
+		expect(events).toHaveLength(1);
+		const categories = events[0]?.categories;
+		expect(categories?.map((c) => c.name)).toEqual(["announcements", "chat"]);
+		// announcements holds rules; chat holds general (position 3) before
+		// off-topic (position 4).
+		expect(categories?.[0]?.children).toEqual([roomOf(rooms, CHANNEL_3)]);
+		expect(categories?.[1]?.children).toEqual([
+			roomOf(rooms, CHANNEL),
+			roomOf(rooms, CHANNEL_2),
+		]);
+	});
+
+	test("ST02: a category type is never bridged as a room", async () => {
+		mapBridgedChannels(repo);
+
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+
+		expect(createRoomEvent(roomy, SPACE_A)).toBeUndefined();
+		expect(repo.getRoomyId(SPACE_A, "channel", CATEGORY)).toBeUndefined();
+	});
+
+	test("ST03: a second call does not re-apply the structure", async () => {
+		mapBridgedChannels(repo);
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+		expect(sidebarEvents()).toHaveLength(1);
+
+		// The guard is the only thing preventing a second write, so this is
+		// the assertion that fails when `claimStructureSync` is removed.
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+		expect(sidebarEvents()).toHaveLength(1);
+	});
+
+	test("ST04: a later Discord channel event does not re-order or re-apply", async () => {
+		mapBridgedChannels(repo);
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+		const before = sidebarEvents()[0]?.categories;
+		expect(before).toHaveLength(2);
+
+		// Ongoing Discord traffic, exactly as the gateway delivers it: a new
+		// channel and a reorder-triggering update. Neither path calls the
+		// structure sync, so the sidebar is untouched.
+		await handleChannelCreate(
+			makeChannel({ id: "823456789012345678", name: "new-channel" }),
+			repo,
+			roomy,
+		);
+		await handleRoomUpdate(
+			makeChannel({ id: CHANNEL, name: "general-renamed" }),
+			repo,
+			roomy,
+		);
+
+		expect(sidebarEvents()).toHaveLength(1);
+		expect(sidebarEvents()[0]?.categories).toEqual(before);
+	});
+
+	test("ST05: is idempotent across backfill runs via the persisted marker", async () => {
+		mapBridgedChannels(repo);
+
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+
+		// A reconnect re-runs the backfill; the claim is in the repo, so a
+		// fresh call on the same repo (same process, or after a restart from
+		// the same DB) must not write again.
+		expect(repo.hasClaimedStructureSync(GUILD, SPACE_A)).toBe(true);
+
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+
+		expect(sidebarEvents()).toHaveLength(1);
+	});
+
+	test("ST06: merges into the space's existing sidebar", async () => {
+		const rooms = mapBridgedChannels(repo);
+		roomy.setSidebar(SPACE_A, [
+			{
+				id: EXISTING_CATEGORY_ID,
+				name: "chat",
+				children: [EXISTING_CHILD_ID],
+			},
+		]);
+
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+
+		const categories = sidebarEvents()[0]?.categories;
+		// The existing category keeps its position and id, and its existing
+		// child stays ahead of the Discord channels appended to it.
+		expect(categories?.[0]?.id).toBe(EXISTING_CATEGORY_ID);
+		expect(categories?.[0]?.children).toEqual([
+			EXISTING_CHILD_ID,
+			roomOf(rooms, CHANNEL),
+			roomOf(rooms, CHANNEL_2),
+		]);
+		// A Discord category with no existing counterpart is appended (in
+		// Discord order) rather than pre-empting the space's own ordering.
+		expect(categories?.[1]?.name).toBe("announcements");
+		expect(categories?.[1]?.children).toEqual([roomOf(rooms, CHANNEL_3)]);
+	});
+
+	test("ST07: subset bridges only place allowlisted channels", async () => {
+		repo = setupRepo("subset");
+		roomy = new MockRoomyGateway();
+		repo.addToAllowlist(SPACE_A, CHANNEL, GUILD);
+		const roomId = newUlid();
+		repo.registerMapping(SPACE_A, "channel", CHANNEL, roomId);
+		// A mapping exists for an un-allowlisted channel (it was bridged
+		// before being removed); it must not be placed.
+		repo.registerMapping(SPACE_A, "channel", CHANNEL_2, newUlid());
+
+		await syncInitialStructure(makeGuild(), repo, roomy, subsetConfig);
+
+		const categories = sidebarEvents()[0]?.categories;
+		expect(categories).toHaveLength(1);
+		expect(categories?.[0]?.children).toEqual([roomId]);
+	});
+
+	test("ST08: sends no event when no channel is bridged, and stays retryable", async () => {
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+
+		// No rooms mapped yet: nothing written, and the claim released so the
+		// one initial sync still happens once rooms exist.
+		expect(sidebarEvents()).toHaveLength(0);
+		expect(repo.hasClaimedStructureSync(GUILD, SPACE_A)).toBe(false);
+
+		mapBridgedChannels(repo);
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+
+		expect(sidebarEvents()).toHaveLength(1);
+		expect(repo.hasClaimedStructureSync(GUILD, SPACE_A)).toBe(true);
+
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+		expect(sidebarEvents()).toHaveLength(1);
+	});
+
+	test("ST09: a failed write keeps the claim so structure is never applied twice", async () => {
+		mapBridgedChannels(repo);
+		const failing: RoomyGateway = {
+			sendEvent: async () => {
+				throw new Error("XRPC failed (503)");
+			},
+			sendEvents: async () => {},
+			getSidebar: async () => ({ categories: [] }),
+			subscribe: async () => {},
+			unsubscribe: async () => {},
+			disconnectAll: async () => {},
+		};
+		await syncInitialStructure(makeGuild(), repo, failing, fullConfig);
+
+		// Claimed but not applied: the write may have reached the space, so a
+		// retry could apply the structure a second time. The claim stays, and
+		// `applied_at` is null.
+		expect(repo.hasClaimedStructureSync(GUILD, SPACE_A)).toBe(true);
+
+		await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+		expect(sidebarEvents()).toHaveLength(0);
+	});
+
+	test("CAP04: syncs no structure when over capacity", async () => {
+		setCapacityGate({ isEnabled: async () => false });
+		try {
+			mapBridgedChannels(repo);
+
+			await syncInitialStructure(makeGuild(), repo, roomy, fullConfig);
+
+			expect(sidebarEvents()).toHaveLength(0);
+			expect(repo.hasClaimedStructureSync(GUILD, SPACE_A)).toBe(false);
+		} finally {
+			resetCapacityGate();
+		}
+	});
+});
+
+describe("readGuildStructure", () => {
+	test("reads categories in position order and excludes threads", async () => {
+		const guild = makeGuild();
+		const channels = [
+			...(await guild.getGuild(GUILD))!.channels!,
+			makeThread({ id: THREAD, parentId: CHANNEL }),
+		];
+		const discord = FileDiscordDataSource.fromData({
+			guild: { id: GUILD, channels },
+			channels,
+			messages: {},
+		});
+
+		const structure = await readGuildStructure(discord, GUILD);
+
+		expect(structure.categories.map((c) => c.name)).toEqual([
+			"announcements",
+			"chat",
+		]);
+		// Threads carry their parent CHANNEL in parentId, not a category —
+		// including one here would file the thread under "announcements".
+		expect(structure.channels.map((c) => c.id)).not.toContain(THREAD);
+		expect(structure.channels.map((c) => c.id)).toContain(CHANNEL_2);
 	});
 });

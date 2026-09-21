@@ -58,6 +58,7 @@ function topicsForSignal(signal: InvalidationEvent["signal"]): Topic[] {
         return [];
       case "space.roomy.space.getMetadata":
       case "space.roomy.space.getThreads":
+      case "space.roomy.space.getLinks":
       case "space.roomy.space.getRoles":
       case "space.roomy.space.getMembers":
       case "space.roomy.space.getInvites":
@@ -72,6 +73,7 @@ function topicsForSignal(signal: InvalidationEvent["signal"]): Topic[] {
       case "space.roomy.room.getMetadata":
       case "space.roomy.room.getMessages":
       case "space.roomy.room.getThreads":
+      case "space.roomy.room.getLinks":
         return qi.params["roomId"]
           ? [topicKey("room", qi.params["roomId"])]
           : [];
@@ -715,12 +717,14 @@ export class SyncManager {
       "space.roomy.space.getSpaces",
       "space.roomy.space.getMetadata",
       "space.roomy.space.getThreads",
+      "space.roomy.space.getLinks",
       "space.roomy.space.getRoles",
       "space.roomy.space.getMembers",
       "space.roomy.space.getInvites",
       "space.roomy.room.getMetadata",
       "space.roomy.room.getMessages",
       "space.roomy.room.getThreads",
+      "space.roomy.room.getLinks",
       "space.roomy.message.getMessage",
     ];
 
@@ -794,6 +798,7 @@ export class SyncManager {
       { nsid: "space.roomy.room.getMessages" },
       { nsid: "space.roomy.room.getMetadata" },
       { nsid: "space.roomy.room.getThreads" },
+      { nsid: "space.roomy.room.getLinks" },
     ];
     for (const { nsid } of roomNsids) {
       state.send(

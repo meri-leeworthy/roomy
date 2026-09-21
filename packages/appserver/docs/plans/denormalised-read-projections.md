@@ -307,7 +307,9 @@ This is where the fanout actually shrinks, and R1 is what makes it safe:
   while a live client must not be told to refetch.
 - Result: 5 invalidations → 2 (activity feed, author-scoped metadata), i.e.
   **20 refetches per message → 8** (4 clients × 5 → 4 × 2), and **91 → 34 DB
-  round-trips per client**.
+  round-trips per client** when measured on that commit — the merged base
+  carries two additional link-index invalidations, so the same measurement
+  there reads **7 → 4** and **102 → 45** (see §Results R2).
 
 The plan expected this to be "a diff, not an invalidation" via
 `roomMetadataDiff`. It is a **separate broadcast frame** instead: that frame is
@@ -457,31 +459,25 @@ rather than passing through the fallback.
 
 R2 replaces the ordering-driven invalidations a `createMessage` emits with a
 **`#roomActivityDiff`** broadcast, plus a **cache-eviction-only** invalidation
-for the same queries. Measured with the same probe (fixture: 20 rooms, 12
-threads, 1200 messages in the hot channel, 100 readers, 4 sync clients, 30
-iterations), `--label r2-before` vs `--label r2-after`:
+for the same queries. Measured with the same probe on the same base commit
+(fixture: 20 rooms, 12 threads, 1200 messages in the hot channel, 100 readers,
+4 sync clients, 30 iterations), `--label merged-before` vs `--label
+merged-after`:
 
 | per client, one live message | before | after |
 |---|---:|---:|
-| frames | **7** | **5** |
-| `#invalidate` frames | **5** | **2** |
-| refetch storm (HTTP reads) | **5** | **2** |
-| refetch storm (DB round-trips) | **91** | **34** (−63 %) |
-| across 4 clients (reads) | 20 | **8** (−60 %) |
-
-The two remaining invalidations are `space.getActivityFeed` (its items hydrate
-media/link-embeds per message — a shape the activity diff does not carry, so it
-stays a refetch) and the author-scoped `space.getMetadata` (`activeThreads`).
-
-Frame set, before and after:
-
-```
-before: #messageDiff:1  #roomMetadataDiff:1  #invalidate:5
-after:  #messageDiff:1  #roomMetadataDiff:1  #roomActivityDiff:1  #invalidate:2
-```
+| frames | **9** | **7** |
+| `#invalidate` frames | **7** | **4** |
+| refetch storm (HTTP reads) | **7** | **4** |
+| refetch storm (DB round-trips) | **102** | **45** (−56 %) |
+| across 4 clients (reads) | 28 | **16** (−43 %) |
 
 The invalidated NSIDs that disappeared are exactly the three boards:
-`room.getMetadata`, `room.getThreads`, `space.getThreads`. A batch of N
+`room.getMetadata`, `room.getThreads`, `space.getThreads`. The four that remain
+are the link-index pair (`room.getLinks`, `space.getLinks` — added by the link
+aggregation work), `space.getActivityFeed` (its items hydrate media/link-embeds
+per message — a shape the activity diff does not carry, so it stays a refetch),
+and the author-scoped `space.getMetadata` (`activeThreads`). A batch of N
 messages in one room collapses to **one** activity diff (verified end-to-end),
 because each is a superseding snapshot of the same row.
 
@@ -525,7 +521,8 @@ the server would not return.
 
 ### Tests
 
-`bun test --cwd packages/appserver`: **1074 pass, 1 skip, 0 fail**; `tsc
+`bun test --cwd packages/appserver`: **1090 pass, 1 skip, 0 fail** (on the
+merged base); `tsc
 --noEmit`: 0 errors. `pnpm --filter @roomy-space/sdk test`: **224 pass**;
 `pnpm --filter app-lite check`: 0 errors.
 

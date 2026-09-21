@@ -425,6 +425,8 @@ const READ_PATHS: Record<string, string> = {
   "space.roomy.space.getActivityFeed": `/xrpc/space.roomy.space.getActivityFeed?limit=50`,
   "space.roomy.space.getMetadata": `/xrpc/space.roomy.space.getMetadata?spaceId=${encodeURIComponent(SPACE)}`,
   "space.roomy.space.getSpaces": `/xrpc/space.roomy.space.getSpaces`,
+  "space.roomy.room.getLinks": `/xrpc/space.roomy.room.getLinks?roomId=${encodeURIComponent(HOT)}`,
+  "space.roomy.space.getLinks": `/xrpc/space.roomy.space.getLinks?spaceId=${encodeURIComponent(SPACE)}`,
 };
 
 const observedNsids = new Set<string>();

@@ -159,26 +159,30 @@ describe("embed sweeper invalidation room resolution", () => {
 
     expect(signals.length).toBeGreaterThan(0);
 
-    // Every emitted signal must be a #messageDiff update targeting the real
-    // ROOM id (not the message id) with an update op keyed on the message id.
+    // There must be a #messageDiff targeting the real ROOM id (not the
+    // message id) with an update op keyed on the message id. (The sweeper
+    // also emits queryInvalidation signals for the links views; this test
+    // only asserts the streaming diff contract.)
     for (const sig of signals) {
-      expect(sig.kind).toBe("messageDiff");
-      if (sig.kind === "messageDiff") {
-        expect(sig.signal.roomId as string).toBe(ids.room);
-        expect(sig.signal.ops.length).toBeGreaterThan(0);
-        for (const op of sig.signal.ops) {
-          expect(op.op).toBe("update");
-          expect(op.key as string).toBe(ids.message);
-          // The update op must carry the enriched embed data so the client can
-          // render the card without a re-fetch (this is the streaming payoff).
-          if (op.op === "update") {
-            const link = op.message.linkEmbeds[0];
-            expect(link).toBeDefined();
-            expect(link?.embed?.["t"]).toBe("Example Article");
-          }
+      if (sig.kind !== "messageDiff") continue;
+      expect(sig.signal.roomId as string).toBe(ids.room);
+      expect(sig.signal.ops.length).toBeGreaterThan(0);
+      for (const op of sig.signal.ops) {
+        expect(op.op).toBe("update");
+        expect(op.key as string).toBe(ids.message);
+        // The update op must carry the enriched embed data so the client can
+        // render the card without a re-fetch (this is the streaming payoff).
+        if (op.op === "update") {
+          const link = op.message.linkEmbeds[0];
+          expect(link).toBeDefined();
+          expect(link?.embed?.["t"]).toBe("Example Article");
         }
       }
     }
+
+    // Explicitly assert the sweep produced the room-targeted diff.
+    const diffs = signals.filter((s) => s.kind === "messageDiff");
+    expect(diffs.length).toBeGreaterThan(0);
 
     // Explicitly assert the bug is fixed: the message id must NOT appear as
     // the diff's roomId.

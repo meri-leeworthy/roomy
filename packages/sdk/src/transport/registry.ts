@@ -29,6 +29,10 @@ export const QUERY_SCHEMAS = {
     params: queries.getSpaceThreads.Params,
     response: queries.getSpaceThreads.Response,
   },
+  "space.roomy.space.getLinks": {
+    params: queries.getSpaceLinks.Params,
+    response: queries.getSpaceLinks.Response,
+  },
   "space.roomy.space.getRoles": {
     params: queries.getRoles.Params,
     response: queries.getRoles.Response,
@@ -52,6 +56,10 @@ export const QUERY_SCHEMAS = {
   "space.roomy.room.getThreads": {
     params: queries.getRoomThreads.Params,
     response: queries.getRoomThreads.Response,
+  },
+  "space.roomy.room.getLinks": {
+    params: queries.getRoomLinks.Params,
+    response: queries.getRoomLinks.Response,
   },
   "space.roomy.room.getMessages": {
     params: queries.getMessages.Params,

@@ -9,11 +9,17 @@
  */
 
 import type { Event } from "@roomy-space/sdk";
-import type { RoomyEventCallback, RoomyGateway } from "./gateway.ts";
+import type {
+	BridgeSidebar,
+	BridgeSidebarCategory,
+	RoomyEventCallback,
+	RoomyGateway,
+} from "./gateway.ts";
 
 export class MockRoomyGateway implements RoomyGateway {
 	#events = new Map<string, Event[]>();
 	#subscriptions = new Map<string, RoomyEventCallback>();
+	#sidebars = new Map<string, BridgeSidebar>();
 
 	async sendEvent(spaceDid: string, event: Event): Promise<void> {
 		const list = this.#events.get(spaceDid) ?? [];
@@ -25,6 +31,15 @@ export class MockRoomyGateway implements RoomyGateway {
 		const list = this.#events.get(spaceDid) ?? [];
 		list.push(...events);
 		this.#events.set(spaceDid, list);
+	}
+
+	/** Seed the sidebar a space will report from `getSidebar`. */
+	setSidebar(spaceDid: string, categories: BridgeSidebarCategory[]): void {
+		this.#sidebars.set(spaceDid, { categories });
+	}
+
+	async getSidebar(spaceDid: string): Promise<BridgeSidebar> {
+		return this.#sidebars.get(spaceDid) ?? { categories: [] };
 	}
 
 	async subscribe(

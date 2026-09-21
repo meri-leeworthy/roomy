@@ -21,6 +21,8 @@
   import RoomPickerModal from "$lib/components/chat/RoomPickerModal.svelte";
   import type { Message } from "$lib/queries/messages";
   import ChannelBoardView from "$lib/components/thread/ChannelBoardView.svelte";
+  import LinksView from "$lib/components/thread/LinksView.svelte";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import SeoMeta from "$lib/components/seo/SeoMeta.svelte";
   import { resolveBlobUrl } from "$lib/utils";
 
@@ -271,7 +273,17 @@
   // The Chat/Threads tab is per-entry state: it starts in Chat on every room
   // visit, so navigating from a channel in Threads view to another channel
   // always lands in Chat.
-  const channelTabList = ["Chat", "Threads"] as const;
+  // The Links tab is gated behind the "links-view" feature flag: it only
+  // appears once an admin has enabled the flag. All flags default false.
+  const flagsQuery = createFeatureFlagsQuery();
+  const linksViewEnabled = $derived(
+    flagsQuery.data?.flags.includes("links-view") ?? false,
+  );
+  const channelTabList = $derived(
+    linksViewEnabled
+      ? (["Chat", "Threads", "Links"] as const)
+      : (["Chat", "Threads"] as const),
+  );
   let channelActiveTab = $state<(typeof channelTabList)[number]>("Chat");
 
   // Reset to Chat whenever the room changes. Navigating between rooms reuses
@@ -292,6 +304,8 @@
       channelActiveTab = "Chat";
     } else if (page.url.hash === "#threads") {
       channelActiveTab = "Threads";
+    } else if (page.url.hash === "#links" && linksViewEnabled) {
+      channelActiveTab = "Links";
     }
   });
 
@@ -367,6 +381,14 @@
       <div class="absolute inset-0" class:hidden={channelActiveTab !== "Threads"}>
         <ChannelBoardView />
       </div>
+
+      <!-- Links view - always rendered but visibility toggled; only mounted
+           when the links-view feature flag is enabled. -->
+      {#if linksViewEnabled}
+        <div class="absolute inset-0" class:hidden={channelActiveTab !== "Links"}>
+          <LinksView />
+        </div>
+      {/if}
     </div>
 
     <!-- Chat input area - only shown in chat view -->

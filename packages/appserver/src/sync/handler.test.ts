@@ -825,7 +825,8 @@ describe("SyncManager", () => {
     expect(nsids).toContain("space.roomy.room.getMessages");
     expect(nsids).toContain("space.roomy.room.getMetadata");
     expect(nsids).toContain("space.roomy.room.getThreads");
-    expect(socket.sentFrames.length).toBe(3);
+    expect(nsids).toContain("space.roomy.room.getLinks");
+    expect(socket.sentFrames.length).toBe(4);
     for (const f of socket.sentFrames) {
       expect(f.header.t).toBe("#invalidate");
       expect(decodeFrameBody(f).params).toEqual({ roomId: ROOM_ID });
