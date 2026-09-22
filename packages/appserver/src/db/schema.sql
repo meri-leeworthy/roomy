@@ -367,3 +367,16 @@ create table if not exists room_access (
 ) strict;
 
 create index if not exists idx_room_access_space on room_access(space_id);
+
+-- Denormalised read projection (TASK-175, R3): each room's latest message and
+-- its distinct recent authors, so board reads are O(rooms in scope) instead of
+-- O(messages in scope). Declared here as well as in schema-space.sql because
+-- this file is the in-memory schema used by unit tests (toAsyncDb), which
+-- exercise the queries directly rather than through the worker's schema
+-- loader. Purely additive and idempotent on both paths.
+create table if not exists room_activity (
+  room_id           text primary key,
+  latest_message_id text,
+  latest_at         integer,
+  recent_authors    text not null default '[]'
+) strict;

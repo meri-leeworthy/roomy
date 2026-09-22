@@ -9,6 +9,12 @@
  *   - `decrementUnreadForRemovedMessages` — remove exactly the unread messages
  *     a user still owed when messages leave the room, never below zero.
  *
+ * The `room_activity` board projection needs the same "a room's messages just
+ * changed, re-derive its summary" step, but it lives with its own read path in
+ * `queries/roomActivityProjection.ts` (`rebuildRoomActivity`), which owns the
+ * projection's schema, maintenance rules and fallback. Only the unread unwind
+ * and the feed window are shared from here.
+ *
  * `moveMessages` (source room) and `deleteMessage` both need them, so they live
  * here rather than in either caller: a second copy is how the two paths drift.
  */
