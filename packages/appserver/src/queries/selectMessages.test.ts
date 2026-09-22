@@ -526,4 +526,43 @@ describe("selectMessages missing-author hydration", () => {
       _setTestGetProfiles(null);
     }
   });
+
+  test("re-hydrates a row older than the freshness TTL", async () => {
+    // A profile row that exists but is TTL-stale must go back through
+    // on-demand hydration, so a display-name/avatar change on the PDS shows
+    // up in message lists without a visit to the profile page.
+    const AUTHOR = "did:plc:read-path-ghost";
+    const g = await openGlobalDb();
+    await g.run(
+      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
+      // 2 hours ago — past the 30-minute refresh TTL.
+      [AUTHOR, "alice.bsky.social", "Old Name", Date.now() - 2 * 60 * 60 * 1000],
+    );
+    await g.run(
+      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
+      [STREAM, null, "Test Space", Date.now()],
+    );
+
+    let attempts = 0;
+    _setTestGetProfiles(async () => {
+      attempts++;
+      return [];
+    });
+
+    try {
+      const { db, roomId } = await seedMessageByUnknownAuthor();
+
+      const { messages } = await selectMessages(db, {
+        kind: "room",
+        roomId,
+        limit: 50,
+        cursor: null,
+      });
+      // The stale author's row triggers on-demand hydration.
+      expect(attempts).toBe(1);
+      expect(messages).toHaveLength(1);
+    } finally {
+      _setTestGetProfiles(null);
+    }
+  });
 });

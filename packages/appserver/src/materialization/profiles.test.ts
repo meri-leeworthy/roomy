@@ -262,6 +262,55 @@ describe("ensureProfilesForBatch", () => {
         .get<{ handle: string }>(ALICE))?.handle,
     ).toBe("handle.invalid");
   });
+
+  test("re-fetches an existing row older than the freshness TTL", async () => {
+    // A *valid* (non-handle.invalid) row older than PROFILE_REFRESH_TTL_MS
+    // must be re-fetched, so a display-name/avatar change on the PDS
+    // propagates instead of pinning the first-fetched values forever.
+    const { globalDb } = freshGlobal();
+    await globalDb.run(
+      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
+      // 2 hours ago — past the 30-minute refresh TTL.
+      [ALICE, "alice.test", "old display", Date.now() - 2 * 60 * 60 * 1000],
+    );
+
+    const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
+    const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
+
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
+
+    // Should fetch despite a valid handle, because the row is TTL-stale.
+    expect(getProfiles).toHaveBeenCalledTimes(1);
+    expect(getProfiles).toHaveBeenCalledWith([ALICE]);
+    // The refreshed name/avatar replace the stale values.
+    expect(
+      (await globalDb
+        .query("select name from profiles where did = ?")
+        .get<{ name: string }>(ALICE))?.name,
+    ).toBe("alice.test display");
+  });
+
+  test("does NOT re-fetch an existing row within the freshness TTL", async () => {
+    const { globalDb } = freshGlobal();
+    await globalDb.run(
+      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
+      // 10 minutes ago — within the 30-minute refresh TTL.
+      [ALICE, "alice.test", "alice display", Date.now() - 10 * 60 * 1000],
+    );
+
+    const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
+    const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
+
+    await ensureProfilesForBatch(globalDb, events, getProfiles);
+
+    // Fresh row, valid handle — no fetch.
+    expect(getProfiles).toHaveBeenCalledTimes(0);
+    expect(
+      (await globalDb
+        .query("select name from profiles where did = ?")
+        .get<{ name: string }>(ALICE))?.name,
+    ).toBe("alice display");
+  });
 });
 
 describe("defaultGetProfiles", () => {
@@ -408,6 +457,67 @@ describe("global profile store (Phase 2)", () => {
     expect(row?.handle).toBe("bob#1234");
     expect(row?.name).toBe("Bob");
     expect(row?.avatar).toBe("https://cdn.example/bob.png");
+  });
+
+  test("Bluesky re-fetch refreshes display fields (null-preserving merge)", async () => {
+    // Regression: the old Bluesky write-back was first-writer-wins for
+    // display fields — a re-fetched profile could never update a name/avatar
+    // that changed on the PDS. With the profile-refresh TTL re-fetching rows,
+    // the merge must now null-preservingly update those fields (a NULL still
+    // never clobbers an existing value).
+    const { insertProfilesWithExtras } = await import("./profiles.ts");
+    const { globalDb } = freshGlobal();
+
+    // First fetch pins an old name/avatar (extras empty → Bluesky path).
+    await insertProfilesWithExtras(
+      openDb(),
+      [profileFor(ALICE, "alice.test")],
+      new Map(),
+    );
+    const before = await globalDb
+      .query("select name, avatar from profiles where did = ?")
+      .get<{ name: string | null; avatar: string | null }>(ALICE);
+    expect(before?.name).toBe("alice.test display");
+
+    // Second fetch returns a changed name/avatar (new CID-bearing URL).
+    const refreshed = {
+      did: ALICE,
+      handle: "alice.test",
+      displayName: "Alice Renewed",
+      avatar: "https://cdn.example/alice-renewed.png",
+    } as unknown as ProfileViewDetailed;
+    await insertProfilesWithExtras(openDb(), [refreshed], new Map());
+
+    const after = await globalDb
+      .query("select name, avatar, handle from profiles where did = ?")
+      .get<{ name: string | null; avatar: string | null; handle: string | null }>(ALICE);
+    expect(after?.name).toBe("Alice Renewed");
+    expect(after?.avatar).toBe("https://cdn.example/alice-renewed.png");
+    // Handle preserved across the merge.
+    expect(after?.handle).toBe("alice.test");
+  });
+
+  test("Bluesky merge never clobbers an existing value with a NULL", async () => {
+    const { insertProfilesWithExtras } = await import("./profiles.ts");
+    const { globalDb } = freshGlobal();
+
+    await insertProfilesWithExtras(
+      openDb(),
+      [profileFor(ALICE, "alice.test")],
+      new Map(),
+    );
+    // A sparse Bluesky response with no displayName/avatar must not wipe them.
+    const sparse = {
+      did: ALICE,
+      handle: "alice.other.test",
+    } as unknown as ProfileViewDetailed;
+    await insertProfilesWithExtras(openDb(), [sparse], new Map());
+
+    const row = await globalDb
+      .query("select name, avatar, handle from profiles where did = ?")
+      .get<{ name: string | null; avatar: string | null; handle: string | null }>(ALICE);
+    expect(row?.name).toBe("alice.test display");
+    expect(row?.avatar).toBe("https://cdn.example/alice.test.png");
   });
 
   test("Roomy record without a handle does not clobber an existing handle", async () => {

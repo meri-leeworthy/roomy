@@ -36,6 +36,7 @@ import { tryOpenGlobalDb } from "../db/db.ts";
 import type { AsyncDatabase } from "../db/asyncDatabase.ts";
 import { getHappyView } from "../happyview.ts";
 import {
+  PROFILE_REFRESH_TTL_MS,
   getProfilesRoomyFirst,
   insertProfilesWithExtras,
   isProfileFetchBackedOff,
@@ -166,13 +167,14 @@ async function resolveFromGlobalDb(
   const placeholders = dids.map(() => "?").join(",");
   const rows = await globalDb
     .query(
-      `select did, handle, name, avatar from profiles where did in (${placeholders})`,
+      `select did, handle, name, avatar, updated_at from profiles where did in (${placeholders})`,
     )
     .all<{
       did: string;
       handle: string | null;
       name: string | null;
       avatar: string | null;
+      updated_at: number;
     }>(...dids);
   for (const row of rows) {
     const entry: CacheEntry = {
@@ -197,7 +199,16 @@ async function resolveFromGlobalDb(
   const handleless = allowNetworkFetch
     ? rows.filter((r) => !r.handle).map((r) => r.did)
     : [];
-  const toHydrate = [...new Set([...notInDb, ...handleless])];
+  // Rows older than the freshness TTL — re-fetch so a display-name/avatar
+  // change on the PDS propagates to message/member lists without a visit to
+  // the profile page. Mirrors `filterMissing` in materialization/profiles.ts,
+  // so the write and read paths refresh a stale row on the same cadence.
+  const stale = allowNetworkFetch
+    ? rows
+        .filter((r) => now - r.updated_at >= PROFILE_REFRESH_TTL_MS)
+        .map((r) => r.did)
+    : [];
+  const toHydrate = [...new Set([...notInDb, ...handleless, ...stale])];
   if (toHydrate.length > 0) {
     // On-demand hydration mirroring the getProfile handler: fetch Roomy
     // records from HappyView (batch) and fall back to Bluesky, then write
