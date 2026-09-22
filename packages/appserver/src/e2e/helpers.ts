@@ -308,6 +308,11 @@ export function seedUser(
 
 /**
  * Seed a membership edge (member or admin) in the space's per-space DB.
+ *
+ * Space→user, which is the direction the access queries read: `isAdmin` and
+ * `isMember` both look up `head = spaceId and tail = did`. Seeding the reverse
+ * edge leaves a caller who looks like a member in the table but is denied by
+ * every check that actually runs.
  */
 export function seedMembership(
   db: Database,
@@ -316,10 +321,16 @@ export function seedMembership(
   label?: "member" | "admin",
 ): void {
   const sp = spaceDb(db, spaceId);
+  // The `edges` table has FKs on head/tail → entities.id, so the user's entity
+  // row must exist in this space DB before the edge.
+  sp.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+    userDid,
+    userDid,
+  ]);
   sp.run(
     `insert or ignore into edges (head, tail, label)
      values (?, ?, ?)`,
-    [userDid, spaceId, label ?? "member"],
+    [spaceId, userDid, label ?? "member"],
   );
 }
 

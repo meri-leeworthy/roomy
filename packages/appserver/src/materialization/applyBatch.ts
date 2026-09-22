@@ -42,6 +42,7 @@ import {
 import { openReadStateDb } from "../db/db.ts";
 import { recordSpaceStats, selectMemberCount } from "../queries/spaceStats.ts";
 import { maintainRoomAccess } from "../queries/roomAccessProjection.ts";
+import { maintainRoomActivity } from "../queries/roomActivityProjection.ts";
 import {
   classifyMembershipEvent,
   setUserSpaceMembership,
@@ -258,6 +259,25 @@ export async function applyBatch(
           type: "run",
           sql: projectionStep.sql,
           params: projectionStep.params,
+          derived: "space",
+        });
+      }
+
+      // Denormalised read projection (TASK-175, R3): maintain `room_activity`,
+      // the per-room latest-message/recent-authors summary the board reads.
+      // Same placement and same rules as `room_access` above — one statement
+      // inside the per-event transaction, upsert on live events and invalidate
+      // on replay. The delete/move paths rebuild the rooms they invalidate in
+      // the chunk's side-effect stage (see materialization/roomDerivedState.ts).
+      const activityStep = maintainRoomActivity(
+        e.event as unknown as Record<string, unknown>,
+        opts.isBackfill,
+      );
+      if (activityStep) {
+        chunkSteps.push({
+          type: "run",
+          sql: activityStep.sql,
+          params: activityStep.params,
           derived: "space",
         });
       }

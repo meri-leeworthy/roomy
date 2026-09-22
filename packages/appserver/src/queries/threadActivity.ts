@@ -23,6 +23,7 @@ import type { DbLike } from "../db/types.ts";
 import { decodeContent, decodeRichTextBody } from "../db/content.ts";
 import { RICHTEXT_MIME, blocksToPlaintext } from "@roomy-space/sdk";
 import { hydrateProfiles } from "./profileStore.ts";
+import { readRoomActivityProjection, rebuildRoomActivity, warnProjectionUnavailable } from "./roomActivityProjection.ts";
 
 export interface ThreadMember {
   did: string;
@@ -188,23 +189,83 @@ export async function listThreadActivity(
 }
 
 /**
- * Batch-fetch activity metadata for a set of rooms: latest message
- * timestamp, up to 3 unique recent participants, canonical parent channel,
- * and the latest message (content decoded to plaintext). Shared by
- * `listThreadActivity` and `space.roomy.search.rooms` so search results
- * render with the same activity columns as the board views.
+ * Batch-fetch activity metadata for a set of rooms: latest message timestamp,
+ * up to 3 unique recent participants, canonical parent channel, and the latest
+ * message (content decoded to plaintext). Shared by `listThreadActivity` and
+ * `space.roomy.search.rooms` so search results render with the same activity
+ * columns as the board views.
  *
- * Forwarded messages are forward-reference entities with no own
- * content/author — their timestamp and author live on the original message
- * reached via the `forward` edge. We follow that edge (coalescing the
- * message's own content with the forwarded original's) so a room created by
- * forwarding messages still reports a latest timestamp, recent participants
- * (the original authors), and a latest message.
+ * Served from the `room_activity` projection (TASK-175), which holds the same
+ * facts reduced once per write. `scanRoomActivity` below is the fallback: the
+ * projection is an optimisation and a page it cannot answer in full is read the
+ * old way, from the messages themselves.
  *
  * Rooms with no messages are absent from the map (or carry empty arrays) —
  * callers treat that as "no activity".
  */
 export async function fetchRoomActivity(
+  db: DbLike,
+  roomIds: string[],
+): Promise<Map<string, ThreadActivity>> {
+  if (roomIds.length === 0) return new Map();
+
+  const projected = await fetchProjectedRoomActivity(db, roomIds);
+  const out = projected ?? (await scanRoomActivity(db, roomIds));
+
+  // Warm on miss — the `room_access` pattern (queries/roomAccessProjection.ts).
+  // The scan below has just derived every room's answer from the live tables, so
+  // writing those rows now means this page is projected from the next read on.
+  //
+  // Without this, the projection could never cover a room with no messages: no
+  // message event exists to maintain its row, and because a page is projected
+  // only when EVERY room in it is, a single quiet room would send the whole board
+  // back to the scan permanently. It is also what heals a blue-green rebuild,
+  // where rematerialisation deliberately invalidates without populating.
+  //
+  // Best-effort: the caller already holds a correct answer, so a failed warm must
+  // never turn a successful read into an error.
+  if (!projected) {
+    try {
+      await rebuildRoomActivity(db, roomIds);
+    } catch (err) {
+      warnProjectionUnavailable(err);
+    }
+  }
+
+  // Resolve participant + latest-message author profiles from the global store
+  // (with an in-memory cache). A user's profile entity lives in their own
+  // stream, not this space's stream, so the per-space comp_info join is null
+  // for cross-stream users. The global `profiles` table is authoritative; the
+  // per-space value (if any) acts as a fallback. Shared by both paths so a
+  // projected row and a scanned row hydrate identically.
+  const membersToHydrate: ThreadMember[] = [];
+  for (const t of out.values()) {
+    membersToHydrate.push(...t.latestMembers);
+    if (t.latestMessage?.author) membersToHydrate.push(t.latestMessage.author);
+  }
+  await hydrateProfiles(
+    membersToHydrate,
+    (m) => m.did,
+    (m, p) => {
+      if (p.name != null) m.name = p.name;
+      if (p.avatar != null) m.avatar = p.avatar;
+    },
+  );
+
+  return out;
+}
+
+/**
+ * The pre-projection implementation: derive each room's activity from its
+ * messages. Kept as the fallback for a page the projection cannot answer — a
+ * room whose row was invalidated, or a handle whose schema predates the table.
+ *
+ * Its cost is O(messages in scope) — SQLite has no `LIMIT` per group, so the
+ * latest message is picked by reading every message in every requested room and
+ * reducing in JS (measured: 8001 rows to keep 2 at 8000 messages). That is what
+ * the projection replaces.
+ */
+async function scanRoomActivity(
   db: DbLike,
   roomIds: string[],
 ): Promise<Map<string, ThreadActivity>> {
@@ -255,7 +316,7 @@ export async function fetchRoomActivity(
           and (cc.entity is not null or forward_e.tail is not null)
           and coalesce(author_e.tail, fwd_author_e.tail) is not null
         group by msg.room, coalesce(author_e.tail, fwd_author_e.tail)
-        order by msg.room, ts desc`,
+        order by msg.room, ts desc, coalesce(author_e.tail, fwd_author_e.tail) asc`,
     )
     .all<{ room: string; did: string; name: string | null; avatar: string | null; ts: number | null }>([...roomIds]);
 
@@ -282,6 +343,20 @@ export async function fetchRoomActivity(
     .all<{ tail: string; head: string }>([...roomIds]);
   const parentMap = new Map(parentRows.map((r) => [r.tail, r.head]));
 
+  // Room kind and name. `fetchRoomActivity` is used by the search handler, which
+  // matches channels and threads alike, so the kind must come from the room's
+  // own label rather than being assumed to be a thread.
+  const roomRows = await db
+    .query(
+      `select cr.entity as room_id, cr.label as label, ci.name as name
+         from comp_room cr
+         left join comp_info ci on ci.entity = cr.entity
+        where cr.entity in (${ph})`,
+    )
+    .all<{ room_id: string; label: string | null; name: string | null }>([...roomIds]);
+  const roomKinds = new Map(roomRows.map((r) => [r.room_id, r.label]));
+  const roomNames = new Map<string, string>();
+  for (const r of roomRows) if (r.name != null) roomNames.set(r.room_id, r.name);
   // Latest message per room. SQLite doesn't support LIMIT per group, so we
   // fetch all messages and pick the latest per room in JS.
   const latestMsgRows = await db
@@ -336,7 +411,17 @@ export async function fetchRoomActivity(
   >();
   for (const r of latestMsgRows) {
     const existing = latestMsgMap.get(r.room);
-    if (!existing || (r.timestamp ?? 0) > (existing.timestamp ?? 0)) {
+    // Newest timestamp wins; a tie breaks by message id. The tie-break is
+    // shared with the `room_activity` projection, which cannot otherwise agree
+    // with this fold: two messages can share a millisecond (a pair created
+    // together, or bridged messages carrying sender-supplied times), and
+    // without a stated rule each path would pick whichever row it happened to
+    // see first.
+    if (
+      !existing ||
+      (r.timestamp ?? 0) > (existing.timestamp ?? 0) ||
+      ((r.timestamp ?? 0) === (existing.timestamp ?? 0) && r.id > existing.id)
+    ) {
       latestMsgMap.set(r.room, r);
     }
   }
@@ -351,18 +436,7 @@ export async function fetchRoomActivity(
     if (latestMsgRow && latestMsgRow.author_did) {
       latestMessage = {
         id: latestMsgRow.id,
-        // Rich-text bodies are base64-encoded on the wire (decodeContent
-        // base64s non-text mimeTypes). Decode them to plaintext so the board
-        // preview shows readable text, not the encoded blob. Legacy text/*
-        // content is already plaintext and stays as-is.
-        content: (() => {
-          const { mime_type: mime, data } = latestMsgRow;
-          if (mime === RICHTEXT_MIME) {
-            const blocks = decodeRichTextBody(mime, data);
-            return blocks ? blocksToPlaintext(blocks) : "";
-          }
-          return decodeContent(mime, data);
-        })(),
+        content: decodeBoardPreview(latestMsgRow.mime_type, latestMsgRow.data),
         author: {
           did: latestMsgRow.author_did,
           name: latestMsgRow.author_name,
@@ -376,8 +450,8 @@ export async function fetchRoomActivity(
 
     out.set(roomId, {
       id: roomId,
-      kind: "thread",
-      name: null,
+      kind: roomKinds.get(roomId) === "space.roomy.channel" ? "channel" : "thread",
+      name: roomNames.get(roomId) ?? null,
       canonicalParent: parent ?? null,
       latestTimestamp: latest ? new Date(latest).toISOString() : null,
       latestMembers: members,
@@ -385,24 +459,153 @@ export async function fetchRoomActivity(
     });
   }
 
-  // Resolve participant + latest-message author profiles from the global
-  // store (with an in-memory cache). A user's profile entity lives in their
-  // own stream, not this space's stream, so the per-space comp_info join
-  // above is null for cross-stream users. The global `profiles` table is
-  // authoritative; the per-space value (if any) acts as a fallback.
-  const membersToHydrate: ThreadMember[] = [];
-  for (const t of out.values()) {
-    membersToHydrate.push(...t.latestMembers);
-    if (t.latestMessage?.author) membersToHydrate.push(t.latestMessage.author);
+  return out;
+}
+
+/**
+ * Decode a message body to the plaintext a board row previews.
+ *
+ * Rich-text bodies are base64-encoded on the wire (`decodeContent` base64s
+ * non-text mimeTypes), so they decode to blocks and then to plaintext — a board
+ * must show readable text, not the encoded blob. Legacy `text/*` content is
+ * already plaintext and passes through. Shared by the projection read and the
+ * live scan so both render the same preview from the same row.
+ */
+function decodeBoardPreview(
+  mime: string | null,
+  data: Buffer | Uint8Array | null,
+): string {
+  if (mime === RICHTEXT_MIME) {
+    const blocks = decodeRichTextBody(mime, data);
+    return blocks ? blocksToPlaintext(blocks) : "";
   }
-  await hydrateProfiles(
-    membersToHydrate,
-    (m) => m.did,
-    (m, p) => {
-      if (p.name != null) m.name = p.name;
-      if (p.avatar != null) m.avatar = p.avatar;
-    },
-  );
+  return decodeContent(mime, data);
+}
+
+/**
+ * Serve the batch from the `room_activity` projection.
+ *
+ * Two round-trips for the whole page, neither growing with the number of
+ * messages in it: one read of the reduced rows (latest message id + timestamp,
+ * distinct authors by their newest message) and one for the board shape the
+ * caller needs (kind, name, canonical parent, and the latest message's decoded
+ * content).
+ *
+ * Returns `null` when the projection cannot answer the whole page — the table is
+ * missing, or at least one requested room has no row — which sends the caller to
+ * the live scan. A partially-projected answer is deliberately not assembled; see
+ * `readRoomActivityProjection`.
+ */
+async function fetchProjectedRoomActivity(
+  db: DbLike,
+  roomIds: string[],
+): Promise<Map<string, ThreadActivity> | null> {
+  const projected = await readRoomActivityProjection(db, roomIds);
+  if (!projected) return null;
+
+  const ph = roomIds.map(() => "?").join(",");
+
+  // Room shape + latest-message content, one row per room. The content columns
+  // are the decoded message the board previews; `coalesce` picks the forwarded
+  // original's for a legacy forward reference, which has none of its own.
+  const roomRows = await db
+    .query(
+      `select cr.entity as room_id,
+              cr.label as label,
+              ci.name as name,
+              p.head as parent_id,
+              ra.latest_message_id as latest_message_id,
+              coalesce(mc.mime_type, fc.mime_type) as mime_type,
+              coalesce(mc.data, fc.data) as data,
+              coalesce(a.tail, fa.tail) as author_did
+         from comp_room cr
+         left join comp_info ci on ci.entity = cr.entity
+         left join edges p
+                on p.tail = cr.entity and p.label = 'link'
+               and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+         left join room_activity ra on ra.room_id = cr.entity
+         left join entities m on m.id = ra.latest_message_id
+         left join comp_content mc on mc.entity = m.id
+         left join edges a on a.head = m.id and a.label = 'author'
+         left join edges f on f.head = m.id and f.label = 'forward'
+         left join comp_content fc on fc.entity = f.tail
+         left join edges fa on fa.head = f.tail and fa.label = 'author'
+        where cr.entity in (${ph})`,
+    )
+    .all<{
+      room_id: string;
+      label: string | null;
+      name: string | null;
+      parent_id: string | null;
+      latest_message_id: string | null;
+      mime_type: string | null;
+      data: Buffer | Uint8Array | null;
+      author_did: string | null;
+    }>(...roomIds);
+
+  // A requested id with no `comp_room` row is not a room at all — the caller
+  // asked for something this projection has no board row for, so it cannot
+  // answer the page.
+  if (roomRows.length !== roomIds.length) return null;
+
+  // Every author who can appear in the page's `latestMembers`, in one read
+  // rather than one per room. Names/avatars come from the per-space `comp_info`;
+  // `hydrateProfiles` in the caller then layers the global store over whatever
+  // this finds, as it does for the scanned path.
+  const memberDids = new Set<string>();
+  for (const row of projected.values()) {
+    for (const a of row.authors) memberDids.add(a.did);
+  }
+  const members = new Map<string, { name: string | null; avatar: string | null }>();
+  if (memberDids.size > 0) {
+    const dids = [...memberDids];
+    const infoRows = await db
+      .query(
+        `select entity, name, avatar from comp_info
+          where entity in (${dids.map(() => "?").join(",")})`,
+      )
+      .all<{ entity: string; name: string | null; avatar: string | null }>(...dids);
+    for (const r of infoRows) members.set(r.entity, { name: r.name, avatar: r.avatar });
+  }
+
+  const out = new Map<string, ThreadActivity>();
+  for (const row of roomRows) {
+    const projection = projected.get(row.room_id)!;
+    const author = row.author_did != null ? members.get(row.author_did) : undefined;
+
+    const latestMessage: ThreadMessage | null =
+      row.latest_message_id != null && row.author_did != null
+        ? {
+            id: row.latest_message_id,
+            content: decodeBoardPreview(row.mime_type, row.data),
+            author: {
+              did: row.author_did,
+              name: author?.name ?? null,
+              avatar: author?.avatar ?? null,
+            },
+            timestamp:
+              projection.latestAt != null
+                ? new Date(projection.latestAt).toISOString()
+                : null,
+          }
+        : null;
+
+    out.set(row.room_id, {
+      id: row.room_id,
+      kind: row.label === "space.roomy.channel" ? "channel" : "thread",
+      name: row.name,
+      canonicalParent: row.parent_id,
+      latestTimestamp:
+        projection.latestAt != null
+          ? new Date(projection.latestAt).toISOString()
+          : null,
+      latestMembers: projection.authors.slice(0, 3).map((a) => {
+        const p = members.get(a.did);
+        return { did: a.did, name: p?.name ?? null, avatar: p?.avatar ?? null };
+      }),
+      latestMessage,
+    });
+  }
 
   return out;
 }

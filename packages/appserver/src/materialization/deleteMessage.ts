@@ -30,6 +30,7 @@ import {
   rebuildActivityWindow,
   decrementUnreadForRemovedMessages,
 } from "./roomDerivedState.ts";
+import { rebuildRoomActivity } from "../queries/roomActivityProjection.ts";
 
 /** A delete the side-effects stage needs, with its pre-delete ordering key. */
 export interface PendingDelete {
@@ -65,6 +66,13 @@ export async function applyDeleteSideEffects(
   const rooms = new Set<string>();
   for (const d of deletes) if (d.roomId) rooms.add(d.roomId);
   for (const roomId of rooms) await rebuildActivityWindow(db, roomId);
+
+  // `room_activity` was invalidated by the delete's own maintenance step
+  // (applyBatch), so restore it here, from the rows that now remain. Same
+  // backfill rule as the window above: a replay must leave the projection
+  // matching the room's contents, and a rebuild is not population — it
+  // describes data the replay just wrote.
+  await rebuildRoomActivity(db, [...rooms]);
 
   if (!opts.readStateDb || opts.isBackfill) return;
 

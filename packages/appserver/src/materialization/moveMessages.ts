@@ -42,6 +42,7 @@ import {
   decrementUnreadForRemovedMessages,
   rebuildActivityWindow,
 } from "./roomDerivedState.ts";
+import { rebuildRoomActivity } from "../queries/roomActivityProjection.ts";
 import { setMessageSortIdxByMove } from "./sortIdx.ts";
 import { isThread, refreshThreadActivityOnMessage } from "../queries/userActiveThreads.ts";
 import { upsertUserRoomParticipation } from "../queries/userRoomParticipation.ts";
@@ -114,6 +115,10 @@ export async function applyMoveSideEffects(
   }
   await rebuildActivityWindow(db, event.room);
   await rebuildActivityWindow(db, event.toRoomId);
+  // `room_activity` (TASK-175) was invalidated for both rooms by the move's own
+  // maintenance step; restore both from the post-move tables. Also on backfill,
+  // for the same reason the windows above are.
+  await rebuildRoomActivity(db, [event.room, event.toRoomId]);
 
   // ── Read-state: unread counts, thread activity, participation ─────────
   // Live events only, mirroring createMessage's unread bump in `applyBundle`:

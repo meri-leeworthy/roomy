@@ -5,7 +5,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { toAsyncDb } from "../db/syncAdapter.ts";
 import type { DbLike } from "../db/types.ts";
-import { listThreadActivity } from "./threadActivity.ts";
+import { listThreadActivity, fetchRoomActivity } from "./threadActivity.ts";
+import {
+  readRoomActivityProjection,
+  rebuildRoomActivity,
+} from "./roomActivityProjection.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -567,5 +571,105 @@ describe("threadActivity", () => {
     expect(result.map((t) => t.id).sort()).toEqual(
       [THREAD_A, THREAD_B, THREAD_C].sort(),
     );
+  });
+});
+
+/**
+ * `room_activity` read parity (TASK-175, R3).
+ *
+ * The projection replaces a scan of every message in scope, so the only
+ * assertion that matters is that the two produce the SAME board — otherwise the
+ * optimisation is a behaviour change. Each test reads the fixture through the
+ * scan, then through the projection, and compares.
+ *
+ * Without this the rest of the suite would not exercise the projected path at
+ * all: the projection starts empty, so every read above falls back by design.
+ */
+describe("room_activity projection parity", () => {
+  /** Read every fixture room twice: first by scan, then projected. */
+  async function bothWays(db: Database, asyncDb: DbLike, roomIds: string[]) {
+    const scanned = await fetchRoomActivity(asyncDb, roomIds);
+    await rebuildRoomActivity(asyncDb, roomIds);
+    const projected = await fetchRoomActivity(asyncDb, roomIds);
+    // The projection must actually have been read — a fallback would make this
+    // comparison pass trivially.
+    expect(await readRoomActivityProjection(asyncDb, roomIds)).not.toBeNull();
+    return { scanned, projected };
+  }
+
+  const plain = (m: Map<string, unknown>) =>
+    JSON.parse(
+      JSON.stringify([...m.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])))),
+    );
+
+  test("matches the scan for threads with messages, empties, and a thread with no messages", async () => {
+    const { db, asyncDb } = freshDb();
+    seed(db);
+
+    postMessage(db, THREAD_A, ALICE, 1000, "first");
+    postMessage(db, THREAD_A, BOB, 3000, "latest");
+    postMessage(db, THREAD_A, CAROL, 2000);
+    postMessage(db, THREAD_C, DAVE, 4000, "other channel thread");
+    // THREAD_B stays empty — no message event can ever maintain its row, so it
+    // is the case that forces the warm-on-miss.
+
+    const rooms = [THREAD_A, THREAD_B, THREAD_C];
+    const { scanned, projected } = await bothWays(db, asyncDb, rooms);
+    expect(plain(projected)).toEqual(plain(scanned));
+  });
+
+  test("matches the scan for a legacy forward reference", async () => {
+    const { db, asyncDb } = freshDb();
+    seed(db);
+
+    // The original lives in another channel; the forward reference is the only
+    // row in THREAD_B, and carries no content or author of its own.
+    const original = postMessage(db, OTHER_CHANNEL, ALICE, 5000, "original text");
+    forwardMessage(db, THREAD_B, original);
+
+    const rooms = [OTHER_CHANNEL, THREAD_B];
+    const { scanned, projected } = await bothWays(db, asyncDb, rooms);
+    expect(plain(projected)).toEqual(plain(scanned));
+    // And the forwarded original really is what the board shows, not a blank
+    // row that happens to match a blank scan.
+    expect(projected.get(THREAD_B)!.latestMessage!.content).toBe("original text");
+    expect(projected.get(THREAD_B)!.latestMembers.map((m) => m.did)).toEqual([ALICE]);
+  });
+
+  test("matches the scan once the latest message is deleted", async () => {
+    const { db, asyncDb } = freshDb();
+    seed(db);
+
+    const newest = postMessage(db, THREAD_A, BOB, 3000, "newest");
+    postMessage(db, THREAD_A, ALICE, 1000, "older");
+    await rebuildRoomActivity(asyncDb, [THREAD_A]);
+
+    // Delete the newest message, as the delete materialiser does (the entity
+    // row disappears; `edges` cascades).
+    db.run("delete from entities where id = ?", [newest]);
+    await rebuildRoomActivity(asyncDb, [THREAD_A]);
+
+    const { scanned, projected } = await bothWays(db, asyncDb, [THREAD_A]);
+    expect(plain(projected)).toEqual(plain(scanned));
+    expect(projected.get(THREAD_A)!.latestMessage!.content).toBe("older");
+    expect(projected.get(THREAD_A)!.latestMembers.map((m) => m.did)).toEqual([ALICE]);
+  });
+
+  test("a partially projected page falls back and warms every room it read", async () => {
+    const { db, asyncDb } = freshDb();
+    seed(db);
+
+    postMessage(db, THREAD_A, ALICE, 1000, "a");
+    postMessage(db, THREAD_C, CAROL, 2000, "c");
+    // Only one of the two rooms is projected.
+    await rebuildRoomActivity(asyncDb, [THREAD_A]);
+
+    const result = await fetchRoomActivity(asyncDb, [THREAD_A, THREAD_C]);
+    expect(result.get(THREAD_C)!.latestMessage!.content).toBe("c");
+
+    // The fallback warmed the room it had to read, so the whole page is
+    // projected from the next read on — this is what stops a single quiet room
+    // from pinning a board to the scan forever.
+    expect(await readRoomActivityProjection(asyncDb, [THREAD_A, THREAD_C])).not.toBeNull();
   });
 });

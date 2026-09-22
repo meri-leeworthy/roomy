@@ -1,8 +1,9 @@
 # Denormalised read projections
 
 **Date:** 2026-09-21
-**Status:** R1 merged (`room_access` projection); R2 merged (`#roomActivityDiff`)
-**Task:** TASK-173 (R1), TASK-174 (R2)
+**Status:** R1 merged (`room_access` projection); R2 merged (`#roomActivityDiff`);
+R3 merged (`room_activity` projection)
+**Task:** TASK-173 (R1), TASK-174 (R2), TASK-175 (R3)
 
 ## Summary
 
@@ -19,9 +20,11 @@ With 4 subscribers that is 16 refetches per message, each of which re-runs the
 above per-room access resolution. This is the fanout Meri asked about: 5
 invalidations → 5 full read endpoints → ~137 DB round-trips *per client*.
 
-This document plans denormalised projections for the read side, and reports the
-round-1 prototype: a `room_access` projection maintained on live events and
-warmed on read miss, measured before/after.
+This document plans denormalised projections for the read side, and reports all
+three rounds: the `room_access` projection maintained on live events and warmed
+on read miss (R1), the `#roomActivityDiff` that replaces the ordering-driven
+invalidations (R2), and the `room_activity` projection that makes board reads
+independent of channel size (R3) — measured before/after in each case.
 
 ## Context: what is actually slow (measured, not assumed)
 
@@ -317,12 +320,22 @@ caller-scoped (sent once per affected user), so folding structural,
 identical-for-everyone board fields into it would put the same board row on the
 wire once per reader.
 
-**R3 — `space.getThreads` / `getActivityFeed` projection.** `fetchRoomActivity`
-(`threadActivity.ts:230`) reads every message in scope to pick the latest per
-room (measured: 8001 rows → 2 at 8000 messages). The fix is a
-`room_activity` projection — `(room_id) → latest_message_id, latest_ts,
-recent_authors` — maintained on createMessage/deleteMessage/moveMessages, which
-is the same shape as the existing `activity_item` and can share its update path.
+**R3 — `space.getThreads` / `getActivityFeed` projection (DONE — see §Results R3).**
+`fetchRoomActivity` (`threadActivity.ts`) read every message in scope to pick the
+latest per room (measured: 8001 rows → 2 at 8000 messages), which is why
+`space.getThreads` grew with channel size, not with the number of rooms on the
+page. The fix is the `room_activity` projection — `(room_id) → latest_message_id,
+latest_at, recent_authors` — maintained inside the same per-event transaction as
+`room_access` (zero additional worker round-trips, measured), with the read path
+falling back to the scan and warming on a miss.
+
+The plan expected this to share `activity_item`'s update path. It does not, and
+should not: `activity_item` is the **feed** projection (a rolling 5-message
+window plus denormalised names, read by `getActivityFeed`), while
+`room_activity` is a **reduction** (a per-author maximum over the room's entire
+history, which no rolling window can produce). They share a maintenance
+*mechanism* — one statement in `applyBatch`'s per-event transaction — which is
+the part that made the cost argument work.
 
 **R4 — `selectMessages` embed/reaction pre-join.** Lower value than expected:
 measured at 20k messages with 4000 reactions and 5000 link embeds, the base
@@ -549,6 +562,143 @@ merged base); `tsc
   the last message. Verified to fail on pre-R2 code (the diff frame never
   arrives, so the test times out).
 
+
+## Results — R3
+
+Measured with `perf/probe-projections.ts`, same fixture for both sides (12
+channels + 12 threads, 3000 messages in the hot channel unless stated, 100
+readers, 5 sync clients, 20 iterations, query cache disabled), `--label` before
+vs after. Each figure was reproduced twice.
+
+### Read cost
+
+`space.getThreads` is the endpoint this round is for: it lists every room in the
+space, so it pays `fetchRoomActivity` for all of them.
+
+| fixture | before p50 | after p50 | before p95 | after p95 |
+|---|---:|---:|---:|---:|
+| 3000 messages in the hot channel | **29.5 / 31.8 / 33.5 ms** | **1.8 / 3.3 / 1.8 ms** | 33.4 / 39.0 / 40.6 ms | 4.5 / 7.3 / 4.5 ms |
+| 500 messages | 9.6 ms | 1.8 ms | 12.0 ms | 16.1 ms |
+| 8000 messages | **78.7 ms** | **1.8 ms** | 86.9 ms | 6.1 ms |
+
+**Read latency stops depending on channel size.** 500 → 8000 messages (16×) moved
+the pre-projection p50 by 8.2× (9.6 → 78.7 ms) and the R3 p50 not at all (1.8 →
+1.8 ms). That flat line is the whole point of the round: the remaining work is
+O(rooms on the page), and the 12-room/12-thread fixture is smaller than the
+production sidebar. (The 500-message `after` p95 of 16.1 ms is a first-run
+outlier — the repeat reads 1.8 ms p50 / 4.5 ms p95.)
+
+Round-trips move the other way, and honestly so: `space.getThreads` 18 → 17. The
+projection answers a page in **two** reads (the reduced rows, then the board
+shape) while the scan used four, but the *dominant* cost was never the number of
+statements — it was the row count they returned and the JS reduction over it. A
+round-trip count is the wrong instrument for this change; rows scanned is the
+right one (8001 → 12 at the 8000-message fixture, i.e. per room rather than per
+message).
+
+The other endpoints are untouched, as staged: `room.getThreads` 18 → 16,
+`room.getMetadata` 21 → 19 (both now serve threads from the projection),
+`getActivityFeed` 15 → 15 and `getMetadata` 19 → 19 (R4's shape).
+
+### Write-side cost of maintaining the projection
+
+Throwaway harness, one 50-message `sendEvents` batch through the real write path,
+`WorkerLink.prototype.send` counted (same technique as the probe):
+
+| | worker round-trips | of which per-space |
+|---|---:|---:|
+| before (no `room_activity` step) | **865** | 660 |
+| after (step enabled) | **865** | 660 |
+
+**Zero additional worker round-trips** — the statement rides inside the per-event
+transaction `applyBatch` already opens, exactly as `room_access` does. The
+projection adds one statement per *message* event, and a create is merged in
+place (O(1) in room size) rather than rebuilt, so a bridge posting live messages
+never pays a per-room re-aggregation.
+
+### Fanout
+
+Unchanged, as scoped — R3 makes each refetch cheaper, it does not reduce their
+number:
+
+```
+  frames per client: 7   (#messageDiff:1  #roomMetadataDiff:1  #roomActivityDiff:1  #invalidate:4)
+  #invalidate nsids: room.getLinks, space.getLinks, space.getActivityFeed, space.getMetadata
+  refetch storm per client: 4 requests, 45 DB round-trips
+```
+
+The four remaining invalidations are the link-index pair, the activity feed
+(whose items hydrate media/link embeds per message — a shape the activity diff
+does not carry), and the author-scoped `space.getMetadata`.
+
+### Rematerialisation constraint
+
+Same rule as R1, and enforced the same way: replay **invalidates**, never
+populates. `maintainRoomActivity` deletes the row on a backfilled
+`createMessage`/`deleteMessage`/`moveMessages`, and the read path falls back to
+the live scan for any page that is not fully projected.
+
+Deletes and moves take this further than R1 needed to: the projection is
+invalidated by the event's own transaction and then **rebuilt from the
+post-event tables** in the materialiser's side-effect stage, so a room keeps its
+projection across a delete or a move instead of dropping back to the scan. That
+rebuild runs on backfill too, for the same reason `rebuildActivityWindow` does —
+a replay must leave the projection describing the data the replay just wrote. A
+rebuild is not population.
+
+### Tests
+
+`bun test --cwd packages/appserver`: **1115 pass, 1 skip, 0 fail** (baseline on
+`next` before this work: 1102 pass, 1 skip, 0 fail). `tsc --noEmit`: 0 errors.
+
+- `queries/roomActivityProjection.test.ts` (5) — the maintenance contract: a live
+  create merges in with its room, timestamp and author; a message older than the
+  recorded latest does not displace it (the bridged-`timestampOverride` case);
+  delete and move invalidate the rooms they name; **the same create during
+  backfill deletes rather than populates**; events that cannot move a room's
+  latest message produce no step, and malformed payloads are inert.
+- `queries/threadActivity.test.ts` (+4, beside the 21 existing) — read parity:
+  the projected board equals the scanned board for threads with messages, empty
+  rooms, a legacy forward reference, and a room whose newest message was deleted.
+  Each asserts the projection actually answered (not a silent fallback), so the
+  comparison cannot pass trivially.
+- `e2e/roomActivityProjection.test.ts` (4) — through the real write path
+  (`sendEvents` → materialise → projection maintenance → board read): a live
+  message; a **delete** dropping the message from the board; a **move** updating
+  both rooms; and projected-equals-scan after a mixed sequence of creates, a
+  delete, a thread, and an empty room.
+
+The parity tests were mutation-checked: forcing the projected reader to always
+miss fails 23 of the 25 `threadActivity` tests, confirming they exercise the
+projected path rather than passing through the fallback.
+
+### Two parity defects found and fixed
+
+The projection and the scan must return the *same board* — that is the contract
+that lets a read fall back at any time. Getting there surfaced two real
+divergences, both in the pre-existing scan:
+
+1. **Latest message on a timestamp tie.** The scan folded rows in query-return
+   order and kept the first at a given timestamp; the projection picks the
+   highest message id. Two messages can share a millisecond (created together, or
+   bridged with sender-supplied times), and the two paths disagreed on which one
+   was "latest". The tie-break is now stated once — highest id wins — and applied
+   in both. This was found by the e2e test, not by inspection.
+2. **`fetchRoomActivity` hardcoded `kind: "thread"` and `name: null`.** No
+   consumer reads those fields today — `listThreadActivity` derives them from its
+   own room rows (with the real label and name), and `space.roomy.search.rooms`
+   sets them on its result items itself, using this helper only for the
+   `activity.*` columns. So this was not a live bug, and it is recorded here as
+   what it was: a latent wrong fact (a channel would report itself as a thread)
+   that the parity test surfaced the moment the projection started reading the
+   room's real label. Both paths now report the truth. The honest framing matters
+   more than the fix — a doc that calls a dead field a user-visible defect is
+   worse than one that says "unused, and now consistent".
+
+A third, unrelated defect was found in the test helpers: `seedMembership` wrote
+the membership edge user→space, while `isAdmin`/`isMember` read space→user, so a
+caller seeded as an admin was denied by every check that actually ran. Nothing
+depended on the old direction; the helper is corrected rather than worked around.
 
 ## Assessment: decoupling the `sendEvents` 200 from materialisation
 

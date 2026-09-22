@@ -371,3 +371,28 @@ create table if not exists room_access (
 ) strict;
 
 create index if not exists idx_room_access_space on room_access(space_id);
+
+-- Denormalised read projection (TASK-175, R3): each room's latest message and
+-- its distinct recent authors, reduced once per write instead of once per
+-- board read. `fetchRoomActivity` otherwise reads EVERY message in EVERY room
+-- in scope to pick one per room (measured: 8001 rows to keep 2 at 8000
+-- messages), which is what makes `space.getThreads` grow with channel size.
+--
+-- Maintained on LIVE events only, inside the per-event transaction
+-- `applyBatch` already opens: createMessage folds one message in, delete/
+-- moveMessages invalidate the affected rooms and the materialiser's
+-- side-effect stage rebuilds them. Rematerialisation invalidates but never
+-- populates. The read path falls back to the live scan whenever a page is not
+-- fully projected, so a blue-green rebuild heals lazily.
+--
+-- Purely additive: declared here so every existing per-space DB gains it at
+-- next open (the schema file is exec'd on every open regardless of version),
+-- with no SPACE_SCHEMA_VERSION bump and therefore no forced rebuild.
+create table if not exists room_activity (
+  room_id           text primary key,
+  latest_message_id text,
+  latest_at         integer,
+  -- JSON array of {did, ts}, distinct authors newest-first, ts = that author's
+  -- newest message. The board takes the first 3.
+  recent_authors    text not null default '[]'
+) strict;
