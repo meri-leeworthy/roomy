@@ -34,6 +34,7 @@ import {
   filterPendingUrls,
   inFlightCount,
   backoffMs,
+  classifyPendingLinks,
   type EnrichOutcome,
   type PendingLink,
 } from "./enricher.ts";
@@ -107,18 +108,74 @@ let dbErrorCount = 0;
 /** Timestamp (ms) until which the sweeper should skip fetching and just idle. */
 let dbBackoffUntil = 0;
 /**
- * Backlog-stall signal. Set on a cycle where the DB backlog is non-empty,
- * a batch was selected but every pending link was skipped by the transient
- * backoff, and the oldest pending row is older than {@link STALL_AGE_MS}.
- * That is the "the whole backlog is in transient backoff, so the sweeper
- * does nothing" state — invisible to `pending`/`inFlight` (both read 0/false
- * in-memory while 5k rows sit in `pending_links`). `since` is when the stall
- * began (ms); `skipped` counts cycles that saw it. Exposed on /health/embed
- * and as a Prometheus gauge so an alert can fire on the stalled backlog.
+ * Backlog-stall signal. Set on a cycle that selected nothing while the DB
+ * backlog is non-empty and its oldest row is older than {@link STALL_AGE_MS}.
+ * That is the "the backlog is not draining" state — invisible to
+ * `pending`/`inFlight` (both read 0/false in-memory while 5k rows sit in
+ * `pending_links`). `since` is when the stall began (ms); `skipped` counts
+ * cycles that saw it. Exposed on /health/embed and as a Prometheus gauge so
+ * an alert can fire on the stalled backlog.
+ *
+ * The CAUSE is deliberately not asserted here: {@link stallCause} and
+ * {@link lastCycle} carry the measured numbers from the cycle that failed to
+ * select, and the warn at the end of {@link sweepCycle} reports them. The
+ * previous version hardcoded "all pending links are in transient-retry
+ * backoff", which is false whenever the skip set does not cover every pending
+ * ROW — the sweeper's backoff is keyed by URL while the backlog is rows.
  */
 let backlogStuck = false;
 let backlogStuckSince = 0;
 let backlogStuckSkipped = 0;
+
+/**
+ * Why the last sweep cycle selected nothing, measured — not assumed — on the
+ * cycle itself. `parked`/`selectable` are ROW counts from
+ * {@link classifyPendingLinks} against the same URL skip set the backlog query
+ * uses, so they cannot disagree with what was actually excluded.
+ *
+ * - `all-parked`: every pending row is inside a backoff window (`selectable`
+ *   0), so returning empty is correct and the backlog will drain as windows
+ *   expire.
+ * - `selectable-but-absent`: rows were NOT parked yet the query still returned
+ *   nothing — a real bug (the query, the skip-set bind, or a different
+ *   population), which the log line must escalate rather than smooth over.
+ */
+export type StallCause = "all-parked" | "selectable-but-absent" | "unknown";
+
+/**
+ * The measured cause of a cycle that selected nothing. Two inputs, both
+ * required for a sound claim:
+ *
+ * - `selectableRows`: ROW count the skip set did NOT exclude (from
+ *   {@link classifyPendingLinks}). Zero means every row is parked, so the empty
+ *   selection is correct.
+ * - `probeFound`: whether re-running the SAME selection found anything. A
+ *   positive `selectableRows` only proves rows exist — not that the selection
+ *   missed them, since `selectableRows` is counted after the selection ran and
+ *   rows may have landed in between. A non-empty probe refutes the "missed"
+ *   claim outright: the backlog IS selectable, so this is not a stall.
+ *
+ * Returns `"unknown"` for that not-actually-stalled case, so the caller can
+ * decline to raise the flag rather than publish a cause it cannot stand behind.
+ * Pure, so the rule is testable without a DB.
+ */
+export function classifyStallCause(
+  selectableRows: number,
+  probeFound: number,
+): StallCause {
+  if (selectableRows === 0) return "all-parked";
+  return probeFound === 0 ? "selectable-but-absent" : "unknown";
+}
+
+let stallCause: StallCause = "unknown";
+/** Row breakdown from the last cycle that selected nothing (see lastCycle). */
+let lastCycle: {
+  pendingRows: number;
+  selectableRows: number;
+  parkedRows: number;
+  backoffUrls: number;
+  selected: number;
+} | null = null;
 /**
  * Priority queue of freshly-detected live link URLs. Drained before the
  * oldest-first backlog so a newly posted link is enriched within seconds
@@ -178,11 +235,11 @@ export function embedSweeperStats(): {
   dbErrorCount: number;
   dbBackoffActive: boolean;
   /**
-   * True when the backlog is non-empty but the sweeper is selecting nothing
-   * (every pending link is inside transient-retry backoff) and the oldest
-   * pending row is older than {@link STALL_AGE_MS}. This is the signal the
-   * `pending`/`inFlight` pair cannot express: a stuck 5k-row backlog looks
-   * idle. See /health/embed and `roomy_embed_backlog_stuck`.
+   * True when the backlog is non-empty but the sweeper selected nothing and
+   * the oldest pending row is older than {@link STALL_AGE_MS}. This is the
+   * signal the `pending`/`inFlight` pair cannot express: a stuck 5k-row
+   * backlog looks idle. The CAUSE is not implied — read {@link lastStallCause}
+   * and {@link lastCycle}. See /health/embed and `roomy_embed_backlog_stuck`.
    */
   backlogStuck: boolean;
   /** Epoch-ms the stall began (0 when not stuck). */
@@ -190,11 +247,31 @@ export function embedSweeperStats(): {
   /** Sweep cycles that observed the stall. */
   backlogStuckSkipped: number;
   /**
-   * Number of URLs the sweeper is currently skipping because they are inside
-   * a transient-retry backoff window. When this covers the whole backlog,
-   * `pending` stays high while nothing is selected — the observed stall.
+   * Number of URLs currently inside a transient-retry backoff window
+   * (`retryAt` in the future).
+   *
+   * URL-keyed, and the backlog is ROW-keyed, so this is NOT comparable to
+   * `pending` by subtraction: one parked URL pending in N messages parks N
+   * rows. `pending - transientBackoff` therefore over-reports selectable rows
+   * and reads positive even when the whole backlog is parked. Use
+   * {@link lastCycle}'s `selectableRows` for that question.
    */
   transientBackoff: number;
+  /**
+   * Measured reason the last cycle that selected nothing did so. `null` until
+   * such a cycle has run. `"all-parked"` means every pending ROW was inside a
+   * backoff window; `"selectable-but-absent"` means selectable rows existed
+   * and the query returned nothing anyway — a real selection bug.
+   */
+  lastStallCause: StallCause | null;
+  /** Row/URL breakdown of the last cycle that selected nothing (`null` until then). */
+  lastCycle: {
+    pendingRows: number;
+    selectableRows: number;
+    parkedRows: number;
+    backoffUrls: number;
+    selected: number;
+  } | null;
 } {
   return {
     priorityQueue: priorityLinks.size,
@@ -208,6 +285,8 @@ export function embedSweeperStats(): {
     backlogStuckSince,
     backlogStuckSkipped,
     transientBackoff: activeBackoffSize(),
+    lastStallCause: lastCycle === null ? null : stallCause,
+    lastCycle,
   };
 }
 
@@ -329,6 +408,15 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
 
   let pending: PendingLink[] = [];
 
+  // URLs currently parked in a transient-retry backoff window. Computed once
+  // per cycle (from the `now` above) and reused by BOTH the backlog query and
+  // the stall diagnostic below, so the diagnostic measures against the exact
+  // skip set the selection used — never a re-derived approximation.
+  const backoffUrls = new Set<string>();
+  for (const [url, retry] of transientRetry) {
+    if (retry.retryAt > now) backoffUrls.add(url);
+  }
+
   // 1. Priority: freshly-detected live links first, so a newly posted
   //    link is enriched within seconds instead of waiting behind the
   //    entire backfill backlog. Resolve which spaces each priority URL is
@@ -351,11 +439,6 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
   //    oldest backoff links every cycle and stalling.
   if (pending.length < SWEEP_BATCH) {
     try {
-      const now = Date.now();
-      const backoffUrls = new Set<string>();
-      for (const [url, retry] of transientRetry) {
-        if (retry.retryAt > now) backoffUrls.add(url);
-      }
       const backlog = await findPendingLinks(
         globalDb,
         SWEEP_BATCH - pending.length,
@@ -474,31 +557,104 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
     else markDbOk(); // a successful write cycle → DB is healthy again
   }
 
-  // Stall detection: a cycle that selected NO links out of a NON-EMPTY
-  // backlog is doing no work, and the obvious in-memory signals stay silent
-  // about it (`inFlight` 0, `dbBackoffActive` false). If the oldest pending
-  // row is also older than STALL_AGE_MS, transient-retry backoff is pinning
-  // the whole queue and the backlog will not drain. Record it so an operator
-  // (or a Grafana alert on `roomy_embed_backlog_stuck`) can see it.
+  // Stall detection: a cycle that selected NO links out of a NON-EMPTY,
+  // stale backlog is doing no work, and the obvious in-memory signals stay
+  // silent about it (`inFlight` 0, `dbBackoffActive` false). Record it so an
+  // operator (or a Grafana alert on `roomy_embed_backlog_stuck`) can see it.
   //
-  // This second query runs ONLY on a cycle that selected nothing — i.e. while
-  // stalled, roughly one cheap indexed `min(created_at)` per idle poll — not
-  // on every cycle, so it costs nothing while the sweeper is healthy.
-  if (pending.length === 0 && !backlogStuck) {
+  // The CAUSE is MEASURED here, never assumed. The previous version asserted
+  // "all pending links are in transient-retry backoff" as a fixed string; that
+  // is false whenever a parked URL is pending in more than one message (the
+  // sweeper's backoff is keyed by URL, the backlog by row), and it sent the
+  // next reader hunting a backoff-window problem that was not the whole story.
+  // `classifyPendingLinks` counts the ROWS the same skip set excludes, so the
+  // numbers in the log line cannot disagree with what the query actually did.
+  //
+  // These queries run ONLY on a cycle that selected nothing — i.e. while
+  // stalled, roughly one cheap indexed `min(created_at)` plus one aggregate per
+  // idle poll — not on every cycle, so they cost nothing while healthy.
+  if (pending.length === 0) {
     try {
       const row = await globalDb
         .query(`select min(created_at) as oldest from pending_links`)
         .get<{ oldest: number | null }>();
       const oldest = row?.oldest;
       if (oldest != null && Date.now() - oldest > STALL_AGE_MS) {
-        backlogStuck = true;
-        backlogStuckSince = Date.now();
-        backlogStuckSkipped = 0;
-        log.warn(
-          `[embed-sweeper] backlog stalled: oldest pending link is ${Math.round(
-            (Date.now() - oldest) / 60_000,
-          )}m old and the last cycle selected nothing (all pending links are in transient-retry backoff)`,
+        // Count the rows the SAME skip set excluded, via one aggregate.
+        // `selectable` is computed over all rows at diagnostic time, so it
+        // cannot be attributed to the earlier SELECT — a row inserted between
+        // the two would make an "the query missed rows" claim unsound. Treat
+        // the count as EVIDENCE about the backlog's shape and confirm it with
+        // a probe that must find something if the claim is true.
+        const { total, selectable, parked } = await classifyPendingLinks(
+          globalDb,
+          backoffUrls,
         );
+        const numbers = () =>
+          `pendingRows=${total} selectableRows=${selectable} ` +
+          `parkedRows=${parked} backoffUrls=${backoffUrls.size} ` +
+          `selected=${pending.length}`;
+        const age = Math.round((Date.now() - oldest) / 60_000);
+
+        // `selectable > 0` says rows exist NOW that the skip set does not
+        // cover. The only sound way to conclude the SELECT missed them is to
+        // run that SELECT again, unchanged; a non-empty result PROVES it was a
+        // transient/mid-cycle discrepancy (new rows arriving), not a bug. Only
+        // when the repeat ALSO returns empty is the selection genuinely broken.
+        const probe = await findPendingLinks(globalDb, SWEEP_BATCH, backoffUrls);
+        const cause: StallCause = classifyStallCause(selectable, probe.length);
+
+        if (cause !== "unknown") {
+          // A cause CHANGE while stalled (e.g. the parked set drained but the
+          // selection is still broken) must never be silent — record the old
+          // cause before overwriting it.
+          const prevCause = backlogStuck ? stallCause : null;
+          stallCause = cause;
+          lastCycle = {
+            pendingRows: total,
+            selectableRows: selectable,
+            parkedRows: parked,
+            backoffUrls: backoffUrls.size,
+            selected: pending.length,
+          };
+          if (!backlogStuck) {
+            backlogStuck = true;
+            backlogStuckSince = Date.now();
+            backlogStuckSkipped = 0;
+          }
+          // Log on first entry into the stall and on any cause CHANGE; stay
+          // quiet on repeats so a 30s idle poll doesn't flood the log.
+          if (prevCause !== cause) {
+            if (cause === "all-parked") {
+              // Every pending row is inside a backoff window, so the empty
+              // selection is correct and the backlog drains as windows expire.
+              // Report the numbers so the next reader doesn't re-derive them.
+              log.warn(
+                `[embed-sweeper] backlog stalled: oldest pending row is ${age}m old ` +
+                  `and the last cycle selected nothing — cause=all-parked (${numbers()})`,
+              );
+            } else {
+              // A re-run of the selection returned nothing while selectable
+              // rows exist: a real bug (the query, the skip-set bind, or the
+              // two call sites reading different populations). ERROR, not warn
+              // — this is the state the old fixed-cause message concealed.
+              log.error(
+                `[embed-sweeper] backlog stalled: oldest pending row is ${age}m old ` +
+                  `and the last cycle selected nothing — cause=selectable-but-absent ` +
+                  `(a re-run of the backlog query returned none while rows outside ` +
+                  `the backoff set exist) (${numbers()})`,
+              );
+            }
+          }
+        } else if (backlogStuck) {
+          // The probe found selectable rows: the backlog is NOT stalled (the
+          // empty selection was a transient race with in-flight inserts).
+          // Clear the flag instead of publishing a cause that is not true.
+          backlogStuck = false;
+          backlogStuckSkipped = 0;
+          stallCause = "unknown";
+          lastCycle = null;
+        }
       }
     } catch (err) {
       log.debug("[embed-sweeper] backlog-age probe failed:", err);
@@ -511,6 +667,12 @@ export async function sweepCycle(globalDb: DbLike): Promise<boolean> {
   if (pending.length > 0) {
     backlogStuck = false;
     backlogStuckSkipped = 0;
+    // Clear the measured cause too: it describes the LAST cycle that selected
+    // nothing, and reporting a stale cause after recovery would be the same
+    // class of mistake (a cause that no longer matches reality) this whole
+    // change removes.
+    stallCause = "unknown";
+    lastCycle = null;
   } else if (backlogStuck) {
     backlogStuckSkipped++;
   }
@@ -747,6 +909,8 @@ export function _resetEmbedSweeper(): void {
   backlogStuck = false;
   backlogStuckSince = 0;
   backlogStuckSkipped = 0;
+  stallCause = "unknown";
+  lastCycle = null;
 }
 
 /**

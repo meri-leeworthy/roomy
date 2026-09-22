@@ -611,9 +611,12 @@ export async function createAppserver(
           : null,
         cache,
         embed: {
-          // `pending` is the DB backlog (same source as /health/embed); the
-          // rest is in-memory sweeper state. Together they make the stall
-          // self-evident: pending > 0, inFlight 0, transientBackoff ~= pending.
+          // `pending` is the DB backlog ROW count (same source as
+          // /health/embed); the rest is in-memory sweeper state. NOTE
+          // `transientBackoff` counts URLs while `pending` counts rows, so do
+          // NOT subtract them — read `lastCycle.selectableRows` for how many
+          // rows were actually selectable, and `lastStallCause` for why a
+          // stalled cycle selected nothing.
           pending,
           priorityQueue: embed.priorityQueue ?? 0,
           inFlight: embed.inFlight ?? 0,
@@ -621,6 +624,8 @@ export async function createAppserver(
           dbBackoff: embed.dbBackoffActive ?? false,
           transientBackoff: embed.transientBackoff ?? 0,
           backlogStuck: embed.backlogStuck ?? false,
+          lastStallCause: embed.lastStallCause ?? null,
+          lastCycle: embed.lastCycle ?? null,
         },
         search: {
           queue: search.queueLength ?? 0,
@@ -771,11 +776,15 @@ export async function createAppserver(
   const embedDbBackoff = metrics.gauge("roomy_embed_db_backoff", "1 when the embed sweeper is in DB backoff.");
   const embedTransientBackoff = metrics.gauge(
     "roomy_embed_transient_backoff",
-    "Embed URLs currently skipped inside a transient-retry backoff window.",
+    "Embed URLs currently skipped inside a transient-retry backoff window (URL-keyed; NOT row-comparable to roomy_embed_pending).",
+  );
+  const embedSelectableRows = metrics.gauge(
+    "roomy_embed_selectable_rows",
+    "Pending_links ROWS selectable by the sweeper's last stalled cycle (rows the URL backoff skip-set did not exclude).",
   );
   const embedBacklogStuck = metrics.gauge(
     "roomy_embed_backlog_stuck",
-    "1 when the embed backlog is non-empty but the sweeper is selecting nothing (all pending links in transient-retry backoff).",
+    "1 when the embed backlog is non-empty but the sweeper selected nothing and the oldest row is stale.",
   );
   const embedBacklogStuckSince = metrics.gauge(
     "roomy_embed_backlog_stuck_since_seconds",
@@ -922,6 +931,9 @@ export async function createAppserver(
           {},
           embed.backlogStuck ? Math.floor(embed.backlogStuckSince / 1000) : 0,
         );
+        // Published only while stalled (0 otherwise): a stale non-zero value
+        // after recovery would misreport selectable rows for a healthy queue.
+        embedSelectableRows.set({}, embed.lastCycle?.selectableRows ?? 0);
         const search = searchIndexerStats();
         searchQueue.set({}, search.queueLength ?? 0);
         const backfill = searchBackfillStats();

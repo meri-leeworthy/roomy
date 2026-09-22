@@ -11,6 +11,7 @@ import {
   filterPendingUrls,
   fetchEmbedData,
   countPendingLinks,
+  classifyPendingLinks,
   type PendingLink,
 } from "./enricher.ts";
 import type { DbLike } from "../db/types.ts";
@@ -185,6 +186,52 @@ describe("global pending_links index (findPendingLinks / countPendingLinks)", ()
     seedPendingLink(db, "https://two.example", "did:web:b", "m2");
     expect(await countPendingLinks(asyncDb)).toBe(2);
     expect(await countPendingLinks(asyncDb)).toBe((await findPendingLinks(asyncDb)).length);
+  });
+
+  test("classifyPendingLinks counts ROWS, not distinct URLs", async () => {
+    // The PK is (space_did, message_id, url): one URL pending in two messages
+    // is TWO rows. This is the unit mismatch that made `pending - transientBackoff`
+    // look like selectable work.
+    const { db, asyncDb } = freshGlobalDb();
+    seedPendingLink(db, "https://dup.example", "did:web:a", "m1");
+    seedPendingLink(db, "https://dup.example", "did:web:a", "m2");
+    seedPendingLink(db, "https://other.example", "did:web:a", "m3");
+
+    const all = await classifyPendingLinks(asyncDb, new Set());
+    expect(all).toEqual({ total: 3, selectable: 3, parked: 0 });
+
+    // Park one URL: BOTH of its rows become parked, so only 1 row remains
+    // selectable even though 2 URLs exist. A URL-keyed `parked` count cannot
+    // express this.
+    const parkedUrl = await classifyPendingLinks(
+      asyncDb,
+      new Set(["https://dup.example"]),
+    );
+    expect(parkedUrl).toEqual({ total: 3, selectable: 1, parked: 2 });
+  });
+
+  test("classifyPendingLinks reports zero selectable when every row is parked", async () => {
+    // The production shape: 727 more rows than parked URLs looked selectable,
+    // but every ROW was parked. The row-level count must say 0.
+    const { db, asyncDb } = freshGlobalDb();
+    seedPendingLink(db, "https://a.example", "did:web:a", "m1");
+    seedPendingLink(db, "https://a.example", "did:web:a", "m2");
+    seedPendingLink(db, "https://b.example", "did:web:a", "m3");
+
+    const out = await classifyPendingLinks(
+      asyncDb,
+      new Set(["https://a.example", "https://b.example"]),
+    );
+    expect(out.selectable).toBe(0);
+    expect(out.parked).toBe(out.total);
+
+    // Agrees with the selection query: nothing is selectable, so it returns [].
+    const selected = await findPendingLinks(
+      asyncDb,
+      25,
+      new Set(["https://a.example", "https://b.example"]),
+    );
+    expect(selected).toEqual([]);
   });
 });
 

@@ -389,12 +389,54 @@ export function inFlightCount(): number {
  * Total rows in the global `pending_links` index still awaiting enrichment.
  * Mirrors {@link findPendingLinks} but unbounded, for the `/health/embed`
  * endpoint so operators can watch the backlog drain.
+ *
+ * Counts ROWS, not distinct URLs: the PK is (space_did, message_id, url), so
+ * one URL pending in N messages is N rows. Never compare this with the
+ * sweeper's URL-keyed backoff count by subtraction — see
+ * {@link classifyPendingLinks}.
  */
 export async function countPendingLinks(db: DbLike): Promise<number> {
   const row = await db
     .query(`select count(*) as n from pending_links`)
     .get<{ n: number }>();
   return row?.n ?? 0;
+}
+
+/**
+ * Row-level breakdown of the global `pending_links` backlog against a URL
+ * skip set — the same set {@link findPendingLinks} excludes. Measures how many
+ * rows are actually selectable and how many are parked, so a stall report can
+ * state a cause instead of assuming one.
+ *
+ * Units are the whole point: `pending` counts ROWS while the sweeper's
+ * transient backoff is keyed by URL, so `pending - transientBackoff`
+ * under-counts parked rows and over-reports selectable ones. A backlog whose
+ * every URL is parked still shows a positive difference whenever a URL is
+ * pending in more than one message — which is exactly how a fully-parked
+ * backlog gets misread as "N selectable rows". Counting the rows the skip set
+ * excludes cannot make that mistake.
+ *
+ * Both counts come from ONE query so they describe the same snapshot (two
+ * separate `count(*)`s could straddle an insert).
+ */
+export async function classifyPendingLinks(
+  db: DbLike,
+  skipUrls: ReadonlySet<string>,
+): Promise<{ total: number; selectable: number; parked: number }> {
+  const skip = skipUrls.size > 0 ? [...skipUrls] : [];
+  const skipPh = skip.map(() => "?").join(",");
+  const selectableExpr =
+    skip.length > 0
+      ? `sum(case when url not in (${skipPh}) then 1 else 0 end)`
+      : `count(*)`;
+  const row = await db
+    .query(
+      `select count(*) as total, ${selectableExpr} as selectable from pending_links`,
+    )
+    .get<{ total: number; selectable: number | null }>([...skip]);
+  const total = row?.total ?? 0;
+  const selectable = row?.selectable ?? 0;
+  return { total, selectable, parked: total - selectable };
 }
 
 /**
