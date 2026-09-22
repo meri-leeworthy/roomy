@@ -15,12 +15,8 @@ describe("migrations", () => {
 	test("apply cleanly on a fresh database", () => {
 		const db = new Database(":memory:");
 		const result = runMigrations(db);
-		const ascending = [...result.applied].sort((a, b) => a - b);
-		expect(result.applied.join(",")).toBe(ascending.join(","));
-		expect(result.current).toBe(ascending[ascending.length - 1] ?? 0);
-		// Every migration ran: the bookkeeping version matches the last one
-		// applied, so no migration silently skipped on a fresh install.
-		expect(result.applied.length).toBe(new Set(result.applied).size);
+		expect(result.applied).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+		expect(result.current).toBe(8);
 	});
 
 	test("are idempotent across re-runs", () => {
@@ -28,7 +24,7 @@ describe("migrations", () => {
 		const first = runMigrations(db);
 		const second = runMigrations(db);
 		expect(second.applied).toEqual([]);
-		expect(second.current).toBe(first.current);
+		expect(second.current).toBe(8);
 	});
 });
 

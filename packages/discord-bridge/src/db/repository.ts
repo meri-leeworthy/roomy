@@ -34,6 +34,43 @@ export type ChannelCursor = {
 	updatedAt: number;
 };
 
+/**
+ * Backfill phases. `phase1` = the bounded recent window is running (or was
+ * interrupted mid-window); `phase2` = window done, remainder walk in
+ * progress (or pending resume); `complete` = full history ingested.
+ */
+export type BackfillPhase = "phase1" | "phase2" | "complete";
+
+export type BackfillProgress = {
+	spaceDid: string;
+	channelId: string;
+	guildId: string | null;
+	kind: "channel" | "thread" | null;
+	channelName: string | null;
+	phase: BackfillPhase;
+	messagesSynced: number;
+	messagesSkipped: number;
+	/** Oldest message ingested by Phase 1; the Phase 2 walk covers ids strictly below it. */
+	windowBoundary: string | null;
+	/** Resume position of the Phase 2 walk (id of the newest message the walk has ingested). */
+	walkCursor: string | null;
+	updatedAt: number;
+};
+
+/** Identity + counts used to upsert a progress row (counts are absolute). */
+export type BackfillProgressUpdate = {
+	spaceDid: string;
+	channelId: string;
+	guildId?: string | null;
+	kind?: "channel" | "thread" | null;
+	channelName?: string | null;
+	phase: BackfillPhase;
+	messagesSynced: number;
+	messagesSkipped: number;
+	windowBoundary?: string | null;
+	walkCursor?: string | null;
+};
+
 export type WebhookToken = {
 	channelId: string;
 	webhookId: string;
@@ -386,11 +423,169 @@ export class BridgeRepository {
 					"DELETE FROM channel_cursors WHERE space_did = ? AND channel_id = ?",
 				)
 				.run(spaceDid, channelId);
+			// Re-backfill starts from scratch, so the durable progress record
+			// (phase, window boundary, walk cursor) no longer reflects reality.
+			this.db
+				.prepare(
+					"DELETE FROM backfill_progress WHERE space_did = ? AND channel_id = ?",
+				)
+				.run(spaceDid, channelId);
 		} else {
 			this.db
 				.prepare("DELETE FROM channel_cursors WHERE channel_id = ?")
 				.run(channelId);
+			this.db
+				.prepare("DELETE FROM backfill_progress WHERE channel_id = ?")
+				.run(channelId);
 		}
+	}
+
+	// === Backfill progress (per (space, channel)) ===
+
+	getBackfillProgress(
+		spaceDid: string,
+		channelId: string,
+	): BackfillProgress | undefined {
+		const row = this.db
+			.query<
+				{
+					space_did: string;
+					channel_id: string;
+					guild_id: string | null;
+					kind: "channel" | "thread" | null;
+					channel_name: string | null;
+					phase: BackfillPhase;
+					messages_synced: number;
+					messages_skipped: number;
+					window_boundary: string | null;
+					walk_cursor: string | null;
+					updated_at: number;
+				},
+				[string, string]
+			>(
+				`SELECT space_did, channel_id, guild_id, kind, channel_name, phase,
+				        messages_synced, messages_skipped, window_boundary, walk_cursor,
+				        updated_at
+				 FROM backfill_progress
+				 WHERE space_did = ? AND channel_id = ?`,
+			)
+			.get(spaceDid, channelId);
+		if (!row) return undefined;
+		return {
+			spaceDid: row.space_did,
+			channelId: row.channel_id,
+			guildId: row.guild_id,
+			kind: row.kind,
+			channelName: row.channel_name,
+			phase: row.phase,
+			messagesSynced: row.messages_synced,
+			messagesSkipped: row.messages_skipped,
+			windowBoundary: row.window_boundary,
+			walkCursor: row.walk_cursor,
+			updatedAt: row.updated_at,
+		};
+	}
+
+	/**
+	 * Upsert a backfill progress row. Counts/phase/cursors are absolute and
+	 * overwrite; the optional identity fields (guild, kind, name) are merged
+	 * with COALESCE so a later writer that lacks them never erases earlier
+	 * resolution work.
+	 */
+	upsertBackfillProgress(update: BackfillProgressUpdate): void {
+		this.db
+			.prepare(
+				`INSERT INTO backfill_progress
+				   (space_did, channel_id, guild_id, kind, channel_name, phase,
+				    messages_synced, messages_skipped, window_boundary, walk_cursor, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(space_did, channel_id) DO UPDATE SET
+				   guild_id = COALESCE(excluded.guild_id, backfill_progress.guild_id),
+				   kind = COALESCE(excluded.kind, backfill_progress.kind),
+				   channel_name = COALESCE(excluded.channel_name, backfill_progress.channel_name),
+				   phase = excluded.phase,
+				   messages_synced = excluded.messages_synced,
+				   messages_skipped = excluded.messages_skipped,
+				   window_boundary = excluded.window_boundary,
+				   walk_cursor = excluded.walk_cursor,
+				   updated_at = excluded.updated_at`,
+			)
+			.run(
+				update.spaceDid,
+				update.channelId,
+				update.guildId ?? null,
+				update.kind ?? null,
+				update.channelName ?? null,
+				update.phase,
+				update.messagesSynced,
+				update.messagesSkipped,
+				update.windowBoundary ?? null,
+				update.walkCursor ?? null,
+				Date.now(),
+			);
+	}
+
+	/** List progress rows, optionally scoped to one space. */
+	listBackfillProgress(spaceDid?: string): BackfillProgress[] {
+		const rows = spaceDid
+			? this.db
+					.query<
+						{
+							space_did: string;
+							channel_id: string;
+							guild_id: string | null;
+							kind: "channel" | "thread" | null;
+							channel_name: string | null;
+							phase: BackfillPhase;
+							messages_synced: number;
+							messages_skipped: number;
+							window_boundary: string | null;
+							walk_cursor: string | null;
+							updated_at: number;
+						},
+						[string]
+					>(
+						`SELECT space_did, channel_id, guild_id, kind, channel_name, phase,
+						        messages_synced, messages_skipped, window_boundary, walk_cursor,
+						        updated_at
+						 FROM backfill_progress WHERE space_did = ?
+						 ORDER BY updated_at DESC`,
+					)
+					.all(spaceDid)
+			: this.db
+					.query<
+						{
+							space_did: string;
+							channel_id: string;
+							guild_id: string | null;
+							kind: "channel" | "thread" | null;
+							channel_name: string | null;
+							phase: BackfillPhase;
+							messages_synced: number;
+							messages_skipped: number;
+							window_boundary: string | null;
+							walk_cursor: string | null;
+							updated_at: number;
+						},
+						[]
+					>(`SELECT space_did, channel_id, guild_id, kind, channel_name, phase,
+					        messages_synced, messages_skipped, window_boundary, walk_cursor,
+					        updated_at
+					 FROM backfill_progress ORDER BY updated_at DESC`)
+					.all();
+		return rows.map((r) => ({
+			spaceDid: r.space_did,
+			channelId: r.channel_id,
+			guildId: r.guild_id,
+			kind: r.kind,
+			channelName: r.channel_name,
+			phase: r.phase,
+			messagesSynced: r.messages_synced,
+			messagesSkipped: r.messages_skipped,
+			windowBoundary: r.window_boundary,
+			walkCursor: r.walk_cursor,
+			updatedAt: r.updated_at,
+		}));
 	}
 
 	// === Allowlist (subset mode only) ===

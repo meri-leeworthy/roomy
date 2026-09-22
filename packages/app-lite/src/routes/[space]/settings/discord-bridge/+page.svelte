@@ -123,6 +123,42 @@
       }
     | { type: "error_checking" } = $state({ type: "checking" });
 
+  // Per-channel backfill progress from the bridge REST surface. Polled while
+  // the space is bridged; survives restarts because the bridge persists the
+  // rows (phase, counts, cursor) in SQLite.
+  type BackfillProgressEntry = {
+    spaceDid: string;
+    channelId: string;
+    guildId: string | null;
+    kind: "channel" | "thread" | null;
+    channelName: string | null;
+    phase: "phase1" | "phase2" | "complete";
+    messagesSynced: number;
+    messagesSkipped: number;
+    cursor: string | null;
+    running: boolean;
+    updatedAt: number;
+  };
+  let backfillChannels = $state<BackfillProgressEntry[]>([]);
+  let backfillError = $state(false);
+
+  async function updateBackfillProgress() {
+    try {
+      const resp = await fetch(
+        `${env.PUBLIC_DISCORD_BRIDGE}/backfill/progress?spaceDid=${spaceId}`,
+      );
+      if (!resp.ok) {
+        backfillError = true;
+        return;
+      }
+      const data: { channels: BackfillProgressEntry[] } = await resp.json();
+      backfillChannels = data.channels;
+      backfillError = false;
+    } catch {
+      backfillError = true;
+    }
+  }
+
   async function updateBridgeStatus() {
     if (!spaceId) return;
     try {
@@ -248,6 +284,34 @@
     };
   });
 
+  // Poll backfill progress at a tighter cadence while bridged. Re-runs when
+  // bridgeStatus flips to loaded (it's read here), so the timer only exists
+  // once the space is actually bridged.
+  $effect(() => {
+    let interval: ReturnType<typeof setInterval> | undefined;
+
+    const updateProgress = () => {
+      if (
+        document.visibilityState === "visible" &&
+        bridgeStatus.type === "loaded" &&
+        bridgeStatus.guildId
+      ) {
+        updateBackfillProgress();
+        clearInterval(interval);
+        interval = setInterval(updateProgress, 5000);
+      } else {
+        clearInterval(interval);
+      }
+    };
+    updateProgress();
+    document.addEventListener("visibilitychange", updateProgress);
+
+    return () => {
+      document.removeEventListener("visibilitychange", updateProgress);
+      clearInterval(interval);
+    };
+  });
+
   onMount(() => {
     // Surface the live bridge connection status badge in the navbar, next to
     // the "Discord Bridge" settings title.
@@ -268,6 +332,53 @@
   {:else if bridgeStatus.type === "error_checking"}
     <Badge variant="red">error connecting to bridge</Badge>
   {/if}
+{/snippet}
+
+{#snippet backfillStatusPanel()}
+  <section
+    class="rounded-lg border border-base-200 dark:border-base-800 px-4 py-3"
+  >
+    <h2 class="text-sm font-semibold text-base-900 dark:text-base-100">
+      Backfill status
+    </h2>
+    {#if backfillError}
+      <p class="mt-1 text-sm text-base-600 dark:text-base-400">
+        Couldn't load backfill progress right now.
+      </p>
+    {:else if backfillChannels.length === 0}
+      <p class="mt-1 text-sm text-base-600 dark:text-base-400">
+        No channels backfilled yet — history syncs shortly after bridging.
+      </p>
+    {:else}
+      <ul class="mt-2 space-y-2">
+        {#each backfillChannels as ch (ch.spaceDid + ch.channelId)}
+          <li class="flex items-center justify-between gap-4 text-sm">
+            <span
+              class="min-w-0 truncate text-base-900 dark:text-base-100">
+              {ch.channelName ?? ch.channelId}
+              {#if ch.kind === "thread"}
+                <span class="text-base-500 dark:text-base-400">(thread)</span>
+              {/if}
+            </span>
+            <span class="flex shrink-0 items-center gap-2">
+              <span class="text-base-500 dark:text-base-400">
+                {ch.messagesSynced} synced
+              </span>
+              {#if ch.running}
+                <Badge variant="blue">backfilling</Badge>
+              {:else if ch.phase === "complete"}
+                <Badge variant="green">complete</Badge>
+              {:else if ch.phase === "phase2"}
+                <Badge variant="blue">catching up</Badge>
+              {:else}
+                <Badge variant="yellow">starting</Badge>
+              {/if}
+            </span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </section>
 {/snippet}
 
 {#snippet proMembershipPanel()}
@@ -395,6 +506,8 @@
       </p>
 
       {@render proMembershipPanel()}
+
+      {@render backfillStatusPanel()}
     </div>
   </form>
 {:else}
