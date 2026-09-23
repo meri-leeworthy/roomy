@@ -33,5 +33,10 @@ export function createRoomMetadataQuery(
     enabled:
       !!roomId() &&
       (typeof opts?.enabled === "function" ? opts.enabled() : opts?.enabled !== false),
+    // A genuinely-missing room 404s deterministically; retrying it is
+    // pointless. The sibling space-entry query (space-metadata) carries the
+    // same guard. Transport-level retries (rate limits) live in
+    // DirectXrpcClient.
+    retry: false,
   }));
 }
