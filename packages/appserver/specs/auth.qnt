@@ -248,19 +248,30 @@ module auth {
   // No admin is ever in the bans set.
   // Note: banAccount refuses to ban an admin, but addAdmin does not check
   //       the bans set — so MBT may find a trace that violates this.
+  // Status: VIOLATED (confirmed, quint 0.32.0, --max-steps=30 --max-samples=200).
+  // Reachable in 2 steps: banAccount(caroline) then addAdmin(caroline).
+  // Left as-is deliberately: whether "admin overrides ban" should hold is a
+  // policy call, not an implementation bug. See specs/README.md.
   val adminsNotBanned =
     state.admins.intersect(state.bans).size() == 0
 
   // A banned user is never a member of the space.
+  // Status: holds.
   val bannedNotMembers =
     state.bans.intersect(state.members).size() == 0
 
   // Every role member is a member of the space.
+  // Status: VIOLATED (confirmed, same run). leaveSpace drops membership but
+  // keeps the user's role assignments, so a former member can still hold a
+  // role grant. The same hole exists in the appserver: nothing deletes
+  // `member_roles` on leave or ban. See specs/README.md ("Dangling role
+  // grants") — the model keeps the permissive behaviour on purpose.
   val roleMembersAreMembers =
     state.roles.keys().forall(rid =>
       state.roles.get(rid).members.subseteq(state.members))
 
   // If a thread has a parent, the parent must be a channel — no thread-of-thread.
+  // Status: holds.
   val threadParentIsChannel =
     state.rooms.keys().forall(rid =>
       match state.rooms.get(rid) {

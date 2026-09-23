@@ -10,7 +10,8 @@
     "test": "bun test --isolate",
     "perf": "bun run perf/measure.ts",
     "trace:smoke": "bun run perf/trace-smoke.ts",
-    "test:e2e": "bun test src/e2e/"
+    "test:e2e": "bun test src/e2e/",
+    "mbt:traces": "./scripts/generate-mbt-traces.sh"
   },
   "dependencies": {
     "@atcute/cbor": "^2.2.8",

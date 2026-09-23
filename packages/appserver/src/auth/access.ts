@@ -507,8 +507,9 @@ async function computeRoomAccess(
  * Results are written into the shared memo so later single-room `roomAccess`
  * calls hit the cache.
  *
- * Must stay in parity with `computeRoomAccess` — the MBT spec-oracle tests
- * drive both against the same model.
+ * Must stay in parity with `computeRoomAccess`. `src/auth/mbt/mbt.test.ts`
+ * drives both this and the single-room path against the same spec oracle, so a
+ * drift in the decision logic here fails CI.
  */
 export async function roomAccessMany(
   db: DbLike,

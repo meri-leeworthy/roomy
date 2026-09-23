@@ -110,6 +110,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build SDK (appserver imports its dist)
         run: pnpm turbo run build-lib
+      - name: Generate MBT traces (quint, pinned via npx)
+        run: pnpm --filter @roomy/appserver mbt:traces
       - name: Test Appserver
         run: bun test --cwd packages/appserver --isolate
 
