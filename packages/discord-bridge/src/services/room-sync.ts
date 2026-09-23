@@ -420,10 +420,14 @@ export async function readGuildStructure(
  * Existing categories are preserved (they may hold Roomy-native or federated
  * rooms the bridge did not create), and a Discord category is matched to an
  * existing one by name — the only stable handle across the two systems, since
- * Roomy category ids are assigned by whoever wrote the sidebar. Channels are
- * grouped by their Discord category, ordered by `position`, and appended to
- * their category's children; channels in no category go to the end of the
- * first category, matching where the client puts orphans in its edit view.
+ * Roomy category ids are assigned by whoever wrote the sidebar. Matching is
+ * case-insensitive: Roomy seeds `general` lower-case while Discord servers
+ * report the name as typed, and a verbatim comparison would forge a second
+ * header beside the seeded one. Channels are grouped by their Discord
+ * category, ordered by `position`, and appended to their category's children;
+ * channels in no category go to the end of the first category, matching where
+ * the client puts orphans in its edit view. A room already present in any
+ * category is never appended under a second one.
  *
  * Returns categories in render order. Pure, so the merge is testable without
  * a space.
@@ -437,7 +441,23 @@ export function mergeGuildStructure(
 		...cat,
 		children: [...cat.children],
 	}));
-	const byName = new Map(merged.map((cat) => [cat.name, cat]));
+	// Match by normalised (lower-cased) name. The name is the only stable
+	// handle the two systems share, but its case is not: Roomy seeds a
+	// lower-case `general` (`sdk/src/operations/space.ts`) while Discord
+	// guilds report whatever casing the admin typed, so a verbatim match
+	// creates a second, differently-cased header beside the seeded one.
+	// First-wins: if the sidebar already holds both casings (a pre-fix
+	// duplicate), the first — the seeded, canonical one — gets the rooms.
+	const byName = new Map<string, BridgeSidebarCategory>();
+	for (const cat of merged) {
+		const key = cat.name.toLowerCase();
+		if (!byName.has(key)) byName.set(key, cat);
+	}
+
+	// Global room guard: a room already present in ANY category — moved there
+	// by an admin, or by a previous merge — is never appended a second time
+	// under a different header. Per-category checks miss exactly that.
+	const placedRooms = new Set(merged.flatMap((cat) => cat.children));
 
 	// Group bridged channels under their Discord category, in position order.
 	// A channel with no mapping was not created (subset bridge, failed
@@ -471,20 +491,24 @@ export function mergeGuildStructure(
 		}
 		placed.add(category.id);
 
-		const target = byName.get(category.name);
+		// Drop rooms already placed under any header; the rest keep their
+		// Discord position order. An all-duplicate category creates no header
+		// with nothing new under it.
+		const fresh = children.filter((roomId) => !placedRooms.has(roomId));
+		if (fresh.length === 0) continue;
+
+		const target = byName.get(category.name.toLowerCase());
 		if (target) {
-			const present = new Set(target.children);
-			for (const roomId of children) {
-				if (!present.has(roomId)) target.children.push(roomId);
-			}
+			target.children.push(...fresh);
 		} else {
 			const created: BridgeSidebarCategory = {
 				name: category.name,
-				children,
+				children: fresh,
 			};
 			merged.push(created);
-			byName.set(category.name, created);
+			byName.set(category.name.toLowerCase(), created);
 		}
+		for (const roomId of fresh) placedRooms.add(roomId);
 	}
 
 	// A bridged channel whose category is absent from the guild payload (the
@@ -503,9 +527,11 @@ export function mergeGuildStructure(
 		const fallback: BridgeSidebarCategory = { name: "general", children: [] };
 		const first = merged[0] ?? fallback;
 		if (merged.length === 0) merged.push(first);
-		const present = new Set(first.children);
 		for (const roomId of uncategorized) {
-			if (!present.has(roomId)) first.children.push(roomId);
+			if (!placedRooms.has(roomId)) {
+				first.children.push(roomId);
+				placedRooms.add(roomId);
+			}
 		}
 	}
 

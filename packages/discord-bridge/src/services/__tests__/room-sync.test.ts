@@ -6,13 +6,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { newUlid, Ulid, type Event } from "@roomy-space/sdk";
-import { BridgeRepository } from "../../db/repository.ts";
+import { type Event, newUlid, Ulid } from "@roomy-space/sdk";
 import type { BridgeConfig } from "../../db/repository.ts";
+import { BridgeRepository } from "../../db/repository.ts";
 import { FileDiscordDataSource } from "../../discord/file-data-source.ts";
-import { MockRoomyGateway } from "../../roomy/mock-gateway.ts";
-import type { RoomyGateway } from "../../roomy/gateway.ts";
 import { resetCapacityGate, setCapacityGate } from "../../roomy/capacity.ts";
+import type { RoomyGateway } from "../../roomy/gateway.ts";
+import { MockRoomyGateway } from "../../roomy/mock-gateway.ts";
 import {
 	ensureRoomyChannel,
 	handleChannelCreate,
@@ -696,6 +696,120 @@ describe("mergeGuildStructure", () => {
 		);
 
 		expect(merged).toHaveLength(1);
+		expect(merged[0]?.children).toEqual(["01AAAAAAAAAAAAAAAAAAAAAAAA"]);
+	});
+
+	test("matches a differently-cased Discord category instead of duplicating it", () => {
+		// Production shape: the space is seeded with lower-case `general`
+		// (`sdk/src/operations/space.ts`) while the guild reports `General`.
+		// A verbatim match forged a second header with the same room under
+		// both. The room must appear exactly once, in the seeded category.
+		const existing = [
+			{
+				id: EXISTING_CATEGORY_ID,
+				name: "general",
+				children: [EXISTING_CHILD_ID],
+			},
+			{ name: "dev", children: [] },
+		];
+		const structure = {
+			categories: [
+				{ id: CATEGORY, name: "General", position: 0 },
+				{ id: CATEGORY_2, name: "dev", position: 1 },
+			],
+			channels: [
+				makeChannel({ id: CHANNEL, parentId: CATEGORY, position: 0 }),
+				makeChannel({ id: CHANNEL_2, parentId: CATEGORY_2, position: 1 }),
+			],
+		};
+		const rooms = new Map([
+			[CHANNEL, "01AAAAAAAAAAAAAAAAAAAAAAAA"],
+			[CHANNEL_2, "01BBBBBBBBBBBBBBBBBBBBBBBB"],
+		]);
+
+		const merged = mergeGuildStructure(existing, structure, rooms);
+
+		// No second `General` header: the guild's category merged into the
+		// seeded one, which received the room.
+		expect(merged.map((c) => c.name)).toEqual(["general", "dev"]);
+		expect(merged).toHaveLength(2);
+		expect(merged[0]?.children).toEqual([
+			EXISTING_CHILD_ID,
+			"01AAAAAAAAAAAAAAAAAAAAAAAA",
+		]);
+		expect(merged[1]?.children).toEqual(["01BBBBBBBBBBBBBBBBBBBBBBBB"]);
+		expect(
+			merged.filter((c) => c.children.includes("01AAAAAAAAAAAAAAAAAAAAAAAA")),
+		).toHaveLength(1);
+	});
+
+	test("does not re-place a room already under a category the guild does not share", () => {
+		// An admin moved a bridged room under a category of their own; the
+		// guild still reports the channel under a different, exact-name
+		// category. No case mismatch involved — the per-category guard alone
+		// misses this and appends the room a second time.
+		const existing = [
+			{
+				id: EXISTING_CATEGORY_ID,
+				name: "general",
+				children: [EXISTING_CHILD_ID],
+			},
+			{ name: "dev", children: [] },
+		];
+		const structure = {
+			categories: [
+				{ id: CATEGORY, name: "general", position: 0 },
+				{ id: CATEGORY_2, name: "dev", position: 1 },
+			],
+			channels: [
+				makeChannel({ id: CHANNEL, parentId: CATEGORY, position: 0 }),
+				makeChannel({ id: CHANNEL_2, parentId: CATEGORY_2, position: 1 }),
+				makeChannel({ id: CHANNEL_3, parentId: CATEGORY_2, position: 2 }),
+			],
+		};
+		const rooms = new Map([
+			[CHANNEL, "01AAAAAAAAAAAAAAAAAAAAAAAA"],
+			[CHANNEL_2, "01BBBBBBBBBBBBBBBBBBBBBBBB"],
+			[CHANNEL_3, EXISTING_CHILD_ID],
+		]);
+
+		const merged = mergeGuildStructure(existing, structure, rooms);
+
+		// The pre-placed room stays under `general` only; the guild's `dev`
+		// did not receive a copy.
+		expect(merged[0]?.children).toEqual([
+			EXISTING_CHILD_ID,
+			"01AAAAAAAAAAAAAAAAAAAAAAAA",
+		]);
+		expect(merged[1]?.children).toEqual(["01BBBBBBBBBBBBBBBBBBBBBBBB"]);
+		expect(
+			merged.filter((c) => c.children.includes(EXISTING_CHILD_ID)),
+		).toHaveLength(1);
+	});
+
+	test("exact-case same-name merge stays a no-op for an already-placed room", () => {
+		// The room is already the only child of the matching category — the
+		// merge must neither duplicate the room nor add a second category.
+		const existing = [
+			{
+				id: EXISTING_CATEGORY_ID,
+				name: "general",
+				children: ["01AAAAAAAAAAAAAAAAAAAAAAAA"],
+			},
+		];
+		const structure = {
+			categories: [{ id: CATEGORY, name: "general", position: 0 }],
+			channels: [makeChannel({ id: CHANNEL, parentId: CATEGORY, position: 0 })],
+		};
+
+		const merged = mergeGuildStructure(
+			existing,
+			structure,
+			new Map([[CHANNEL, "01AAAAAAAAAAAAAAAAAAAAAAAA"]]),
+		);
+
+		expect(merged).toHaveLength(1);
+		expect(merged[0]?.name).toBe("general");
 		expect(merged[0]?.children).toEqual(["01AAAAAAAAAAAAAAAAAAAAAAAA"]);
 	});
 });
