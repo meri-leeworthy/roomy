@@ -846,3 +846,95 @@ identified defect** (below).
 Mismatches 1 and 2 are why the projection is designed as a **warm-on-read
 cache** rather than a rebuilt-per-remat table: any projection populated only
 during rematerialisation would inherit both defects.
+
+
+## Results — R5: what is left after R3 (TASK-194)
+
+Meri reported that `space.getThreads` was *still* slow on large spaces after R3
+landed. Measured on Little Fox's 2.8 GB dataset (`packages/appserver/data`,
+4276 space DBs, 448,565 entities), against the space with the most traffic —
+`did:plc:gnwy2zbm3hu4gfdawzxmpb2s`, 434 rooms (18 channels / 416 threads),
+123,225 messages, `limit=50` so a board page is 50 rooms. Instrument:
+`perf/probe-getthreads.ts` (this round's addition), which classifies every
+`WorkerLink.send` round-trip by the statement that issued it and reports rows
+and bytes returned as well as time.
+
+### The projection never existed in production
+
+Per-stage measurement of one page, on the dataset as installed:
+
+| stage | rtt | rows | kB | min ms |
+|---|---:|---:|---:|---:|
+| `b.scan.latest_message` (every message body, to keep 50) | 1 | 1724 | 636.1 | 8.82 |
+| `b.scan.latest_ts` | 2 | 206 | 24.9 | 7.11 |
+| `a.page_query` | 1 | 51 | 4.9 | 1.44 |
+| `b.projection_read` | 1 | 0 | 0.0 | — |
+| `b.projection_warm` | 1 | 0 | 0.0 | — |
+| **TOTAL** | 24 | 2337 | 674.5 | |
+
+**Projection hit rate: 0 of 10 requests.** Every read logged `[room_activity]
+projection unavailable; falling back to the live activity scan: no such table`.
+The reason is in the installed data: those space DBs are stamped
+`space_schema_version = 1` and the current version is `2` (`db.ts:31`), so
+neither `room_activity` (R3) nor `room_access` (R1) exists in them at all —
+`room_access` is missing from the same DBs, which is why the 36-round-trip N+1
+R1 removed is still being paid too.
+
+That is a data-deployment fact, not a code defect: on a current-schema space the
+projection works exactly as designed. Applying the current schema to a copy of
+the same DB and letting the read path warm takes the full board walk (9 pages,
+419 rooms) **1793 ms → 87 ms**, with the per-page floor at 9.6 ms. Reproducing
+the post-blue-green state (tables present, rows invalidated, which is what
+`reMaterialize` leaves behind) puts the walk back at ~3000 ms: the warm is
+per-page, and the first page after a rebuild pays `scan + insert` for its 50
+rooms.
+
+So there are two costs, and R3's projection addresses only the first:
+
+1. **Cold projection** — the fallback scan, on every page of every board load,
+   until every room in the space has been read once. This is the dominant cost
+   in production today, and it is O(messages in scope) per page.
+2. **A rebuild resets it to cold** — the warm is a cache with no backfill, by
+   design (a projection populated during rematerialisation would inherit the two
+   defects in §"Mismatches found against the code" above), so every deploy that
+   bumps `SPACE_SCHEMA_VERSION` returns every space to (1).
+
+### R5 — the scan stops shipping message bodies it throws away
+
+Fixing (2) means a backfill, which the invariants above rule out; the honest
+change is to make (1) cheap. It was dominated not by the SQL but by the payload
+crossing the worker boundary: the latest-message statement returned **every
+message in scope with its decoded body** so the JS fold could pick one per room
+— 1724 rows and **196 kB of bodies to keep 50**, each row structured-cloned
+across the thread.
+
+R5 splits that statement in two — pick the winner by `(timestamp, id)` from the
+ordering columns alone, then fetch content for the 50 kept ids — and gives
+`scanRoomActivity` an in-process implementation (`db.backend === "sqlite"`) that
+runs the same reduction as ONE statement with the body columns restricted to the
+window's `rn = 1` row. Both branches produce byte-identical answers; the parity
+tests assert that, and the `sqlite` backend is the only one where the extra SQL
+is free (there is no boundary to cross).
+
+Same request, same fixture (projection-less DB), 12 measured requests:
+
+| | rtt | rows/req | kB/req | min ms/req | board walk (9 pages) |
+|---|---:|---:|---:|---:|---:|
+| before | 24 | 2337 | 674.5 | ~27 | 1793 ms |
+| after | 24 | 2337 | **193.7** | ~19 | 1293 ms |
+| Δ | 0 | 0 | **−480.8 kB (−71%)** | | −28% |
+
+`kB/req` is the stall-free number: it counts the bytes a worker response has to
+carry back, so it does not move with machine load the way a timer does. On this
+2-vCPU VM the wall-clock figures swing ±100 ms per page from unrelated stalls (a
+bare `select 1` round-trip shows the same 70 ms tail; a `Bun.serve` returning
+`ok` does too), so the row/byte columns are the honest comparison and the timings
+are indicative.
+
+Honest summary of what R5 buys: **~71% less data over the boundary and ~28% off
+a full board walk on a cold space**, for one query split and one in-process
+branch. It is not a fix for (2) — a backfill remains the only thing that would
+remove the cold cost entirely, and it is still ruled out by the rematerialisation
+invariant. The larger remaining lever is the deployment question at the top of
+this section: production's per-space DBs are on schema version 1, so every board
+read pays for a projection that was built to remove exactly this work.

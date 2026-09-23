@@ -23,7 +23,12 @@ import type { DbLike } from "../db/types.ts";
 import { decodeContent, decodeRichTextBody } from "../db/content.ts";
 import { RICHTEXT_MIME, blocksToPlaintext } from "@roomy-space/sdk";
 import { hydrateProfiles } from "./profileStore.ts";
-import { readRoomActivityProjection, rebuildRoomActivity, warnProjectionUnavailable } from "./roomActivityProjection.ts";
+import {
+  readRoomActivityProjection,
+  rebuildRoomActivity,
+  warnProjectionUnavailable,
+  type RoomActivityAuthor,
+} from "./roomActivityProjection.ts";
 
 export interface ThreadMember {
   did: string;
@@ -272,6 +277,14 @@ async function scanRoomActivity(
   const out = new Map<string, ThreadActivity>();
   if (roomIds.length === 0) return out;
 
+  // An in-process handle has no thread boundary to cross, so the whole
+  // reduction runs in ONE statement and the JS fold disappears. The IPC path
+  // below returns the same answer, statement for statement and row for row —
+  // `queries/threadActivity.test.ts` asserts the two agree — because the
+  // alternative (this reducer over `AsyncDatabase`) is the expensive one, not
+  // the correct one.
+  if (db.backend === "sqlite") return scanRoomActivityInProcess(db, roomIds);
+
   const ph = roomIds.map(() => "?").join(",");
 
   // Latest timestamps for all rooms at once.
@@ -358,73 +371,50 @@ async function scanRoomActivity(
   const roomNames = new Map<string, string>();
   for (const r of roomRows) if (r.name != null) roomNames.set(r.room_id, r.name);
   // Latest message per room. SQLite doesn't support LIMIT per group, so we
-  // fetch all messages and pick the latest per room in JS.
-  const latestMsgRows = await db
+  // read every message-shaped row in scope and pick the newest per room in JS
+  // — but only the ORDERING columns of it.
+  //
+  // The message BODY is deliberately not selected here. This statement returns
+  // one row per message in the requested rooms to keep one per room (measured on
+  // the 124k-message probe space: 1724 rows to keep 50), and every one of those
+  // rows is structured-cloned across the worker boundary on its way back. The
+  // body is the largest column in it — 196 kB across those 1724 rows — and all
+  // but 50 rows' worth is discarded unread by the fold below. Picking the winner
+  // first and fetching its body afterwards moves that payload off the boundary
+  // without changing the answer: the `id`s are identical, so the rows read back
+  // are the rows the fold chose.
+  const winnerRows = await db
     .query(
       `select e.room as room,
               e.id as id,
-              coalesce(cc.mime_type, fwd_cc.mime_type) as mime_type,
-              coalesce(cc.data, fwd_cc.data) as data,
-              coalesce(author_e.tail, fwd_author_e.tail) as author_did,
-              author_info.name as author_name,
-              author_info.avatar as author_avatar,
               coalesce(cc.timestamp, fwd_cc.timestamp) as timestamp
          from entities e
          left join comp_content cc on cc.entity = e.id
-         left join edges author_e
-           on author_e.head = e.id and author_e.label = 'author'
          left join edges forward_e
            on forward_e.head = e.id and forward_e.label = 'forward'
          left join comp_content fwd_cc on fwd_cc.entity = forward_e.tail
-         left join edges fwd_author_e
-           on fwd_author_e.head = forward_e.tail and fwd_author_e.label = 'author'
-         left join comp_info author_info
-           on author_info.entity = coalesce(author_e.tail, fwd_author_e.tail)
         where e.room in (${ph})
           and (cc.entity is not null or forward_e.tail is not null)
           and coalesce(cc.timestamp, fwd_cc.timestamp) is not null`,
     )
-    .all<
-      {
-        room: string;
-        id: string;
-        mime_type: string | null;
-        data: Buffer | Uint8Array | null;
-        author_did: string | null;
-        author_name: string | null;
-        author_avatar: string | null;
-        timestamp: number | null;
-      }
-    >([...roomIds]);
+    .all<{ room: string; id: string; timestamp: number | null }>([...roomIds]);
 
-  const latestMsgMap = new Map<
-    string,
-    {
-      id: string;
-      mime_type: string | null;
-      data: Buffer | Uint8Array | null;
-      author_did: string | null;
-      author_name: string | null;
-      author_avatar: string | null;
-      timestamp: number | null;
-    }
-  >();
-  for (const r of latestMsgRows) {
-    const existing = latestMsgMap.get(r.room);
+  const winnerIds = new Map<string, { id: string; timestamp: number }>();
+  for (const r of winnerRows) {
+    const existing = winnerIds.get(r.room);
     // Newest timestamp wins; a tie breaks by message id. The tie-break is
     // shared with the `room_activity` projection, which cannot otherwise agree
     // with this fold: two messages can share a millisecond (a pair created
     // together, or bridged messages carrying sender-supplied times), and
     // without a stated rule each path would pick whichever row it happened to
     // see first.
-    if (
-      !existing ||
-      (r.timestamp ?? 0) > (existing.timestamp ?? 0) ||
-      ((r.timestamp ?? 0) === (existing.timestamp ?? 0) && r.id > existing.id)
-    ) {
-      latestMsgMap.set(r.room, r);
+    const ts = r.timestamp ?? 0;
+    if (!existing || ts > existing.timestamp || (ts === existing.timestamp && r.id > existing.id)) {
+      winnerIds.set(r.room, { id: r.id, timestamp: ts });
     }
   }
+
+  const latestMsgMap = await fetchLatestMessageContent(db, winnerIds);
 
   for (const roomId of roomIds) {
     const latest = latestMap.get(roomId);
@@ -459,6 +449,288 @@ async function scanRoomActivity(
     });
   }
 
+  return out;
+}
+
+/** The latest message a room previews, as the scan's fold produces it. */
+interface LatestMessageRow {
+  id: string;
+  mime_type: string | null;
+  data: Buffer | Uint8Array | null;
+  author_did: string | null;
+  author_name: string | null;
+  author_avatar: string | null;
+  timestamp: number;
+}
+
+/**
+ * Read the board columns — decoded body, author, canonical time — for the
+ * message ids the fold above picked, one per room.
+ *
+ * Two statements rather than one: the second only has to find the 50 rows the
+ * page keeps instead of every row it considered, which is the whole point of
+ * splitting the fold (see the caller). The author's name/avatar come from the
+ * per-space `comp_info`; a cross-stream author has no row here and is hydrated
+ * from the global store by `fetchRoomActivity` afterwards, as on every path.
+ */
+async function fetchLatestMessageContent(
+  db: DbLike,
+  winnerIds: Map<string, { id: string; timestamp: number }>,
+): Promise<Map<string, LatestMessageRow>> {
+  const out = new Map<string, LatestMessageRow>();
+  if (winnerIds.size === 0) return out;
+
+  const idToRoom = new Map<string, string>();
+  for (const [room, w] of winnerIds) idToRoom.set(w.id, room);
+
+  const rows = await db
+    .query(
+      `select e.id as id,
+              coalesce(cc.mime_type, fwd_cc.mime_type) as mime_type,
+              coalesce(cc.data, fwd_cc.data) as data,
+              coalesce(author_e.tail, fwd_author_e.tail) as author_did,
+              author_info.name as author_name,
+              author_info.avatar as author_avatar
+         from entities e
+         left join comp_content cc on cc.entity = e.id
+         left join edges author_e
+           on author_e.head = e.id and author_e.label = 'author'
+         left join edges forward_e
+           on forward_e.head = e.id and forward_e.label = 'forward'
+         left join comp_content fwd_cc on fwd_cc.entity = forward_e.tail
+         left join edges fwd_author_e
+           on fwd_author_e.head = forward_e.tail and fwd_author_e.label = 'author'
+         left join comp_info author_info
+           on author_info.entity = coalesce(author_e.tail, fwd_author_e.tail)
+        where e.id in (select value from json_each(?1))`,
+    )
+    .all<{
+      id: string;
+      mime_type: string | null;
+      data: Buffer | Uint8Array | null;
+      author_did: string | null;
+      author_name: string | null;
+      author_avatar: string | null;
+    }>(JSON.stringify([...idToRoom.keys()]));
+
+  for (const r of rows) {
+    const room = idToRoom.get(r.id);
+    if (room === undefined) continue;
+    out.set(room, {
+      id: r.id,
+      mime_type: r.mime_type,
+      data: r.data,
+      author_did: r.author_did,
+      author_name: r.author_name,
+      author_avatar: r.author_avatar,
+      timestamp: winnerIds.get(room)!.timestamp,
+    });
+  }
+  return out;
+}
+
+/**
+ * `scanRoomActivity` for an in-process handle: the same reduction, one
+ * statement, no JS fold.
+ *
+ * The statements the IPC path issues each repeat the same
+ * `entities → comp_content → forward → author` join over the same room set,
+ * and the latest-message one additionally returns every message's
+ * `comp_content.data`. On the worker path that duplication is what the
+ * projection removes (measured at 8000 messages: 8001 rows to keep 2). Here
+ * the join runs once, is reduced by SQLite, and the body bytes reach JS only
+ * for the row that is actually previewed — the 50-52 rows a board page keeps,
+ * not the ~1700 it considered.
+ *
+ * The answer is identical to the IPC path's, clause for clause:
+ *
+ *  - the room shape comes from `comp_room`/`comp_info`, with `comp_room` the
+ *    driving table so a requested id with no room row is absent from both;
+ *  - a row is message-shaped when it has its own content OR a `forward` edge,
+ *    and the canonical time coalesces the forwarded original's;
+ *  - the latest message is the window's `rn = 1` and a room with no timestamped
+ *    message yields NULL, which reads as "no activity" below;
+ *  - authors are grouped per `(room, author)` with `max(ts)`, ordered
+ *    `ts desc, did asc` and capped at 3, with a null-`ts` author (a system
+ *    message — the "x joined the space" row) ordered last;
+ *  - ties in the latest message break by message id, and a tie between two
+ *    authors' newest messages breaks by DID — both stated rules in
+ *    `roomActivityProjection.ts`, shared here so the projection, this scan and
+ *    the IPC scan cannot disagree about a millisecond.
+ */
+async function scanRoomActivityInProcess(
+  db: DbLike,
+  roomIds: string[],
+): Promise<Map<string, ThreadActivity>> {
+  const rows = await db
+    .query(
+      `with rooms as (select distinct cr.entity as id, p.head as parent, cr.label as label, ci.name as name
+                        from comp_room cr
+                        left join comp_info ci on ci.entity = cr.entity
+                        left join edges p
+                               on p.tail = cr.entity and p.label = 'link'
+                              and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+                       where cr.entity in (select value from json_each(?1))),
+            entries as (
+              select e.id as id, e.room as room,
+                     coalesce(a.tail, fa.tail) as did,
+                     coalesce(cc.timestamp, fcc.timestamp) as ts,
+                     coalesce(cc.mime_type, fcc.mime_type) as mime_type,
+                     coalesce(cc.data, fcc.data) as data
+                from entities e
+                left join comp_content cc on cc.entity = e.id
+                left join edges a  on a.head  = e.id and a.label  = 'author'
+                left join edges f  on f.head  = e.id and f.label  = 'forward'
+                left join comp_content fcc on fcc.entity = f.tail
+                left join edges fa on fa.head = f.tail and fa.label = 'author'
+               where e.room in (select id from rooms)
+                 and (cc.entity is not null or f.tail is not null)),
+            latest as (
+              select room, id, ts, mime_type, data from (
+                select room, id, ts, mime_type, data,
+                       row_number() over (partition by room order by ts desc, id desc) as rn
+                  from entries
+                 where ts is not null
+              ) where rn = 1),
+            recent as (
+              select room, did, ts, row_number() over (
+                       partition by room order by ts desc, did asc) as rn
+                from (select room, did, max(ts) as ts
+                        from entries
+                       where did is not null
+                       group by room, did))
+       select r.id as room_id,
+              r.parent as parent_id,
+              r.label as label,
+              r.name as name,
+              l.id as latest_message_id,
+              l.ts as latest_ts,
+              l.mime_type as latest_mime_type,
+              l.data as latest_data,
+              coalesce(la.tail, lfa.tail) as latest_author_did,
+              (select json_group_array(json_object('did', did, 'ts', ts) order by ts desc, did asc)
+                 from (select did, ts from recent
+                        where room = r.id and rn <= 3)) as latest_members
+         from rooms r
+         left join latest l on l.room = r.id
+         left join edges la on la.head = l.id and la.label = 'author'
+         left join edges lf on lf.head = l.id and lf.label = 'forward'
+         left join edges lfa on lfa.head = lf.tail and lfa.label = 'author'`,
+    )
+    .all<{
+      room_id: string;
+      parent_id: string | null;
+      label: string | null;
+      name: string | null;
+      latest_message_id: string | null;
+      latest_ts: number | null;
+      latest_mime_type: string | null;
+      latest_data: Buffer | Uint8Array | null;
+      latest_author_did: string | null;
+      latest_members: string | null;
+    }>(JSON.stringify(roomIds));
+
+  // Hydrate the authors the board can render — the capped member list plus the
+  // latest message's author — in one batched read, exactly as the IPC path's
+  // `fetchRoomActivity` does for the page. `hydrateProfiles` in the caller then
+  // layers the global store over these names, as it does there.
+  const memberDids = new Set<string>();
+  for (const r of rows) {
+    for (const a of parseAuthors(r.latest_members)) memberDids.add(a.did);
+    if (r.latest_author_did != null) memberDids.add(r.latest_author_did);
+  }
+  const profiles = new Map<string, { name: string | null; avatar: string | null }>();
+  if (memberDids.size > 0) {
+    const dids = [...memberDids];
+    const infoRows = await db
+      .query(
+        `select ci.entity as did, ci.name as name, ci.avatar as avatar
+           from comp_info ci
+          where ci.entity in (select value from json_each(?1))`,
+      )
+      .all<{ did: string; name: string | null; avatar: string | null }>(JSON.stringify(dids));
+    for (const r of infoRows) profiles.set(r.did, { name: r.name, avatar: r.avatar });
+  }
+
+  const out = new Map<string, ThreadActivity>();
+  for (const r of rows) {
+    const latestMembers: ThreadMember[] = parseAuthors(r.latest_members).map((a) => {
+      const p = profiles.get(a.did);
+      return { did: a.did, name: p?.name ?? null, avatar: p?.avatar ?? null };
+    });
+
+    // A latest message the board can render needs an id AND an author — the
+    // same condition the IPC path applies. The timestamp is the message's own
+    // (`latest_ts`, the room's MAX), not the author's, so a room whose newest
+    // message was superseded by nothing still previews at the time it was sent.
+    let latestMessage: ThreadMessage | null = null;
+    if (r.latest_message_id != null && r.latest_author_did != null) {
+      const p = profiles.get(r.latest_author_did);
+      latestMessage = {
+        id: r.latest_message_id,
+        content: decodeBoardPreview(r.latest_mime_type, r.latest_data),
+        author: {
+          did: r.latest_author_did,
+          name: p?.name ?? null,
+          avatar: p?.avatar ?? null,
+        },
+        timestamp: r.latest_ts != null ? new Date(r.latest_ts).toISOString() : null,
+      };
+    }
+
+    out.set(r.room_id, {
+      id: r.room_id,
+      kind: r.label === "space.roomy.channel" ? "channel" : "thread",
+      name: r.name,
+      canonicalParent: r.parent_id,
+      latestTimestamp: r.latest_ts != null ? new Date(r.latest_ts).toISOString() : null,
+      latestMembers,
+      latestMessage,
+    });
+  }
+
+  // A requested id with no `comp_room` row is not a room. The IPC scan emits a
+  // blank entry for it (its JS loop over `roomIds` is unconditional), so this
+  // one does too: the two implementations are interchangeable, and a caller
+  // that passes an id it did not read out of `comp_room` gets the same answer
+  // either way. Nothing in the appserver passes one — `listThreadActivity`
+  // selects the page from `comp_room` — so this only pins the two paths
+  // together.
+  for (const roomId of roomIds) {
+    if (out.has(roomId)) continue;
+    out.set(roomId, {
+      id: roomId,
+      kind: "thread",
+      name: null,
+      canonicalParent: null,
+      latestTimestamp: null,
+      latestMembers: [],
+      latestMessage: null,
+    });
+  }
+
+  return out;
+}
+
+/** Parse the JSON array of `{did, ts}` the reduced scan emits. */
+function parseAuthors(raw: string | null): RoomActivityAuthor[] {
+  if (raw == null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: RoomActivityAuthor[] = [];
+  for (const entry of parsed) {
+    if (entry === null || typeof entry !== "object") continue;
+    const did = (entry as Record<string, unknown>).did;
+    const ts = (entry as Record<string, unknown>).ts;
+    if (typeof did !== "string") continue;
+    if (ts !== null && typeof ts !== "number") continue;
+    out.push({ did, ts });
+  }
   return out;
 }
 
