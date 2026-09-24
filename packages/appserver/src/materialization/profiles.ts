@@ -34,6 +34,7 @@ import {
   type RoomyProfileExtras,
 } from "./roomyProfile.ts";
 import type { HappyViewConfig } from "../happyview.ts";
+import { fetchWithTimeout } from "../fetchTimeout.ts";
 import { log } from "../log.ts";
 
 
@@ -167,7 +168,7 @@ export const defaultGetProfiles: GetProfilesFn = async (dids: UserDid[]) => {
       try {
         const params = new URLSearchParams();
         for (const d of chunk) params.append("actors", d);
-        const resp = await fetch(
+        const resp = await fetchWithTimeout(
           `https://api.bsky.app/xrpc/app.bsky.actor.getProfiles?${params.toString()}`,
         );
         if (!resp.ok) {

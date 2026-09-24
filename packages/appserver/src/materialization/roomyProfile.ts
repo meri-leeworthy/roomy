@@ -18,6 +18,7 @@ import type { ProfileViewDetailed } from "@atproto/api/dist/client/types/app/bsk
 import { resolvePdsEndpoint } from "../identity.ts";
 import type { UserDid } from "@roomy-space/sdk";
 import type { HappyViewConfig } from "../happyview.ts";
+import { fetchWithTimeout, profileFetchTimeoutMs } from "../fetchTimeout.ts";
 import { log } from "../log.ts";
 
 /** Shape of a `space.roomy.user.profile` record on the PDS. */
@@ -88,14 +89,21 @@ export async function getRoomyProfileRecord(
   did: string,
 ): Promise<RoomyProfileRecord | null> {
   if (testGetRoomyProfileRecord) return testGetRoomyProfileRecord(did);
+  // DID-document resolution carries its own 3s deadline inside
+  // @atproto/identity (`DidResolver`'s `timeout` default); this record call
+  // does not, so it gets one. The xrpc client passes `opts.signal` straight
+  // into `fetch`, so the deadline covers the response and the body read.
   const pdsEndpoint = await resolvePdsEndpoint(did);
   const agent = new AtpAgent({ service: pdsEndpoint });
   try {
-    const resp = await agent.com.atproto.repo.getRecord({
-      repo: did,
-      collection: PROFILE_COLLECTION,
-      rkey: PROFILE_RKEY,
-    });
+    const resp = await agent.com.atproto.repo.getRecord(
+      {
+        repo: did,
+        collection: PROFILE_COLLECTION,
+        rkey: PROFILE_RKEY,
+      },
+      { signal: AbortSignal.timeout(profileFetchTimeoutMs()) },
+    );
     return parseRoomyProfileRecord(resp.data.value);
   } catch (err) {
     if (isRecordNotFound(err)) return null;
@@ -133,7 +141,7 @@ export async function getProfilesFromHappyView(
       if (config.clientSecret) {
         headers["X-Client-Secret"] = config.clientSecret;
       }
-      const resp = await fetch(
+      const resp = await fetchWithTimeout(
         `${config.endpoint}/xrpc/space.roomy.user.getProfiles?${params.toString()}`,
         { headers },
       );
@@ -182,7 +190,7 @@ export async function getProfileFromHappyView(
     if (config.clientSecret) {
       headers["X-Client-Secret"] = config.clientSecret;
     }
-    const resp = await fetch(
+    const resp = await fetchWithTimeout(
       `${config.endpoint}/xrpc/space.roomy.user.getProfiles?actors=${encodeURIComponent(did)}`,
       { headers },
     );

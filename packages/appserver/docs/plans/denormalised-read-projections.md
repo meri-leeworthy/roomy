@@ -2,8 +2,8 @@
 
 **Date:** 2026-09-21
 **Status:** R1 merged (`room_access` projection); R2 merged (`#roomActivityDiff`);
-R3 merged (`room_activity` projection)
-**Task:** TASK-173 (R1), TASK-174 (R2), TASK-175 (R3)
+R3 merged (`room_activity` projection); R6 merged (profile fetch off the read path)
+**Task:** TASK-173 (R1), TASK-174 (R2), TASK-175 (R3), TASK-199 (R6)
 
 ## Summary
 
@@ -938,3 +938,114 @@ remove the cold cost entirely, and it is still ruled out by the rematerialisatio
 invariant. The larger remaining lever is the deployment question at the top of
 this section: production's per-space DBs are on schema version 1, so every board
 read pays for a projection that was built to remove exactly this work.
+
+## R6 — the profile fetch leaves the read path (TASK-199)
+
+The R1–R5 rounds all cut *DB* work. This one is about the other thing inside
+the same requests: the read path's on-demand profile hydration, which is a
+third-party HTTP round-trip to HappyView/Bluesky.
+
+### How it was found
+
+Prod Tempo, a sample of `space.roomy.room.getMessages` traces, split by phase:
+
+```
+  215ms  getMessages           206ms  selectMessages   8ms requireRead  0ms openDb
+  693ms  getMessages           682ms  requireRead     10ms selectMessages
+  813ms  getMessages           762ms  requireRead     48ms selectMessages
+  263ms  getMessages           259ms  selectMessages  3ms openDb
+```
+
+`openDb` (entity→space resolution) is 0–2 ms throughout, so the DB round-trips
+are not the tail. The probe agrees: the same endpoint is p50 4.6 ms against a
+local appserver with the profile network stubbed. The 50× difference between
+those two numbers is the profile fetch, and it sits in a span with no children —
+i.e. inside `selectMessages`, in `resolveFromGlobalDb` → `hydrateMissingProfiles`.
+
+Measured directly with a local HappyView-compatible upstream delayed N ms
+(`perf/`-style throwaway harness, both refs, same fixture):
+
+| | upstream 0 ms | upstream +300 ms | delta |
+|---|---:|---:|---:|
+| **before** — read path awaits the fetch | 19 ms | **315 ms** | **+296 ms** |
+| **after** — fetch is detached | 3 ms | 5 ms | **+2 ms** |
+
+1:1 before, flat after. The write path (`sendEvents` → `ensureProfilesRoomyFirst`
+before `applyBatch`) was measured the same way and is **still 1:1** (+292 ms for
++300 ms) — see §Not changed below for why that one stays.
+
+Three cases, because the code path differs:
+
+| store state | before | after |
+|---|---|---|
+| no `profiles` row (cold) | awaits — 308 ms @ 300 ms upstream | detached |
+| row older than the 30-min TTL | awaits — 307 ms @ 300 ms upstream | detached |
+| row within the TTL | 3 ms, no fetch | 3 ms, no fetch |
+
+The middle row is why this was worth doing: `PROFILE_REFRESH_TTL_MS` (TASK-187)
+re-fetches every stale row, so a long-lived member paid the network leg on their
+next message-list read every 30 minutes, not once.
+
+### What changed
+
+- `resolveFromGlobalDb` reads the global store and **starts the fetch detached**
+  (`startHydration`) instead of awaiting it. The caller returns the pre-fetch
+  values; the fetch's write-back is visible to the next read.
+- The in-memory cache entries for DIDs whose fetch is still running are
+  **dropped when it settles**, so the next read re-reads the row rather than
+  serving the pre-fetch positive for the remaining 60 s of its TTL.
+- **In-flight dedup by DID** (`hydrationInflight`), mirroring `inFlightLinks`
+  in `embed/enricher.ts`. Without it the deferral multiplies the fetches:
+  measured on the real pipeline, 25 concurrent readers of one cold author
+  produced **25** upstream requests. Batching was never the problem — one page
+  with 13 distinct cold authors makes **1** request at batch size 16.
+- **Every outbound profile call is bounded** (`fetchTimeout.ts`, default 3 s,
+  `PROFILE_FETCH_TIMEOUT_MS`). They previously had *no* timeout: `fetch`
+  imposes none, so a HappyView/PDS/appview that accepted the connection and
+  then said nothing held the request open forever. `AbortSignal.timeout` also
+  covers a stalled body read, which a manual `setTimeout(() => abort())` around
+  the response alone would not. The four call sites — HappyView batch, HappyView
+  single-DID, Bluesky appview, PDS `getRecord` — are each driven against a
+  black-hole server in `profileFetchBounds.test.ts`.
+
+### What this costs, stated plainly
+
+On a **cold store** (no row) the first read now renders the author as the DID
+until something else refetches that page. This is the one real regression and it
+is worth being precise about:
+
+- It is the state the pre-change code already reached whenever the fetch
+  **failed**, errored, or was backed off by the negative cache — `hydrateMissingProfiles`
+  swallows failures and returns the same incomplete result. The deferral reaches
+  it sooner; it does not invent it.
+- The page is not permanently wrong. Any later refetch picks the row up — a
+  `sub` to the room (which emits `#invalidate` for `room.getMessages`), a
+  resync, or the write-path materialisation that fills the row for every
+  `createMessage` author on a live space in the first place.
+- It cannot happen in steady state: the fresh-row case above is 0 fetches and
+  unchanged, and the write path materialises the author before the message is
+  ever readable.
+
+Not changed, and why: the **write path** (`StreamManager` awaiting
+`ensureProfilesRoomyFirst` before `applyBatch`) is still 1:1 with the upstream.
+Deferring it would leave a push notification naming a sender by DID — the badge
+is dispatched from the same batch (§Assessment, guarantee 3) — and on a
+migration or backfill replay the fetch is awaited per chunk with no request
+waiting anyway. Reported rather than done.
+
+### Results
+
+`bun test --isolate --cwd packages/appserver`: **1136 pass, 1 skip, 0 fail**
+(baseline on `next`: 1132 pass, 1 skip, 0 fail). `tsc --noEmit`: 0 errors.
+
+New coverage, all mutation-checked (reverting each change fails the test):
+
+- `queries/selectMessages.test.ts` (3 rewritten/added) — the read returns while
+  the fetch is still gated open; a row the fetch wrote is visible on the next
+  read; 8 concurrent readers of one cold author issue **one** fetch.
+- `fetchTimeout.test.ts` (4) — a black-hole server is aborted, a stalled body
+  read is aborted, a caller's own signal still works, a responsive server is
+  unaffected.
+- `materialization/profileFetchBounds.test.ts` (4) — the same against each
+  real call site, so a future profile fetch that bypasses `fetchWithTimeout` is
+  caught.
