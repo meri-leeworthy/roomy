@@ -132,6 +132,54 @@ Events carry two extensions:
 - `discordMessageOrigin.v0` — debug breadcrumb (snowflake, channelId, guildId). Never read for sync decisions.
 - `authorOverride.v0` — content-level puppetting so Roomy renders the Discord author's identity.
 
+## Structure-sync recovery tool (`src/scripts/recover-sidebar.ts`)
+
+The one-shot structure sync merges **into** the space's existing sidebar —
+by design, for spaces bridged at creation the merge target is the space's
+seed sidebar, so the sync's write is the *first* non-seed layout. For spaces
+that were bridged **before** the structure-sync feature shipped (TASK-140
+fallout), that merge produced duplicated/reorganized sidebars from the
+pre-existing admin layout, which was preserved "behind" the sync write but
+is still recoverable from the appserver's event log.
+
+The recovery tool classifies every `structure_sync` row by replaying the
+space's sidebar-write history from the appserver's `stream_events` log:
+
+- **`untouched`** — the bridge-authored `updateSidebar.v1` write is the
+  latest sidebar change in the log. The bridge DID (`stream_events.user`) and
+  `applied_at` identify the sync write unambiguously; the last sidebar write
+  *before* it is the pre-sync state. `--apply` restores exactly that state.
+- **`edited`** — a non-bridge author wrote a sidebar update after the sync.
+  The space's admins own the layout now; leave it.
+- **`multi-sync`** — the space received more than one bridge-authored
+  sidebar write (two guilds bridged to one space, or a crashed claim
+  re-synced). Reverting one write would leave an intermediate merge state;
+  manual review.
+- **`unapplied` / `no-sync-event`** — nothing (or nothing attributable) was
+  written; nothing to revert.
+
+```bash
+# Report (read-only; needs the appserver's events SQLite, not the bridge's):
+bun run src/scripts/recover-sidebar.ts \
+  --events-db /var/lib/appserver/events.sqlite \
+  --bridge-db ./data/bridge.sqlite
+
+# Machine-readable report (one JSON object per line):
+bun run src/scripts/recover-sidebar.ts --events-db ... --json
+
+# Restore the pre-sync sidebar for every untouched bridge (writes as the
+# bridge's ATProto identity via sendEvents):
+bun run src/scripts/recover-sidebar.ts --events-db ... --apply --yes
+```
+
+`--apply` requires `--yes` and the bridge env (`ATPROTO_BRIDGE_DID`,
+`ATPROTO_BRIDGE_APP_PASSWORD`, `APPSERVER_URL`, `APPSERVER_DID`). If
+`ATPROTO_BRIDGE_DID` is not set for the report run, attribution falls back
+to timestamps (`created_at` vs `applied_at`, within 10 min) and is flagged as
+weaker — pass it whenever possible. Restoring a sidebar from deprecated
+`updateSidebar.v0` events (which carry no category ids) synthesizes stable
+ids, since v1 requires them.
+
 ## Environment variables
 
 ### Required
