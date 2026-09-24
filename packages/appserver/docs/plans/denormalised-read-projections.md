@@ -1036,7 +1036,14 @@ waiting anyway. Reported rather than done.
 ### Results
 
 `bun test --isolate --cwd packages/appserver`: **1136 pass, 1 skip, 0 fail**
-(baseline on `next`: 1132 pass, 1 skip, 0 fail). `tsc --noEmit`: 0 errors.
+on the branch, against **1131 pass, 1 skip, 0 fail** on the base measured in
+the same session — the delta is the 13 tests below (net +5, since three of the
+four TASK-187 hydration cases were replaced by three). `tsc --noEmit`: 0 errors.
+
+The suite now runs 250–310 s against this VM's 2 cores and is sensitive to
+concurrent load: with the box at load 30 (several suites started by hand), even
+the **unmodified base** fails to finish inside a 1200 s cap, stalling in the
+same place. Compare runs only when nothing else is running.
 
 New coverage, all mutation-checked (reverting each change fails the test):
 
