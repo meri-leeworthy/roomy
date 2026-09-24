@@ -112,6 +112,8 @@ export const READSTATE_MIGRATIONS = {
   "10": { kind: "structural" },
   // Per-user OAuth scope grants — user_oauth_grants in readStateSchema.sql.
   "11": { kind: "structural" },
+  // Pending OAuth scope-expansion intents — user_scope_intents in readStateSchema.sql.
+  "12": { kind: "structural" },
 } as const satisfies Record<string, ReadStateMigrationEntry>;
 
 /**
