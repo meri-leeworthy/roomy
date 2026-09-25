@@ -1214,7 +1214,6 @@ depends only on 2 and 5 — it adds a tier and the dialogue is what makes the
 tier reachable, so it can run in parallel with 4 once 3 has landed.
 
 ---
-
 ### Phase 5 results (shipped) — supersede the placeholders above
 
 Phase 5 shipped the reactive path and answered the two placeholders #274 left
@@ -1269,6 +1268,7 @@ export function isInsufficientScopeError(err: unknown): boolean {
   return message !== undefined && /^Missing required scope/.test(message);
 }
 ```
+
 ## Open Questions
 
 1. **Should `getLoginScope` also return the tier name** so the client can
