@@ -29,6 +29,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { createAppserver } from "../../appserver/src/appserver.ts";
+import { _setTestGetRoomyProfileRecord } from "../../appserver/src/materialization/roomyProfile.ts";
+import { _setTestGetProfiles } from "../../appserver/src/queries/profileStore.ts";
 import { startPdsStub } from "./pds-stub.ts";
 import { seedFixture } from "./seed.ts";
 import {
@@ -96,6 +98,15 @@ async function main(): Promise<void> {
 
   const pds = startPdsStub();
 
+  // Keep every profile lookup in-process, the same way the appserver's own
+  // e2e helpers do (`src/e2e/helpers.ts`). Without these the `getProfile`
+  // handler's PDS-first branch resolves the DID through https://plc.directory
+  // and then calls the user's PDS — a real network dependency inside the
+  // suite. Stubbed, the handler falls through to the seeded global profile
+  // row, which is what the specs assert on.
+  _setTestGetProfiles(async () => []);
+  _setTestGetRoomyProfileRecord(async () => null);
+
   const appserver = await createAppserver({
     port: APPSERVER_PORT,
     ownDid: APPSERVER_DID,
@@ -104,8 +115,8 @@ async function main(): Promise<void> {
     readStateDbPath: join(dataDir, "roomy-readstate.sqlite"),
     corsOrigin: "*",
     quiet: true,
-    // Keep every profile lookup in-process: without this the materialiser
-    // falls back to api.bsky.app, making the run network-dependent.
+    // Belt-and-braces with the stubs above: the materialiser's own hydration
+    // leg takes this fetcher, so nothing reaches api.bsky.app either.
     getProfiles: async () => [],
     // HappyView / arbiter / Qdrant / Polar are all left unconfigured —
     // each is a no-op without its env vars.
