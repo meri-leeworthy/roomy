@@ -73,6 +73,15 @@ export const SEED_ROOM_2_MESSAGE_TEXT = "seeded message in the general channel";
 /** Distinctive body for the second space's channel. */
 export const SEED_SPACE_2_MESSAGE_TEXT =
   "seeded message in the second space";
+/**
+ * Origin of the Discord bridge REST surface. Nothing listens here: the spec
+ * that covers the bridge settings page fulfils these requests itself, and
+ * every other spec never reaches this page. Set on the app-lite dev server by
+ * Playwright's `webServer.env`, because the panel reads it from
+ * `$env/dynamic/public` at runtime.
+ */
+export const BRIDGE_PORT = 9998;
+export const BRIDGE_ORIGIN = `http://127.0.0.1:${BRIDGE_PORT}`;
 
 /** Path to the seeded channel. */
 export const SEED_ROOM_PATH = `/${SEED_SPACE_ID}/${SEED_ROOM_ID}`;

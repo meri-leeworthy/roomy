@@ -5,21 +5,19 @@ import * as path from "node:path";
 import { BoundedTail, createOmpEventSink, parseOmpJson, runOmp } from "./omp.js";
 
 /**
- * Regression coverage for the responder crash of 2026-09-14 on bramble.
+ * Coverage for the responder surviving long omp runs.
  *
- * The scout job ran ~29 minutes and streamed NDJSON events the whole time.
- * `runOmp` accumulated the entire stream (`out += d.toString()` in the stdout
- * `data` handler) and only parsed it at process exit. Once the run's stdout
- * crossed V8's maximum string length the handler threw
- * `RangeError: Invalid string length` — an uncaught exception inside a stream
- * callback, so it killed the responder process mid-job rather than failing the
- * one job. The dead responder broke the pipeline's pipe, and omp then exited
- * with its own `EPIPE: broken pipe, write` unhandled rejections.
+ * A run streams NDJSON events for its whole duration; accumulating them in the
+ * stdout `data` handler and parsing at exit throws `RangeError: Invalid string
+ * length` once the stream crosses V8's maximum string length — an uncaught
+ * exception inside a stream callback, so it kills the responder process mid-job
+ * rather than failing the one job. A dead responder breaks the pipeline's pipe,
+ * and omp exits with its own `EPIPE: broken pipe, write` unhandled rejections.
  *
- * The fix removes unbounded accumulation entirely: raw stdout/stderr are kept
- * only as bounded tails (BoundedTail) for the last-resort fallback reply, and
- * the structured result is reduced event by event (createOmpEventSink), so
- * retained memory is O(largest single message), independent of run length.
+ * `runOmp` keeps raw stdout/stderr only as bounded tails (BoundedTail) for the
+ * last-resort fallback reply and reduces the structured result event by event
+ * (createOmpEventSink), so retained memory is O(largest single message),
+ * independent of run length.
  */
 
 const messageEnd = (text: string) =>
@@ -110,4 +108,67 @@ describe("runOmp", () => {
     expect(reply.answer).toBe("stub answer");
     expect(reply.sessionId).toBe("stub-session");
   }, 60_000);
+});
+
+/**
+ * A FAILED model turn must never become a postable answer.
+ *
+ * Found 2026-09-18 by the self-check: when the provider refused a turn (HTTP
+ * 429/quota) omp exited 0 with a full NDJSON transcript and no assistant text,
+ * so `runOmp`'s no-text branch salvaged the last 2000 chars of raw stdout — the
+ * escaped-JSON error transcript — and the responder posted that into the room
+ * as the answer. From 2026-09-16T16:00Z every scheduled tick's report was
+ * silently replaced by such a dump.
+ */
+const failedTurn = (errorMessage = "HTTP 429 from https://ollama.com/api/chat\nyou have reached your weekly usage limit") =>
+  [
+    JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [], stopReason: "error", errorMessage },
+    }),
+    JSON.stringify({
+      type: "turn_end",
+      message: { role: "assistant", content: [], stopReason: "error", errorMessage },
+    }),
+    JSON.stringify({ type: "agent_end", messages: [], isTerminal: true }),
+  ].join("\n");
+
+/** Write an executable stub `omp` that prints `body` and exits 0. */
+function writeStubOmpBody(dir: string, body: string): string {
+  const stub = path.join(dir, "omp-fail-stub");
+  fs.writeFileSync(stub, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(`${body}\n`)});\n`);
+  fs.chmodSync(stub, 0o755);
+  return stub;
+}
+
+describe("failed turns", () => {
+  test("parseOmpJson reports the failure instead of an empty answer", () => {
+    const reply = parseOmpJson(failedTurn());
+    expect(reply.answer).toBe("");
+    expect(reply.failure?.reason).toBe("error");
+    // First line only — provider messages carry embedded newlines.
+    expect(reply.failure?.message).toBe("HTTP 429 from https://ollama.com/api/chat");
+  });
+
+  test("a later successful turn clears the failure", () => {
+    const reply = parseOmpJson(`${failedTurn()}\n${messageEnd("the answer")}`);
+    expect(reply.failure).toBeUndefined();
+    expect(reply.answer).toBe("the answer");
+  });
+
+  test("runOmp rejects on a failed turn rather than salvaging the transcript", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "roomy-omp-"));
+    const stub = writeStubOmpBody(dir, failedTurn());
+    await expect(runOmp("prompt", { ompBin: stub, cwd: dir })).rejects.toThrow(
+      /omp turn failed: HTTP 429/,
+    );
+  });
+
+  test("runOmp resolves normally on a successful turn", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "roomy-omp-"));
+    const stub = writeStubOmpBody(dir, messageEnd("the answer"));
+    const reply = await runOmp("prompt", { ompBin: stub, cwd: dir });
+    expect(reply.answer).toBe("the answer");
+    expect(reply.failure).toBeUndefined();
+  });
 });
