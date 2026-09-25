@@ -1,9 +1,6 @@
 /**
  * Sort-index materialisation for messages.
  *
- * Ported from `packages/app/src/lib/workers/sqlite/worker.ts` —
- * `materializeEntitySortPositionByTimestamp` and `materializeEntitySortPosition`.
- *
  * Kept *outside* the SDK materialisers, which are kept
  * backfill-agnostic and free of
  * extension-aware ordering logic.
@@ -135,7 +132,7 @@ export async function setMessageSortIdxByReorder(
   if (!existing) return; // materialiser failed earlier
 
   // Reorder always overwrites sort_idx — fall through even if one already
-  // exists. This matches the frontend's `update: true` semantics.
+  // exists.
 
   const before = await db
     .query(
@@ -183,8 +180,7 @@ export async function setMessageSortIdxByReorder(
 
 /**
  * Lexicographic midpoint between two ULIDs. If `later` is missing we sort the
- * new entry 10 ms after `earlier`. Mirrors the frontend's `midpointUlid`
- * helper in `worker.ts`.
+ * new entry 10 ms after `earlier`.
  */
 function midpointUlid(earlier: Ulid, later?: Ulid): string {
   if (!later) {

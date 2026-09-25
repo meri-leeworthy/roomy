@@ -9,7 +9,7 @@
  * post-transaction since they're idempotent.
  *
  * Per-space split: `db` is the per-space DB — the source of truth
- * for space data. There is no monolithic DB. `globalDb` (optional) receives
+ * for space data. `globalDb` (optional) receives
  * the `joinedSpace`/`leftSpace` membership edges and the `entity_space`
  * entity→space index. The materialization cursor advances on the per-space
  * DB so each space DB is self-describing about its own re-materialisation

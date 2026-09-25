@@ -33,15 +33,15 @@ interface RawEvent {
   payload: Uint8Array;
 }
 
-/** Default number of streams re-materialized concurrently (matches the Phase 4 pool default). */
+/** Default number of streams re-materialized concurrently (matches the pool default). */
 export const DEFAULT_REMATERIALIZE_CONCURRENCY = 4;
 
 /**
  * Re-materialize streams that have un-materialized events in the local events DB.
  *
  * Streams are processed with bounded concurrency (up to `concurrency` at
- * once) so different spaces' replay lands on different Phase-4 pool workers
- * in parallel. The cap keeps memory bounded — we never load every stream's
+ * once) so different spaces' replay lands on different pool workers in
+ * parallel. The cap keeps memory bounded — we never load every stream's
  * event batch into memory at once. Within a stream, the un-materialized
  * events are batched — read in one query and materialized in one
  * `applyBatch` call, which is the fastest path for a replay. Streams whose
@@ -122,7 +122,7 @@ export async function reMaterializeFromLocalEvents(
       continue;
     }
 
-    // Phase 3: backfill the global `entity_space` index from this space's
+    // Backfill the global `entity_space` index from this space's
     // per-space DB. Existing per-space DBs materialized before the index
     // existed have no entries, so `openSpaceDbForEntity` would 404 on every
     // room/message. This runs for every current-schema stream (caught up or
@@ -152,7 +152,7 @@ export async function reMaterializeFromLocalEvents(
       );
     }
 
-    // Phase 3: the materialization_cursor lives in the per-space DB (each
+    // The materialization_cursor lives in the per-space DB (each
     // space DB is self-describing about its own re-materialization state),
     // not the event-log DB. Read it from the per-space handle. Streams
     // without a cursor row (e.g. after a schema-version wipe, or first boot)
@@ -204,7 +204,7 @@ export async function reMaterializeFromLocalEvents(
 
   // Bounded-concurrency worker pool: up to `cap` streams are replayed at
   // once, each pulling the next pending stream as it finishes. Different
-  // streams hash to different Phase-4 pool workers, so their applyBatch
+  // streams hash to different pool workers, so their applyBatch
   // runs in parallel. The cap keeps memory bounded (never all streams in
   // flight at once) while still using the pool.
   const nextIndex = { i: 0 };

@@ -1,10 +1,9 @@
 /**
  * Profile prefetch + materialisation.
  *
- * Mirrors the frontend `worker.ts → ensureProfiles` flow: scan a batch of
- * events for user DIDs that need a profile, look up which ones we don't yet
- * have, fetch profiles, and write them to the global `profiles` table (the
- * authoritative per-user Roomy profile store).
+ * Scan a batch of events for user DIDs that need a profile, look up which ones
+ * we don't yet have, fetch profiles, and write them to the global `profiles`
+ * table (the authoritative per-user Roomy profile store).
  *
  * **HappyView-first with Bluesky fallback.** When a HappyView index service
  * is configured, bulk profile fetches query it in batch (one HTTP call per 25

@@ -238,7 +238,7 @@ export class StreamManager {
       }
 
       // 5. Apply batch to materialize. The per-space DB is the source of
-      // truth (Phase 3); the global DB receives membership edges + the
+      // truth; the global DB receives membership edges + the
       // entity→space index.
       const globalDb = this.#db.global?.();
       const batchStats = await applyBatch(this.#db.forSpace!(streamDid), streamDid, decodedEvents, {

@@ -3,13 +3,13 @@
  *
  * Owns the read-state DB (`readStateDb`), the event-log DB (`eventsDb`),
  * the per-space DBs (`data/spaces/<spaceDid>.sqlite`), and the global DB
- * (`data/global.sqlite`). There is no monolithic materialised DB — the
- * per-space DBs are the source of truth for space data.
+ * (`data/global.sqlite`). The per-space DBs are the source of truth for space
+ * data.
  *
  * Per-space DBs (`data/spaces/<spaceDid>.sqlite`) are opened lazily on first
  * request for that space, cached with LRU eviction, and created by
- * re-materialising that stream from the event log (not backfilled from a
- * monolithic DB). The global DB (`data/global.sqlite`) is opened lazily on
+ * re-materialising that stream from the event log (never backfilled from
+ * another DB). The global DB (`data/global.sqlite`) is opened lazily on
  * first request and holds `joinedSpace`/`leftSpace` edges, the global
  * `profiles` table, and the `entity_space` entity→space index.
  *
@@ -99,7 +99,7 @@ const GLOBAL_SCHEMA_PATH = join(THIS_DIR, "schema-global.sql");
 const READSTATE_SCHEMA_PATH = join(THIS_DIR, "readStateSchema.sql");
 const EVENTS_SCHEMA_PATH = join(THIS_DIR, "eventsSchema.sql");
 
-// ─── Schema helpers (ported from db.ts / readStateDb.ts) ──────────────────
+// ─── Schema helpers ───────────────────────────────────────────────────────
 
 class SchemaVersionMismatchError extends Error {
   constructor(expected: string, actual: string) {
@@ -318,8 +318,7 @@ function initializeReadStateSchema(
 /**
  * Open (or return from the LRU cache) the per-space DB for `spaceDid`.
  * On first open: create the file and apply the per-space schema. The DB is
- * populated by re-materialising the stream from the event log — there is no
- * monolithic DB to backfill from.
+ * populated by re-materialising the stream from the event log.
  */
 function openSpaceDb(spaceDid: string): Database {
   if (!spacesDir) throw new Error("Per-space DBs not initialized (no init)");

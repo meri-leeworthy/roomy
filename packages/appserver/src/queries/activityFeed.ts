@@ -221,8 +221,8 @@ export async function selectActivityFeed(
     for (const [k, v] of fetched) messagesData.set(k, v);
   }
 
-  // Step 6: fetch unread counts from the MONOLITHIC handle (readstate tables
-  // are not split — they live on the monolithic DB).
+  // Step 6: fetch unread counts from the read-state handle (`read_positions`
+  // lives in the read-state DB, not in the per-space DBs).
   const roomIds = pageRows.map((r) => r.room_id);
   const unreadCounts = await batchFetchUnreadCounts(mainDb, userDid, roomIds);
 

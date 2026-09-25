@@ -358,7 +358,7 @@ describe("push/evaluate — Busy immediate pushes", () => {
   });
 });
 
-// ── Phase 2: Engaged digest ───────────────────────────────────────────────
+// ── Engaged digest ────────────────────────────────────────────────────────
 
 async function addParticipation(
   db: DbLike,
@@ -519,7 +519,7 @@ describe("push/evaluate — Engaged digest path", () => {
     const deliveries7 = await evaluatePush(db, db, msgJob(7));
     expect(deliveries6.find((d) => d.userDid === ENGAGED_READER)).toBeUndefined();
     expect(deliveries7.find((d) => d.userDid === ENGAGED_READER)).toBeUndefined();
-    // Per the plan, once notified the row "does nothing" for further messages
+    // Once notified the row does nothing for further messages
     // (one push per batch) — the count is left at the fire-time value and the
     // batch stays quiet until the user reopens the room (which resets it).
     expect(await notifState(db, ENGAGED_READER, CHANNEL)).toEqual({
@@ -582,7 +582,7 @@ describe("push/evaluate — Engaged digest path", () => {
   });
 });
 
-// ── Phase 3: Mention routing ───────────────────────────────────────────────
+// ── Mention routing ───────────────────────────────────────────────────────
 
 /** Build a createMessage job with a given ordinal and optional mentions. */
 function msgJobWithMentions(ordinal: number, mentions?: string[], repliedToDids?: string[]) {
@@ -598,7 +598,7 @@ function msgJobWithMentions(ordinal: number, mentions?: string[], repliedToDids?
   };
 }
 
-describe("push/evaluate — Phase 3 mention routing", () => {
+describe("push/evaluate — mention routing", () => {
   test("quiet + mentioned → immediate message push", async () => {
     const db = freshDb();
     await seedFixture(db);

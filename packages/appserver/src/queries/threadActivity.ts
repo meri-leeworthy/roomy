@@ -12,11 +12,10 @@
  * still reports a latest timestamp, recent participants (the original authors),
  * and a latest message — matching what `selectMessages` displays.
  *
- * Implementation note: the equivalent frontend LiveQuery used a window function
- * with `partition by author` over a SELECT alias and silently returned 0–1
- * members because window functions evaluate before aliases. We sidestep that
- * here by using a per-thread aggregate with `json_group_array(distinct ...)`
- * over the top-N most recent messages.
+ * Implementation note: the participant list is a per-thread `json_group_array`
+ * aggregate over the top-N most recent messages, not a window function keyed
+ * on a SELECT alias — window functions evaluate before aliases, so that shape
+ * silently returns 0–1 members. The aggregate sidesteps that.
  */
 
 import type { DbLike } from "../db/types.ts";

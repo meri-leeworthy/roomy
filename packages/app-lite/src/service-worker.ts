@@ -204,7 +204,7 @@ async function handlePush(event: PushEvent): Promise<void> {
     // public CDN URL by the appserver. The OS fetches the image itself; if the
     // URL is unreachable the notification simply shows without an icon.
     ...(payload?.icon ? { icon: payload.icon } : {}),
-    // Phase 1: no badge yet. Phase polish can add a monochrome maskable badge.
+    // No badge is shown for a push; a monochrome maskable badge would go here.
   });
 }
 

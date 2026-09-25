@@ -84,10 +84,9 @@ export const leaveSpaceHandler: ProcedureHandler<LeaveSpaceBody, void> = async (
   );
 
   // ── 2. Delete the joinedSpace edge (membership) ──────────────────────
-  // The space-side LeaveSpace materialiser now deletes this edge (routed to
+  // The space-side LeaveSpace materialiser also deletes this edge (routed to
   // the global DB), but remove it here directly too for read-after-write
-  // consistency, in both the monolithic DB (Phase-1 read source) and the
-  // global DB (membership store).
+  // consistency in the global DB (the membership store).
   await deleteGlobalMembership(
     openGlobalDb(),
     spaceStreamDid,

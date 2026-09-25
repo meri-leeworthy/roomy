@@ -12,7 +12,7 @@
  * with bounded concurrency and a self-healing backoff on 429/5xx. Subscriptions
  * that return 404/410 (the browser unsubscribed / expired) are pruned.
  *
- * Phase 2: the loop now serves two push kinds:
+ * The loop serves two push kinds:
  *  - **Busy** immediate `message` pushes, emitted by `evaluatePush` and
  *    delivered in `processBatch`.
  *  - **Engaged digest** pushes — the on-event 5-message threshold is emitted by
@@ -290,7 +290,7 @@ export async function _runDigestSweep(db: DbLike): Promise<void> {
     const icon = iconByRoom.get(row.roomId);
     if (icon) payload.icon = icon;
     // Mark notified regardless of delivery success so a transient push-service
-    // outage doesn't re-fire the same batch every 60s (Phase 4 adds retry).
+    // outage doesn't re-fire the same batch every 60s (no retry).
     await deliverPayload(db, row.userDid, payload);
     await markNotified(db, row.userDid, row.roomId);
     statsDigestsFired++;

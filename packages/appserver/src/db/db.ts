@@ -5,8 +5,8 @@
  * `spaceDid` (`hash(spaceDid) % N`), so different spaces' materialization and
  * reads run on different threads in parallel.
  * Dedicated workers each own one of the shared DBs: a "global" worker, a
- * "readstate" worker and an "events" worker. There is no monolithic
- * materialised DB — the per-space DBs are the source of truth for space data.
+ * "readstate" worker and an "events" worker. The per-space DBs are the source
+ * of truth for space data.
  *
  * This module owns the shared `DatabasePool` and hands out routed handles:
  * `openDb()` → the router (event-log DB by default, with `forSpace`/`global`/
@@ -140,8 +140,8 @@ export function openSpaceDb(spaceDid: string): AsyncDatabase {
  *
  * Room/message-scoped handlers need to know which per-space DB to
  * read from, but their XRPC params only carry the room/message id. The
- * global `entity_space` index (populated during materialization) replaces
- * the monolithic DB's `entities.stream_id` lookup. Returns `null` when the
+ * global `entity_space` index (populated during materialization) resolves
+ * the owning space. Returns `null` when the
  * entity doesn't exist (the caller decides 404 vs 400).
  */
 export async function openSpaceDbForEntity(

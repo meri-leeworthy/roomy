@@ -2,7 +2,7 @@
  * Unit tests for reMaterializeFromLocalEvents — idempotent re-materialization
  * of every stream from the local events DB on boot.
  *
- * Phase 3: `openDb()` returns the EVENT-LOG DB (stream_events / stream_state).
+ * `openDb()` returns the EVENT-LOG DB (stream_events / stream_state).
  * Materialised rows (entities, comp_*, materialization_cursor) live in the
  * per-space DBs, reached via `db.forSpace(streamDid)`. Events are seeded
  * directly into the event-log `stream_events`, bypassing StreamManager.
@@ -583,7 +583,7 @@ describe("reMaterializeFromLocalEvents", () => {
 
     expect(getProfiles).toHaveBeenCalledTimes(1);
     expect(getProfiles).toHaveBeenCalledWith([author]);
-    // Phase 3: profiles are written to the global `profiles` table (the
+    // Profiles are written to the global `profiles` table (the
     // authoritative per-user Roomy profile store), not per-space comp_info.
     const info = await db
       .global!()
@@ -613,7 +613,7 @@ describe("reMaterializeFromLocalEvents", () => {
     await reMaterializeFromLocalEvents(db, async () => []);
 
     // The room entity must be resolvable via the global entity_space index
-    // (Phase 3: openSpaceDbForEntity reads this to find the owning space).
+    // (openSpaceDbForEntity reads this to find the owning space).
     const row = await db
       .global!()
       .query("select space_did from entity_space where entity_id = ?")

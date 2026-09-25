@@ -19,7 +19,7 @@ const DISCORD_USER = UserDid.assert("did:discord:9999");
 /**
  * Set up the worker-backed global DB (the authoritative `profiles` store).
  * Profiles live in the global `profiles` table, so these tests seed
- * and assert against the global DB rather than a monolithic materialised DB.
+ * and assert against the global DB.
  */
 function freshGlobal(): { globalDb: DbLike } {
   closeDb();
