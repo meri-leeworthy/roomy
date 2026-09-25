@@ -89,12 +89,11 @@ export async function reMaterializeFromLocalEvents(
 
   // Partition streams into blue-green rebuilds and incremental catch-ups.
   //
-  // Blue-green (P1/P3/P5/P6): a stream whose canonical per-space DB is on a
-  // STALE schema is rebuilt from the event log into a temp `.sqlite.new` DB
-  // (fresh, current schema) and atomically swapped over the canonical file.
-  // Reads keep serving the old DB until the swap, so a schema bump never
-  // makes a space appear empty. On any failure the temp DB is aborted and the
-  // old DB keeps serving (P6).
+  // A stream whose canonical per-space DB is on a STALE schema is rebuilt from
+  // the event log into a temp `.sqlite.new` DB (fresh, current schema) and
+  // atomically swapped over the canonical file. Reads keep serving the old DB
+  // until the swap, so a schema bump never makes a space appear empty. On any
+  // failure the temp DB is aborted and the old DB keeps serving.
   //
   // A stream whose canonical DB is on the CURRENT schema uses the existing
   // incremental catch-up path unchanged (skip if caught up, else replay the
@@ -140,10 +139,10 @@ export async function reMaterializeFromLocalEvents(
 
     // Publish this space's `space_stats` aggregate row. Member count only
     // exists in the space's own DB, so the admin dashboard's member-count
-    // ordering needs it precomputed; doing that per request is what made
-    // listSpaces fan out over every space. This sweep runs for every stream on
-    // every boot (caught up or not), so an existing dataset self-heals on the
-    // next deploy and no separate data migration is needed. Idempotent.
+    // ordering needs it precomputed; a per-request aggregate would fan out over
+    // every space. This sweep runs for every stream on every boot (caught up or
+    // not), so an existing dataset self-heals on the next deploy and no separate
+    // data migration is needed. Idempotent.
     try {
       await refreshSpaceStats(db, stream_id as StreamDid);
     } catch (err) {
@@ -220,7 +219,7 @@ export async function reMaterializeFromLocalEvents(
         // created and the space is flagged rebuilding BEFORE replay starts
         // (and before any slow profile hydration holds the window open) —
         // otherwise `isSpaceRebuilding` is still false while we replay and the
-        // write gate (P2) wouldn't reject during the window. Idempotent, so it
+        // write gate wouldn't reject during the window. Idempotent, so it
         // is safe alongside the lazy `forSpaceRebuild` auto-begin.
         if (rebuild) {
           await db.spaceRebuildBegin!(streamDid as StreamDid);
@@ -285,14 +284,14 @@ export async function reMaterializeFromLocalEvents(
 
         if (rebuild) {
           // Atomic swap: the temp rebuild DB replaces the canonical file and
-          // routing flips. The cursor was advanced by applyBatch (P5).
+          // routing flips. The cursor was advanced by applyBatch.
           await db.spaceRebuildCommit!(streamDid as StreamDid);
         }
         succeeded++;
       } catch (err) {
         if (rebuild) {
           // Never swap in a broken/partial DB — abort and keep serving the
-          // old DB (P6). The next boot re-runs the rebuild for this stream.
+          // old DB. The next boot re-runs the rebuild for this stream.
           try {
             await db.spaceRebuildAbort!(streamDid as StreamDid);
           } catch {

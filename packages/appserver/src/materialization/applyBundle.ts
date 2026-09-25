@@ -7,10 +7,10 @@
  * application as a bug, not a feature.
  *
  * Side-effects (sort_idx, unread counter) live here rather than inside the SDK
- * materialisers because the original design keeps materialisers free of
+ * materialisers because materialisers are kept free of
  * backfill awareness.
  *
- * Per-space split (Phase 3): `db` is the per-space DB — the source of truth.
+ * Per-space split: `db` is the per-space DB — the source of truth.
  * There is no monolithic DB. `globalDb` (optional) receives the
  * `joinedSpace`/`leftSpace` membership edges and the `SetUserProfile` global
  * profile write. `readStateDb` (optional) receives the read-state side-effects

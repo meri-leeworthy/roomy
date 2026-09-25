@@ -350,7 +350,7 @@ create table if not exists materialization_cursor (
   materialized_to integer not null default -1
 ) strict;
 
--- Denormalised read projection (TASK-173): the room→space→parent→access facts
+-- Denormalised read projection: the room→space→parent→access facts
 -- that `auth/access.ts:resolveRoom` re-derives per room, per request, per
 -- caller. Those three queries are 36 of the ~50 DB round-trips
 -- `room.getThreads` spends (measured in perf/probe-projections.ts).
@@ -372,7 +372,7 @@ create table if not exists room_access (
 
 create index if not exists idx_room_access_space on room_access(space_id);
 
--- Denormalised read projection (TASK-175, R3): each room's latest message and
+-- Denormalised read projection: each room's latest message and
 -- its distinct recent authors, reduced once per write instead of once per
 -- board read. `fetchRoomActivity` otherwise reads EVERY message in EVERY room
 -- in scope to pick one per room (measured: 8001 rows to keep 2 at 8000

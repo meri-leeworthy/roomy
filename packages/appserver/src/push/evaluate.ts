@@ -127,7 +127,7 @@ export async function resolveMessageFacts(
     // Degraded path marker: the author has no comp_info/comp_user row AND no
     // global profile (e.g. the Discord bridge bot) — the notification names
     // them by raw DID. Cheap info log so prod can confirm how often this
-    // happens (it's what used to render as "New message").
+    // happens.
     log.info(`[push-evaluate] authorName fell back to raw DID for ${messageId}: ${authorDid}`);
   }
 

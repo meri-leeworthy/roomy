@@ -354,7 +354,7 @@ create table if not exists materialization_cursor (
   materialized_to integer not null default -1
 ) strict;
 
--- Denormalised read projection (TASK-173): the room→space→parent→access facts
+-- Denormalised read projection: the room→space→parent→access facts
 -- `auth/access.ts:resolveRoom` would otherwise re-derive per room, per request,
 -- per caller. Declared here as well as in schema-space.sql because this file is
 -- the in-memory schema used by unit tests (toAsyncDb), which exercise handlers
@@ -368,7 +368,7 @@ create table if not exists room_access (
 
 create index if not exists idx_room_access_space on room_access(space_id);
 
--- Denormalised read projection (TASK-175, R3): each room's latest message and
+-- Denormalised read projection: each room's latest message and
 -- its distinct recent authors, so board reads are O(rooms in scope) instead of
 -- O(messages in scope). Declared here as well as in schema-space.sql because
 -- this file is the in-memory schema used by unit tests (toAsyncDb), which

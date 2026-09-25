@@ -194,14 +194,13 @@ export async function _runDigestSweep(db: DbLike): Promise<void> {
   const due = await selectDueDigests(db, Date.now(), SWEEP_BATCH_LIMIT);
   if (due.length === 0) return;
 
-  // Freshness gate (TASK-151). A digest row whose batch *began* long ago is
-  // not a "you missed this" prompt — it is stale state that accumulated while
-  // nothing fired (the process was down, the room was never reopened, a
-  // replay seeded it). Firing it greets the user with hours-old messages, and
-  // every restart re-fires it, which is what made the 2026-09-16 flood look
-  // deploy-coupled. Drop the stale rows instead: they can never become
-  // current, and the user's unread counter is driven by `read_positions`, not
-  // by this table, so nothing user-visible is lost.
+  // Freshness gate. A digest row whose batch *began* long ago is not a "you
+  // missed this" prompt — it is stale state that accumulated while nothing
+  // fired (the process was down, the room was never reopened, a replay seeded
+  // it). Firing it greets the user with hours-old messages, and every restart
+  // re-fires it. Drop the stale rows instead: they can never become current,
+  // and the user's unread counter is driven by `read_positions`, not by this
+  // table, so nothing user-visible is lost.
   const now = Date.now();
   // `first_unseen_at` is null-typed at the SQL boundary (the column is
   // nullable), though the query filters those rows out. Treat an absent

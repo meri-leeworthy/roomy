@@ -45,7 +45,7 @@ afterEach(() => {
  * Seed events into the event-log `stream_events` for a given stream.
  * Each event is CBOR-encoded and inserted with a sequential idx starting
  * from `startIdx` (default 0). The event-log DB has no FK to `entities`, so
- * no pre-seeding is needed (unlike the old monolithic schema).
+ * no pre-seeding is needed.
  */
 async function seedEvents(
   db: DbLike,
@@ -534,8 +534,9 @@ describe("reMaterializeFromLocalEvents", () => {
     }
     await seedEvents(db, streamDid, badEvents);
 
-    // applyBatch should process the events (with errors) and still advance
-    // the cursor — this is the key fix for the infinite-retry loop.
+    // applyBatch must process the events (with errors) and still advance
+    // the cursor: a failed event that does not advance the cursor is retried
+    // forever by the next replay.
     const decoded = await readDecodedEvents(db, streamDid, 0);
     await applyBatch(space, streamDid, decoded, { isBackfill: true }, db.global?.());
 
@@ -554,11 +555,11 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(cursor2!.materialized_to).toBe(2);
   });
   test("hydrates author profiles via getProfiles during backfill", async () => {
-    // Regression: reMaterializeFromLocalEvents used to call applyBatch
-    // directly without ensureProfilesForBatch, so backfilled messages
-    // rendered with blank author profiles. Passing a getProfiles fn must
-    // hydrate comp_info/comp_user for did:plc authors referenced by
-    // profile-relevant events (joinSpace here).
+    // `reMaterializeFromLocalEvents` must call ensureProfilesForBatch rather
+    // than applyBatch directly, or backfilled messages render with blank
+    // author profiles. Passing a getProfiles fn must hydrate
+    // comp_info/comp_user for did:plc authors referenced by profile-relevant
+    // events (joinSpace here).
     const streamDid = StreamDid.assert("did:web:profile-backfill.example");
     const space = db.forSpace!(streamDid);
     const author = UserDid.assert("did:plc:backfill-author");
