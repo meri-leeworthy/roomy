@@ -38,6 +38,7 @@ import {
 } from "./errors";
 import { withRateLimitRetry, type RateLimitRetryOptions } from "./retry";
 import { ServiceAuthClient } from "./service-auth";
+import { stringifyParams } from "./params";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
@@ -102,7 +103,9 @@ export class DirectXrpcClient {
     params: QueryParams<N>,
   ): Promise<QueryResponse<N>> {
     const entry = QUERY_SCHEMAS[nsid];
-    const stringParams = stringifyParams(params as Record<string, unknown>);
+    // Rejects non-scalar params before the token fetch — a `[object Object]`
+    // id must never be sent, and must not cost a service-auth round trip.
+    const stringParams = stringifyParams(nsid, params as Record<string, unknown>);
 
     return this.#runWithDeadline(nsid, async (signal) => {
       const token = await this.#serviceAuth.getToken(this.#appserverDid, nsid);
@@ -232,7 +235,7 @@ export class DirectXrpcClient {
 
       // Query (GET)
       const url = new URL(`${this.#appserverUrl}/xrpc/${nsid}`);
-      for (const [k, v] of Object.entries(params)) {
+      for (const [k, v] of Object.entries(stringifyParams(nsid, params))) {
         url.searchParams.set(k, v);
       }
       const resp = await fetch(url.toString(), {
@@ -298,17 +301,6 @@ export class DirectXrpcClient {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
-
-function stringifyParams(
-  params: Record<string, unknown>,
-): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(params)) {
-    if (v === undefined || v === null) continue;
-    out[k] = typeof v === "string" ? v : String(v);
-  }
-  return out;
-}
 
 async function toXrpcError(resp: Response, nsid: string): Promise<Error> {
   // 429: surface as a RateLimitError so the transport's retry wrapper can
