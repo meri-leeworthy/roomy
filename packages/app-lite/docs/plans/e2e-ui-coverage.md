@@ -86,7 +86,7 @@ the messages are authored by a second account that administers it:
 
 ---
 
-## 2. Covered now (39 tests)
+## 2. Covered now (36 tests)
 
 Every test below states the observable behaviour it defends.
 
