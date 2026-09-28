@@ -26,7 +26,11 @@ import { openGlobalDb, openSpaceDb } from "../db/db.ts";
 import { createHash } from "node:crypto";
 import { log } from "../log.ts";
 import { evaluatePush, resolveAuthorName } from "./evaluate.ts";
-import { sendPush } from "./webpush.ts";
+// Transport registration: importing a transport module installs it in
+// `PUSH_TRANSPORTS`. Every transport the appserver ships must be imported here
+// (or by another module on the boot path), or its stored rows fail delivery.
+import "./webpush.ts";
+import { PUSH_TRANSPORTS, type PushTarget } from "./transport.ts";
 import {
   pruneSubscriptionByEndpoint,
   selectSubscriptions,
@@ -301,8 +305,17 @@ export async function _runDigestSweep(db: DbLike): Promise<void> {
  * Deliver one payload to all of a user's subscription endpoints, with
  * per-room `topic` coalescing. Shared by the on-event path (`processBatch`)
  * and the time-based sweep. Failures are logged, never thrown to the caller.
+ *
+ * Each stored row names its transport in `kind` and is handed to that
+ * transport as a {@link PushTarget}; the outcome (`delivered`/`gone`/`retry`)
+ * drives the same pruning, counting and logging for every transport, so adding
+ * one never touches this policy.
+ *
+ * Exported for the transport-seam test: it is the single place a stored
+ * subscription meets a transport, so a test can drive routing without the
+ * background loop.
  */
-async function deliverPayload(
+export async function deliverPayload(
   db: DbLike,
   userDid: string,
   payload: PushPayload,
@@ -313,46 +326,52 @@ async function deliverPayload(
   const topic = roomTopic(payload.roomId);
   await Promise.all(
     subs.map(async (sub) => {
-      try {
-        const res = await sendPush(
-          {
-            endpoint: sub.endpoint,
-            keys: { p256dh: sub.p256dh, auth: sub.auth },
-            expirationTime: sub.expirationTime,
-          },
-          body,
-          { topic, urgency: "normal" },
+      const transport = PUSH_TRANSPORTS[sub.kind];
+      if (!transport) {
+        // A row stored for a transport this build doesn't run. Count it as a
+        // failure so the gap is visible instead of silently dropping pushes.
+        statsFailed++;
+        log.warn(
+          `[push-deliver] FAILED unknown transport kind=${sub.kind} endpoint=${sub.endpoint.slice(0, 60)}…`,
         );
-        if (res.gone) {
-          // Browser unsubscribed / expired — prune so we never retry it.
+        return;
+      }
+      const target: PushTarget = {
+        kind: sub.kind,
+        endpoint: sub.endpoint,
+        p256dh: sub.p256dh,
+        auth: sub.auth,
+        expirationTime: sub.expirationTime,
+      };
+      let service = "unknown";
+      try {
+        service = new URL(sub.endpoint).hostname;
+      } catch {
+        // Non-URL endpoint (a native device token, say) — leave "unknown".
+      }
+      try {
+        const res = await transport.deliver(target, body, { topic, urgency: "normal" });
+        if (res.outcome === "gone") {
+          // Destination unsubscribed / expired — prune so we never retry it.
           await pruneSubscriptionByEndpoint(db, sub.endpoint);
           statsGone++;
-          let service = "unknown";
-          try { service = new URL(sub.endpoint).hostname; } catch { /* leave */ }
-          log.info(`[push-deliver] GONE (pruned) service=${service} endpoint=${sub.endpoint.slice(0, 60)}…`);
-        } else if (res.status !== null) {
+          log.info(`[push-deliver] GONE (pruned) kind=${sub.kind} service=${service} endpoint=${sub.endpoint.slice(0, 60)}…`);
+        } else if (res.outcome === "delivered") {
           statsDeliveredOk++;
-          let service = "unknown";
-          try { service = new URL(sub.endpoint).hostname; } catch { /* leave */ }
-          log.debug(`[push-deliver] OK status=${res.status} service=${service} endpoint=${sub.endpoint.slice(0, 60)}…`);
+          log.debug(`[push-deliver] OK kind=${sub.kind} status=${res.status ?? "skipped"} service=${service} endpoint=${sub.endpoint.slice(0, 60)}…`);
+        } else {
+          statsFailed++;
+          log.warn(
+            `[push-deliver] FAILED kind=${sub.kind} status=${res.status ?? "?"} service=${service} endpoint=${sub.endpoint.slice(0, 60)}…:`,
+            res.error instanceof Error ? res.error.message : res.error,
+          );
         }
       } catch (err) {
+        // A transport must not throw; one that does still must not kill the
+        // batch, so count it as a failure like any other.
         statsFailed++;
-        // web-push throws WebPushError (has .statusCode) on 429/5xx; narrow
-        // rather than assume the shape.
-        let status = "?";
-        if (
-          typeof err === "object" &&
-          err !== null &&
-          "statusCode" in err &&
-          typeof (err as { statusCode?: unknown }).statusCode === "number"
-        ) {
-          status = String((err as { statusCode: number }).statusCode);
-        }
-        let service = "unknown";
-        try { service = new URL(sub.endpoint).hostname; } catch { /* leave */ }
         log.warn(
-          `[push-deliver] FAILED status=${status} service=${service} endpoint=${sub.endpoint.slice(0, 60)}…:`,
+          `[push-deliver] FAILED (transport threw) kind=${sub.kind} service=${service} endpoint=${sub.endpoint.slice(0, 60)}…:`,
           err instanceof Error ? err.message : err,
         );
       }

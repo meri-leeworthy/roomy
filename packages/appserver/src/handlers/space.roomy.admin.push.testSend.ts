@@ -17,7 +17,9 @@
 
 import { openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
-import { sendPush } from "../push/webpush.ts";
+// Side effect: registers the Web Push transport in `PUSH_TRANSPORTS`.
+import "../push/webpush.ts";
+import { PUSH_TRANSPORTS } from "../push/transport.ts";
 import { selectSubscriptions } from "../queries/pushSubscriptions.ts";
 import { pruneSubscriptionByEndpoint } from "../queries/pushSubscriptions.ts";
 import { XrpcError } from "../xrpc/errors.ts";
@@ -93,21 +95,35 @@ export const adminTestSendHandler: ProcedureHandler<
     try {
       pushService = new URL(sub.endpoint).hostname;
     } catch {
-      // leave as "unknown"
+      // Non-URL endpoint (a native device token, say) — leave "unknown".
+    }
+
+    const transport = PUSH_TRANSPORTS[sub.kind];
+    if (!transport) {
+      results.push({
+        endpoint: sub.endpoint,
+        pushService,
+        status: null,
+        gone: false,
+        error: `No transport registered for kind '${sub.kind}'`,
+      });
+      continue;
     }
 
     try {
-      const res = await sendPush(
+      const res = await transport.deliver(
         {
+          kind: sub.kind,
           endpoint: sub.endpoint,
-          keys: { p256dh: sub.p256dh, auth: sub.auth },
+          p256dh: sub.p256dh,
+          auth: sub.auth,
           expirationTime: sub.expirationTime,
         },
         payload,
         { urgency: "normal" },
       );
 
-      if (res.gone) {
+      if (res.outcome === "gone") {
         // Prune the dead subscription (same as the dispatcher does).
         await pruneSubscriptionByEndpoint(db, sub.endpoint);
       }
@@ -116,10 +132,16 @@ export const adminTestSendHandler: ProcedureHandler<
         endpoint: sub.endpoint,
         pushService,
         status: res.status,
-        gone: res.gone,
-        error: null,
+        gone: res.outcome === "gone",
+        error:
+          res.outcome === "retry"
+            ? res.error instanceof Error
+              ? res.error.message
+              : String(res.error)
+            : null,
       });
     } catch (err) {
+      // A transport must not throw; report it like any other failure.
       const message = err instanceof Error ? err.message : String(err);
       results.push({
         endpoint: sub.endpoint,

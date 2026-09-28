@@ -24,7 +24,7 @@ afterEach(() => {
 
 describe("read-state schema", () => {
   test("READSTATE_SCHEMA_VERSION is exported", () => {
-    expect(READSTATE_SCHEMA_VERSION).toBe("10");
+    expect(READSTATE_SCHEMA_VERSION).toBe("11");
   });
 
   test("schema applies cleanly on a fresh database", () => {
@@ -130,6 +130,54 @@ describe("read-state schema", () => {
       )
       .all("u", "s");
     expect(rows).toHaveLength(1);
+  });
+
+  test("push_subscriptions gains kind on a pre-v11 DB, existing rows default to webpush", () => {
+    const db = new Database(":memory:");
+    db.exec("pragma foreign_keys = on");
+
+    // Simulate a v10 DB: push_subscriptions WITHOUT `kind`, version row = 10.
+    db.exec(`
+      create table readstate_schema_version (
+        id integer primary key check (id = 1),
+        version text not null
+      ) strict;
+      insert into readstate_schema_version (id, version) values (1, '10');
+
+      create table push_subscriptions (
+        user_did        text not null,
+        endpoint        text not null,
+        p256dh          text not null,
+        auth            text not null,
+        expiration_time integer,
+        created_at      integer not null default (unixepoch() * 1000),
+        updated_at      integer not null default (unixepoch() * 1000),
+        primary key (user_did, endpoint)
+      ) strict;
+      insert into push_subscriptions (user_did, endpoint, p256dh, auth)
+        values ('did:plc:existing', 'https://push.example/old', 'k', 'a');
+    `);
+
+    // The schema exec runs on every open, then the manifest walk applies v11's
+    // structural `up`. A pre-v11 table is untouched by the `create table if not
+    // exists`, so the ALTER is the only thing that adds the column.
+    db.exec(readFileSync(SCHEMA_PATH, "utf8"));
+    const entry = readStateMigrationEntry("11");
+    expect(entry?.kind).toBe("structural");
+    expect(() => entry?.up?.(db)).not.toThrow();
+
+    // The pre-existing browser subscription defaults to the Web Push
+    // transport, so routing is unchanged for every stored row.
+    const row = db
+      .query<{ kind: string }, []>(
+        "select kind from push_subscriptions where endpoint = 'https://push.example/old'",
+      )
+      .get();
+    expect(row?.kind).toBe("webpush");
+
+    // Re-running the ALTER on an already-migrated table is a no-op, matching
+    // the migration walk on a partially-upgraded DB.
+    expect(() => entry?.up?.(db)).not.toThrow();
   });
 
   test("migration runs from v1 schema to current version", () => {
