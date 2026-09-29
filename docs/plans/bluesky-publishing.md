@@ -1,10 +1,9 @@
 # Publishing to Bluesky as the Space Account — Plan
 
-**Date:** 2026-09-16
+**Date:** 2026-09-16 (arbiter review 2026-09-29)
 **Status:** Draft for review. **No implementation.** This document changes no production code.
-**Author:** Sorrel (TASK-138), for Meri.
-**Verified against:** `origin/next` @ `c7087ea9`.
-**Slots into:** `packages/appserver/docs/plans/arbiter-integration.md` (Phases 0–4) — read that first. This plan is a *new* phase that consumes that plan's shipped machinery; it does not replace or restate it.
+**Verified against:** `origin/next` @ `b245b695`. §0.1, §4.2 and §6.1/§6.4 were re-verified after the arbiter work that landed between `c7087ea9` and `b245b695`; the `file:line` citations outside those sections are unchanged from the original pass and shift with `next`.
+**Slots into:** `packages/appserver/docs/plans/arbiter-integration.md` (Phases 0–4) — read that first. This plan is a *new* phase that consumes that plan's shipped machinery; it does not replace or restate it. Its account of the arbiter is itself partly stale (§4.2 says so where it matters).
 
 **Path choice.** This document lives at `docs/plans/bluesky-publishing.md`. Rationale: the root `docs/plans/` directory holds the cross-package plan documents (`richtext-migration-plan.md`, `voice-chat-plan.md`, `client-migration-plan.md`), while `packages/appserver/docs/plans/` holds appserver-scoped ones. Publishing touches `packages/sdk` (exporter, arbiter client), `packages/appserver` (opt-in storage, sweeper, mapping table), and `packages/app-lite` (the share affordance) — three packages, so the root directory is correct. Say the word if you want it moved beside `arbiter-integration.md` instead.
 
@@ -19,11 +18,12 @@ The arbiter half is shipped. A Roomy space *is* a real ATProto account on the Ro
 | Capability | Evidence |
 |---|---|
 | Provision a space as a real PDS account | `packages/appserver/src/arbiter/provision.ts:46` (`provisionSpace` → `createArbiter`, `resetConfig`, `proxy`) |
-| Act as the space on its PDS | `packages/sdk/src/atproto/arbiter.ts:97` (`ArbiterClient`), `:156` (`proxy`), posting to `town.muni.arbiter.proxy` with a per-request single-use serviceAuth token (`:140-150`) |
-| Write a record under the space's repo | `packages/sdk/src/atproto/bluesky-profile.ts:101` — `putRecord` via `arbiter.proxy`; the only `app.bsky.*` writes anywhere in the repo |
+| Act as the space on its PDS | `packages/sdk/src/atproto/arbiter.ts:97` (`ArbiterClient`), `:156` (`proxy`), posting to `space.roomy.authComplete.arbiter.proxy` with a per-request single-use serviceAuth token (`:140-148`) |
+| Write a record under the space's repo | `packages/sdk/src/atproto/bluesky-profile.ts:101` — `putRecord` via `arbiter.proxy`; the only `app.bsky.*` write in production code. The one other reference is a negative fixture (`packages/appserver/src/arbiter/provision.test.ts:200-205`), which asserts the scoped route *denies* a `putRecord` of `app.bsky.feed.post` |
+| Write a `network.cosmik.*` record under the space's repo | `packages/sdk/src/atproto/cosmik-card.ts` (`createCosmikCard`, `createRecord` of `network.cosmik.card`) via `space.roomy.authComplete.arbiter.proxy`; wired from the message toolbar at `packages/app-lite/src/lib/mutations/space-card.ts` |
 | Upload a blob to the space's repo | `packages/sdk/src/atproto/bluesky-profile.ts:41` (`uploadBlobToSpace`), `:48` (`com.atproto.repo.uploadBlob`) |
 | Set the space's handle | `packages/sdk/src/atproto/space-handle.ts:77` (`setSpaceHandle` → `com.atproto.identity.updateHandle`) |
-| Server-side proxy helper | `packages/appserver/src/arbiter/client.ts:136`; used exactly once today, at `packages/appserver/src/arbiter/provision.ts:60-72` |
+| Server-side proxy helper | `packages/appserver/src/arbiter/client.ts:145`; used exactly once today, at `packages/appserver/src/arbiter/provision.ts:60-75` |
 | UI surface | `packages/app-lite/src/routes/[space]/settings/integrations/+page.svelte:101` — "Create/Update Bluesky Profile", gated by the `space-account-management` flag (`:18-20`) and `isAdmin` (`:14`) |
 
 ### 0.2 What does not exist
@@ -34,21 +34,23 @@ The arbiter half is shipped. A Roomy space *is* a real ATProto account on the Ro
 git grep -n "app\.bsky\.feed\.post" origin/next
 ```
 
-returns exactly two hits, both prose:
+returns three hits, all prose or fixtures:
 
 - `docs/plans/richtext-migration-plan.md:160`
 - `docs/rich-text-representation-research.md:136`
+- `packages/appserver/src/arbiter/provision.test.ts:203` — a **negative** fixture (the request is denied)
 
 and zero writers. Supporting greps, also against `origin/next`:
 
 ```bash
 git grep -n "bskyPost\|publishSweeper\|createRecord\|outbox" origin/next -- 'packages/**'   # → only a doc comment in pending-sends.svelte.ts:26
-git grep -n "town\.muni\.arbiter\.policy" origin/next                                      # → only the AT-URI string, provision.ts:35
-git grep -in "\.rego\b\|package arbiter" origin/next | grep -v arbiter-integration.md       # → nothing
+git grep -n "town\.muni\.arbiter\.policy" origin/next                                      # → the AT-URI string, provision.ts:35, and its mirror in scripts/migrate-arbiter-configs.ts:102
 git grep -n "maxGraphemes\|grapheme\|Intl\.Segmenter" origin/next -- 'packages/**'          # → only profile lexicons + PUSH_MAX_MESSAGE_AGE_MS
 ```
 
 There is no publish table, no outbox, no dedupe table for "this message was posted", and no character-limit machinery of any kind on messages.
+
+**Correction to the original pass.** The grep `git grep -in "\.rego\b\|package arbiter"` no longer returns nothing: the arbiter policy now lives in this repo at `packages/appserver/policy/default.rego` (with tests at `policy/tests/default_test.rego`). It governs *who may act*, and it is the single most important input to this plan's §6.1 — see §4.2.
 
 ### 0.3 What is already researched and must not be redone
 
@@ -63,6 +65,19 @@ That analysis **still holds against the current representation**, and §2 below 
 - The index-space mismatch is real and unchanged: Roomy facets are **per-block** (`packages/sdk/src/schema/richtext/index.ts:117` — `Facet` indexes into *a block's* `text`), while `app.bsky.feed.post` facets are **post-global**.
 
 The delta this plan adds is what that cited line does not cover: **how the blocks are flattened into one post text without destroying the offsets**, what to do about Bluesky's 300-grapheme limit, what triggers a publish, and how a publish is made idempotent.
+
+### 0.4 Arbiter review, 2026-09-29 — what changed under this plan
+
+`next` moved 85 commits between the original pass (`c7087ea9`) and this review (`b245b695`). Four commits touch the arbiter:
+
+| Commit | Effect on this plan |
+|---|---|
+| `d01b02c3` — "use the new scoped arbiter endpoint" | Renamed the proxy route to `space.roomy.authComplete.arbiter.proxy` repo-wide and added `include:space.roomy.authComplete` to the OAuth scope. **A pure rename for this plan, except that it is what makes §4.2(c) bite.** |
+| `9e70ffbd` — "provision spaces via the arbiter's built-in proxy route" | Reverted the *appserver's* provisioning back to `town.muni.arbiter.proxy` after the scoped route denied it. **The precedent the plan should have extrapolated from** — a scoped route denies by request shape, and no admin authorization can rescue it. |
+| `d32d84a5` — "add Roomy's new arbiter policy and policy tests" | Put the policy **in this repo** (`packages/appserver/policy/`). Kills §4.2's "the policy is not in this repo", and is what let §4.2 be rewritten as fact rather than speculation. |
+| `1b052a98` — docs/comment minimisation | Stripped task ids and incident framing repo-wide. This document's own `TASK-151` references and the `push-freshness-gate.md:224-228` citation are the visible casualties. |
+
+**The one substantive finding: the client-driven publish path is blocked, and the server-driven one is not.** See §4.2 — the scoped route's permission set (a pure function of the request, with no caller identity) admits only `space.roomy*` / `network.cosmik*` NSIDs, `uploadBlob`, `updateHandle`, and `putRecord` of `app.bsky.actor.profile` or `space.roomy.service`. A post is not in it, so it returns `403 request denied by scope policy` — while the appserver, as the named recovery admin, may write **any** collection through the built-in route. §4.3, §6.1 and Phase 3 are rewritten accordingly; everything else in this document stands.
 
 ---
 
@@ -275,7 +290,7 @@ With belt 2, the failure mode of "network call succeeded, process died before th
 
 | Entry point | Evidence | Replays old events? | Verdict |
 |---|---|---|---|
-| `space.roomy.space.sendEvents` → `StreamManager.sendEvents` | handler at `packages/appserver/src/handlers/space.roomy.space.sendEvents.ts:176`; hard-codes `isBackfill: false` for `applyBatch` (`packages/appserver/src/streams/StreamManager.ts:244-246`) | **Yes** — the bridge's `runBackfill` is indistinguishable from live traffic; there is no replay marker on this path at all (called out as a follow-up at `push-freshness-gate.md:224-228`) | **A hook here fires on replay.** This is TASK-151. |
+| `space.roomy.space.sendEvents` → `StreamManager.sendEvents` | handler at `packages/appserver/src/handlers/space.roomy.space.sendEvents.ts:176`; hard-codes `isBackfill: false` for `applyBatch` (`packages/appserver/src/streams/StreamManager.ts:245`) | **Yes** — the bridge's `runBackfill` is indistinguishable from live traffic; there is no replay marker on this path at all (called out as a follow-up at `push-freshness-gate.md:67-70`) | **A hook here fires on replay.** This is TASK-151. |
 | Boot re-materialisation | `reMaterializeFromLocalEvents` (`packages/appserver/src/streams/reMaterialize.ts:60`), started fire-and-forget at `packages/appserver/src/index.ts:76`, applying with `isBackfill: true` (`reMaterialize.ts:263-265`) | **Yes, always after a schema wipe or blue-green rebuild** (`:9-12`; full rebuild from `idx 0` at `:122`) | A hook inside `applyBatch`/`applyBundle` fires on every boot after a wipe. |
 | Sync `#streamEvents` backfill | `packages/appserver/src/sync/handler.ts:797-815` (`hasMore` at `:810`); resumable from a cursor | Yes (`cursor: -1` ⇒ full history) | Consumer-side only; this is how the bridge *re-sees* history, not how the appserver side-effects. |
 | Jetstream / firehose | **Absent from the appserver** (it exists only as HappyView, an external Rust AppView) | n/a | No hook to place. |
@@ -344,31 +359,55 @@ That second fact is worth stating plainly, because it is the answer to "who is a
 - **Rate limits and content rules apply to the space's PDS account,** so one spammy member can degrade the *space's* standing, not just their own.
 - **Banning a member in Roomy does not remove what they already posted** in this space's name, and — if auto-mirroring is on — a banned user's next message is blocked at write time by the existing ban check on the write path (`packages/appserver/src/handlers/space.roomy.space.sendEvents.ts:108-112`) rather than at publish time, which is the correct layering but worth stating.
 
-### 4.2 What the arbiter's policy would need to permit
+### 4.2 What the arbiter's policy permits — and the one gate that does not (2026-09-29 review)
 
-**The policy is not in this repo.** Verified: the only `town.muni.arbiter.policy` occurrence in code is the AT-URI *string* at `packages/appserver/src/arbiter/provision.ts:35` — `at://did:plc:cyqufxsezk33hqulcilckna6/town.muni.arbiter.policy/default` — and a repo-wide grep for `.rego` files or `package arbiter` outside `arbiter-integration.md` returns nothing. The policy is a document in someone else's repo, fetched and hot-reloaded by the arbiter (`arbiter-integration.md:67-77`).
+**The policy is now in this repo.** It lives at `packages/appserver/policy/default.rego` (167 lines, plus 673 lines of behavioural tests at `policy/tests/default_test.rego`), landed after the original pass. The arbiter fetches and hot-reloads the *installed record*, but the source is here, and the arbiter CLI validates and tests it (`policy/README.md`). The single `policyLayers` AT-URI the reference config points at (`at://did:plc:cyqufxsezk33hqulcilckna6/town.muni.arbiter.policy/default`, `packages/appserver/src/arbiter/provision.ts:35`, mirrored by `scripts/migrate-arbiter-configs.ts:102`) is the published form of that file.
 
-What *is* in the repo:
+**The policy admits the appserver, and it does not restrict which collections it writes.** `policy/default.rego` resolves adminship from three sources in order (first match wins):
 
-- The appserver's three arbiter calls: `createArbiter` (`packages/appserver/src/arbiter/client.ts:98`), `resetConfig` (`:118`), `proxy` (`:136`). It never calls `resetPolicy`.
-- The reference config applied at provisioning (`provision.ts:30-36`): `trustedScopes: ["space.roomy.authComplete"]` and the single `policyLayers` AT-URI above.
-- The policy's data hook back into Roomy: **`space.roomy.space.getUserAccess`** (`packages/appserver/src/handlers/space.roomy.space.getUserAccess.ts:38-70`), whose authorization is `auth.did !== null && auth.did === spaceId` (`:46`) — i.e. it only answers when the caller *is* the space DID, which is true only when the arbiter is proxying under the stewarded account. Its header (`:5-23`) explains why that is the correct boundary and why it fails closed. [Note: this endpoint is the *shipped* equivalent of `space.roomy.space.isAdmin`, which `arbiter-integration.md:174-235` proposes as not-yet-implemented. The arbiter plan's Phase 2 description is out of date on this point.]
+1. the space account itself — `input.callerDid == input.arbiterDid`;
+2. **the recovery admin named in the space's `town.muni.arbiter.recovery/self` record — the appserver (`did:web:api.roomy.space`)**. The policy's own comment calls this "load-bearing: the appserver's own proxy calls … are authorized here";
+3. a Roomy admin, via the `xrpc` host function reading `space.roomy.service/self` and then calling **`space.roomy.space.getUserAccess`** (`packages/appserver/src/handlers/space.roomy.space.getUserAccess.ts`), whose authorization is `auth.did === spaceId` (`:46`).
 
-**The two publish paths present two different callers to the policy, and this is the decision that matters:**
+For any admin, the policy's final rule forwards **any** non-`town.muni.arbiter.*` request to `input.target` as the steward — there is no NSID or collection allowlist:
 
-- **Client-driven (A):** app-lite mints a serviceAuth token to the arbiter with the *user's* agent (`packages/sdk/src/atproto/arbiter.ts:140-150`), so `input.callerDid` is the human admin — an identity the policy already has a way to evaluate, via the `xrpc()` host function calling `getUserAccess` (`arbiter-integration.md:73-76`, `:198-210`). The OAuth scope for this is already granted (`packages/app-lite/src/lib/config.ts:125-135`, mirrored at `packages/app-lite/scripts/build-prod.sh:34-40`).
-- **Server-driven (B):** the appserver calls `proxy()` as **itself** — `mintServiceAuth(config.did, nsid, ownDid)` signs with the appserver's key and sets `iss = sub = ownDid` (`packages/appserver/src/auth/serviceAuth.ts:110-135`). The appserver **cannot** assert a space DID; it has no space keys (the legacy path's `did_keys` table is only written by the non-arbiter provisioning branch — `packages/appserver/src/streams/StreamManager.ts:371-376`). The arbiter plan's Phase 2 sketch grants `input.callerDid == input.arbiterDid` (the space itself) and Roomy *admins* — **not the appserver DID** (`arbiter-integration.md:174-210`).
+```rego
+result := xrpc({ "target": input.target, "method": input.method, "nsid": input.nsid, ... })
+  if { is_admin; not startswith(input.nsid, "town.muni.arbiter.") }
+```
 
-**So: enabling automatic mirroring requires a change to a document outside this repo** (plus, if the reference config should change, a `REFERENCE_ARBITER_CONFIG` edit at `provision.ts:30-36` and a re-apply to existing spaces). Re-application is available via the admin-only `space.roomy.space.updatePolicy` procedure, which calls `resetConfig` with the reference config (`packages/appserver/src/handlers/space.roomy.space.updatePolicy.ts:65`). Note two stale/incorrect pointers found while verifying:
+**This inverts the conclusion the original pass reached, and it splits into three separate gates that the plan previously conflated:**
 
-- `provision.ts:25-28` says the constant "Must stay in sync with `scripts/migrate-arbiter-configs.ts`" — **that script does not exist** (`packages/appserver/scripts/` contains `bench-materialize.ts`, `bench-queries.ts`, `generate-vapid.ts`, `migrate-from-leaf.ts`, `migrate-spaces-to-pds.ts`, `repair-activity-timestamps.ts`). The re-apply mechanism is the `updatePolicy` procedure.
-- `packages/sdk/src/schemas/procedures/updatePolicy.ts:5-8` says the appserver calls `town.muni.arbiter.resetPolicy`; the implementation calls `resetConfig` (`packages/appserver/src/arbiter/client.ts:118-129`).
+**(a) The built-in community pipeline (`town.muni.arbiter.proxy`) — the appserver is admitted, for any collection.** The appserver authenticates as *itself*: `mintServiceAuth(config.did, nsid, ownDid)` sets `iss = sub = ownDid` (`packages/appserver/src/auth/serviceAuth.ts:112-128`), and source 2 above matches that DID. So a `putRecord` of `app.bsky.feed.post` from the appserver reaches the pipeline and is **allowed by the installed policy today**. The original claim that the policy grants the space itself and Roomy admins but "**not the appserver DID**" is **false** — and it was false at the baseline too, against the arbiter plan's Phase 2 *sketch* rather than against the shipped policy. What is true is the narrower point the plan also made: the appserver cannot assert a *space*'s DID (no space keys), so `callerDid` is the appserver, not the space. That still identifies the accountable actor as the operator.
 
-Neither is caused by this work, and neither blocks it, but the second one will mislead whoever writes the policy change.
+**(b) The route the server-side `proxy()` helper uses is the built-in one.** `packages/appserver/src/arbiter/client.ts:145` posts to `town.muni.arbiter.proxy` — the route with no scope gate (the module comment at `:15-23` states why). The scoped `space.roomy.authComplete.arbiter.proxy` route is for OAuth'd end users. This is a change from baseline: `d01b02c3` briefly moved the appserver onto the scoped route, and `9e70ffbd` (2026-09-21) reverted provisioning to the built-in route after the scoped route denied the provisioning `putRecord` outright. **The plan's §0.1 and PR description naming `town.muni.arbiter.proxy` for the server-side helper were therefore correct; its §0.1 naming it for the *client* was not** — see (c).
+
+**(c) The scoped route (`space.roomy.authComplete.arbiter.proxy`) is the path the client-driven share would use — and it denies exactly this write.** Two gates run before any policy layer:
+
+1. the account's `trustedScopes` must contain the scope prefix (`space.roomy.authComplete` — it does, `provision.ts:34`), then
+2. the **permission-set lexicon's embedded Rego, evaluated over the inner request core alone** (no caller DID — scope policies are pure functions of `{method, nsid, parameters, body, encoding}`).
+
+That transcription is pinned by tests in `packages/appserver/src/arbiter/provision.test.ts`: the scope policy admits `space.roomy.*`, `network.cosmik.*`, `uploadBlob`, `updateHandle`, `putRecord`/`createRecord` of `network.cosmik.*`, and `putRecord` of `app.bsky.actor.profile` or `space.roomy.service` (`:61-83`) — and a `putRecord` of `app.bsky.feed.post` is asserted to return **403 `request denied by scope policy`** (`:187-218`). **A Bluesky post is not in the permission set, so a client-driven publish through the scoped route fails structurally, for every caller including a space admin.** No admin authorization can rescue it, because the caller DID is not visible to the scope policy at all.
+
+**What follows for the plan, precisely:**
+
+| Publish path | Route | Status today | What must change |
+|---|---|---|---|
+| **A. Client-driven manual share** (Phase 3) | `space.roomy.authComplete.arbiter.proxy`, in-sdk `ArbiterClient.proxy` | **blocked** — scope policy denies `app.bsky.feed.post` | the published `space.roomy.authComplete` permission-set lexicon must admit `putRecord` of `app.bsky.feed.post` (that lexicon is a published record with no in-repo source; the repo-side mirror to update is `scopedScopePolicyAllows` in `provision.test.ts`, which would otherwise fail as the transcription drifts from the deployed policy) |
+| **B. Server-driven mirroring** (Phase 4) | `town.muni.arbiter.proxy`, `arbiter/client.ts:145` | **permitted by the installed policy** — the recovery admin may write any collection | nothing on the arbiter side; the only remaining question is policy in the product sense (§6.1) |
+
+This flips the original §4.2/§4.3 conclusion. The original pass held that client-driven is "the only path whose authorization is already expressible today" and that server-driven "requires a change to a document outside this repo". Both are now backwards: **the server-driven path is the one that works today, and the client-driven path is the one that needs an outside-the-repo policy change.** The reason is the same mechanism the arbiter plan documented for provisioning (`arbiter-integration.md:158-166`): the scope policy is a pure function of the request core and cannot see *who* is calling, so it is the strictest gate in the stack and the appserver's own writes must not depend on it.
+
+Two consequences worth stating plainly:
+
+- **Phase 3 (manual share) cannot ship through the scoped route as originally specified.** Either the permission set admits the post collection, or manual share is implemented by calling the *appserver* (which uses the built-in route) rather than by the client calling the arbiter directly. The second avoids the outside-the-repo dependency but makes the operator the actor for every share — which is exactly the tradeoff §6.1 was asking Meri to decide, now forced one step earlier.
+- **The appserver's ability to write any collection as any space is unconditional** (source 2, plus the recovery-admin record). That was already true; the new policy file makes it legible. It strengthens §4.1's accountability point rather than changing it.
+
+Re-application of the config is available via the admin-only `space.roomy.space.updatePolicy` procedure, which calls `resetConfig` with `REFERENCE_ARBITER_CONFIG` (`packages/appserver/src/handlers/space.roomy.space.updatePolicy.ts:65`). Two stale pointers the original pass flagged are **both now fixed**: `scripts/migrate-arbiter-configs.ts` exists (landed with the policy), and `packages/sdk/src/schemas/procedures/updatePolicy.ts:1-8` now correctly says `resetConfig`, not `resetPolicy`.
 
 ### 4.3 Policy questions this plan will not answer
 
-See §6. Summarising the shape: **client-driven publishing is the only path whose authorization is already expressible today**, because its caller is a human admin the policy can check. Server-driven publishing makes the accountable actor the appserver's DID, i.e. Roomy-the-operator, on behalf of spaces that merely flipped a toggle. That is a decision about what Roomy is willing to be, not a technical one.
+See §6. The shape is now the reverse of the original draft: **server-driven publishing is the path whose authorization already works**, because the recovery admin is admitted by name. Client-driven publishing is blocked by a scope policy that cannot see the caller. Choosing server-driven makes the accountable actor the appserver's DID, i.e. Roomy-the-operator, on behalf of spaces that merely flipped a toggle. That is a decision about what Roomy is willing to be, not a technical one — and it can no longer be deferred past Phase 3.
 
 ---
 
@@ -421,7 +460,10 @@ Each phase states an **observable completion criterion**. Nothing here is implem
 
 **Deliverables**
 
-- An admin-only "Share to Bluesky" action on a message, client-driven through the arbiter (`ArbiterClient.proxy`, `packages/sdk/src/atproto/arbiter.ts:156`) — the same mechanism the handle and profile writes already use.
+- An admin-only "Share to Bluesky" action on a message.
+- **Route decision required first (§4.2(c)):** `ArbiterClient.proxy` (`packages/sdk/src/atproto/arbiter.ts:156`) posts to the scoped `space.roomy.authComplete.arbiter.proxy`, whose scope policy **denies `app.bsky.feed.post`** — so the client-driven share as originally specified cannot work until that permission set admits the post collection. Two ways through, and the choice is §6.1's:
+  - **(i) widen the permission set** — a change outside this repo, plus updating its in-repo transcription at `packages/appserver/src/arbiter/provision.test.ts:61-83`; or
+  - **(ii) route the share through the appserver**, which uses the built-in `town.muni.arbiter.proxy` (`packages/appserver/src/arbiter/client.ts:145`) and is already admitted as the recovery admin. No policy change, but the actor becomes the operator, not the admin.
 - Publish writes via `com.atproto.repo.putRecord` with the derived rkey; the returned `uri`/`cid` are recorded in the mapping table.
 - A retraction (delete) path exercising §3.4.
 - The `space.roomy.space.updatePolicy`-style error surfacing: map `ArbiterProxyError.errorName` to a human message.
@@ -471,13 +513,13 @@ Each phase states an **observable completion criterion**. Nothing here is implem
 
 These are decisions, not gaps in research. Each names the options and the tradeoff; none is invented into a default.
 
-**6.1 May the appserver publish without a human in the loop?** This decides whether automatic mirroring (Phase 4) is possible at all. Server-driven publishing requires the arbiter's Rego policy — a document outside this repo (§4.2) — to permit `com.atproto.repo.putRecord` for the **appserver's own DID**, and it makes Roomy-the-operator the accountable actor for any space that flips a toggle. Options: (a) client-driven only, admins publish by hand; (b) allow the appserver DID and accept operator accountability; (c) allow the appserver DID but only for rooms whose admins have explicitly accepted that. **The plan is written so that Phase 3 is deliverable under (a) alone.**
+**6.1 May the appserver publish without a human in the loop?** *Rewritten 2026-09-29 — the original framing had the two options backwards.* Under the policy now in the repo (`packages/appserver/policy/default.rego`), **server-driven publishing is already permitted**: the appserver is the named recovery admin and may write any collection through the built-in route. **Client-driven publishing is the path that is currently blocked**, by the scoped route's permission set (§4.2(c)). So the question is no longer "may the appserver act" but: (a) keep the operator as the actor for every publish, including manual shares — nothing to change, operator accountability accepted; (b) widen the published `space.roomy.authComplete` permission set to admit `app.bsky.feed.post`, so a human admin's own credentials drive manual shares, at the cost of a change outside this repo; or (c) do both, sequencing (a) then (b). Note the tradeoff no longer runs the direction the draft assumed: the *cheap* path is the one that makes Roomy-the-operator the actor.
 
-**6.2 Who may share a message to the space's Bluesky account?** Admin-only (matching every other space setting, §1.4) or any member? Any-member publishing under a shared identity is a reputational exposure that admin-only avoids; a capability model to express anything in between does not exist today and would be new work.
+**6.2 Who may share a message to the space's Bluesky account?** Admin-only (matching every other space setting, §1.4) or any member? Any-member publishing under a shared identity is a reputational exposure that admin-only avoids; a capability model to express anything in between does not exist today and would be new work. Note the shipped arbiter policy already answers the *authorization* half for the admin case — `getUserAccess` is what decides `is_admin` — so "any member" would mean relaxing a policy that currently admits admins only.
 
 **6.3 May a space re-host a member's media under the space's identity?** Roomy attachments are blobs on the *author's* PDS; publishing them under the *space's* account means copying a user's file into another repo (§2.6). This is a consent question about members' content, not a technical one.
 
-**6.4 What happens to a space with no stewarded account?** Steward resolution fails opaquely today — `getSpaceProfileRecord` swallows every error and returns `null` (`packages/sdk/src/atproto/bluesky-profile.ts:83-86`), so "no steward" and "no profile" are indistinguishable in the UI. Options: (a) surface steward state in `getMetadata` (needs a new read, since no appserver table records it); (b) stop swallowing the error so the integrations tab can say *why*; (c) leave it. The plan needs the answer before Phase 1's UI work, because offering a publish toggle on a space that cannot publish is a dead control.
+**6.4 What happens to a space with no stewarded account?** Steward resolution fails opaquely today — `getSpaceProfileRecord` swallows every error and returns `null` (`packages/sdk/src/atproto/bluesky-profile.ts:83-87`), so "no steward" and "no profile" are indistinguishable in the UI. Options: (a) surface steward state in `getMetadata` (needs a new read, since no appserver table records it); (b) stop swallowing the error so the integrations tab can say *why*; (c) leave it. The plan needs the answer before Phase 1's UI work, because offering a publish toggle on a space that cannot publish is a dead control. Newly relevant: the policy now resolves the appserver through the space's own `space.roomy.service/self` record (`policy/default.rego`), and the migration script skips any space whose `town.muni.arbiter.service/self` does not point at the expected arbiter (`scripts/migrate-arbiter-configs.ts`) — so "stewarded, but by a different arbiter" is a third state the UI currently cannot express either.
 
 **6.5 What is the character-limit policy?** Refuse (recommended, §2.5), truncate, or split into a thread. If "refuse", what does the sharer see — and does an auto-mirrored room silently drop long messages, or notify its admins?
 
@@ -487,12 +529,15 @@ These are decisions, not gaps in research. Each names the options and the tradeo
 
 ## 7. References
 
-**In-repo (all verified on `origin/next` @ `c7087ea9`)**
+**In-repo (verified on `origin/next` @ `c7087ea9`; §7's arbiter entries re-verified @ `b245b695`)**
 
-- `packages/appserver/docs/plans/arbiter-integration.md` — the arbiter (leaf-0.4) integration plan. Phases 0–1 shipped; 2–4 not implemented. This plan is a new phase consuming that machinery. (Note: its Phase 2 claim that `space.roomy.space.isAdmin` does not exist is stale — the shipped equivalent is `space.roomy.space.getUserAccess`, and its Phase 3 "not needed yet" note is what this plan begins to change.)
+- `packages/appserver/docs/plans/arbiter-integration.md` — the arbiter (leaf-0.4) integration plan. Phases 0–1 shipped; 2–4 not implemented. This plan is a new phase consuming that machinery. (Note: much of that document is now stale — its Phase 2 says `space.roomy.space.isAdmin` does not exist, when the shipped equivalent `space.roomy.space.getUserAccess` is what the installed policy actually calls; its Phase 1 step 3 still names the scoped route the provisioning code no longer uses; and its "the policy is not in this repo" premise no longer holds.)
+- `packages/appserver/policy/default.rego` + `policy/tests/default_test.rego` + `policy/README.md` — **the installed arbiter policy and its behavioural tests.** The authoritative answer to "may the appserver write this?" (§4.2).
+- `packages/appserver/src/arbiter/provision.test.ts:61-83` — the in-repo transcription of the published `space.roomy.authComplete` permission set, and `:187-218` the negative fixture pinning that a `putRecord` of `app.bsky.feed.post` is denied on the scoped route.
+- `packages/appserver/scripts/migrate-arbiter-configs.ts` — one-time `resetConfig` backfill; mirrors `REFERENCE_ARBITER_CONFIG`.
 - `docs/plans/richtext-migration-plan.md:160` — the export mapping, already researched (§0.3).
 - `docs/rich-text-representation-research.md:136-183` — the Bluesky post/facet lexicon analysis, and the byte-index footgun.
-- `packages/appserver/docs/push-freshness-gate.md` — the TASK-151 incident write-up (mechanism, evidence, mitigations, and the replay-marker follow-up at `:224-228`).
+- `packages/appserver/docs/push-freshness-gate.md` — the three freshness gates; the bridge-replay hazard is documented in its framing, and the replay-marker follow-up now sits at `:67-70`.
 - `packages/appserver/docs/plans/per-space-dbs.md` — per-space DB split, and `comp_space.backfilled_to`'s move to `materialization_cursor`.
 - `packages/docs/src/routes/concepts/feature-flags/+page.svelte` — the authoritative flag semantics ("not a security boundary", "not per-space").
 
@@ -507,7 +552,8 @@ These are decisions, not gaps in research. Each names the options and the tradeo
 
 ## 8. Verification notes
 
-- Every `file:line` in this document was read from `origin/next` at `c7087ea9`; the working tree was clean and at that commit throughout.
+- Every `file:line` in this document was read from `origin/next` at `c7087ea9`; the working tree was clean and at that commit throughout. The arbiter material — §0.1, §0.2's greps, §4.2, §4.3, §6.1, §6.4, §7 — was re-verified at `b245b695` after `next` moved 85 commits, and is the version to trust; the remaining citations are unchanged from the original pass and drift with `next` (they shift by single-digit-to-low-hundreds of lines as files grow — the symbols and the claims still hold).
 - The absence of the publish half was verified with the greps quoted verbatim in §0.2, each runnable as written against `origin/next`.
 - Runtime facts checked rather than assumed: `Intl.Segmenter` grapheme segmentation (family emoji → 1 grapheme; `e` + combining acute → 1; vs 7 and 2 code points) and the TID alphabet/length (13 chars from `234567abcdefghijklmnopqrstuvwxyz`; a ULID is 26 Crockford base32 chars including `0`, `1`, `9`, so it is **not** a valid TID).
+- The 2026-09-29 review's headline finding — that the scoped route's permission set denies `app.bsky.feed.post` while the built-in route admits the appserver for any collection — rests on `packages/appserver/policy/default.rego`, the transcription at `packages/appserver/src/arbiter/provision.test.ts:61-83`, and the negative fixture at `:187-218`. All three were read at `b245b695`.
 - No production code was changed by this task.
