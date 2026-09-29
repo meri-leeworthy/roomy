@@ -98,11 +98,18 @@ create index if not exists idx_user_thread_activity_user
 -- initializeReadStateSchema (worker.ts).
 
 -- ── Web push (schema v3) ────────────────────────────────────────────────
--- A device/browser subscription for a user. A user may have many (one per
--- browser). Idempotent on endpoint — re-registering updates keys/expiry.
+-- A delivery destination for a user. A user may have many (one per browser or
+-- device). Idempotent on endpoint — re-registering updates its keys/expiry.
+--
+-- `kind` names the transport that can reach the row (see
+-- `push/transports/types.ts`).
+-- Web Push rows carry the push-service URL plus the RFC 8291 `p256dh`/`auth`
+-- keys; a native transport's row will carry its device token in `endpoint` and
+-- leave the keys unused.
 create table if not exists push_subscriptions (
   user_did        text not null,
-  endpoint        text not null,          -- push service URL; unique per subscription
+  endpoint        text not null,          -- push service URL / device token; unique per subscription
+  kind            text not null default 'webpush',
   p256dh          text not null,
   auth            text not null,
   expiration_time integer,                -- epoch ms, nullable
@@ -209,4 +216,21 @@ create index if not exists idx_bridge_token_grants_space
 create table if not exists pro_role_grants (
   did         text primary key,
   granted_at  integer not null default (unixepoch() * 1000)
+) strict;
+
+-- ── OAuth scope grants (schema v11) ─────────────────────────────────────
+-- The raw OAuth scope string each user last consented to, as returned by
+-- the PDS's `getTokenInfo().scope`. Written by the recordScopeGrant
+-- procedure (the client calls it after every login/expansion) and read by
+-- the unauthenticated getLoginScope query, so a returning user gets the
+-- scope they already approved back in one round-trip, with no re-prompt.
+--
+-- LAST-GRANTED, not a high-water mark: a user who narrows consent on the
+-- PDS consent screen must not be silently re-granted the removed scopes on
+-- next login. Tiers (`semble`, `withDms`) are a client-side UX abstraction —
+-- the server stores the opaque string from `getTokenInfo()` verbatim.
+create table if not exists user_oauth_grants (
+  user_did       text primary key,
+  granted_scope  text not null,
+  updated_at     integer not null default (unixepoch() * 1000)
 ) strict;
