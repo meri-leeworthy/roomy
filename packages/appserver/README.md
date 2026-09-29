@@ -93,3 +93,35 @@ L1/L2/L3 test layers that prove the invariants.
 Litestream is only active when the app runs in the container. For local
 development, run the appserver directly (`bun run packages/appserver/src/index.ts`)
 with no backup config.
+
+## Lexicons
+
+`lexicons/` holds the ATProto JSON lexicons this service defines, grouped by
+NSID path. The XRPC definitions here are the contract for third-party clients
+and are mirrored into the SDK by `packages/sdk/scripts/generate-lexicons.ts`;
+pure **record** collections (no query, no procedure — e.g.
+`space/roomy/user/profile.json`) are not generated into the SDK and live only
+in this directory.
+
+### Publishing a record lexicon
+
+For another app to resolve a record collection over the network, its lexicon
+must be published as a `com.atproto.lexicon.schema` record, with the rkey set
+to the NSID, in the repo of the NSID's authority. For a `space.roomy.*` NSID the
+authority is the `roomy.space` account, `did:plc:cyqufxsezk33hqulcilckna6`
+(declared by the `_lexicon.roomy.space` TXT record).
+
+This is an **out-of-band** step: it needs credentials for that authority
+account, which the appserver does not hold, and it is not part of the build or
+deploy. Land the lexicon file here first — an unpublished lexicon is a known
+gap, not a broken build — then publish with an authenticated agent for that DID:
+
+```
+com.atproto.repo.putRecord { repo: <authority-did>, collection: "com.atproto.lexicon.schema", rkey: <NSID>, record: <the lexicon file> }
+```
+
+The record is the lexicon document itself plus `$type:
+"com.atproto.lexicon.schema"`. Verify with `com.atproto.repo.listRecords` on
+the authority repo (collection `com.atproto.lexicon.schema`).
+
+**Outstanding:** `space/roomy/user/block.json` is not yet published.
