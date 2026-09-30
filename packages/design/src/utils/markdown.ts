@@ -1,20 +1,13 @@
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { Did, Ulid, type } from "@roomy-space/sdk";
-
-// Known Roomy domains — bare links to these are treated as internal space/room
-// references and replaced with rich badge components. Static membership table.
-const ROOMY_DOMAINS: Record<string, true> = {
-  "roomy.space": true,
-  "a.roomy.space": true,
-  "roomy.chat": true,
-};
+import { Did, Ulid, ROOMY_HOSTS, type } from "@roomy-space/sdk";
 
 /**
  * A bare relative path or Roomy-domain URL is an internal space/room link
  * only when it carries a valid (DID, ULID?) pair on its path — `/did:plc:…`
  * or `/did:plc:…/01ABC…`. This rejects app routes (`/watch`, `/profile`,
- * `/blog`, …) and non-DID path segments (`roomy.space/muni-town`) so they're
+ * `/blog`, …), non-DID path segments (`roomy.space/muni-town`), and `/did:…`
+ * paths on hosts that are not Roomy (`twinkl.social/did:plc:…`) so they're
  * never marked internal, which is what would otherwise make the badge
  * prefetch fire 404 `getSpaceSummary` queries. Mirrors the guard in
  * `parseInternalLinkHref` (app-lite).
@@ -53,7 +46,7 @@ marked.use({
       if (isExternal && href) {
         try {
           const url = new URL(href);
-          if (url.hostname in ROOMY_DOMAINS && isSpaceRoomPath(url.pathname)) {
+          if (url.hostname in ROOMY_HOSTS && isSpaceRoomPath(url.pathname)) {
             roomyDomainAttr = ' data-roomy-internal-link="true"';
           }
         } catch {

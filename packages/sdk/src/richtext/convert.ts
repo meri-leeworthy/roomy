@@ -89,21 +89,39 @@ function roomRefFeature(spaceId: string, roomId?: string): FacetFeature {
 }
 
 /**
+ * Hosts that serve the Roomy app. A bare link to one of these, whose path is
+ * a `/did:…` space/room reference, is a reference to a space this appserver
+ * can look up; the same path on any other host is an ordinary link.
+ */
+export const ROOMY_HOSTS: Readonly<Record<string, true>> = {
+  "roomy.space": true,
+  "a.roomy.space": true,
+  "roomy.chat": true,
+};
+
+/**
  * Parse an internal Roomy link href into `{ spaceId, roomId? }`, or `null`.
- * Accepts root-relative paths (`/did:plc:…/roomId`) and absolute URLs on any
- * host whose path has the same shape. `/user/…` and other non-space routes
- * are rejected.
+ * Accepts root-relative paths (`/did:plc:…/roomId`, the app's own origin,
+ * which is not knowable here) and absolute URLs on a {@link ROOMY_HOSTS}
+ * host. `/user/…` and other non-space routes are rejected.
  */
 export function parseInternalLinkHref(
   href: string,
 ): { spaceId: string; roomId?: string } | null {
-  let path: string;
+  let url: URL;
   try {
-    path = new URL(href, "https://roomy.space").pathname;
+    url = new URL(href, "https://roomy.space");
   } catch {
     return null;
   }
-  const parts = path.split("/").filter(Boolean);
+  // A `/did:…` path on someone else's site is that site's page, not a space
+  // in this appserver's world — the DID is whatever that site put there.
+  // Treating it as a space reference both fabricates a lookup that 404s and
+  // persists the fabrication into the message body, where every later reader
+  // repeats it.
+  const isRootRelative = href.startsWith("/") && !href.startsWith("//");
+  if (!isRootRelative && !(url.hostname in ROOMY_HOSTS)) return null;
+  const parts = url.pathname.split("/").filter(Boolean);
   const spaceId = parts[0];
   if (!spaceId || spaceId === "user") return null;
   // Space IDs are DIDs (did:plc:… / did:web:…); room IDs are ULIDs. Reject

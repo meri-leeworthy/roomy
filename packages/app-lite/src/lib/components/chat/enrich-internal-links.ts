@@ -1,12 +1,13 @@
 import { mount, unmount } from "svelte";
 import SpaceRoomBadge from "./embeds/SpaceRoomBadge.svelte";
-import { extractInternalLinkTargets, Did, Ulid, type } from "@roomy-space/sdk";
+import {
+  extractInternalLinkTargets,
+  ROOMY_HOSTS,
+  Did,
+  Ulid,
+  type,
+} from "@roomy-space/sdk";
 import type { Block } from "@roomy-space/sdk";
-
-// Known Roomy domains — bare links to these are treated as internal space/room
-// references. Must stay in sync with packages/design/src/utils/markdown.ts
-// (ROOMY_DOMAINS) so the extractor sees the same links the renderer marks.
-const ROOMY_DOMAINS = new Set(["roomy.space", "a.roomy.space", "roomy.chat"]);
 
 export interface InternalLinkTarget {
   spaceId: string;
@@ -32,10 +33,14 @@ export function enrichInternalLinksFromBlocks(
  * Mirrors the path-parsing logic in {@link enrichInternalLinks} and the
  * internal-link marking in `packages/design/src/utils/markdown.ts`:
  *   - relative links starting with `/`
- *   - absolute URLs whose host is a known Roomy domain (roomy.space, …)
+ *   - absolute URLs whose host is a {@link ROOMY_HOSTS} domain (roomy.space, …)
  *   - absolute URLs whose host is the app's own origin (the renderer can't
  *     know the origin at build time, so the action marks these; the extractor
  *     accepts them too so prefetch covers every link the action would enrich)
+ *
+ * A `/did:…` path on any *other* host is that site's page, not a space
+ * reference: the DID in it is whatever the site put there, and asking the
+ * appserver to summarise it 404s.
  *
  * `/user/<did>` and other non-space routes are skipped (matches the action).
  * `appOrigin` is optional so the function stays pure and testable; the action
@@ -46,12 +51,12 @@ export function parseInternalLinkHref(
   appOrigin?: string,
 ): InternalLinkTarget | null {
   let path: string;
-  if (href.startsWith("/")) {
+  if (href.startsWith("/") && !href.startsWith("//")) {
     path = href;
   } else {
     try {
       const url = new URL(href);
-      const isRoomyDomain = ROOMY_DOMAINS.has(url.hostname);
+      const isRoomyDomain = url.hostname in ROOMY_HOSTS;
       const isAppOrigin = appOrigin !== undefined && url.origin === appOrigin;
       if (!isRoomyDomain && !isAppOrigin) return null;
       path = url.pathname;

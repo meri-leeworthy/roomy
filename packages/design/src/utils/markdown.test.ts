@@ -43,4 +43,16 @@ describe("internal-link marking in the marked renderer", () => {
 	test("does not mark bare roomy.space links with invalid room id", () => {
 		expect(isInternal("https://roomy.space/did:plc:abc/not-a-ulid")).toBe(false);
 	});
+
+	test("does not mark a DID path on a host that is not Roomy", () => {
+		// Someone else's site may serve a `/did:plc:…` page (twinkl.social
+		// does, for profile pages). Marking it internal makes the badge
+		// prefetch ask this appserver to summarise a DID that only means
+		// something to that site — a permanent 404, on every read.
+		expect(isInternal("https://twinkl.social/did:plc:rqbqpaaluty5v47jwciowpik")).toBe(false);
+		expect(isInternal("https://example.com/did:plc:abc/01KZBRQMEP2FTE079YRVDFKGTA")).toBe(false);
+		// Roomy hosts still mark the same paths.
+		expect(isInternal("https://roomy.space/did:plc:abc")).toBe(true);
+		expect(isInternal("https://roomy.chat/did:plc:abc")).toBe(true);
+	});
 });

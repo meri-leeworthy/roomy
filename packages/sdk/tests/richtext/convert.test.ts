@@ -335,6 +335,79 @@ describe("derivations", () => {
     // DID space but non-ULID room is not a valid room reference.
     expect(parseInternalLinkHref("/did:plc:space/oauth-improvements")).toBeNull();
   });
+
+  test("parseInternalLinkHref rejects a DID path on a foreign host", () => {
+    // Any site can put a `did:plc:…` segment on its own path. That is a page
+    // on that site, not a space this appserver can resolve, and writing it
+    // into a `#roomRef` facet makes every later reader ask for its summary
+    // forever. Only the Roomy hosts (and the app's own origin, which is not
+    // knowable here) can carry a space reference.
+    expect(parseInternalLinkHref("https://twinkl.social/did:plc:rqbqpaaluty5v47jwciowpik")).toBeNull();
+    expect(parseInternalLinkHref("https://example.com/did:plc:space/01KZBRQMEP2FTE079YRVDFKGTA")).toBeNull();
+    // The same paths on a Roomy host still parse.
+    expect(parseInternalLinkHref("https://roomy.space/did:plc:space")).toEqual({ spaceId: "did:plc:space" });
+    expect(parseInternalLinkHref("https://roomy.chat/did:plc:space/01KZBRQMEP2FTE079YRVDFKGTA")).toEqual({
+      spaceId: "did:plc:space",
+      roomId: "01KZBRQMEP2FTE079YRVDFKGTA",
+    });
+  });
+
+  test("a foreign-host link body carries no roomRef facet to persist", () => {
+    // The write path is the fix: what the composer/converter emits is what
+    // lands in the message, and what every later reader's prefetch trusts.
+    const foreign = proseMirrorDocToBlocks({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "text",
+              text: "https://twinkl.social/did:plc:rqbqpaaluty5v47jwciowpik",
+              marks: [
+                {
+                  type: "link",
+                  attrs: { href: "https://twinkl.social/did:plc:rqbqpaaluty5v47jwciowpik" },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(extractInternalLinkTargets(foreign)).toEqual([]);
+    // The `#link` facet survives — only the space reference is dropped, so
+    // the URL still renders as a link.
+    expect(
+      foreign.flatMap((b) =>
+        "facets" in b && Array.isArray(b.facets)
+          ? b.facets.flatMap((f) => f.features.map((x) => x.$type))
+          : [],
+      ),
+    ).toEqual(["space.roomy.richtext.facet#link"]);
+
+    // The markdown path (backfill, bridge transition) agrees.
+    expect(extractInternalLinkTargets(markdownToBlocks(
+      "[x](https://twinkl.social/did:plc:rqbqpaaluty5v47jwciowpik)",
+    ))).toEqual([]);
+
+    // A Roomy-host link still produces the facet.
+    expect(extractInternalLinkTargets(proseMirrorDocToBlocks({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "text",
+              text: "https://roomy.space/did:plc:space",
+              marks: [{ type: "link", attrs: { href: "https://roomy.space/did:plc:space" } }],
+            },
+          ],
+        },
+      ],
+    }))).toEqual([{ spaceId: "did:plc:space" }]);
+  });
 });
 
 describe("wire encoding", () => {
