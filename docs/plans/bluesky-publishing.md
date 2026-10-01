@@ -1,559 +1,395 @@
 # Publishing to Bluesky as the Space Account — Plan
 
-**Date:** 2026-09-16 (arbiter review 2026-09-29)
+**Date:** 2026-09-16 (scope corrected by Meri 2026-09-29; revised 2026-10-01)
 **Status:** Draft for review. **No implementation.** This document changes no production code.
-**Verified against:** `origin/next` @ `b245b695`. §0.1, §4.2 and §6.1/§6.4 were re-verified after the arbiter work that landed between `c7087ea9` and `b245b695`; the `file:line` citations outside those sections are unchanged from the original pass and shift with `next`.
-**Slots into:** `packages/appserver/docs/plans/arbiter-integration.md` (Phases 0–4) — read that first. This plan is a *new* phase that consumes that plan's shipped machinery; it does not replace or restate it. Its account of the arbiter is itself partly stale (§4.2 says so where it matters).
+**Verified against:** `origin/next` @ `2dbf7d8a`. §0.3, §0.4, §1.4, §2.5 and §4 were re-read there; §3's `convert.ts` citations too. Other `file:line` citations date from the original pass and shift with `next`.
+**Slots into:** `packages/appserver/docs/plans/arbiter-integration.md` (Phases 0–4) — read that first. This plan is a *new* phase that consumes that plan's shipped machinery; it does not replace or restate it. Its account of the arbiter is itself partly stale (§4.1 says where).
 
-**Path choice.** This document lives at `docs/plans/bluesky-publishing.md`. Rationale: the root `docs/plans/` directory holds the cross-package plan documents (`richtext-migration-plan.md`, `voice-chat-plan.md`, `client-migration-plan.md`), while `packages/appserver/docs/plans/` holds appserver-scoped ones. Publishing touches `packages/sdk` (exporter, arbiter client), `packages/appserver` (opt-in storage, sweeper, mapping table), and `packages/app-lite` (the share affordance) — three packages, so the root directory is correct. Say the word if you want it moved beside `arbiter-integration.md` instead.
+**Path choice.** This document lives at `docs/plans/bluesky-publishing.md`. Rationale: the root `docs/plans/` directory holds the cross-package plan documents (`richtext-migration-plan.md`, `voice-chat-plan.md`, `client-migration-plan.md`), while `packages/appserver/docs/plans/` holds appserver-scoped ones. This work touches `packages/sdk` (exporter, arbiter client), `packages/appserver` (the feed query, opt-in, mapping table) and `packages/app-lite` (the share action, the space page) — three packages, so the root directory is correct.
 
 ---
 
-## 0. Status: the space already has a Bluesky identity; nothing publishes with it
+## 0. Scope
 
-### 0.1 What is built
+### 0.1 The two features
 
-The arbiter half is shipped. A Roomy space *is* a real ATProto account on the Roomy PDS, reachable only through the arbiter's policy proxy.
+Per Meri, 2026-09-29:
+
+1. **Share an individual message.** A user clicking "share" on *their own* message gets the option to make a Bluesky post, with that message as a starting point.
+2. **The space's Bluesky page.** A page in a space — "perhaps comparable to 'index'" — that is essentially a mini Bluesky client, scoped to the profile feed of the space's account. Admins may post to the space's account from it (if enabled); non-admins may view it.
+
+**Automatic mirroring is explicitly not a goal.** The earlier draft of this document recommended a per-room auto-mirror phase; that is out of scope and §0.2 records what it was carrying.
+
+### 0.2 What the correction removes
+
+Dropping automatic mirroring removes more than a phase — it removes the entire apparatus the draft built *for* it. Both remaining features have a human in the loop at the moment of posting, so:
+
+| Draft section | Status now |
+|---|---|
+| Per-room mirror toggle, `mirror_from` watermark, persisted publish queue, publish sweeper | **Removed.** These existed to make an unattended publish safe. Neither feature publishes unattended. |
+| §3.3 "the replay problem" (TASK-151's shape) | **Moot for now**, but the design rule it produced is kept as a standing invariant (§3.3) — it applies again the moment any automatic path is added. |
+| Per-space opt-in event + `comp_space.publish_enabled` (§1.2–1.3) | **Narrowed.** It gated automatic publishing. What remains is a smaller question: whether a space's page has posting enabled at all (§2.4). |
+| The grapheme limit as a *terminal* failure mode | **Becomes a composer constraint.** A human reviews the post before it goes out, so an over-length message is something the UI tells them about, not a queue item that settles. |
+| The `definitive` / `transient` outcome model, backoff, delete-on-settle | **Removed.** Failure is a synchronous error on a user action, surfaced like every other failed mutation (the `space.roomy.space.updatePolicy` error-surfacing precedent). |
+
+What survives is the part that is genuinely load-bearing:
+
+- the **exporter** (Roomy message → `app.bsky.feed.post`) — §3;
+- the **message ↔ post mapping**, needed to answer "has this message been shared?" and to retract a post when the message is deleted — §1.5;
+- the **route and policy analysis** — §4, which is where the one hard blocker lives.
+
+### 0.3 What is built today; what is absent
+
+**The space already has a Bluesky identity.** A Roomy space *is* a real ATProto account on the Roomy PDS, reachable through the arbiter's policy proxy.
 
 | Capability | Evidence |
 |---|---|
 | Provision a space as a real PDS account | `packages/appserver/src/arbiter/provision.ts:46` (`provisionSpace` → `createArbiter`, `resetConfig`, `proxy`) |
-| Act as the space on its PDS | `packages/sdk/src/atproto/arbiter.ts:97` (`ArbiterClient`), `:156` (`proxy`), posting to `space.roomy.authComplete.arbiter.proxy` with a per-request single-use serviceAuth token (`:140-148`) |
-| Write a record under the space's repo | `packages/sdk/src/atproto/bluesky-profile.ts:101` — `putRecord` via `arbiter.proxy`; the only `app.bsky.*` write in production code. The one other reference is a negative fixture (`packages/appserver/src/arbiter/provision.test.ts:200-205`), which asserts the scoped route *denies* a `putRecord` of `app.bsky.feed.post` |
-| Write a `network.cosmik.*` record under the space's repo | `packages/sdk/src/atproto/cosmik-card.ts` (`createCosmikCard`, `createRecord` of `network.cosmik.card`) via `space.roomy.authComplete.arbiter.proxy`; wired from the message toolbar at `packages/app-lite/src/lib/mutations/space-card.ts` |
-| Upload a blob to the space's repo | `packages/sdk/src/atproto/bluesky-profile.ts:41` (`uploadBlobToSpace`), `:48` (`com.atproto.repo.uploadBlob`) |
-| Set the space's handle | `packages/sdk/src/atproto/space-handle.ts:77` (`setSpaceHandle` → `com.atproto.identity.updateHandle`) |
-| Server-side proxy helper | `packages/appserver/src/arbiter/client.ts:145`; used exactly once today, at `packages/appserver/src/arbiter/provision.ts:60-75` |
+| Act as the space on its PDS (client-driven) | `packages/sdk/src/atproto/arbiter.ts:97` (`ArbiterClient`), `:156` (`proxy`), posting to `space.roomy.authComplete.arbiter.proxy` with a per-request single-use serviceAuth token (`:140-148`) |
+| Act as the space on its PDS (server-driven) | `packages/appserver/src/arbiter/client.ts:145` (`proxy`), posting to `town.muni.arbiter.proxy`; used today only by provisioning (`arbiter/provision.ts:60-75`) |
+| Write a record under the space's repo | `packages/sdk/src/atproto/bluesky-profile.ts:101` — `putRecord` of `app.bsky.actor.profile`; the only `app.bsky.*` write in production code |
+| Write a `network.cosmik.*` record under the space's repo | `packages/sdk/src/atproto/cosmik-card.ts` (`createCosmikCard`) via the scoped route; wired from the message toolbar at `packages/app-lite/src/lib/mutations/space-card.ts` |
+| Upload a blob to the space's repo | `packages/sdk/src/atproto/bluesky-profile.ts:41` (`uploadBlobToSpace`) |
+| Set the space's handle | `packages/sdk/src/atproto/space-handle.ts:77` |
 | UI surface | `packages/app-lite/src/routes/[space]/settings/integrations/+page.svelte:101` — "Create/Update Bluesky Profile", gated by the `space-account-management` flag (`:18-20`) and `isAdmin` (`:14`) |
+| OAuth scopes for all of the above | already in the `base` tier (`packages/app-lite/src/lib/scopes.ts:146`, `:156`) — this plan adds none (§2.5) |
 
-### 0.2 What does not exist
+**Absent, and required by this plan:**
 
-**No code anywhere publishes a post.** The falsifiable grep, run against `origin/next`:
+- **Any code that publishes a post.** `git grep -n "app\.bsky\.feed\.post"` returns three hits: two prose (`docs/plans/richtext-migration-plan.md:160`, `docs/rich-text-representation-research.md:136`) and one **negative** fixture (`packages/appserver/src/arbiter/provision.test.ts:203`, asserting the scoped route denies it).
+- **Any Bluesky *read* path.** `git grep -n "app\.bsky\.feed"` over `packages/` finds only that same fixture — no `getAuthorFeed`, no feed or thread fetch anywhere. The repo's only Bluesky reads are profile/handle lookups against `api.bsky.app` (`packages/app-lite/src/lib/components/auth/HandleTypeahead.svelte:50`, `packages/app-lite/src/lib/last-login.ts:41`). Feature 2's client is new work.
+- **No message ↔ post mapping** of any kind, and no retraction path.
+- **No message-length limit**: no `maxGraphemes`/`maxLength` on any message schema, and `Intl.Segmenter` appears nowhere in the repo (the only grapheme constraints are on *profile* fields).
 
-```bash
-git grep -n "app\.bsky\.feed\.post" origin/next
-```
+### 0.4 Arbiter review, 2026-09-29 — the one finding that shapes this plan
 
-returns three hits, all prose or fixtures:
+`next` moved 85 commits between the original pass (`c7087ea9`) and this review. Four touch the arbiter:
 
-- `docs/plans/richtext-migration-plan.md:160`
-- `docs/rich-text-representation-research.md:136`
-- `packages/appserver/src/arbiter/provision.test.ts:203` — a **negative** fixture (the request is denied)
-
-and zero writers. Supporting greps, also against `origin/next`:
-
-```bash
-git grep -n "bskyPost\|publishSweeper\|createRecord\|outbox" origin/next -- 'packages/**'   # → only a doc comment in pending-sends.svelte.ts:26
-git grep -n "town\.muni\.arbiter\.policy" origin/next                                      # → the AT-URI string, provision.ts:35, and its mirror in scripts/migrate-arbiter-configs.ts:102
-git grep -n "maxGraphemes\|grapheme\|Intl\.Segmenter" origin/next -- 'packages/**'          # → only profile lexicons + PUSH_MAX_MESSAGE_AGE_MS
-```
-
-There is no publish table, no outbox, no dedupe table for "this message was posted", and no character-limit machinery of any kind on messages.
-
-**Correction to the original pass.** The grep `git grep -in "\.rego\b\|package arbiter"` no longer returns nothing: the arbiter policy now lives in this repo at `packages/appserver/policy/default.rego` (with tests at `policy/tests/default_test.rego`). It governs *who may act*, and it is the single most important input to this plan's §6.1 — see §4.2.
-
-### 0.3 What is already researched and must not be redone
-
-`docs/plans/richtext-migration-plan.md:160` (in §3.5, "Tradeoffs accepted") already states the hard part of the export:
-
-> **Explicit share/crosspost (Roomy → `app.bsky.feed.post`)**: the exporter must map features to Bluesky's closed union at export time (drop typography/`#roomRef`, `#didMention`→`#mention`, `#link`→`#link`) and rebase indices to post-global offsets — work that was never actually saved by the twins (§3.5 analysis above). No change to the Roomy record itself.
-
-That analysis **still holds against the current representation**, and §2 below is an implementation of it rather than a re-derivation. It holds because:
-
-- Roomy's facet byte semantics are *identical* to Bluesky's (`space.roomy.richtext.facet#byteSlice` is UTF-8, `byteStart` inclusive / `byteEnd` exclusive — `packages/sdk/src/schema/richtext/index.ts:24`, and `packages/appserver/lexicons/space/roomy/richtext/facet.json:4` says so explicitly, citing `app.bsky.richtext.facet#byteSlice`).
-- Roomy deliberately did *not* emit `app.bsky.*` facet twins (`docs/plans/richtext-migration-plan.md:147-161`, decision at `:151-155`), so the exporter is the only place the mapping can happen.
-- The index-space mismatch is real and unchanged: Roomy facets are **per-block** (`packages/sdk/src/schema/richtext/index.ts:117` — `Facet` indexes into *a block's* `text`), while `app.bsky.feed.post` facets are **post-global**.
-
-The delta this plan adds is what that cited line does not cover: **how the blocks are flattened into one post text without destroying the offsets**, what to do about Bluesky's 300-grapheme limit, what triggers a publish, and how a publish is made idempotent.
-
-### 0.4 Arbiter review, 2026-09-29 — what changed under this plan
-
-`next` moved 85 commits between the original pass (`c7087ea9`) and this review (`b245b695`). Four commits touch the arbiter:
-
-| Commit | Effect on this plan |
+| Commit | Effect |
 |---|---|
-| `d01b02c3` — "use the new scoped arbiter endpoint" | Renamed the proxy route to `space.roomy.authComplete.arbiter.proxy` repo-wide and added `include:space.roomy.authComplete` to the OAuth scope. **A pure rename for this plan, except that it is what makes §4.2(c) bite.** |
-| `9e70ffbd` — "provision spaces via the arbiter's built-in proxy route" | Reverted the *appserver's* provisioning back to `town.muni.arbiter.proxy` after the scoped route denied it. **The precedent the plan should have extrapolated from** — a scoped route denies by request shape, and no admin authorization can rescue it. |
-| `d32d84a5` — "add Roomy's new arbiter policy and policy tests" | Put the policy **in this repo** (`packages/appserver/policy/`). Kills §4.2's "the policy is not in this repo", and is what let §4.2 be rewritten as fact rather than speculation. |
-| `1b052a98` — docs/comment minimisation | Stripped task ids and incident framing repo-wide. This document's own `TASK-151` references and the `push-freshness-gate.md:224-228` citation are the visible casualties. |
+| `d32d84a5` — add Roomy's arbiter policy and tests | Put the policy **in this repo** at `packages/appserver/policy/`. §4 is written against it as fact rather than speculation. |
+| `9e70ffbd` — provision via the arbiter's built-in proxy route | The precedent for §4.1(c): a scoped route denies by *request shape*, and no admin authorization can rescue it. |
+| `d01b02c3` — use the new scoped arbiter endpoint | Renamed the proxy route to `space.roomy.authComplete.arbiter.proxy` repo-wide. The rename is what makes the blocker visible. |
+| `1b052a98` — docs/comment minimisation | Stripped task ids and incident framing repo-wide. |
 
-**The one substantive finding: the client-driven publish path is blocked, and the server-driven one is not.** See §4.2 — the scoped route's permission set (a pure function of the request, with no caller identity) admits only `space.roomy*` / `network.cosmik*` NSIDs, `uploadBlob`, `updateHandle`, and `putRecord` of `app.bsky.actor.profile` or `space.roomy.service`. A post is not in it, so it returns `403 request denied by scope policy` — while the appserver, as the named recovery admin, may write **any** collection through the built-in route. §4.3, §6.1 and Phase 3 are rewritten accordingly; everything else in this document stands.
+**The finding: the two publish paths are gated differently, and the *client-driven* one is the one that is blocked.**
 
----
+- The **scoped** route (`space.roomy.authComplete.arbiter.proxy` — what `ArbiterClient.proxy` uses, i.e. any client-driven post) runs the published permission set's embedded Rego over the inner request alone, with **no caller identity**. It **denies `putRecord` of `app.bsky.feed.post`** — pinned by `packages/appserver/src/arbiter/provision.test.ts:187-218` (`403 request denied by scope policy`). A post cannot be made through this route by anyone, admin included.
+- The **built-in** route (`town.muni.arbiter.proxy` — what the appserver's own `proxy()` helper uses) has no scope gate; the installed policy admits the appserver as the space's recovery admin and forwards **any** non-management request. A post through this route is permitted **today**.
 
-## 1. Per-space opt-in
-
-### 1.1 The constraints that decide the design
-
-Three facts from the repo settle most of this.
-
-**(a) The existing feature-flag system cannot express a per-space opt-in, and is not a security boundary.** Flags are keyed by `(flag_key, user_did)` only (`packages/appserver/src/db/readStateSchema.sql:167-182`), and `space.roomy.getFlags` takes no space argument (`packages/appserver/src/handlers/space.roomy.getFlags.ts:21-33`). The docs say both things outright:
-
-- `packages/docs/src/routes/concepts/feature-flags/+page.svelte:198-201` — "**Not a security boundary.** The appserver does not consult flags when authorizing events; a gate is a UI affordance."
-- `packages/docs/src/routes/concepts/feature-flags/+page.svelte:204-206` — "**Not per-space.** `getFlags` takes no space argument, so a flag can't be enabled for one community only."
-
-**Therefore: `space-account-management` rides along for UI availability only.** Publishing does not get its own flag and does not depend on being able to express per-space state through flags; it needs real space state. What the flag *does* legitimately control is whether an admin sees the publishing controls at all during rollout — exactly as it gates the integrations tab today (`packages/app-lite/src/lib/components/sidebar/SpaceSidebar.svelte:156-161`, `+page.svelte:18-20`). The UI gate is `space-account-management` **AND** `isAdmin`, per the existing precedent at `SpaceSidebar.svelte:159-161`.
-
-**(b) The per-space DB is wiped on a schema bump; the global DB is not.** `packages/appserver/src/db/db.ts:28-31`:
-
-> Per-space DB schema version (`data/spaces/*.sqlite`). Bump whenever `schema-space.sql` changes — a bump wipes and re-derives every per-space DB (from the event log via re-materialisation).
-
-The rebuild replays the stream from `idx 0` and swaps the file (`packages/appserver/src/streams/reMaterialize.ts:110-127`, `:263-265`). The global DB, by contrast, is explicitly never wiped (`packages/appserver/src/db/globalVersions.ts:1-10`). **This single asymmetry decides §3's storage question and it also decides this one**: any setting that must survive a rebuild has to be either (i) in the event log, or (ii) in the global DB. It must *not* be a directly-written per-space column.
-
-**(c) The repo has a precedent for each, and one bad precedent.** `comp_space.handle` is written by a direct `SQL UPDATE` in the `space.roomy.space.setHandle` procedure (`packages/appserver/src/handlers/space.roomy.space.setHandle.ts:69-77`) — i.e. **not** reconstructible from the event log, and therefore lost on a schema bump. By contrast `comp_space.handle_provider` is written by an event (`space.roomy.space.setHandleProvider.v0` → `update comp_space set handle_provider = …`, `packages/sdk/src/schema/events/space.ts:405-412`) and survives a rebuild because it is re-materialised from `stream_events`. The same contrast shows up in the *default* convention: `allow_public_join` is `NULL` = unset, defaulted in code by `coalesce(allow_public_join, 1)` (`packages/appserver/src/db/schema-space.sql:85`, `packages/appserver/src/auth/access.ts:195-206`) — i.e. **unset means OPEN**, which is precisely the default shape publishing must not copy.
-
-### 1.2 Recommendation
-
-**Store the opt-in as an event, materialised into `comp_space`.** Specifically:
-
-- **Event (recommended):** a dedicated `space.roomy.space.setPublishTarget.v0` carrying `{ enabled: boolean, targets?: [...] }`. A dedicated NSID rather than extending `space.roomy.space.updateSpaceInfo.v0`, because a publishing toggle is not "space basic info" and because a dedicated event gets its own invalidation signal without touching the one every space-settings save already emits (`packages/appserver/src/invalidation/inferSignals.ts:751-757`, registered at `:1058`).
-- **Alternative considered:** extend `updateSpaceInfo` to a `.v1` adding `publishToBluesky?: boolean | null`. This has the strong advantage of an *existing* precedent for versioning an event in place — `space.roomy.space.updateSidebar.v0` → `.v1` are both registered and both materialised (`packages/sdk/src/schema/events/registry.ts:72-73`, `packages/sdk/src/schema/events/space.ts:214` and `:246`), and the materialiser already does partial updates (only fields `!== undefined` are written — `space.ts:151-161`, `:198-204`). It is defensible; it is rejected here only because it couples the publishing toggle's invalidation and write-auth surface to a general-purpose settings event.
-- **Whatever the NSID, three registrations are mandatory** (this is the complete checklist for a new space-config event, and it is not obvious): `packages/sdk/src/schema/events/registry.ts` (schema + materialiser), `packages/appserver/src/auth/writeAuth.ts:47` (`ALLOWED_TYPES`, or the event is rejected at the `sendEvents` boundary) **and** `writeAuth.ts:146-165` (`SPACE_MANAGE_TYPES`, so it is admin-gated — without this the event is allowed for any authenticated caller with space access), and `packages/appserver/src/invalidation/inferSignals.ts` (the signal registry at `:1055-1090`). `SPACE_MANAGE_TYPES` is the mechanism by which `updateSpaceInfo` and `setHandleProvider` are already admin-only (`writeAuth.ts:147`/`:150`, dispatched at `:749-752`).
-- **Read path:** add the flag to `space.roomy.space.getMetadata`'s `comp_space` select (`packages/appserver/src/handlers/space.roomy.space.getMetadata.ts:130-142`, returned at `:332-348`, alongside the existing `isAdmin: access.isAdmin` at `:343`). That is the one query every space-settings surface already runs.
-- **Adding the column to `comp_space` requires a `SPACE_SCHEMA_VERSION` bump** (`packages/appserver/src/db/db.ts:31`), which wipes and re-derives every per-space DB. That is acceptable *only because the state is event-sourced* — it is re-derived from the log. It would be unacceptable for a directly-written column. Note also that the schema exec runs idempotently on every open when the version already matches (`packages/appserver/src/db/worker.ts:154-157`), so a table-with-no-ALTER change heals without a bump; a new `comp_space` column is the case that does need one.
-
-### 1.3 Default for existing spaces: OFF, fail-closed
-
-**Existing spaces must not start posting.** The mechanism: the new column is `NULL`-able with the read defaulting to **false** (`coalesce(publish_enabled, 0)`), the *opposite* of the `allow_public_join` convention at `access.ts:193-206`. `NULL` = "this space predates publishing" = off.
-
-This is not a stylistic preference. A default-open flag here means the first deploy turns every space into a Bluesky publisher, and every replayed historical message through the shared write path becomes a publish candidate — the same shape as TASK-151 (§3.3). Write the `coalesce(..., 0)` explicitly and test it, because the neighbouring column in the same table does the opposite and a copy-paste of that line is the plausible bug.
-
-Additionally: publishing requires a stewarded account, and **there is no way to ask the appserver whether a space has one**. `grep -i arbiter` over every schema file in `packages/appserver/src/db/` returns nothing; the only trace is two records on the space's own repo — `town.muni.arbiter.service/self` (read by `packages/sdk/src/atproto/arbiter.ts:110-129`, which throws at `:125-127` when absent) and `space.roomy.service/self` (written at `packages/appserver/src/arbiter/provision.ts:58-72`, lexicon at `packages/appserver/lexicons/space/roomy/service.json`). Today a space without a steward renders as `hasProfile: false`, indistinguishable from a space with no profile, because `getSpaceProfileRecord` swallows the error (`packages/sdk/src/atproto/bluesky-profile.ts:83-86`). **The opt-in UI must not offer publishing for a space whose steward cannot be resolved**; either surface steward state in `getMetadata` or let the resolution failure render distinctly instead of being swallowed. Flagged as an open question (§6.4) — it is a small decision with a user-visible failure mode.
-
-### 1.4 Opt-in shape: a per-space flag, not a new role capability
-
-The repo's entire capability vocabulary is `SpaceAccess {isMember, isAdmin, isBanned}` and `RoomAccess {canRead, canWrite, …}` (`packages/appserver/src/auth/access.ts:20-59`), plus `DefaultAccess = "readwrite" | "read" | "none"` (`:18`) and role grants `permission IN ('read','readwrite')` (`packages/appserver/src/db/schema-space.sql:288`). **There is no capability registry, and no permission value beyond read/readwrite.**
-
-So a "who may publish" capability has exactly three possible homes, all with real costs:
-
-1. **A new boolean predicate in `access.ts`** (e.g. `mayPublish`), derived from an edge label or a role. Needs a new edge label or role-table semantics, plus write-auth wiring.
-2. **A third value in `role_rooms.permission`** — a SQLite `CHECK` constraint change (`schema-space.sql:288`), which SQLite cannot `ALTER`, so it needs a table rebuild plus a `SPACE_SCHEMA_VERSION` bump and a global data migration (the precedent for exactly this dance is `federation_receiver_permissions.kind` at `packages/appserver/src/db/globalVersions.ts:56-58`). Broad blast radius for one capability.
-3. **Admin-only, like every other space-level setting.**
-
-**Recommendation for v1: (3), admin-only.** It matches every existing space-config precedent — `setHandle` and `updatePolicy` both gate on `requireSpaceAccess(...).isAdmin` (`packages/appserver/src/handlers/space.roomy.space.setHandle.ts:53-61`, `packages/appserver/src/handlers/space.roomy.space.updatePolicy.ts:49-57`) — and it defers the capability model to a real decision rather than inventing one inside a publishing feature. Whether *non-admin* members may share an individual message to the space's Bluesky account is a policy question, listed at §6.2.
+Details, and what each feature must do about it, are in §4.1. This is the plan's critical path.
 
 ---
 
-## 2. The record shape: Roomy message → `app.bsky.feed.post`
+## 1. Feature 1 — sharing an individual message
 
-### 2.1 Source shape (verified)
+### 1.1 The product shape
 
-A Roomy message is not an ATProto record. It is a DRISL event, `space.roomy.message.createMessage.v0`, with an arktype schema and **no JSON lexicon** (`packages/sdk/src/schema/events/message.ts:15-21`; the appserver's `lexicons/` tree is documentation only, per `packages/appserver/docs/plans/sendEvents-procedure.md:176`). Its content is an opaque envelope:
+A user acts on **their own message**. The share affordance leads to a composer pre-filled with that message's content, targeting the space's Bluesky account. The user edits if they want, sees what will be posted, and confirms. The post is created as the space, on the space's PDS.
 
-```ts
-// packages/sdk/src/schema/primitives.ts:91-95
-Content = { mimeType: string, data: Bytes }
-```
+Two consequences of "as a starting point" that shape everything below:
 
-with two wire formats discriminated by `mimeType`:
+- **The user reviews the text before it is public.** So the exporter is a *draft generator*, not a publisher: its output is editable, and every lossy decision it makes (dropped typography, flattened headings, a dropped link card) is visible to the person about to publish it.
+- **The post may not be the message.** A user may rewrite, add context, or trim. So "the post for message X" is a *human-authored derivative*, which is why §1.5 keeps a mapping the user can reason about rather than assuming post ≈ message.
 
-- **Legacy:** `text/markdown` (or `text/plain`), decoded to a string by `decodeContent` (`packages/appserver/src/db/content.ts:20`) — non-`text/*` mime types are base64'd on the read API.
-- **Current:** `application/vnd.roomy.richtext+json` (`packages/sdk/src/richtext/convert.ts:32`), UTF-8 JSON of `{ $type: "space.roomy.richtext.document", blocks }` (`convert.ts:1082-1092`), parsed by `deserializeBody` (`:1099`) or the appserver-side `decodeRichTextBody` (`packages/appserver/src/db/content.ts:45`).
+### 1.2 Where the share action lives
 
-Facets are generated **client-side** by `proseMirrorDocToBlocks(tiptap.getJSON())` (`convert.ts:291`; called from `packages/app-lite/src/lib/components/chat/ChatInput.svelte:124`). The server never constructs facets; it only decodes them for link detection, mention extraction, and plaintext (`packages/appserver/src/materialization/applyBatch.ts:554-566`, `packages/appserver/src/materialization/toAppliedEvent.ts:52-71`, `packages/appserver/src/push/evaluate.ts:140-146`). **A publish path must therefore handle both mime types**, and `markdownToBlocks` (`convert.ts:808`) is the existing legacy→blocks bridge if it needs one.
+The per-message hover toolbar already carries forward/move/delete (`packages/app-lite/src/routes/[space]/[room]/+page.svelte`, which owns those modals), and the same toolbar already hosts the Semble "save as space card" action (`packages/app-lite/src/lib/mutations/space-card.ts`). "Share to Bluesky" is a sibling of that, on the author's own messages.
 
-Facet features that exist today (`packages/sdk/src/schema/richtext/index.ts`):
+The composer itself is new UI. It is not the message composer: it targets `app.bsky.feed.post`, enforces Bluesky's limit, and previews the facet mapping.
 
-| Roomy feature | Line | Payload |
-|---|---|---|
-| `#bold` / `#italic` / `#strikethrough` / `#underline` / `#code` / `#highlight` | `:32` `:37` `:42` `:47` `:52` `:57` | none |
-| `#link` | `:62` | `uri` |
-| `#didMention` | `:68` | `did` |
-| `#atMention` | `:74` | `uri` |
-| `#roomRef` | `:80` | `spaceId`, `roomId?` |
+### 1.3 Who may share
 
-`#highlight` and `#atMention` are **producer-less and consumer-less** (type declarations and lexicon entries only; nothing emits or renders them) — they can be ignored without loss.
+Meri's framing is "users clicking 'share' on their own messages" — so the *author* of the message, not only admins. That is a different question from who may post to the space's feed from the page (§2.3), and it is worth stating separately because it is the more permissive of the two: it lets any member put one of their own messages on the space's public account.
 
-Blocks (`:125`–`:203`): `#text`, `#header`, `#blockquote`, `#small`, `#code`, `#orderedList`, `#unorderedList`, `#image`, `#horizontalRule`. Facets appear only on `#text` (`:125-130`), `#header` (`:132`), `#blockquote` (`:139`), `#small` (`:147`), and on list `items` (`:163-165`).
+That is a real authority question, not a UI detail — the post is authored by the *space*, so a member's words appear under the community's identity. §6.2 asks it directly. The draft of this plan assumed admin-only; Meri's clarification reverses that, and the two readings are different products.
 
-### 2.2 Target shape
+### 1.4 The write path — and its blocker
 
-`app.bsky.feed.post` (upstream lexicon: `bluesky-social/atproto` `lexicons/app/bsky/feed/post.json`, fetched 2026-09-16 — external, not in this repo):
+A client-driven post goes through `ArbiterClient.proxy` → the **scoped** route → **denied** (§0.4, §4.1). So feature 1 cannot be built as a client-driven arbiter call until the permission set admits `app.bsky.feed.post`.
 
-```
-record: { text (required), createdAt (required), facets?, embed?, reply?, langs?, labels?, tags? }
-key: "tid"
-text: maxLength 3000, maxGraphemes 300
-```
+The options, in §4.1(c), are: widen the published permission set (a change outside this repo), or have the client call an **appserver procedure** that performs the post through the built-in route. The second works today and is the recommendation for v1 — it also gives the appserver the natural place to record the message ↔ post mapping (§1.5) and to enforce the author/admin check (§1.3) server-side, where it cannot be bypassed.
 
-`app.bsky.richtext.facet` (same source): `index: #byteSlice` (`byteStart` inclusive, `byteEnd` exclusive, **UTF-8 bytes, post-global**), `features: union[#mention{did}, #link{uri}, #tag{tag}]` — a **closed** union of three.
+Note what the second option costs: the actor on the wire becomes the appserver, not the human. The *authorization* is still the human (the appserver checks that the caller authored the message and has access to the space), but the accountable identity for the published record is the operator. §4.2.
 
-### 2.3 Feature mapping
+### 1.5 Idempotency and retraction
 
-This is `richtext-migration-plan.md:160`, made concrete:
+Without an automatic path there is no replay hazard and no queue — but two things still need durable state, and both live in the **global** DB:
+
+- **"Has this message already been shared?"** drives the toolbar's state and prevents a double-submit from creating two posts.
+- **"Which post is this message's?"** is what makes retraction possible: deleting a Roomy message deletes its post (a post can also simply be un-shared).
+
+Shape: `(space_did, message_id) → (post_uri, post_cid, rkey, state)`, plus a `deleted_at` marker.
+
+- **Home: the global DB, not the per-space DB.** A `SPACE_SCHEMA_VERSION` bump wipes and re-derives every per-space DB (`packages/appserver/src/db/db.ts:28-31`), so a mapping table there would lose every "already posted" record on the next schema change. The global DB is explicitly never wiped (`packages/appserver/src/db/globalVersions.ts:1-10`); new tables go in `schema-global.sql` with a manifest entry (`globalVersions.ts:50-73`, current tip `"10": { kind: "structural" }` at `:70`). Use `kind: "structural"` — the schema exec is idempotent on every open (`packages/appserver/src/db/worker.ts:154-157`).
+- **A second, independent reason it cannot live per-space:** `deleteMessage` removes the row outright (`delete from entities where id = …`, `packages/sdk/src/schema/events/message.ts:429`) and `comp_content` cascades (`schema-space.sql:119-120`). After a delete there is no row left recording that the message existed, let alone that it was posted.
+- **Deterministic rkey (optional, recommended).** `app.bsky.feed.post`'s key is `tid`, and `putRecord` on an existing rkey upserts — the property the profile write already relies on (`bluesky-profile.ts:93`). Deriving the rkey from the message ULID makes a re-share of an edited message an **upsert** rather than a second post. A ULID is *not* a valid TID (26 Crockford base32 chars including `0`/`1`/`9`; a TID is 13 chars from `234567abcdefghijklmnopqrstuvwxyz`), so the derivation is a real encode step, and it must be total, deterministic and collision-free. This is a nicety, not a correctness requirement, once the user is in the loop.
+- **Retraction** uses `com.atproto.repo.deleteRecord`. `ProxyOperation` already supports `"DELETE"` (`packages/sdk/src/atproto/arbiter.ts:27-31`), so no SDK change is needed. Keep the mapping row with a `deleted` marker rather than removing it — a delete event can be delivered more than once, and a retained marker makes the second delivery recognisable as already handled. (The bridge keeps its row in one direction and removes it in the other; `packages/discord-bridge/src/services/message-edit-delete.ts:221` — "Keep mapping row — delete is recorded"). Once retracted, a re-share is a **new** post, not a resurrection.
+
+---
+
+## 2. Feature 2 — the space's Bluesky page
+
+### 2.1 The surface
+
+A space-level page listing the space account's own posts, rendered Roomy-side. Structurally it is a peer of the space index, not a room: it has no messages of its own, no write access rules beyond post/not-post, and it is the same for every member.
+
+- **Route:** a space-level page (e.g. `/[space]/bluesky`), alongside the existing space pages.
+- **Visibility:** members. Viewing is the default affordance; posting is the gated one (§2.3).
+- **Empty and unavailable states matter here.** A space with no stewarded account cannot have a feed at all, and today that is indistinguishable from "no posts yet" (§6.4). The page must distinguish *no steward*, *stewarded but nothing posted*, and *failed to load*.
+
+### 2.2 Reading the space's feed
+
+**Reading public Bluesky data needs no OAuth scope** — `app.bsky.feed.getAuthorFeed` against the public AppView (`https://public.api.bsky.app`) is unauthenticated. The repo already calls `api.bsky.app` directly for handle and profile lookups. So this feature has no scope prerequisite; it is a *fetch*, not a *grant*.
+
+Two placements, and this plan recommends the first:
+
+- **(a) An appserver XRPC query** (e.g. `space.roomy.space.getBlueskyFeed`) that fetches and caches the feed for a space's DID. Consistent with the thin-client architecture (app-lite holds no third-party credentials and makes no unsanctioned external calls), and with the appserver's existing appview-fetch precedent (`getProfilesRoomyFirst` / Bluesky fallback). It also gives the appserver the one place that knows the space's DID → its stewarded account.
+- **(b) Direct from the client** to the public AppView. Less work, no appserver round-trip — but it makes a third-party API call from the browser, leaks the space DID to it on every page view, and puts rendering-coupled fetch logic in the client.
+
+Pagination, thread expansion and profile hydration all follow from whichever is chosen; none is required for v1 beyond a first page of posts.
+
+### 2.3 Posting from the page
+
+An admin composes a post as the space, from the page itself. This is the second human-in-the-loop surface, and it routes the same way feature 1 does (§4.1) — so **the same blocker applies**, and the recommended v1 answer is the same: an appserver procedure performing the post via the built-in route.
+
+Gating: the existing precedent is `space-account-management` flag **AND** `isAdmin` (`packages/app-lite/src/lib/components/sidebar/SpaceSidebar.svelte:156-161`, applied at `:167`; the integrations page gates identically at `:14`, `:18-20`, `:67`/`:73`). The read view is *not* gated — non-admins see the page.
+
+Note what a compose box implies that a share does not: an arbitrary post has no originating message, so it has no mapping row and no retraction-by-provenance. Deleting it is a direct `deleteRecord` against the post's own rkey.
+
+### 2.4 Is a per-space opt-in still needed?
+
+Yes, but it is a smaller thing than the draft's. It no longer gates *automatic* publishing; it gates whether a space's page accepts posts at all. Two shapes:
+
+- **Implicit:** the space has a stewarded account and the caller is an admin → posting is available. No new event, no new column, no schema bump.
+- **Explicit:** a per-space flag, stored as an event materialised into `comp_space`.
+
+**Recommendation: implicit for v1.** The draft's argument for an event-sourced, default-closed flag was that a default-open flag would turn every space into an automatic publisher on first deploy. With no automatic path, that argument does not apply — the gate is already "the caller is an admin", which is enforced server-side on the write path. Adding an event, a column, a `SPACE_SCHEMA_VERSION` bump, three registration sites and an invalidation signal to express "admins of this space may post" is weight the feature does not need. If Meri wants a per-space switch (e.g. for communities that want the identity but not the posting), that is a small, well-precedented addition later — the checklist for adding a space-config event is at §6.4 of the draft's history, and the schema-bump asymmetry that decides where its state lives is unchanged (`db.ts:28-31` vs `globalVersions.ts:1-10`).
+
+### 2.5 Progressive scope expansion — shipped, and a fresh precedent that bites here
+
+Meri asked that this build on the progressive-scope work. That work has since **shipped**: `scopes.ts` is now the single source of truth (`SCOPE_SETS.base` for the per-login request, `FULL_SCOPE_CEILING` for `oauth-client-metadata.json`), with server-side grant tracking, an editable user settings page (`packages/app-lite/src/routes/user/settings/scopes/`), and the reactive consent dialogue (`scope-consent-dialogue.ts`, `scope-guard.ts` — `guardedXrpc` + `isInsufficientScopeError`). The plan document at `packages/app-lite/docs/plans/progressive-scope-extension.md` is now a record of what shipped, not a proposal.
+
+**Two facts decide this feature's relationship to it:**
+
+**(1) A post needs no new scope, because the scopes are already in `base`.** `BASE_SCOPES` carries `include:space.roomy.authComplete` and `rpc:com.atproto.server.getServiceAuth?aud=*` (`scopes.ts:146`, `:156`) — the two that gate *every* space-account write Roomy ships today (handle, profile, Semble cards). This feature adds nothing. **Therefore it adds no tier, and requests no new consent.** A tier would only be needed if Roomy ever wrote Bluesky records to a *user's own* repo — e.g. cross-posting to a personal account — which is not in scope. The plan's own comment marks that boundary: the Semble *space* path "goes through the arbiter proxy under `space.roomy.authComplete` and needs none of these", which is why the *personal* collection is the first real expansion (`scopes.ts:161-172`).
+
+**(2) The proxied `com.atproto.repo.*` scopes are load-bearing, and the precedent is a bug fixed today.** Commit `b95e7cd8` (#329): an image send failed on OAuth with *"this session is not authorized for `com.atproto.repo.putRecord`: it needs `rpc:com.atproto.repo.putRecord?aud=<did>#atproto_pds`"*. The cause generalises — a call carrying an `atproto-proxy` header is an **RPC to that audience**, authorized by `rpc:<nsid>?aud=<did>#<service>`, **not** by the `repo:<collection>` grant that covers the same write sent directly. Declaring only the `repo:` half "looks correct in review while failing at runtime".
+
+**This feature posts through exactly that shape.** A client-driven post is `com.atproto.repo.putRecord` sent to the space's arbiter with an `atproto-proxy` header naming the space's PDS — the same envelope as the profile and handle writes. So §4.1's recommendation matters twice over, and in a way that is easy to miss:
+
+- Under the **recommended server-driven path**, the call is made appserver→arbiter with the appserver's own serviceAuth and never passes through the user's OAuth session — so this constraint does not apply to it.
+- Under the **client-driven path**, it applies exactly: the session must authorize `rpc:com.atproto.repo.putRecord?aud=<arbiter>`. The four proxied NSIDs are declared in `base` today (`PROXIED_REPO_RPCS`, `scopes.ts:124-129`), so this is satisfied — but it is satisfied *incidentally*, by a scope added for a different bug, and a future narrowing of `base` would break posting without breaking anything else.
+
+**Adopt the coverage test as the guard.** `packages/app-lite/src/lib/proxied-repo-scopes.test.ts` (added with that fix) scans for proxied `com.atproto.repo.*` calls and asserts the requested scope authorizes each, using `@atproto/oauth-scopes`'s real matcher rather than string-matching. Any client-driven post path must be covered by it. That test — not this document — is the thing that will catch the regression.
+
+---
+
+## 3. The exporter (shared by both features)
+
+One pure function serves both: feature 1 seeds a composer with it, feature 2 needs the same post-shaping rules for its compose box (limit, facets, preview).
+
+### 3.1 Roomy message → `app.bsky.feed.post`
+
+**Source shape.** A Roomy message is a DRISL event, `space.roomy.message.createMessage.v0`, not an ATProto record, with two wire formats discriminated by mime type:
+
+- **Legacy:** `text/markdown` / `text/plain`, decoded by `decodeContent` (`packages/appserver/src/db/content.ts:20`).
+- **Current:** `application/vnd.roomy.richtext+json` (`convert.ts:32`), UTF-8 JSON of `{ $type: "space.roomy.richtext.document", blocks }`, parsed by `deserializeBody` (`convert.ts:1136`) or the appserver-side `decodeRichTextBody` (`packages/appserver/src/db/content.ts:45`).
+
+Facets are generated **client-side** by `proseMirrorDocToBlocks` (`convert.ts:304`). **The exporter must handle both mime types**; `markdownToBlocks` (`convert.ts:838`) is the existing legacy→blocks bridge.
+
+**Target shape.** `app.bsky.feed.post`: `text` (required, ≤3000 chars / **300 graphemes**), `createdAt` (required), `facets?`, `embed?`, `reply?`, `langs?`, `labels?`, `tags?`; key `tid`. `app.bsky.richtext.facet`: `index: #byteSlice` (`byteStart` inclusive, `byteEnd` exclusive, **UTF-8 bytes, post-global**) and a **closed** feature union of `#mention{did}` / `#link{uri}` / `#tag{tag}`.
+
+### 3.2 Feature mapping
+
+This implements what `docs/plans/richtext-migration-plan.md:160` already researched:
 
 | Roomy feature | → Bluesky | Note |
 |---|---|---|
-| `#link { uri }` | `#link { uri }` | Direct: same field name, same byte semantics (`index.ts:62` ↔ upstream `#link`). |
-| `#didMention { did }` | `#mention { did }` | Direct. The *text* is display-only; upstream says the text "is usually a handle … but the facet reference is a DID". Roomy's text is `@${label}` where `label = attrs.label ?? attrs.id` (`convert.ts:130-137`), so a DID-shaped label renders oddly but resolves correctly. |
+| `#link { uri }` | `#link { uri }` | Direct: same field, same byte semantics. |
+| `#didMention { did }` | `#mention { did }` | Direct. The *text* is display-only; upstream says the facet reference is what counts. |
 | `#bold` `#italic` `#strikethrough` `#underline` `#code` `#highlight` | **dropped** | Bluesky's union has no typography. Text survives. |
 | `#roomRef { spaceId, roomId? }` | **dropped** | No Bluesky equivalent. Text survives. |
-| `#atMention { uri }` | **dropped** | Producer-less; nothing to lose. |
-| unknown `$type` | **dropped** | Roomy's union is open (`index.ts:91-113`); Bluesky's is closed. |
+| `#atMention { uri }` | **dropped** | Producer-less and consumer-less in Roomy today. |
+| unknown `$type` | **dropped** | Roomy's union is open; Bluesky's is closed. |
 
-**Drop at feature granularity, not facet granularity.** One Roomy facet can carry several features: `marksToFeatures` (`convert.ts:160-227`) pushes *all* of a run's marks into one facet's `features` array, and an internal link mark produces `#link` **and** `#roomRef` on the same range (`:182-192`). So the rule is: map the features; keep the facet if ≥1 survived; drop the whole facet if none did. A facet whose features vanish must not be emitted with an empty `features` array — the union requires at least the declared shape, and upstream renderers would have nothing to index.
+**Drop at feature granularity, not facet granularity.** One Roomy facet can carry several features — `marksToFeatures` (`convert.ts:160`, module-private) pushes all of a run's marks into one facet, and an internal link mark produces `#link` **and** `#roomRef` on the same range. Rule: map the features, keep the facet if ≥1 survived, drop the whole facet if none did. Never emit a facet with an empty `features` array — the union requires at least the declared shape.
 
-Consequence worth stating: a `channelThreadMention` emits **only** `#roomRef` (`convert.ts:200-221`, deliberately not also `#link`, to avoid nested `<a>`), so a Roomy channel mention becomes plain `#label` text on Bluesky. An internal *link* (a mark with `href` on a Roomy path) becomes a public `https://<app-origin>/<spaceId>/<roomId>` link — which works, since `parseInternalLinkHref` (`convert.ts:97`) accepts absolute URLs on any host with that path shape.
+A `channelThreadMention` emits **only** `#roomRef`, so a channel mention becomes plain `#label` text on Bluesky. An internal link becomes a public `https://<app-origin>/<spaceId>/<roomId>` URL, which works — `parseInternalLinkHref` (`convert.ts:97`) accepts absolute URLs on any host with that path shape.
 
-### 2.4 Flattening and rebasing — the part that must not be done carelessly
+### 3.3 Flattening and rebasing
 
-Roomy facets index into **one block's** `text` (`index.ts:117`); Bluesky facets index into the **whole post's** `text`. The exporter must therefore:
+Roomy facets index into **one block's** `text`; Bluesky facets index into the **whole post's** `text`. So:
 
-1. Flatten all blocks to a single string with a **deterministic, documented separator** (e.g. `"\n"` between blocks; `"\n"` between list items). Headings, quotes and code lose their structure — that is accepted, and is the same "drop to plain text" posture the rest of the repo takes for unknown blocks (`index.ts:198-206`).
-2. Rebase each surviving facet by the running **UTF-8 byte length** of the emitted prefix (`utf8ByteLength`, `convert.ts:37`), not by character count and not by UTF-16 code units.
-3. Emit `createdAt` from the **canonical** message timestamp, not the event ULID. `canonicalMessageTimestamp` (`packages/appserver/src/materialization/sortIdx.ts:216-223`) is the existing correct source — it honours `space.roomy.extension.timestampOverride.v0`, which is how bridged messages carry their true send time.
+1. Flatten all blocks to one string with a **deterministic, documented separator** (`"\n"` between blocks and between list items). Headings, quotes and code lose their structure — accepted, and the same posture the repo takes for unknown blocks.
+2. Rebase each surviving facet by the running **UTF-8 byte length** of the emitted prefix (`utf8ByteLength`, `convert.ts:37`) — not character count, not UTF-16 code units.
+3. Emit `createdAt` from the **canonical** message timestamp, not the event ULID — `canonicalMessageTimestamp` (`packages/appserver/src/materialization/sortIdx.ts:241`), which honours `space.roomy.extension.timestampOverride.v0` (how bridged messages carry their true send time).
 
-**Do not use `blocksToPlaintext` as the flattening substrate.** It is close, but it collapses whitespace and trims at the end (`convert.ts:655-677`; the final line is `parts.join(" ").replace(/\s+/g, " ").trim()`), which destroys the exact correspondence between text and byte offsets that the rebase depends on. It is the right function for push bodies and search text (its current callers — `packages/appserver/src/push/evaluate.ts:143`, `packages/appserver/src/search/text.ts:33`, `packages/appserver/src/queries/threadActivity.ts:362`) and the wrong one here. The exporter needs its own offset-preserving flatten, and it must be a **pure function** so it can be unit-tested against a message corpus without a network.
+**Do not use `blocksToPlaintext` as the flattening substrate.** It collapses whitespace and trims (`convert.ts:676-698`, ending `parts.join(" ").replace(/\s+/g, " ").trim()`), destroying the exact text↔offset correspondence the rebase depends on. It is right for push bodies and search text, wrong here. The exporter needs its own offset-preserving flatten, and it must be **pure** so it can be tested against a corpus without a network.
 
-Because the exporter is pure and total, it should be written and tested **first**, before any network work — it is the only part of this feature with no failure modes beyond correctness.
+**Standing invariant (kept from the draft).** Do *not* attach any publish side effect to a materialisation path (`applyBatch` / `applyBundle`). Boot re-materialisation replays from `idx 0` after any schema wipe (`packages/appserver/src/streams/reMaterialize.ts`, `isBackfill: true` at `:263-264`), and the bridge's backfill replays history through the live `sendEvents` path with no replay marker (there is none on that path — `push-freshness-gate.md:67-70`). Neither path can distinguish a replay from live traffic. This is inert for the current scope, and it is the first thing that breaks if an automatic path is ever added.
 
-### 2.5 Character limit: 300 graphemes
+### 3.4 Character limit: 300 graphemes
 
-**Roomy has no message-length limit of any kind.** Verified: no `maxGraphemes`/`maxLength` on any message schema or extension; the composer has no `maxlength`; `Intl.Segmenter` appears nowhere in the repo; the only grapheme constraints are on *profile* fields (`packages/appserver/lexicons/space/roomy/user/profile.json:14-27`). The one comment that mentions character counting is on `blocksToPlaintext` (`convert.ts:654`) — and, as above, that function normalises whitespace, so it is not a faithful counter either.
+**Roomy has no message-length limit of any kind** — no `maxGraphemes`/`maxLength` on any message schema, no composer `maxlength`, and `Intl.Segmenter` appears nowhere in the repo. So the exporter introduces the limit with no existing behaviour to match.
 
-So the exporter must introduce the limit, and there is no existing behaviour to match. Three options:
+Because both features route through a human-reviewed composer, **refuse** (the draft's recommendation) is now a UI property rather than a queue outcome: the composer enforces the limit, shows the count, and will not submit over it. Count with `Intl.Segmenter` (`granularity: "grapheme"`) — available in the runtime; a family emoji segments to 1, `e`+combining acute to 1. Count the **flattened post text**, not the blocks.
 
-| Option | Behaviour | Failure mode |
-|---|---|---|
-| **Refuse** (recommended) | Over-limit messages are not publishable; the UI says why and the sweeper records a terminal `too_long` outcome | Members must split their own messages; a long message is simply not shareable |
-| **Truncate** | Publish the first 300 graphemes | Silent content loss, on a permanent public record, and the facet rebase must also be clipped — a truncated facet whose `byteEnd` exceeds the text length is a malformed record |
-| **Thread-split** | Emit N posts chained with `reply` strongRefs | Turns one message into N records; retraction becomes a set; partial failure mid-thread leaves a broken chain; needs the `reply` strongRef machinery of §2.6 |
+Truncation remains wrong for the same reason as before: it is the only option that can silently publish something the author did not write. Thread-splitting stays out of scope.
 
-Recommendation: **refuse**, for v1. Truncation is the only option that can silently publish something the author did not write, on a network Roomy does not control. Count with `Intl.Segmenter` (`granularity: "grapheme"`) — confirmed available in the runtime (a family emoji segments to 1 grapheme, `e`+combining acute to 1, vs 7 and 2 code points respectively) — and count the **flattened post text**, not the blocks.
+### 3.5 Not in scope for v1
 
-### 2.6 Embeds
-
-Bluesky's `embed` is a union of images / video / external / record / recordWithMedia, **one per post**. Roomy's embeds are derived rows keyed by URL, joined on read (`comp_embed_link` + `comp_embed_link_data`, `packages/appserver/src/db/schema-space.sql:199-221`; joined in `packages/appserver/src/queries/selectMessages.ts:292-333`), plus media attachments with `atblob://` URIs.
-
-**Link cards map to `app.bsky.embed.external`, with one catch.** Upstream `external` requires `uri`, `title`, `description`; `thumb` is a **blob** ≤ 1 MB. Roomy's enriched card carries title `t`, description `d`, and thumbnails as **remote image URLs** (`imgs[0].u` / `thumb.u` — `packages/appserver/src/embed/metadata.ts:54-65`, full `EmbedV1` at `packages/appserver/src/embed/types.ts:67-97`). There is no blob anywhere in the embed path. So embedding a thumbnail requires fetching the remote image and uploading it via `uploadBlobToSpace` (`packages/sdk/src/atproto/bluesky-profile.ts:41-59`) — the same shape as the avatar path, which already fetches from an owner's PDS and enforces a 1 MB cap (`packages/app-lite/src/lib/mutations/bluesky-profile.ts:104-136`). `title` and `description` are required fields, so a card with neither cannot be embedded at all and must be dropped.
-
-**Media attachments are a policy question, not a technical one.** Roomy image/video attachments are `atblob://<did>/<cid>` refs on the *author's* PDS (`packages/sdk/src/schema/extensions/message.ts:36-46`; `resolveBlobUrl` at `packages/app-lite/src/lib/utils.ts:25`). Publishing them under the *space's* account means the blob must be fetched from a user's PDS and re-uploaded into the space's repo — the mirror of `uploadAvatar` (`bluesky-profile.ts:104-121`, which fetches via public `com.atproto.sync.getBlob`). Technically straightforward (`app.bsky.embed.images` takes ≤4 blobs ≤2 MB with required `alt`). The question is authority: is a space admin permitted to re-host a member's image under the space's identity? **Recommendation: images and video are out of scope for v1** (§5, Not in scope), and the permission question is listed at §6.3.
-
-**Replies are out of scope for v1.** Roomy replies are a `space.roomy.attachment.reply.v0` targeting a Roomy message ULID (`packages/sdk/src/schema/extensions/message.ts:21-24`). Bluesky's `reply` needs `root` + `parent` strongRefs (`uri` **and** `cid`) of *Bluesky* posts — which only exist if the replied-to Roomy message was itself published, so threading is a strict follow-on to the mapping table of §3.
-
-**`langs`:** nothing in the repo detects language (grep for language detection returns nothing), so omit it in v1 rather than guessing.
+- **Media embeds** (images, video) — see §6.3.
+- **Link-card thumbnails** — a card publishes `uri`/`title`/`description`; a thumbnail needs a blob upload.
+- **Reply threading and quote posts** — Bluesky's `reply` needs `root` + `parent` strongRefs of *Bluesky* posts, which only exist if the Roomy message being replied to was itself published.
+- **`langs`** — nothing in the repo detects language.
+- **Bluesky-side moderation tooling** (labels, reports, blocks) — outside this repo.
+- **Publishing from a space without an arbiter** — the legacy did:plc path (`packages/appserver/src/streams/did.ts:21`) has no PDS account and no credentials.
 
 ---
 
-## 3. What triggers a post — and the failure modes
+## 4. Policy and accountability
 
-### 3.1 The trigger options
+### 4.1 The three gates
 
-| Option | Trigger | Failure modes |
-|---|---|---|
-| **A. Manual per-message share** | An admin clicks "Share to Bluesky" on one message; the client calls the arbiter proxy directly, as the integrations tab does today | Requires a human for every post, so it cannot mirror a conversation. Requires the client to hold message state and to survive a failure mid-flow. **But**: the caller DID the arbiter sees is a real human admin, which is the only identity the existing Rego policy can meaningfully evaluate (§4.2). |
-| **B. Automatic per-room mirroring** | Every message in an opted-in room is published by the appserver | Scales to a real mirror. Publishes without a human in the loop, so a compromised or careless member posts to a public network under the space's identity with no confirmation. Needs the `mirror_from` watermark of §3.3 or the first enable re-publishes history. The appserver calls the arbiter as **itself**, which the policy may not permit (§4.2). |
-| **C. Both** | A per-room auto-mirror toggle, plus a manual share for anything outside a mirrored room | Two paths, one mapping table, one sweeper. The union of A's and B's failure modes, but the auto path is off by default per room, so the blast radius of a mis-set auto toggle is one room. |
+**The policy is in this repo.** `packages/appserver/policy/default.rego` (167 lines, plus 673 lines of behavioural tests at `policy/tests/default_test.rego`), validated by the arbiter CLI per `policy/README.md`. The published record the reference config points at (`at://did:plc:cyqufxsezk33hqulcilckna6/town.muni.arbiter.policy/default`, `arbiter/provision.ts:35`, mirrored by `scripts/migrate-arbiter-configs.ts:102`) is its published form.
 
-**Recommendation: C, sequenced A → B** (§5 Phases 3 and 4). Manual share first because it proves the whole chain (opt-in → export → arbiter write → mapping → retraction) with a human watching each step; automatic mirroring only after the mapping table has been shown to hold under replay. Note the hard dependency: Phase 4 additionally requires the policy answer at §6.1, while Phase 3 does not.
-
-### 3.2 Idempotency: the requirement is stronger than any existing sweeper's
-
-**A duplicate embed card is harmless; a duplicate post is not.** The repo's existing outbound sweeper — link-card enrichment (`packages/appserver/src/embed/sweeper.ts` + `enricher.ts`) — is idempotent *by construction* because enrichment is a pure function of the URL: re-fetching and re-storing the same card is a no-op. Publishing is not: a retried network call produces a second, permanently visible post. **The embed sweeper is the right *structure* to copy and the wrong *guarantee* to copy.**
-
-So the publish path needs both belts:
-
-**Belt 1 — a persisted mapping table, in the global DB.**
-
-- Shape, mirroring the one durable external-id mapping the repo already has (`packages/discord-bridge/src/db/schema.ts:25-33`):
-
-  ```sql
-  CREATE TABLE id_mappings (
-    space_did TEXT, kind TEXT, discord_id TEXT, roomy_id TEXT,
-    PRIMARY KEY (space_did, kind, discord_id)
-  );
-  CREATE INDEX idx_mappings_roomy ON id_mappings (space_did, kind, roomy_id);
-  ```
-
-  with the **reverse index on `roomy_id`** — that is exactly the index that answers "has *this* Roomy message already been posted?", used by `getDiscordId` (`packages/discord-bridge/src/db/repository.ts:245`). The publish table should be `(space_did, message_id) → (post_uri, post_cid, published_revision, state)`, plus the attempts/retry columns of §3.4.
-
-- **Home: the global DB.** Not the per-space DB. Because a `SPACE_SCHEMA_VERSION` bump wipes and re-derives every per-space DB (`packages/appserver/src/db/db.ts:28-31`), a mapping table there would lose every "already published" record on the next schema change — and a lost published-record is a **republish-everything event**. The global DB is explicitly never wiped on a bump (`packages/appserver/src/db/globalVersions.ts:1-10`); new global tables are added to `schema-global.sql` and get a manifest entry (`packages/appserver/src/db/globalVersions.ts:51-74`; the current entry is `"10": { kind: "structural" }` at `:71`). Use `kind: "structural"` — the idempotent schema exec creates the table on every open (`packages/appserver/src/db/worker.ts:154-157`), so no data migration is needed.
-- **Discipline, copied verbatim from the bridge:** check before the side effect (`packages/discord-bridge/src/services/roomy-event-router.ts:317-320` — "Already bridged to Discord? Skip (prevents duplicates on restart/re-backfill)"), register **after** the send succeeds (`:463-470`).
-- **Caveat that must be handled, not inherited:** the bridge's `stream_events` log has PK `(stream_id, idx)` and **no unique constraint on the event ULID** (`packages/appserver/src/db/eventsSchema.sql:3-12`), so the same logical event can be appended twice. Log-level dedupe is unavailable; the mapping table is the only dedupe.
-
-**Belt 2 — a deterministic record key, so a retry is an *upsert*, not a duplicate.**
-
-This is the improvement over "check then send". `app.bsky.feed.post`'s key is `"tid"`, and `putRecord` on an existing rkey **upserts** — the same property the profile write already relies on (`packages/sdk/src/atproto/bluesky-profile.ts:93` — "`putRecord` with rkey `self` upserts"). So:
-
-- Derive the rkey deterministically from the Roomy message ULID, and use `com.atproto.repo.putRecord`, not `createRecord`.
-- **A ULID is not a valid TID and cannot be used directly.** A ULID is 26 chars of Crockford base32 (uppercase, includes `0`, `1`, `9`); a TID is 13 chars from the alphabet `234567abcdefghijklmnopqrstuvwxyz`, with no `0`/`1`/`9` (verified against `@atproto/syntax`'s `ensureValidTid`, which enforces `TID_LENGTH = 13` and that alphabet, and by generating a sample TID). Encode the ULID's 48-bit timestamp and 80 bits of randomness into the TID alphabet — the derivation must be **total, deterministic, and collision-free**: two Roomy messages must never collide on a TID, or the second silently overwrites the first. Validation lives in the ATProto stack, not in this repo: `git grep -n "ensureValidTid\|ensureValidRecordKey" origin/next -- 'packages/**'` returns nothing, while the dev PDS's bundled `@atproto/syntax` defines `ensureValidTid` (13 chars, the alphabet above). [INFERENCE] that validator is what rejects a bad rkey at write time, so a malformed derivation surfaces as a PDS error rather than a silent mis-write — but the plan should not rely on it for collision safety.
-
-With belt 2, the failure mode of "network call succeeded, process died before the mapping row was written" degrades from *duplicate post* to *harmless re-upsert*. With belt 1, the failure mode of "process died before the network call" degrades to *retry*. Together, the publish becomes safely retryable, which is the only reason automatic mirroring is defensible.
-
-### 3.3 The replay problem: TASK-151's shape, and why publish needs more than the push fix
-
-**The incident.** `packages/appserver/docs/push-freshness-gate.md` records it: the Discord bridge's `runBackfill` replays entire channel history through the **live** `sendEvents` path (`packages/discord-bridge/src/services/backfill.ts:104-120`, which says so in a comment), and every replayed message produced a push because the only time value in the pipeline was `decodeTime(event.id)` — the event ULID, which is *fresh at replay time*. The exact line: `packages/appserver/src/streams/StreamManager.ts:323` (`timestamp: decodeTime(e.id)`), documented as the defect at `packages/appserver/src/push/types.ts:25-36`.
-
-**Why the push fix does not carry over.** Push was saved by an **age gate**: `isPushFresh` (`packages/appserver/src/push/freshness.ts:74-90`) with a 5-minute window (`:48`), applied at the enqueue site using the canonical timestamp (`StreamManager.ts:303-317`). The gate is right for push because push is a *transient* signal — dropping a stale one loses nothing. **Publish is the opposite**: the message's age is irrelevant to whether it *should* exist on Bluesky. A gate tuned to "only publish things younger than 5 minutes" makes historical share-by-hand impossible and makes a legitimate catch-up after downtime publish nothing. So publish cannot use an age gate as its *correctness* mechanism.
-
-**Which replay paths can fire a publish hook?**
-
-| Entry point | Evidence | Replays old events? | Verdict |
-|---|---|---|---|
-| `space.roomy.space.sendEvents` → `StreamManager.sendEvents` | handler at `packages/appserver/src/handlers/space.roomy.space.sendEvents.ts:176`; hard-codes `isBackfill: false` for `applyBatch` (`packages/appserver/src/streams/StreamManager.ts:245`) | **Yes** — the bridge's `runBackfill` is indistinguishable from live traffic; there is no replay marker on this path at all (called out as a follow-up at `push-freshness-gate.md:67-70`) | **A hook here fires on replay.** This is TASK-151. |
-| Boot re-materialisation | `reMaterializeFromLocalEvents` (`packages/appserver/src/streams/reMaterialize.ts:60`), started fire-and-forget at `packages/appserver/src/index.ts:76`, applying with `isBackfill: true` (`reMaterialize.ts:263-265`) | **Yes, always after a schema wipe or blue-green rebuild** (`:9-12`; full rebuild from `idx 0` at `:122`) | A hook inside `applyBatch`/`applyBundle` fires on every boot after a wipe. |
-| Sync `#streamEvents` backfill | `packages/appserver/src/sync/handler.ts:797-815` (`hasMore` at `:810`); resumable from a cursor | Yes (`cursor: -1` ⇒ full history) | Consumer-side only; this is how the bridge *re-sees* history, not how the appserver side-effects. |
-| Jetstream / firehose | **Absent from the appserver** (it exists only as HappyView, an external Rust AppView) | n/a | No hook to place. |
-
-**The design rule that follows.** Do **not** attach the publish side effect to any materialisation path. The repo already models the correct alternative: the embed sweeper. Its work queue is a **persisted table** (`pending_links`, `packages/appserver/src/db/schema-global.sql:86-93`), drained by a process-wide background loop (`packages/appserver/src/embed/sweeper.ts:53-55` — `SWEEP_BATCH = 25`, `IDLE_POLL_MS = 30_000`), whose enqueue is a plain `insert or ignore` and therefore idempotent across re-materialisation (`packages/appserver/src/materialization/applyBatch.ts:579-587`, with that rationale in the comment). Note that boot re-materialisation *pokes nothing* — `grep -n "poke\|onEventsApplied\|streamListeners" packages/appserver/src/streams/reMaterialize.ts` returns nothing — which is a second, independent reason a replay does not fire side effects today.
-
-Publishing should be:
-
-1. **Enqueued** into a persisted, idempotent work queue (`insert or ignore`, keyed by message), from exactly two places: a human action (A, which ignores age entirely — a historical message is exactly what a human shares by hand), or the live write path gated on the room's mirror toggle **and** the message being newer than the room's `mirror_from` watermark (B). Note the distinction: for the *auto* path a recency test is a scope decision (*"mirror the conversation from now on"*), not the correctness mechanism — the watermark and the mapping table are what make the replay safe. Removing the recency test from the auto path changes how much history it mirrors; removing the watermark or the mapping would change whether it double-posts.
-2. **Drained** by its own sweeper with the embed sweeper's outcome model — `ok | definitive | transient` (`packages/appserver/src/embed/enricher.ts:75-79`), the escalating backoff at `:221-225` (1m / 5m / 30m / 2h, capped 6h), and the delete-on-settle rule that removes rows for `ok` **and** `definitive` so a permanently-failing item cannot stall the queue (`packages/appserver/src/embed/sweeper.ts:392-406`). A `definitive` outcome here means "this will never be publishable" — over the grapheme limit, no resolvable steward, a card with no title/description — and it must settle, or the queue never drains.
-3. **Guarded by a first-run watermark**, not only by the mapping table. The global DB already has this shape twice: `search_backfill_cursor (space_did, cursor, updated_at)` (`schema-global.sql:119-123`) and the bridge's `space_cursors (space_did, last_idx)` (`packages/discord-bridge/src/db/schema.ts:116-120`, written with `ON CONFLICT DO UPDATE` at `repository.ts:482-490`). A per-room `mirror_from` watermark makes "enable mirroring on a room with 40 000 historical messages" a bounded operation instead of a 40 000-post incident. **The bridge's migration v2 comment is the transferable lesson**: cursors keyed by channel alone meant "connecting a channel to a second Roomy space inherited the first space's cursor and silently skipped backfill" (`schema.ts:68-71`) — the publish watermark must be keyed by `(space_did, room_id, target)`, not by room alone.
-
-### 3.4 Edit and delete: what actually happens today
-
-**Edit mutates in place; there is no version row and no tombstone.** `space.roomy.message.editMessage.v0` (`packages/sdk/src/schema/events/message.ts:183`) runs `update comp_content set mime_type = …, data = …, last_edit = <editEventId> where entity = <messageId>` (`:216-233`). There is deliberately **no** entity row for the edit event (`:204-211`). `comp_content.last_edit` holds the most recent edit event's ULID, and on an unedited message the materialiser stamps it with the *creating* event's id — so `lastEdit` is surfaced to clients only when it differs from the message id (`packages/appserver/src/queries/selectMessages.ts:504-508`).
-
-- **Consequence for publishing:** "has this message changed since we published it?" is answerable **without any new state** — store the `last_edit` value observed at publish time as `published_revision`, and re-publish when the current `last_edit` differs. Because §3.2 chose a deterministic rkey with `putRecord`, an edit is an **upsert of the same post**, not a second post. That is a genuinely clean story, and it is only available because of the belt-2 decision.
-- **A subtlety:** the "unedited" encoding is `last_edit == message_id`, so `published_revision` must be compared against `last_edit` as-is, not against the client-facing `lastEdit` field (which is `undefined` for unedited messages — `selectMessages.ts:506-508`). Comparing against the DTO field would read "unedited" and "revised" as the same value.
-- **The invalidation signal already keys on the message, not the edit event** (`packages/appserver/src/invalidation/inferSignals.ts:445-449`, ops at `:466` keyed by `messageId`) — the same convention applies to a publish refresh.
-
-**Delete removes everything, including the evidence that the message existed.** `space.roomy.message.deleteMessage.v0` (`message.ts:400`) issues `delete from entities where id = <messageId>` (`:429`); `comp_content` cascades (`packages/appserver/src/db/schema-space.sql:119-120`, `on delete cascade`). After the delete there is **no row in the per-space DB** recording the message id, let alone that it was published.
-
-- **Consequence:** the retraction signal must come from the mapping table in the **global** DB, which the per-space cascade does not touch. This is a second, independent reason the mapping table cannot live in the per-space DB.
-- **Retraction mechanism:** `com.atproto.repo.deleteRecord` via the arbiter proxy. `ProxyOperation` already supports `"DELETE"` (`packages/sdk/src/atproto/arbiter.ts:30`), so no SDK change is needed. The alternative — overwriting the post with a tombstone via `putRecord` — is what some Bluesky clients do, but it is not required here.
-- **Prior art, in-repo:** the bridge's outbound delete path resolves the external id from the mapping and then deletes: `getDiscordId(spaceDid, "message", event.messageId)` at `packages/discord-bridge/src/services/roomy-event-router.ts:742-746`, delete at `:760-765`, followed by `unregisterMapping` (`:766`).
-- **Do not copy the bridge's `unregisterMapping`.** For Bluesky, keep the row with a `deleted_at` / `state = 'deleted'` marker. The bridge removes the row on outbound delete and (deliberately, by a different code path) keeps it on inbound delete (`packages/discord-bridge/src/services/message-edit-delete.ts:221` — "Keep mapping row — delete is recorded; future edit attempts skip naturally"). The publish path should keep it in **both** directions, because a delete event can be delivered more than once (at-least-once delivery is the bridge's own documented model — `packages/discord-bridge/src/roomy/live-gateway.ts:271-279`) and a removed row turns the second delivery into a no-op-with-no-record rather than a confirmed already-handled state.
-- **Delete is authoritative and irreversible on Bluesky.** Once retracted, a re-publish would need a new post; the plan should treat "delete then re-share" as a new publish, not a resurrection.
-
-### 3.5 The failure-mode summary
-
-| Scenario | Required behaviour |
-|---|---|
-| Bridge replays 5 000 historical messages | **Zero posts.** The mapping table (and, on the auto path, the `mirror_from` watermark) — never an age gate, per §3.3. |
-| Publish call times out after the PDS accepted it | **One post.** Deterministic rkey + `putRecord` makes the retry an upsert. |
-| Process dies between the send and the mapping write | **One post.** Same mechanism. |
-| Message edited after publishing | **One post, updated.** `last_edit != published_revision` ⇒ `putRecord` on the same rkey. |
-| Message deleted after publishing | **Post removed.** Mapping row retained with a `deleted` marker; `deleteRecord`. |
-| Delete event replayed | **No-op.** The retained marker makes the second delivery recognisable as already handled. |
-| Message over 300 graphemes, mirroring on | **No post, terminal.** `definitive` outcome; the row settles rather than retrying forever (the embed sweeper's own rationale at `enricher.ts:66-75`: retrying forever "left a permanent backlog and a permanent log flood"). |
-| Space has no arbiter | **No post, terminal, visible.** Steward resolution throws (`arbiter.ts:125-127`); do not retry indefinitely. |
-| Arbiter policy denies the write | **No post, terminal, surfaced.** `ArbiterProxyError` carries the upstream error name (`packages/sdk/src/atproto/arbiter.ts:186-206`), and the app-lite handle path already maps error names to human messages (`packages/app-lite/src/lib/mutations/space-handle.ts:33-46`) — the same pattern applies. |
-
----
-
-## 4. Policy implications
-
-### 4.1 Who is accountable
-
-**The space's posts are published under the space's stewarded ATProto account.** Three facts compose:
-
-- The space's DID *is* a real PDS account, provisioned by the arbiter (`packages/appserver/src/arbiter/provision.ts:46-56`).
-- The arbiter holds that account's **PDS password** (`packages/appserver/docs/plans/arbiter-integration.md:47-52`) and is a policy proxy, not a key custodian.
-- The **appserver DID is the recovery admin of every stewarded account** — stated in the provisioning comment (`provision.ts:53-55`) and resolved as a question in the arbiter plan (`arbiter-integration.md:299-306`).
-
-So there are two accountable parties, and they are not the same:
-
-- **The space's admins**, who can act under the account through the arbiter's policy (the policy is what grants them; §4.2).
-- **Roomy (the appserver DID)**, which can *always* act, because it is the recovery admin. A compromise or a bug in the appserver is, by construction, able to post as any space.
-
-That second fact is worth stating plainly, because it is the answer to "who is accountable": for a policy-violating post, the space's admins are the visible actor, and Roomy is the actor with unconditional capability. Members may be surprised by the latter.
-
-**Moderation and abuse: there is no story in the repo, and it cannot be invented here.** Concretely, the gaps:
-
-- **A Roomy admin deleting a Roomy message does not retract the Bluesky post** unless the publish path is built to do so (§3.4); and once retracted, the post may already have been indexed, quoted, or reposted by the network.
-- **Bluesky-side moderation is outside Roomy.** Labels, blocks, takedown requests, and reports all happen in the Bluesky ecosystem against the space's account. There is no integration point for any of it in this repo.
-- **Rate limits and content rules apply to the space's PDS account,** so one spammy member can degrade the *space's* standing, not just their own.
-- **Banning a member in Roomy does not remove what they already posted** in this space's name, and — if auto-mirroring is on — a banned user's next message is blocked at write time by the existing ban check on the write path (`packages/appserver/src/handlers/space.roomy.space.sendEvents.ts:108-112`) rather than at publish time, which is the correct layering but worth stating.
-
-### 4.2 What the arbiter's policy permits — and the one gate that does not (2026-09-29 review)
-
-**The policy is now in this repo.** It lives at `packages/appserver/policy/default.rego` (167 lines, plus 673 lines of behavioural tests at `policy/tests/default_test.rego`), landed after the original pass. The arbiter fetches and hot-reloads the *installed record*, but the source is here, and the arbiter CLI validates and tests it (`policy/README.md`). The single `policyLayers` AT-URI the reference config points at (`at://did:plc:cyqufxsezk33hqulcilckna6/town.muni.arbiter.policy/default`, `packages/appserver/src/arbiter/provision.ts:35`, mirrored by `scripts/migrate-arbiter-configs.ts:102`) is the published form of that file.
-
-**The policy admits the appserver, and it does not restrict which collections it writes.** `policy/default.rego` resolves adminship from three sources in order (first match wins):
+**(a) The community pipeline admits the appserver, for any collection.** The policy resolves adminship from three sources, first match wins:
 
 1. the space account itself — `input.callerDid == input.arbiterDid`;
-2. **the recovery admin named in the space's `town.muni.arbiter.recovery/self` record — the appserver (`did:web:api.roomy.space`)**. The policy's own comment calls this "load-bearing: the appserver's own proxy calls … are authorized here";
-3. a Roomy admin, via the `xrpc` host function reading `space.roomy.service/self` and then calling **`space.roomy.space.getUserAccess`** (`packages/appserver/src/handlers/space.roomy.space.getUserAccess.ts`), whose authorization is `auth.did === spaceId` (`:46`).
+2. **the recovery admin named in the space's `town.muni.arbiter.recovery/self` record — the appserver (`did:web:api.roomy.space`)**. The policy's own comment calls this "load-bearing";
+3. a Roomy admin, via `space.roomy.service/self` → `space.roomy.space.getUserAccess` (which authorizes on `auth.did === spaceId`).
 
-For any admin, the policy's final rule forwards **any** non-`town.muni.arbiter.*` request to `input.target` as the steward — there is no NSID or collection allowlist:
+For any admin, the final rule forwards **any** non-`town.muni.arbiter.*` request to `input.target` as the steward — **no NSID or collection allowlist**:
 
 ```rego
 result := xrpc({ "target": input.target, "method": input.method, "nsid": input.nsid, ... })
   if { is_admin; not startswith(input.nsid, "town.muni.arbiter.") }
 ```
 
-**This inverts the conclusion the original pass reached, and it splits into three separate gates that the plan previously conflated:**
+The appserver authenticates as *itself* (`mintServiceAuth` sets `iss = sub = ownDid`, `packages/appserver/src/auth/serviceAuth.ts:112-128`), so source 2 matches. **A server-driven post is permitted today.**
 
-**(a) The built-in community pipeline (`town.muni.arbiter.proxy`) — the appserver is admitted, for any collection.** The appserver authenticates as *itself*: `mintServiceAuth(config.did, nsid, ownDid)` sets `iss = sub = ownDid` (`packages/appserver/src/auth/serviceAuth.ts:112-128`), and source 2 above matches that DID. So a `putRecord` of `app.bsky.feed.post` from the appserver reaches the pipeline and is **allowed by the installed policy today**. The original claim that the policy grants the space itself and Roomy admins but "**not the appserver DID**" is **false** — and it was false at the baseline too, against the arbiter plan's Phase 2 *sketch* rather than against the shipped policy. What is true is the narrower point the plan also made: the appserver cannot assert a *space*'s DID (no space keys), so `callerDid` is the appserver, not the space. That still identifies the accountable actor as the operator.
+**(b) The server-side helper uses the built-in route.** `arbiter/client.ts:145` posts to `town.muni.arbiter.proxy` — no scope gate (the module comment at `:15-23` says why). A change from baseline: `d01b02c3` moved the appserver onto the scoped route, and `9e70ffbd` reverted it after the scoped route denied the provisioning write.
 
-**(b) The route the server-side `proxy()` helper uses is the built-in one.** `packages/appserver/src/arbiter/client.ts:145` posts to `town.muni.arbiter.proxy` — the route with no scope gate (the module comment at `:15-23` states why). The scoped `space.roomy.authComplete.arbiter.proxy` route is for OAuth'd end users. This is a change from baseline: `d01b02c3` briefly moved the appserver onto the scoped route, and `9e70ffbd` (2026-09-21) reverted provisioning to the built-in route after the scoped route denied the provisioning `putRecord` outright. **The plan's §0.1 and PR description naming `town.muni.arbiter.proxy` for the server-side helper were therefore correct; its §0.1 naming it for the *client* was not** — see (c).
+**(c) The scoped route — the client-driven path — denies a post.** Two gates run before any policy layer: (1) the account's `trustedScopes` must contain the prefix (`space.roomy.authComplete` — it does, `provision.ts:34`); (2) the **permission set's embedded Rego, over the inner request alone, with no caller identity**. It admits `space.roomy.*`, `network.cosmik.*`, `uploadBlob`, `updateHandle`, `putRecord`/`createRecord` of `network.cosmik.*`, and `putRecord` of `app.bsky.actor.profile` or `space.roomy.service` (`provision.test.ts:61-83`) — and **denies `putRecord` of `app.bsky.feed.post`** (`:187-218`). No admin authorization can rescue it: the caller DID is not visible to the scope policy at all.
 
-**(c) The scoped route (`space.roomy.authComplete.arbiter.proxy`) is the path the client-driven share would use — and it denies exactly this write.** Two gates run before any policy layer:
-
-1. the account's `trustedScopes` must contain the scope prefix (`space.roomy.authComplete` — it does, `provision.ts:34`), then
-2. the **permission-set lexicon's embedded Rego, evaluated over the inner request core alone** (no caller DID — scope policies are pure functions of `{method, nsid, parameters, body, encoding}`).
-
-That transcription is pinned by tests in `packages/appserver/src/arbiter/provision.test.ts`: the scope policy admits `space.roomy.*`, `network.cosmik.*`, `uploadBlob`, `updateHandle`, `putRecord`/`createRecord` of `network.cosmik.*`, and `putRecord` of `app.bsky.actor.profile` or `space.roomy.service` (`:61-83`) — and a `putRecord` of `app.bsky.feed.post` is asserted to return **403 `request denied by scope policy`** (`:187-218`). **A Bluesky post is not in the permission set, so a client-driven publish through the scoped route fails structurally, for every caller including a space admin.** No admin authorization can rescue it, because the caller DID is not visible to the scope policy at all.
-
-**What follows for the plan, precisely:**
-
-| Publish path | Route | Status today | What must change |
+| Path | Route | Status | What must change |
 |---|---|---|---|
-| **A. Client-driven manual share** (Phase 3) | `space.roomy.authComplete.arbiter.proxy`, in-sdk `ArbiterClient.proxy` | **blocked** — scope policy denies `app.bsky.feed.post` | the published `space.roomy.authComplete` permission-set lexicon must admit `putRecord` of `app.bsky.feed.post` (that lexicon is a published record with no in-repo source; the repo-side mirror to update is `scopedScopePolicyAllows` in `provision.test.ts`, which would otherwise fail as the transcription drifts from the deployed policy) |
-| **B. Server-driven mirroring** (Phase 4) | `town.muni.arbiter.proxy`, `arbiter/client.ts:145` | **permitted by the installed policy** — the recovery admin may write any collection | nothing on the arbiter side; the only remaining question is policy in the product sense (§6.1) |
+| **Client-driven** (`ArbiterClient.proxy`) | scoped | **blocked** — scope policy denies `app.bsky.feed.post` | widen the published permission set (outside this repo; update the in-repo transcription at `provision.test.ts:61-83`) |
+| **Server-driven** (`arbiter/client.ts:145`) | built-in | **permitted** — recovery admin, any collection | nothing on the arbiter side |
 
-This flips the original §4.2/§4.3 conclusion. The original pass held that client-driven is "the only path whose authorization is already expressible today" and that server-driven "requires a change to a document outside this repo". Both are now backwards: **the server-driven path is the one that works today, and the client-driven path is the one that needs an outside-the-repo policy change.** The reason is the same mechanism the arbiter plan documented for provisioning (`arbiter-integration.md:158-166`): the scope policy is a pure function of the request core and cannot see *who* is calling, so it is the strictest gate in the stack and the appserver's own writes must not depend on it.
+**Recommendation for v1: server-driven, with the client calling an appserver procedure.** It works today, it keeps the author/admin check server-side where it cannot be bypassed (§1.3), and it gives the mapping table (§1.5) a natural home. Revisit (i) if Meri wants the human to be the accountable actor on the wire (§6.2).
 
-Two consequences worth stating plainly:
+### 4.2 Who is accountable
 
-- **Phase 3 (manual share) cannot ship through the scoped route as originally specified.** Either the permission set admits the post collection, or manual share is implemented by calling the *appserver* (which uses the built-in route) rather than by the client calling the arbiter directly. The second avoids the outside-the-repo dependency but makes the operator the actor for every share — which is exactly the tradeoff §6.1 was asking Meri to decide, now forced one step earlier.
-- **The appserver's ability to write any collection as any space is unconditional** (source 2, plus the recovery-admin record). That was already true; the new policy file makes it legible. It strengthens §4.1's accountability point rather than changing it.
-
-Re-application of the config is available via the admin-only `space.roomy.space.updatePolicy` procedure, which calls `resetConfig` with `REFERENCE_ARBITER_CONFIG` (`packages/appserver/src/handlers/space.roomy.space.updatePolicy.ts:65`). Two stale pointers the original pass flagged are **both now fixed**: `scripts/migrate-arbiter-configs.ts` exists (landed with the policy), and `packages/sdk/src/schemas/procedures/updatePolicy.ts:1-8` now correctly says `resetConfig`, not `resetPolicy`.
-
-### 4.3 Policy questions this plan will not answer
-
-See §6. The shape is now the reverse of the original draft: **server-driven publishing is the path whose authorization already works**, because the recovery admin is admitted by name. Client-driven publishing is blocked by a scope policy that cannot see the caller. Choosing server-driven makes the accountable actor the appserver's DID, i.e. Roomy-the-operator, on behalf of spaces that merely flipped a toggle. That is a decision about what Roomy is willing to be, not a technical one — and it can no longer be deferred past Phase 3.
+- The space's posts are published under the space's stewarded account, which is a real PDS account provisioned by the arbiter.
+- **The appserver DID is the recovery admin of every stewarded account** and may act on any space unconditionally. That is what makes the recommended v1 path work, and it is worth stating plainly: for a post made through it, the visible author is the space, and the actor with unconditional capability is Roomy-the-operator.
+- Moderation is outside Roomy. A deleted Roomy message retracts its post only if this path is built to do it (§1.5); once retracted, the post may already have been indexed or reposted. Rate limits and content rules apply to the space's PDS account, so one careless sharer degrades the *space's* standing.
+- Banning a member does not remove what they already posted, and — with no automatic path — a banned member's share fails at the write path's existing ban check rather than at publish time.
 
 ---
 
 ## 5. Phases
 
-Each phase states an **observable completion criterion**. Nothing here is implemented yet; §0.2 gives the greps proving the publish half is absent.
+Each phase states an **observable completion criterion**. Nothing here is implemented yet.
 
 ### Phase 0 — Decisions (this document; no code)
 
-**Completion criterion:** the open questions in §6 have answers in this document, recorded as decisions.
+**Completion criterion:** §6's open questions have answers recorded here. §6.1 (the route) and §6.2 (who may share) block Phases 2–3.
 
----
-
-### Phase 1 — Per-space opt-in, default closed
+### Phase 1 — The exporter (no network)
 
 **Deliverables**
 
-- New SDK event (`space.roomy.space.setPublishTarget.v0`, or the `updateSpaceInfo` `.v1` variant — §1.2) + materialiser writing a new `comp_space.publish_enabled` column.
-- The three mandatory registrations: `registry.ts`, `writeAuth.ts` `ALLOWED_TYPES` **and** `SPACE_MANAGE_TYPES`, `invalidation/inferSignals.ts`.
-- `comp_space.publish_enabled` added to `schema-space.sql` with a `SPACE_SCHEMA_VERSION` bump (`packages/appserver/src/db/db.ts:31`).
-- `getMetadata` returns `publishEnabled: boolean` (`coalesce(publish_enabled, 0)`), alongside the existing `isAdmin` (`packages/appserver/src/handlers/space.roomy.space.getMetadata.ts:343`).
-- The integrations tab shows the toggle for `space-account-management` **AND** `isAdmin` (the existing `showIntegrationsTab` precedent, `packages/app-lite/src/lib/components/sidebar/SpaceSidebar.svelte:159-161`).
+- A **pure** `roomyMessageToBskyPost(message) → { text, facets, createdAt }` in the SDK, implementing §3.2–§3.4. No I/O.
 
-**Observable completion criterion**
+**Completion criterion**
 
-- A test shows a space with **no** opt-in event reads `publishEnabled === false`, and that the value is **still false after a simulated `SPACE_SCHEMA_VERSION` bump + re-materialisation** (this is the test that proves the event-sourced choice was correct).
-- A test shows a non-admin caller's `setPublishTarget` event is rejected by `checkWriteAuth`.
-- A test shows that setting the opt-in to true and then false round-trips through `getMetadata`.
+- A corpus — plain text, `#link`, `#didMention`, bold/italic, internal links, code blocks, ordered/unordered lists, emoji — round-trips with **every emitted facet's byte range slicing the emitted text to exactly the annotated substring** (assert by slicing UTF-8 bytes, not the JS string).
+- A message whose only facet is `#roomRef` emits **zero** facets; `#link` + `#roomRef` on one range emits exactly one.
+- A 301-grapheme message is rejected; a 300-grapheme message is not.
 
----
-
-### Phase 2 — The exporter and the mapping table (no network)
+### Phase 2 — Feature 1: share an own message
 
 **Deliverables**
 
-- A **pure** `roomyMessageToBskyPost(message) → { text, facets, createdAt } | { skipped: reason }` in the SDK, implementing §2.3–§2.5. No I/O.
-- The `(space_did, message_id) → (rkey, post_uri, post_cid, published_revision, state, attempts, retry_after)` table in `schema-global.sql` + a `GLOBAL_MIGRATIONS` `structural` entry (`packages/appserver/src/db/globalVersions.ts:51-74`).
-- The deterministic ULID→TID rkey derivation (§3.2), with its own collision test.
+- The share affordance on the author's own messages, and the composer (§1.2) — pre-filled, editable, limit-enforcing.
+- The appserver procedure performing the post via the built-in route (§4.1), with the author/admin check server-side (§1.3).
+- The message ↔ post mapping in the global DB (§1.5), used for "already shared" state and retraction.
+- Retraction on message delete, and an explicit un-share.
 
-**Observable completion criterion**
+**Completion criterion**
 
-- The exporter round-trips a corpus — plain text, `#link`, `#didMention`, bold/italic, internal links, code blocks, ordered/unordered lists, emoji — with **every emitted facet's byte range slicing the emitted text to exactly the annotated substring** (assert by slicing the UTF-8 bytes, not the JS string).
-- A message whose only facet is `#roomRef` emits **zero** facets, and one with `#link` + `#roomRef` on one range emits exactly one.
-- A 301-grapheme message returns `skipped: "too_long"`; a 300-grapheme message does not.
-- The rkey derivation is stable (same ULID → same TID) and does not collide across a large sample of ULIDs.
+- A user shares their own message; a post exists at the space's account whose text matches what the composer showed, and the toolbar then reports it as shared.
+- Sharing the same message twice creates one post.
+- Editing the message and re-sharing updates that post rather than creating a second.
+- Deleting the message removes the post; replaying the delete does not error and does not re-attempt.
+- A user sharing someone else's message is refused by the appserver, not merely hidden in the UI.
 
----
-
-### Phase 3 — Manual share (the first end-to-end publish)
-
-**Deliverables**
-
-- An admin-only "Share to Bluesky" action on a message.
-- **Route decision required first (§4.2(c)):** `ArbiterClient.proxy` (`packages/sdk/src/atproto/arbiter.ts:156`) posts to the scoped `space.roomy.authComplete.arbiter.proxy`, whose scope policy **denies `app.bsky.feed.post`** — so the client-driven share as originally specified cannot work until that permission set admits the post collection. Two ways through, and the choice is §6.1's:
-  - **(i) widen the permission set** — a change outside this repo, plus updating its in-repo transcription at `packages/appserver/src/arbiter/provision.test.ts:61-83`; or
-  - **(ii) route the share through the appserver**, which uses the built-in `town.muni.arbiter.proxy` (`packages/appserver/src/arbiter/client.ts:145`) and is already admitted as the recovery admin. No policy change, but the actor becomes the operator, not the admin.
-- Publish writes via `com.atproto.repo.putRecord` with the derived rkey; the returned `uri`/`cid` are recorded in the mapping table.
-- A retraction (delete) path exercising §3.4.
-- The `space.roomy.space.updatePolicy`-style error surfacing: map `ArbiterProxyError.errorName` to a human message.
-
-**Observable completion criterion**
-
-- An admin shares one message; the post exists at the recorded `uri` and its text matches the exporter's output.
-- Sharing the **same message a second time creates no second post** (the same `uri` is returned) — the belt-2 property, proven by observing a single record at that rkey.
-- Deleting the Roomy message removes the Bluesky record; replaying the delete event does not error and does not re-attempt.
-- A space with `publishEnabled === false` cannot reach the action at all.
-
----
-
-### Phase 4 — Automatic mirroring (per-room, opt-in)
+### Phase 3 — Feature 2: the space's Bluesky page
 
 **Deliverables**
 
-- A per-room mirror toggle, off by default even when the space opt-in is on.
-- A persisted work queue + a sweeper modelled on `packages/appserver/src/embed/sweeper.ts` (batched, idle-polled, `ok | definitive | transient` outcomes, escalating backoff, delete-on-settle).
-- Enqueue from the live write path only, gated on the room toggle; **never** from `applyBatch`/`applyBundle`.
-- A per-room `mirror_from` watermark, keyed `(space_did, room_id, target)`.
+- An appserver feed query for a space's account (§2.2).
+- The page: post list, profile header, empty/steward-missing/error states (§2.1).
+- Admin-only compose, gated by `space-account-management` AND `isAdmin`.
 
-**Observable completion criterion**
+**Completion criterion**
 
-- Enabling mirroring on a room with pre-existing history publishes **zero** historical messages, and a message posted afterwards publishes **exactly one**.
-- A simulated bridge-style replay of N historical `createMessage` events through `sendEvents` produces **zero** posts (the TASK-151 shape, asserted directly).
-- A simulated `SPACE_SCHEMA_VERSION` bump + full re-materialisation produces **zero** new posts (the rebuild path, asserted directly).
-- A permanently-failing message (over the limit, no steward) settles to a terminal state and leaves the queue (the sweeper still drains to newer work on the next cycle).
-- A transient PDS failure retries and eventually succeeds, producing exactly one post.
-
----
-
-### Not in scope (explicit)
-
-- **Media embeds** (images, video) — the blob-transfer and permission questions of §2.6, and open question §6.3.
-- **Link-card thumbnails** — cards publish with `uri`/`title`/`description` only; thumbnails need blob upload.
-- **Reply threading and quote posts** — need the mapping table to be mature first (§2.6).
-- **`langs`** — no language detection exists to base it on.
-- **Bluesky-side moderation tooling** (labels, reports, blocks) — outside this repo (§4.1).
-- **Publishing from a space without an arbiter** — the legacy did:plc path (`packages/appserver/src/streams/did.ts:21`) has no PDS account and no credentials; it is out of scope by construction, pending `arbiter-integration.md` Phase 4.
-- **Thread-splitting long messages** (§2.5).
-- **A capability model** finer than admin (§1.4, §6.2).
+- A non-admin member sees the page and the space's posts, with no compose affordance and no way to reach one.
+- An admin posts from the page and it appears.
+- A space with no stewarded account renders the "no account" state, not an empty feed.
 
 ---
 
 ## 6. Open questions for Meri
 
-These are decisions, not gaps in research. Each names the options and the tradeoff; none is invented into a default.
+Decisions, not gaps in research.
 
-**6.1 May the appserver publish without a human in the loop?** *Rewritten 2026-09-29 — the original framing had the two options backwards.* Under the policy now in the repo (`packages/appserver/policy/default.rego`), **server-driven publishing is already permitted**: the appserver is the named recovery admin and may write any collection through the built-in route. **Client-driven publishing is the path that is currently blocked**, by the scoped route's permission set (§4.2(c)). So the question is no longer "may the appserver act" but: (a) keep the operator as the actor for every publish, including manual shares — nothing to change, operator accountability accepted; (b) widen the published `space.roomy.authComplete` permission set to admit `app.bsky.feed.post`, so a human admin's own credentials drive manual shares, at the cost of a change outside this repo; or (c) do both, sequencing (a) then (b). Note the tradeoff no longer runs the direction the draft assumed: the *cheap* path is the one that makes Roomy-the-operator the actor.
+**6.1 Which write path do we ship?** *This is the critical path.* (a) **Server-driven** — the appserver posts via the built-in route; works today, no outside-repo change, but the accountable actor on the wire is the operator. (b) **Client-driven** — requires widening the published `space.roomy.authComplete` permission set (a record outside this repo) so it admits `putRecord` of `app.bsky.feed.post`; then a human admin's own credentials drive the post, and the human is the accountable actor. (c) Both, sequenced (a) then (b). **The plan is written so both features are deliverable under (a) alone.**
 
-**6.2 Who may share a message to the space's Bluesky account?** Admin-only (matching every other space setting, §1.4) or any member? Any-member publishing under a shared identity is a reputational exposure that admin-only avoids; a capability model to express anything in between does not exist today and would be new work. Note the shipped arbiter policy already answers the *authorization* half for the admin case — `getUserAccess` is what decides `is_admin` — so "any member" would mean relaxing a policy that currently admits admins only.
+**6.2 Who may share a message to the space's account — its author, or only admins?** Meri's framing is "users clicking 'share' on their own messages", which is more permissive than admin-only: any member could put their own words on the community's public account. Admin-only is the safer default and matches every other space-level setting; author-only is the better product if the community's account is understood as a shared voice. The two are different products, not two settings of one.
 
-**6.3 May a space re-host a member's media under the space's identity?** Roomy attachments are blobs on the *author's* PDS; publishing them under the *space's* account means copying a user's file into another repo (§2.6). This is a consent question about members' content, not a technical one.
+**6.3 May a space re-host a member's media under the space's identity?** Attachments are blobs on the *author's* PDS; publishing them under the *space's* account copies a user's file into another repo. That is a consent question, not a technical one.
 
-**6.4 What happens to a space with no stewarded account?** Steward resolution fails opaquely today — `getSpaceProfileRecord` swallows every error and returns `null` (`packages/sdk/src/atproto/bluesky-profile.ts:83-87`), so "no steward" and "no profile" are indistinguishable in the UI. Options: (a) surface steward state in `getMetadata` (needs a new read, since no appserver table records it); (b) stop swallowing the error so the integrations tab can say *why*; (c) leave it. The plan needs the answer before Phase 1's UI work, because offering a publish toggle on a space that cannot publish is a dead control. Newly relevant: the policy now resolves the appserver through the space's own `space.roomy.service/self` record (`policy/default.rego`), and the migration script skips any space whose `town.muni.arbiter.service/self` does not point at the expected arbiter (`scripts/migrate-arbiter-configs.ts`) — so "stewarded, but by a different arbiter" is a third state the UI currently cannot express either.
+**6.4 What does the page do for a space with no stewarded account?** Steward resolution fails opaquely today — `getSpaceProfileRecord` swallows every error and returns `null` (`packages/sdk/src/atproto/bluesky-profile.ts:83-87`), so "no steward" and "no profile" are indistinguishable. The policy now resolves the appserver via the space's `space.roomy.service/self` record, and the migration script skips spaces whose `town.muni.arbiter.service/self` names a different arbiter — so "stewarded by another arbiter" is a third state with no UI today. Options: surface steward state in `getMetadata`; stop swallowing the error; or leave it. Needed before Phase 3's page states.
 
-**6.5 What is the character-limit policy?** Refuse (recommended, §2.5), truncate, or split into a thread. If "refuse", what does the sharer see — and does an auto-mirrored room silently drop long messages, or notify its admins?
+**6.5 Should a space be able to disable posting while keeping the identity?** §2.4 recommends implicit gating (admin + stewarded account, no new state) for v1. If some communities want the account to exist without a compose box, that is a small event-sourced flag added later, not now.
 
-**6.6 What is the retraction promise?** When a Roomy admin deletes a message, does Roomy guarantee the Bluesky post is removed (best-effort, with a visible failure), or only attempt it? Deleting a message in Roomy currently removes it permanently and locally (`packages/sdk/src/schema/events/message.ts:429`); a partial publish failure leaves the two out of sync, and the plan needs to say what the user is told.
+**6.6 What is the retraction promise?** When a message is deleted, does Roomy *guarantee* the post is removed (best-effort with a visible failure), or only attempt it? Deleting a message in Roomy is permanent and local (`packages/sdk/src/schema/events/message.ts:429`); a partial publish failure leaves the two out of sync, and the plan must say what the user is told.
 
 ---
 
 ## 7. References
 
-**In-repo (verified on `origin/next` @ `c7087ea9`; §7's arbiter entries re-verified @ `b245b695`)**
+**In-repo**
 
-- `packages/appserver/docs/plans/arbiter-integration.md` — the arbiter (leaf-0.4) integration plan. Phases 0–1 shipped; 2–4 not implemented. This plan is a new phase consuming that machinery. (Note: much of that document is now stale — its Phase 2 says `space.roomy.space.isAdmin` does not exist, when the shipped equivalent `space.roomy.space.getUserAccess` is what the installed policy actually calls; its Phase 1 step 3 still names the scoped route the provisioning code no longer uses; and its "the policy is not in this repo" premise no longer holds.)
-- `packages/appserver/policy/default.rego` + `policy/tests/default_test.rego` + `policy/README.md` — **the installed arbiter policy and its behavioural tests.** The authoritative answer to "may the appserver write this?" (§4.2).
-- `packages/appserver/src/arbiter/provision.test.ts:61-83` — the in-repo transcription of the published `space.roomy.authComplete` permission set, and `:187-218` the negative fixture pinning that a `putRecord` of `app.bsky.feed.post` is denied on the scoped route.
+- `packages/appserver/policy/default.rego` + `policy/tests/default_test.rego` + `policy/README.md` — the installed arbiter policy and its behavioural tests. The authoritative answer to "may the appserver write this?"
+- `packages/appserver/src/arbiter/provision.test.ts:61-83` — the in-repo transcription of the published `space.roomy.authComplete` permission set; `:187-218` the negative fixture pinning that a `putRecord` of `app.bsky.feed.post` is denied on the scoped route.
+- `packages/appserver/src/arbiter/client.ts:15-23` — why the appserver uses the built-in route.
 - `packages/appserver/scripts/migrate-arbiter-configs.ts` — one-time `resetConfig` backfill; mirrors `REFERENCE_ARBITER_CONFIG`.
-- `docs/plans/richtext-migration-plan.md:160` — the export mapping, already researched (§0.3).
-- `docs/rich-text-representation-research.md:136-183` — the Bluesky post/facet lexicon analysis, and the byte-index footgun.
-- `packages/appserver/docs/push-freshness-gate.md` — the three freshness gates; the bridge-replay hazard is documented in its framing, and the replay-marker follow-up now sits at `:67-70`.
-- `packages/appserver/docs/plans/per-space-dbs.md` — per-space DB split, and `comp_space.backfilled_to`'s move to `materialization_cursor`.
-- `packages/docs/src/routes/concepts/feature-flags/+page.svelte` — the authoritative flag semantics ("not a security boundary", "not per-space").
+- `packages/app-lite/src/lib/scopes.ts` — **shipped.** `SCOPE_SETS.base` / `FULL_SCOPE_CEILING`, the tier definitions, and `PROXIED_REPO_RPCS` (§2.5).
+- `packages/app-lite/src/lib/proxied-repo-scopes.test.ts` — **shipped.** The coverage test that asserts every proxied `com.atproto.repo.*` call the client makes is authorized by the requested scope, using the real `@atproto/oauth-scopes` matcher. The guard for any client-driven post path (§2.5).
+- `packages/app-lite/src/lib/scope-guard.ts` + `scope-consent-dialogue.ts` — **shipped.** `guardedXrpc` + `isInsufficientScopeError`, and the reactive consent dialogue (§2.5).
+- `packages/app-lite/docs/plans/progressive-scope-extension.md` — the design record for the above; now a description of what shipped, not a proposal.
+- `docs/plans/richtext-migration-plan.md:160` — the export mapping, already researched.
+- `docs/rich-text-representation-research.md:136-183` — the Bluesky post/facet lexicon analysis and the byte-index footgun.
+- `packages/appserver/docs/push-freshness-gate.md` — the freshness gates; the bridge-replay hazard is in its framing, and the replay-marker follow-up is at `:67-70`.
+- `packages/appserver/docs/plans/arbiter-integration.md` — the arbiter integration plan. Partly stale: its Phase 2 says `space.roomy.space.isAdmin` does not exist (the shipped equivalent, `getUserAccess`, is what the policy calls), and its Phase 1 step 3 names the scoped route the provisioning code no longer uses.
 
 **External (fetched 2026-09-16; not in this repo)**
 
-- `lexicons/app/bsky/feed/post.json` — required `text` + `createdAt`; `text` `maxLength 3000` / `maxGraphemes 300`; `key: "tid"`; the `embed` union.
-- `lexicons/app/bsky/richtext/facet.json` — `#byteSlice` (UTF-8, start inclusive / end exclusive) and the closed `mention | link | tag` feature union. The `byteSlice` description explicitly warns UTF-16 languages to convert to byte arrays, which is the constraint `packages/sdk/src/richtext/convert.ts:22-25` already encodes.
-- `lexicons/app/bsky/embed/external.json` — `uri` / `title` / `description` required, `thumb` a ≤1 MB blob.
+- `lexicons/app/bsky/feed/post.json` — required `text` + `createdAt`; `maxLength 3000` / `maxGraphemes 300`; `key: "tid"`; the `embed` union.
+- `lexicons/app/bsky/richtext/facet.json` — `#byteSlice` (UTF-8, start inclusive / end exclusive) and the closed `mention | link | tag` union. Its `byteSlice` description explicitly warns UTF-16 languages to convert to byte arrays — the constraint `convert.ts:22-25` already encodes.
+- `lexicons/app/bsky/embed/external.json` — `uri`/`title`/`description` required, `thumb` a ≤1 MB blob.
 - `lexicons/app/bsky/embed/images.json` — ≤4 images, ≤2 MB each, `alt` required.
 
 ---
 
 ## 8. Verification notes
 
-- Every `file:line` in this document was read from `origin/next` at `c7087ea9`; the working tree was clean and at that commit throughout. The arbiter material — §0.1, §0.2's greps, §4.2, §4.3, §6.1, §6.4, §7 — was re-verified at `b245b695` after `next` moved 85 commits, and is the version to trust; the remaining citations are unchanged from the original pass and drift with `next` (they shift by single-digit-to-low-hundreds of lines as files grow — the symbols and the claims still hold).
-- The absence of the publish half was verified with the greps quoted verbatim in §0.2, each runnable as written against `origin/next`.
-- Runtime facts checked rather than assumed: `Intl.Segmenter` grapheme segmentation (family emoji → 1 grapheme; `e` + combining acute → 1; vs 7 and 2 code points) and the TID alphabet/length (13 chars from `234567abcdefghijklmnopqrstuvwxyz`; a ULID is 26 Crockford base32 chars including `0`, `1`, `9`, so it is **not** a valid TID).
-- The 2026-09-29 review's headline finding — that the scoped route's permission set denies `app.bsky.feed.post` while the built-in route admits the appserver for any collection — rests on `packages/appserver/policy/default.rego`, the transcription at `packages/appserver/src/arbiter/provision.test.ts:61-83`, and the negative fixture at `:187-218`. All three were read at `b245b695`.
+- §0.3, §0.4, §1.4, §2.5 and §4 were read at `origin/next` @ `2dbf7d8a`. §3's `convert.ts` symbols were re-located at the same commit (`utf8ByteLength:37`, `parseInternalLinkHref:97`, `marksToFeatures:160`, `proseMirrorDocToBlocks:304`, `blocksToPlaintext:676-698`, `markdownToBlocks:838`, `deserializeBody:1136`). Citations elsewhere date from the original pass at `c7087ea9` and shift with `next`; the symbols hold.
+- The absence of the publish half and of any Bluesky read path was verified by grep against `origin/next` (§0.3), and each grep is runnable as written.
+- Runtime facts checked rather than assumed: `Intl.Segmenter` grapheme segmentation (family emoji → 1 grapheme; `e` + combining acute → 1; vs 7 and 2 code points) and the TID alphabet/length (13 chars from `234567abcdefghijklmnopqrstuvwxyz`; a ULID is 26 Crockford base32 chars including `0`/`1`/`9`, so it is **not** a valid TID).
+- §4.1's finding rests on three artefacts read at `2dbf7d8a`: `policy/default.rego`, the transcription at `provision.test.ts:61-83`, and the negative fixture at `:187-218`.
 - No production code was changed by this task.
