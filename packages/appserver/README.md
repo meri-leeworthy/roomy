@@ -133,6 +133,14 @@ appserver's own `did:web:api.roomy.space` cannot hold these records: its DID
 document carries an `#atproto` verification key and an appserver service
 entry, but no `#atproto_pds`, so it has no repo to publish into.
 
+The reason to publish differs by lexicon kind. A permission set must resolve:
+an authorizing PDS resolves an `include:` scope, and a set that cannot be
+resolved fails the session — which is why Roomy's one published lexicon,
+`space.roomy.authComplete`, is published at all. A record collection does not:
+the appserver writes the collection name as a literal and never resolves the
+NSID, which is how `space.roomy.user.profile` has been read since it shipped.
+Publishing one buys third-party resolution and nothing at runtime.
+
 Publishing is an **out-of-band** step: it needs credentials for whichever
 account holds the repo, which the appserver does not have, and it is not part
 of the build or deploy. Land the lexicon file here first — an unpublished

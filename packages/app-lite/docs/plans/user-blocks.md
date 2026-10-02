@@ -1276,11 +1276,13 @@ without the enforcement behind it.
 **Base:** `next`. **Depends on:** nothing.
 
 1. Add `packages/appserver/lexicons/space/roomy/user/block.json` (§1.1).
-2. Publish the lexicon on the network as a `com.atproto.lexicon.schema` record
-   — out-of-band, documented in the package README. This needs one DNS record
-   first: the authority for `space.roomy.user.block` is
-   `_lexicon.user.roomy.space`, which does not exist (§1.3). Without it the
-   NSID resolves to no authority at all, and the record has nowhere to go.
+2. (Optional, nothing depends on it) Publish the lexicon on the network as a
+   `com.atproto.lexicon.schema` record — out-of-band, documented in the package
+   README. This needs one DNS record first: the authority for
+   `space.roomy.user.block` is `_lexicon.user.roomy.space`, which does not exist
+   (§1.3). Nothing in this phase reads the published record — the appserver
+   writes the collection name as a literal and does not resolve the lexicon —
+   so the record is for third-party resolution, not for the feature.
 3. Add `repo:space.roomy.user.block` to `packages/app-lite/src/lib/config.ts`
    (beside `:144`) **and** the matching `SCOPE+=` line in
    `packages/app-lite/scripts/build-prod.sh` (beside `:57`). Run the build to
