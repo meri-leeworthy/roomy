@@ -104,55 +104,85 @@ pure **record** collections (no query, no procedure — e.g.
 in this directory. Nothing here is served over HTTP: the appserver answers
 `/.well-known/did.json` and XRPC, nothing else.
 
-### Publishing a record lexicon
+### Publishing a lexicon
 
-For another app to resolve a record collection over the network, its lexicon
-must be published as a `com.atproto.lexicon.schema` record, with the rkey set
-to the NSID, in the repo of the NSID's authority.
+A lexicon becomes network-resolvable when it is published as a
+`com.atproto.lexicon.schema` record, with the rkey set to the NSID, in the repo
+of the NSID's **authority**. `scripts/publish-lexicons.ts` does this.
 
-The authority is derived from the NSID, not from the `roomy.space` apex: drop
+Whether to publish depends on the lexicon's kind:
+
+- A **permission set** must resolve — an authorizing PDS resolves an `include:`
+  scope, and a set that cannot be resolved fails the session. That is why
+  `space.roomy.authComplete` is published.
+- A **record collection** or XRPC definition does not: the appserver writes the
+  collection name as a literal and never resolves the NSID, which is how
+  `space.roomy.user.profile` has been read since it shipped. Publishing buys
+  third-party resolution — a client, indexer or validator that does not ship
+  this source — and nothing at runtime.
+
+Publishing is **out-of-band**: it needs credentials for the account that holds
+the repo, which the appserver does not have, and it is not part of the build or
+deploy.
+
+#### 1. The authority
+
+Authority comes from DNS, not from the `roomy.space` apex. For an NSID, drop
 the name segment, reverse the rest, and look up `_lexicon.<that domain>`. The
-lookup is not hierarchical — a resolver never falls back to a parent or child
-domain — so NSIDs that differ in any segment but the last have different
-authorities, and each needs its own TXT record:
+lookup is **not hierarchical** — a resolver never falls back to a parent or
+child domain — so NSIDs that differ in more than the last segment have
+different authorities, and each authority group needs its own TXT record.
 
-| NSID | Authority lookup |
-| --- | --- |
-| `space.roomy.user.block` | `_lexicon.user.roomy.space` |
-| `space.roomy.authComplete` | `_lexicon.roomy.space` |
-
-Measured state (2026-10-02):
-
-| Lookup | TXT value | Lexicons published there |
+| Authority domain | NSIDs it governs | TXT record (2026-10-02) |
 | --- | --- | --- |
-| `_lexicon.roomy.space` | `did=did:plc:cyqufxsezk33hqulcilckna6` | `space.roomy.authComplete` only |
-| `_lexicon.user.roomy.space` | absent | — |
+| `roomy.space` | `space.roomy.authComplete`, `space.roomy.service` | `did=did:plc:cyqufxsezk33hqulcilckna6` |
+| `user.roomy.space` | `space.roomy.user.*` | absent |
+| `richtext.roomy.space` | `space.roomy.richtext.*` | absent |
+| `space.roomy.space` | `space.roomy.space.*` | absent |
+| `room.roomy.space` | `space.roomy.room.*` | absent |
 
-`did:plc:cyqufxsezk33hqulcilckna6` is the `roomy.space` account. The
-appserver's own `did:web:api.roomy.space` cannot hold these records: its DID
-document carries an `#atproto` verification key and an appserver service
-entry, but no `#atproto_pds`, so it has no repo to publish into.
+Those are all of them: the missing groups need five TXT records, not one per
+NSID. The record is `"did=<did>"` — a single value, since two are ambiguous.
+Create them at whichever provider hosts the `roomy.space` zone (Cloudflare).
+The DID must have a repo to publish into; `did:plc:cyqufxsezk33hqulcilckna6`
+does, and the appserver's own `did:web:api.roomy.space` does not — its DID
+document carries an `#atproto` verification key and an appserver service entry,
+but no `#atproto_pds`.
 
-The reason to publish differs by lexicon kind. A permission set must resolve:
-an authorizing PDS resolves an `include:` scope, and a set that cannot be
-resolved fails the session — which is why Roomy's one published lexicon,
-`space.roomy.authComplete`, is published at all. A record collection does not:
-the appserver writes the collection name as a literal and never resolves the
-NSID, which is how `space.roomy.user.profile` has been read since it shipped.
-Publishing one buys third-party resolution and nothing at runtime.
-
-Publishing is an **out-of-band** step: it needs credentials for whichever
-account holds the repo, which the appserver does not have, and it is not part
-of the build or deploy. Land the lexicon file here first, then publish with an
-authenticated agent for that DID:
+`bun run scripts/publish-lexicons.ts <nsid> --dry-run` reports what is missing:
 
 ```
-com.atproto.repo.putRecord { repo: <authority-did>, collection: "com.atproto.lexicon.schema", rkey: <NSID>, record: <the lexicon file> }
+space.roomy.user.block  →  create TXT  _lexicon.user.roomy.space  =  "did=<authority-did>"
 ```
 
-The record is the lexicon document itself plus `$type:
-"com.atproto.lexicon.schema"`. Verify with `com.atproto.repo.listRecords` on
-the authority repo (collection `com.atproto.lexicon.schema`).
+#### 2. The credentials
 
-**Outstanding:** `space/roomy/user/block.json` has no authority to publish
-under yet — `_lexicon.user.roomy.space` does not exist — and no record exists.
+```
+export LEXICON_AUTHORITY_IDENTIFIER=roomy.space     # handle or DID of the authority account
+export LEXICON_AUTHORITY_PASSWORD=xxxx-xxxx-xxxx-xxxx
+```
+
+An app password is enough — the write authenticates as the authority account
+against its own PDS, which the script reads from the DID document
+(`LEXICON_AUTHORITY_PDS` overrides).
+
+#### 3. The write
+
+```
+bun run scripts/publish-lexicons.ts space.roomy.user.block
+# or every lexicon in lexicons/ whose authority already resolves:
+bun run scripts/publish-lexicons.ts --all --dry-run
+bun run scripts/publish-lexicons.ts --all
+```
+
+The script resolves the authority, refuses to guess when there is none, writes
+the document verbatim plus `$type: "com.atproto.lexicon.schema"`, and reads it
+back to confirm the repo holds what it sent. It writes with `validate: false`:
+no PDS knows `com.atproto.lexicon.schema`, so a validating write is rejected.
+
+Verify from outside with any resolver, e.g.
+`https://lexicon.garden/xrpc/com.atproto.lexicon.resolveLexicon?nsid=<nsid>`.
+
+**Outstanding:** no `_lexicon.user.roomy.space` or `_lexicon.richtext.roomy.space`
+record exists, so the lexicons in those groups — including
+`space.roomy.user.block` — have nowhere to publish yet.
