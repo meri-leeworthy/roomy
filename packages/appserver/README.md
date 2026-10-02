@@ -101,20 +101,43 @@ NSID path. The XRPC definitions here are the contract for third-party clients
 and are mirrored into the SDK by `packages/sdk/scripts/generate-lexicons.ts`;
 pure **record** collections (no query, no procedure — e.g.
 `space/roomy/user/profile.json`) are not generated into the SDK and live only
-in this directory.
+in this directory. Nothing here is served over HTTP: the appserver answers
+`/.well-known/did.json` and XRPC, nothing else.
 
 ### Publishing a record lexicon
 
 For another app to resolve a record collection over the network, its lexicon
 must be published as a `com.atproto.lexicon.schema` record, with the rkey set
-to the NSID, in the repo of the NSID's authority. For a `space.roomy.*` NSID the
-authority is the `roomy.space` account, `did:plc:cyqufxsezk33hqulcilckna6`
-(declared by the `_lexicon.roomy.space` TXT record).
+to the NSID, in the repo of the NSID's authority.
 
-This is an **out-of-band** step: it needs credentials for that authority
-account, which the appserver does not hold, and it is not part of the build or
-deploy. Land the lexicon file here first — an unpublished lexicon is a known
-gap, not a broken build — then publish with an authenticated agent for that DID:
+The authority is derived from the NSID, not from the `roomy.space` apex: drop
+the name segment, reverse the rest, and look up `_lexicon.<that domain>`. The
+lookup is not hierarchical — a resolver never falls back to a parent or child
+domain — so NSIDs that differ in any segment but the last have different
+authorities, and each needs its own TXT record:
+
+| NSID | Authority lookup |
+| --- | --- |
+| `space.roomy.user.block` | `_lexicon.user.roomy.space` |
+| `space.roomy.authComplete` | `_lexicon.roomy.space` |
+
+Measured state (2026-10-02):
+
+| Lookup | TXT value | Lexicons published there |
+| --- | --- | --- |
+| `_lexicon.roomy.space` | `did=did:plc:cyqufxsezk33hqulcilckna6` | `space.roomy.authComplete` only |
+| `_lexicon.user.roomy.space` | absent | — |
+
+`did:plc:cyqufxsezk33hqulcilckna6` is the `roomy.space` account. The
+appserver's own `did:web:api.roomy.space` cannot hold these records: its DID
+document carries an `#atproto` verification key and an appserver service
+entry, but no `#atproto_pds`, so it has no repo to publish into.
+
+Publishing is an **out-of-band** step: it needs credentials for whichever
+account holds the repo, which the appserver does not have, and it is not part
+of the build or deploy. Land the lexicon file here first — an unpublished
+lexicon is a known gap, not a broken build — then publish with an
+authenticated agent for that DID:
 
 ```
 com.atproto.repo.putRecord { repo: <authority-did>, collection: "com.atproto.lexicon.schema", rkey: <NSID>, record: <the lexicon file> }
@@ -124,4 +147,5 @@ The record is the lexicon document itself plus `$type:
 "com.atproto.lexicon.schema"`. Verify with `com.atproto.repo.listRecords` on
 the authority repo (collection `com.atproto.lexicon.schema`).
 
-**Outstanding:** `space/roomy/user/block.json` is not yet published.
+**Outstanding:** `space/roomy/user/block.json` has no authority to publish
+under yet — `_lexicon.user.roomy.space` does not exist — and no record exists.
