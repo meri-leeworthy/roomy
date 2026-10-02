@@ -6,6 +6,14 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
+# The plugin class is reached by name in two ways that minification cannot
+# see: its `emitEvent` native method resolves through JNI as
+# `Java_app_tauri_mobilepush_MobilePushPlugin_emitEvent`, and Tauri's
+# `PluginHandle` indexes the `@Command` methods by their Java name and
+# dispatches with `Method.invoke`. Renaming either breaks command dispatch
+# and event delivery in a release build only.
+-keep class app.tauri.mobilepush.MobilePushPlugin { *; }
+
 # If your project uses WebView with JS, uncomment the following
 # and specify the fully qualified class name to the JavaScript interface
 # class:
