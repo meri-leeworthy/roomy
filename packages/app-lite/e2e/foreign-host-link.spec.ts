@@ -11,14 +11,15 @@
  *
  * The observable contract is on the write side: a message body carrying that
  * link holds a `#link` facet and no `#roomRef` facet, and opening the room
- * issues no summary request for the DID. A link to a Roomy host still
- * produces the facet and still becomes a badge, so the badge path itself is
- * unchanged.
+ * issues no summary request for the DID. A link to an origin this deployment
+ * serves still produces the facet and still becomes a badge, so the badge
+ * path itself is unchanged.
  */
 
 import { expect, test, waitForAuthenticated } from "./spec-helpers.ts";
 import { newUlid } from "@roomy-space/sdk";
 import {
+  APP_LITE_ORIGIN,
   APPSERVER_HTTP_ORIGIN,
   SEED_ROOM_ID,
   SEED_ROOM_PATH,
@@ -31,13 +32,13 @@ const FOREIGN_DID = "did:plc:rqbqpaaluty5v47jwciowpik";
 /** The exact shape that produced the production 404s. */
 const FOREIGN_URL = `https://twinkl.social/${FOREIGN_DID}`;
 /**
- * A second space DID, referenced through a Roomy host. It is equally absent
- * from this appserver (so its badge 404s too, which is the badge path working
- * as designed), and it is a *different* DID so the control link cannot be
- * confused with the one under test.
+ * A second space DID, referenced through this deployment's own origin. It is
+ * equally absent from this appserver (so its badge 404s too, which is the
+ * badge path working as designed), and it is a *different* DID so the control
+ * link cannot be confused with the one under test.
  */
 const ROOMY_DID = "did:plc:cyqufxsezk33hqulcilckna6";
-const ROOMY_URL = `https://roomy.space/${ROOMY_DID}`;
+const ROOMY_URL = `${APP_LITE_ORIGIN}/${ROOMY_DID}`;
 
 const SPACE_SUMMARY = "space.roomy.space.getSpaceSummary";
 
