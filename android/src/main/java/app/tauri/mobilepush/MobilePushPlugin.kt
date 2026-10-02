@@ -99,19 +99,26 @@ class MobilePushPlugin(private val activity: android.app.Activity) : Plugin(acti
     /**
      * Emits the FCM payload an intent was opened with.
      *
-     * The FCM SDK copies the message's `data` keys onto the launch intent as
-     * extras, so the payload is whatever the sender put there. The extras are
-     * cleared afterwards, which is what keeps a re-delivered intent (a
-     * configuration change, say) from emitting the same tap twice.
+     * The FCM SDK copies the message's `data` bundle onto the launch intent as
+     * extras (`NotificationParams.paramsWithReservedKeysRemoved`), so the
+     * payload is whatever the sender put there, minus `gcm.*`/`google.c.*`.
+     * Only String extras are read, and each one read is removed afterwards —
+     * which is what keeps a re-delivered intent (a configuration change, say)
+     * from emitting the same tap twice, without disturbing extras that belong
+     * to something else (a deep link keeps its own).
      */
     private fun deliverTap(intent: Intent?) {
         val extras: Bundle = intent?.extras ?: return
         val data = JSObject()
-        for (key in extras.keySet()) {
+        // Snapshot the keys: the loop removes from the bundle, and Bundle's
+        // key set is a view of it.
+        for (key in extras.keySet().toList()) {
             val value = extras.get(key)
-            if (value is String) data.put(key, value)
+            if (value is String) {
+                data.put(key, value)
+                intent.removeExtra(key)
+            }
         }
-        intent.replaceExtras(Bundle())
         if (data.length() == 0) return
 
         val event = JSObject()
