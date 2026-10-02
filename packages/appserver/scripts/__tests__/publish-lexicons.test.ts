@@ -5,8 +5,13 @@
  * `_atproto` record and the lexicon system's `_lexicon` record are different
  * names with different meanings, and querying the wrong one returns nothing —
  * which the script reports as "no authority", exactly as it would for a
- * namespace that is genuinely unconfigured. So it is pinned against the live
- * zone, for an authority that exists and for two that do not.
+ * namespace that is genuinely unconfigured. So the live zone is pinned for an
+ * authority that exists, and the "no authority" cases resolve against a zone
+ * supplied by the test.
+ *
+ * Rule for adding a case here: a negative must be non-existent *by
+ * construction*. Never assert on a name the project is still publishing
+ * records for — today's `undefined` is the next record's red build.
  *
  * The write path runs against a fake repo: the three XRPC calls the script
  * makes. That pins the request shape (`validate: false`, rkey = NSID, the
@@ -16,6 +21,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
+import type { TxtLookup } from "../publish-lexicons.ts";
 import { AtpAgent } from "@atproto/api";
 import {
   allNsids,
@@ -39,15 +45,25 @@ describe("authority derivation", () => {
   });
 
   test("resolves per authority group, without falling back to a parent", async () => {
-    // The one published Roomy lexicon.
+    // The one published Roomy lexicon; stable, so the live zone is the right
+    // source for this positive.
     expect(await resolveAuthority("space.roomy.authComplete")).toBe(
       "did:plc:cyqufxsezk33hqulcilckna6",
     );
-    // `_lexicon.user.roomy.space` does not exist, and the `_lexicon.roomy.space`
-    // record that does is not consulted for these: resolution is not
-    // hierarchical.
-    expect(await resolveAuthority("space.roomy.user.block")).toBeUndefined();
-    expect(await resolveAuthority("space.roomy.user.profile")).toBeUndefined();
+
+    // The negatives resolve against a zone the test owns instead of the live
+    // zone. Only the apex `_lexicon.roomy.space` is populated there, so
+    // `space.roomy.user.block` has to derive `_lexicon.user.roomy.space` and
+    // `space.roomy.richtext.blocks` has to derive
+    // `_lexicon.richtext.roomy.space` — both absent by construction, whatever
+    // the live zone holds. The parent record is present precisely so the
+    // "not hierarchical" claim is load-bearing rather than a lookup that could
+    // only have found nothing.
+    const apexOnly: TxtLookup = async (name) =>
+      name === "_lexicon.roomy.space" ? [["did=did:plc:cyqufxsezk33hqulcilckna6"]] : [];
+
+    expect(await resolveAuthority("space.roomy.user.block", apexOnly)).toBeUndefined();
+    expect(await resolveAuthority("space.roomy.richtext.blocks", apexOnly)).toBeUndefined();
   });
 });
 

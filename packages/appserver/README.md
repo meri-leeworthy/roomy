@@ -136,10 +136,12 @@ different authorities, and each authority group needs its own TXT record.
 | Authority domain | NSIDs it governs | TXT record (2026-10-02) |
 | --- | --- | --- |
 | `roomy.space` | `space.roomy.authComplete`, `space.roomy.service` | `did=did:plc:cyqufxsezk33hqulcilckna6` |
-| `user.roomy.space` | `space.roomy.user.*` | absent |
+| `user.roomy.space` | `space.roomy.user.*` | `did=did:plc:cyqufxsezk33hqulcilckna6` |
 | `richtext.roomy.space` | `space.roomy.richtext.*` | absent |
 | `space.roomy.space` | `space.roomy.space.*` | absent |
 | `room.roomy.space` | `space.roomy.room.*` | absent |
+| `embed.roomy.space` | `space.roomy.embed.*` | absent |
+| `mention.roomy.space` | `space.roomy.mention.*` | absent |
 
 Those are all of them: the missing groups need five TXT records, not one per
 NSID. The record is `"did=<did>"` — a single value, since two are ambiguous.
@@ -152,7 +154,7 @@ but no `#atproto_pds`.
 `bun run scripts/publish-lexicons.ts <nsid> --dry-run` reports what is missing:
 
 ```
-space.roomy.user.block  →  create TXT  _lexicon.user.roomy.space  =  "did=<authority-did>"
+space.roomy.richtext.blocks  →  create TXT  _lexicon.richtext.roomy.space  =  "did=<authority-did>"
 ```
 
 #### 2. The credentials
@@ -183,6 +185,5 @@ no PDS knows `com.atproto.lexicon.schema`, so a validating write is rejected.
 Verify from outside with any resolver, e.g.
 `https://lexicon.garden/xrpc/com.atproto.lexicon.resolveLexicon?nsid=<nsid>`.
 
-**Outstanding:** no `_lexicon.user.roomy.space` or `_lexicon.richtext.roomy.space`
-record exists, so the lexicons in those groups — including
-`space.roomy.user.block` — have nowhere to publish yet.
+**Outstanding:** no `_lexicon.richtext.roomy.space` record exists, so the
+lexicons in that group have nowhere to publish yet.

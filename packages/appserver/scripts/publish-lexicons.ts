@@ -123,6 +123,9 @@ export function authorityDomain(nsid: string): string {
   return segments.slice(0, -1).reverse().join(".");
 }
 
+/** A `_lexicon.<authority>` TXT lookup; the system resolver by default. */
+export type TxtLookup = (name: string) => Promise<string[][]>;
+
 /**
  * Resolve the authority DID for an NSID from `_lexicon.<authority>`.
  *
@@ -132,11 +135,17 @@ export function authorityDomain(nsid: string): string {
  *
  * Per the specification more than one `did=` TXT is ambiguous, and absent is
  * absent: both are "no authority", never a fallback to a parent domain.
+ *
+ * `lookup` is injectable so a caller can resolve against a zone it controls,
+ * rather than the live zone this project is still creating records in.
  */
-export async function resolveAuthority(nsid: string): Promise<string | undefined> {
+export async function resolveAuthority(
+  nsid: string,
+  lookup: TxtLookup = resolveTxt,
+): Promise<string | undefined> {
   let chunks: string[][];
   try {
-    chunks = await resolveTxt(`_lexicon.${authorityDomain(nsid)}`);
+    chunks = await lookup(`_lexicon.${authorityDomain(nsid)}`);
   } catch {
     return undefined;
   }
