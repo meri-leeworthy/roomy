@@ -17,7 +17,7 @@ A Tauri v2 plugin that provides native remote push notification support using Ap
 - **Foreground notifications** -- receive and display pushes while the app is open
 - **Notification tap handling** -- deep-link into your app when users tap a notification
 - **Token refresh events** -- stay in sync when the OS rotates device tokens
-- **Desktop no-op** -- compiles on macOS/Windows/Linux without error; commands return stub values so you can gate push logic behind platform checks
+- **Desktop no-op** -- compiles on macOS/Windows/Linux without error; the token commands return an error so you can gate push logic behind platform checks
 - **TypeScript API** -- fully typed async functions and event listeners
 
 ## Platform Support
@@ -26,7 +26,7 @@ A Tauri v2 plugin that provides native remote push notification support using Ap
 |----------|-----------|--------------------------|------------------|---------------|
 | iOS 13+  | APNs device token (hex) | Yes | Yes | Yes |
 | Android 7+ (API 24) | FCM registration token | Yes | Yes | Yes |
-| Desktop  | No-op (stub values) | N/A | N/A | N/A |
+| Desktop  | No-op (returns an error) | N/A | N/A | N/A |
 
 ## Why This Plugin?
 
@@ -48,16 +48,20 @@ A Tauri v2 plugin that provides native remote push notification support using Ap
 Add to `src-tauri/Cargo.toml`:
 
 ```toml
-[dependencies]
-tauri-plugin-mobile-push = "0.1"
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-mobile-push = { git = "https://github.com/yanqianglu/tauri-plugin-mobile-push", rev = "<commit>" }
 ```
 
-Or track the latest from git:
+The native sources ship inside the crate (`[package.metadata.tauri-plugin]`
+points at `android/` and `ios/`), and `tauri-plugin`'s build script copies them
+out of the crate source — so the dependency has to be a source dependency. Pin
+`rev` rather than a branch: a git dependency carries no semver, and the pin is
+what makes a mobile build reproducible. A vendored `.aar`, a compiled artifact,
+or a hand-patched `gen/` tree will not carry the native sources.
 
-```toml
-[dependencies]
-tauri-plugin-mobile-push = { git = "https://github.com/yanqianglu/tauri-plugin-mobile-push" }
-```
+The crate sets `links = "tauri-plugin-mobile-push"`, so a fork replaces the
+crates.io dependency rather than sitting beside it — two packages cannot claim
+the same `links` key in one graph.
 
 ### JavaScript / TypeScript
 
@@ -81,7 +85,8 @@ Add to your capabilities file (e.g., `src-tauri/capabilities/mobile.json`):
 }
 ```
 
-This grants both `allow-request-permission` and `allow-get-token`.
+This grants `allow-request-permission`, `allow-get-token`,
+`allow-register-listener` and `allow-remove-listener`.
 
 ### Plugin Registration
 
@@ -119,7 +124,7 @@ tauri::Builder::default()
 
 Presets on `ForegroundPresentationOptions`:
 
-- `default()` -- `banner + list + sound + badge` (preserves pre-0.1.4 behavior)
+- `default()` -- `banner + list + sound + badge` (right for reminder and alert apps)
 - `silent()` -- `list + badge` only (recommended for chat / messaging apps)
 - `none()` -- fully invisible (data-only push)
 
@@ -309,7 +314,7 @@ Get the current device push token.
 
 - **iOS**: Calls `registerForRemoteNotifications()`, waits for the APNs callback, and returns the device token as a hex string. Times out after 15 seconds.
 - **Android**: Calls `FirebaseMessaging.getInstance().token` and returns the FCM registration token.
-- **Desktop**: Returns an empty string.
+- **Desktop**: Rejects — there is no push service to register with.
 
 ### Events
 
@@ -325,6 +330,10 @@ function onNotificationReceived(
 
 Fires when a push notification arrives while the app is in the **foreground**. On iOS, the notification is also displayed as a banner (with sound and badge).
 
+`title` and `body` are the visible text when the sender supplied one. `data`
+holds the notification's custom keys: the FCM data map on Android, the APNs
+payload's non-`aps` keys on iOS.
+
 #### `onNotificationTapped(handler)`
 
 ```typescript
@@ -334,6 +343,10 @@ function onNotificationTapped(
 ```
 
 Fires when the user **taps** a push notification to open the app. Use this for deep linking.
+
+The tap is emitted even when the app was not running — a cold start delivers
+it to the first listener that registers — so a handler installed during app
+startup still sees the notification that launched it.
 
 #### `onTokenRefresh(handler)`
 
@@ -371,6 +384,20 @@ The notification payload should include `title`, `body`, and any custom `data` f
 
 The plugin uses different strategies per platform to work around limitations in Tauri v2's mobile plugin dispatch.
 
+### Command dispatch
+
+Every command is registered in Rust via `generate_handler!`, because Tauri runs
+a plugin's `extend_api` handlers *before* native plugin dispatch. On iOS that
+fall-through is what hangs (`run_mobile_plugin` never returns — see below), so
+each command chooses its own route rather than falling through:
+
+- **iOS**: `request_permission` and `get_token` call `@_cdecl` FFI functions in
+  Swift directly.
+- **Android**: the same two commands forward to the Kotlin plugin with
+  `run_mobile_plugin_async`, which is the path the Kotlin implementation is
+  reachable through.
+- **Desktop**: `get_token` reports that the platform is unsupported.
+
 ### iOS: Direct `@_cdecl` FFI
 
 Tauri v2's `swift-rs` compilation model creates duplicate `PluginManager` singletons when multiple plugins include Swift code. This causes `run_mobile_plugin` calls to hang indefinitely -- `register_plugin()` stores the plugin in one singleton, but `run_plugin_command()` dispatches through a different one.
@@ -379,11 +406,42 @@ This plugin bypasses that system entirely using `@_cdecl` FFI functions, which i
 
 - **`request_permission`**: Rust spawns a thread that calls `extern "C" mobile_push_request_permission()` in Swift. The Swift function calls `UNUserNotificationCenter.requestAuthorization()` and blocks with a `DispatchSemaphore` until the user responds. Returns 1 (granted) or 0 (denied) to Rust.
 - **`get_token`**: Rust spawns a thread that calls `extern "C" mobile_push_get_device_token()` in Swift. On first call, the Swift function lazily injects APNs delegate methods (`didRegisterForRemoteNotificationsWithDeviceToken`, `didFailToRegisterForRemoteNotificationsWithError`) into Tao's dynamically-created AppDelegate using `imp_implementationWithBlock` + `class_addMethod`. It then calls `registerForRemoteNotifications()` and blocks until the APNs callback fires, writing the hex token to a C buffer.
-- **`register_listener`**: Handled as a no-op in Rust's `generate_handler!` to prevent fallthrough to the broken `run_mobile_plugin` path.
 
-### Android: Standard Tauri Plugin Dispatch
+### Events
 
-On Android, the standard Tauri plugin dispatch works correctly. The Kotlin `MobilePushPlugin` handles commands directly, and `FCMService` (a `FirebaseMessagingService`) forwards incoming messages and token refreshes to the plugin's event system.
+Events do not go through `Plugin::trigger`. That reaches listeners held by the
+plugin object Tauri's dispatch instantiated, which is the dispatch this plugin
+bypasses on iOS; Rust owns the listener registry instead.
+
+`register_listener` stores the `Channel` Tauri deserialized for the JS
+`addPluginListener` call, and each platform delivers into it:
+
+- **iOS**: the Swift side calls `mobile_push_emit_event` (declared with
+  `@_silgen_name`, defined in `src/ios.rs`) from the notification-center
+  delegate and the APNs token callback.
+- **Android**: the Kotlin plugin calls its `emitEvent` native method, which
+  resolves to the JNI symbol `Java_app_tauri_mobilepush_MobilePushPlugin_emitEvent`
+  in `src/commands.rs`.
+
+Both platforms send the same event names and payload shape, so a handler reads
+the same JSON on either: `title`/`body` when the sender supplied visible text,
+and `data` holding the notification's custom keys. `notification-tapped` is
+also held when it arrives before any listener has registered — a cold start
+from a tap — and replayed to the first one.
+
+### Android: command forwarding + FCM callbacks
+
+The Kotlin `MobilePushPlugin` implements `getToken` (via
+`FirebaseMessaging.getInstance().token`) and `requestPermissions` (via
+`requestPermissionForAlias`, the framework's permission-override name), and Rust
+forwards the JS-facing commands to it. `FCMService` (a
+`FirebaseMessagingService`) forwards incoming messages and token rotations to
+the plugin, which bridges them to the same event registry.
+
+Taps arrive through the activity lifecycle rather than a service: the FCM SDK
+copies the message's `data` onto the launch intent, and the plugin emits them
+from `load` (cold start) and `onNewIntent` (the app was already running),
+clearing the extras so a re-delivered intent does not emit twice.
 
 ### TypeScript
 
@@ -391,8 +449,14 @@ Thin async wrappers over `invoke()` and `addPluginListener()` from `@tauri-apps/
 
 ## Known Limitations
 
-- **iOS event listeners are not yet functional.** `onNotificationReceived`, `onNotificationTapped`, and `onTokenRefresh` register successfully but do not deliver events on iOS. This is because the Tauri `PluginManager` dispatch issue also affects the plugin's `trigger()` method for emitting events to the webview. The commands (`requestPermission`, `getToken`) work correctly via the direct FFI path. A future release will route iOS events through `AppHandle.emit()` to bypass the `PluginManager`.
-- **Android event listeners work as expected.** The standard Tauri plugin dispatch functions correctly on Android.
+- **`onNotificationReceived` needs the app running.** It reports a push the
+  process received (foreground, or backgrounded with the plugin loaded). When
+  the app is not running, FCM starts the process for a data message only, and
+  there is no webview to deliver to; the OS shows the notification itself.
+- **Taps on a killed app are data-only.** The intent carried by a notification
+  tap is what this plugin reads, and it is present only for data messages. A
+  notification-only message (one with just a `notification` block and no
+  `data`) opens the app with no payload attached.
 
 ## License
 

@@ -12,15 +12,21 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     _app: &AppHandle<R>,
     api: PluginApi<R, C>,
 ) -> crate::Result<MobilePush<R>> {
-    log::info!("[mobile-push] mobile::init() called");
     #[cfg(target_os = "android")]
     let handle = api.register_android_plugin("app.tauri.mobilepush", "MobilePushPlugin")?;
     #[cfg(target_os = "ios")]
     let handle = api.register_ios_plugin(init_plugin_mobile_push)?;
-    log::info!("[mobile-push] Plugin registered successfully");
+
     Ok(MobilePush(handle))
 }
 
-/// Plugin handle. Kept for Tauri's managed state requirement.
-/// Commands now use direct FFI instead of run_mobile_plugin.
+/// Access to the platform plugin: the Kotlin plugin on Android, the Swift
+/// plugin on iOS.
 pub struct MobilePush<R: Runtime>(PluginHandle<R>);
+
+impl<R: Runtime> MobilePush<R> {
+    /// The underlying Tauri plugin handle.
+    pub const fn handle(&self) -> &PluginHandle<R> {
+        &self.0
+    }
+}

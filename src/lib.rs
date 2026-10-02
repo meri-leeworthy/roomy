@@ -1,6 +1,6 @@
 use tauri::{
     plugin::{Builder as TauriPluginBuilder, TauriPlugin},
-    Manager, Runtime,
+    Manager, RunEvent, Runtime,
 };
 
 pub use models::*;
@@ -12,6 +12,9 @@ mod mobile;
 
 mod commands;
 mod error;
+mod events;
+#[cfg(target_os = "ios")]
+mod ios;
 mod models;
 
 pub use error::{Error, Result};
@@ -43,8 +46,7 @@ pub struct ForegroundPresentationOptions {
 }
 
 impl Default for ForegroundPresentationOptions {
-    /// Pre-0.1.4 hardcoded behavior: banner + list + sound + badge.
-    /// Preserved as the default so upgrading doesn't silently change UX.
+    /// Banner + list + sound + badge.
     fn default() -> Self {
         Self {
             banner: true,
@@ -153,7 +155,8 @@ impl Builder {
             .invoke_handler(tauri::generate_handler![
                 commands::request_permission,
                 commands::get_token,
-                commands::register_listener
+                commands::register_listener,
+                commands::remove_listener
             ])
             .setup(move |app, api| {
                 #[cfg(mobile)]
@@ -172,6 +175,13 @@ impl Builder {
                 let _ = foreground_bits;
 
                 Ok(())
+            })
+            .on_event(|_app, event| {
+                // Listeners live in a process-global registry rather than in
+                // the plugin object, so they are cleared here.
+                if matches!(event, RunEvent::Exit) {
+                    events::clear();
+                }
             })
             .build()
     }

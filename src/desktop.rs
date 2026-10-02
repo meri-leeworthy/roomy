@@ -8,6 +8,6 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     Ok(MobilePush(app.clone()))
 }
 
-/// Plugin handle. Kept for Tauri's managed state requirement.
-/// Commands return stub values on desktop (push notifications are mobile-only).
+/// Plugin handle on the desktop targets, where there is no push service to
+/// register with. The commands report that rather than pretending to work.
 pub struct MobilePush<R: Runtime>(AppHandle<R>);

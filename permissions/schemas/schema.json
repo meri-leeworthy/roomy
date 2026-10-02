@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the register_listener command without any pre-configured scope."
         },
         {
+          "description": "Enables the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-remove-listener",
+          "markdownDescription": "Enables the remove_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-remove-listener",
+          "markdownDescription": "Denies the remove_listener command without any pre-configured scope."
+        },
+        {
           "description": "Enables the request_permission command without any pre-configured scope.",
           "type": "string",
           "const": "allow-request-permission",
@@ -331,10 +343,10 @@
           "markdownDescription": "Denies the request_permission command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the mobile-push plugin\n#### This default permission set includes:\n\n- `allow-request-permission`\n- `allow-get-token`\n- `allow-register-listener`",
+          "description": "Default permissions for the mobile-push plugin\n#### This default permission set includes:\n\n- `allow-request-permission`\n- `allow-get-token`\n- `allow-register-listener`\n- `allow-remove-listener`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the mobile-push plugin\n#### This default permission set includes:\n\n- `allow-request-permission`\n- `allow-get-token`\n- `allow-register-listener`"
+          "markdownDescription": "Default permissions for the mobile-push plugin\n#### This default permission set includes:\n\n- `allow-request-permission`\n- `allow-get-token`\n- `allow-register-listener`\n- `allow-remove-listener`"
         },
         {
           "description": "Allows requesting push notification permission",
@@ -347,6 +359,18 @@
           "type": "string",
           "const": "allow-get-token",
           "markdownDescription": "Allows retrieving the push notification device token"
+        },
+        {
+          "description": "Allows registering a listener for push notification events",
+          "type": "string",
+          "const": "allow-register-listener",
+          "markdownDescription": "Allows registering a listener for push notification events"
+        },
+        {
+          "description": "Allows removing a push notification event listener",
+          "type": "string",
+          "const": "allow-remove-listener",
+          "markdownDescription": "Allows removing a push notification event listener"
         }
       ]
     }
