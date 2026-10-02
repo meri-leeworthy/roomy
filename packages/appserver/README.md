@@ -143,8 +143,7 @@ Publishing one buys third-party resolution and nothing at runtime.
 
 Publishing is an **out-of-band** step: it needs credentials for whichever
 account holds the repo, which the appserver does not have, and it is not part
-of the build or deploy. Land the lexicon file here first — an unpublished
-lexicon is a known gap, not a broken build — then publish with an
+of the build or deploy. Land the lexicon file here first, then publish with an
 authenticated agent for that DID:
 
 ```
