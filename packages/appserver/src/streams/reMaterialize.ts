@@ -14,7 +14,7 @@
  */
 
 import { decode } from "@atcute/cbor";
-import { type DecodedStreamEvent, type Event, type StreamDid, type StreamIndex, type UserDid } from "@roomy-space/sdk";
+import { type Event, type StreamDid, type StreamIndex, type UserDid } from "@roomy-space/sdk";
 import type { DbLike } from "../db/types.ts";
 import { applyBatch } from "../materialization/applyBatch.ts";
 import {
@@ -26,11 +26,13 @@ import type { HappyViewConfig } from "../happyview.ts";
 import { log } from "../log.ts";
 import { runPendingGlobalMigrations } from "../db/globalMigrations.ts";
 import { refreshSpaceStats } from "../queries/spaceStats.ts";
+import type { LoggedEvent } from "../materialization/types.ts";
 
 interface RawEvent {
   idx: number;
   user: string;
   payload: Uint8Array;
+  received_at: number | null;
 }
 
 /** Default number of streams re-materialized concurrently (matches the pool default). */
@@ -233,16 +235,17 @@ export async function reMaterializeFromLocalEvents(
 
         const rawEvents = await db
           .query(
-            "SELECT idx, user, payload FROM stream_events WHERE stream_id = ? AND idx >= ? ORDER BY idx",
+            "SELECT idx, user, payload, received_at FROM stream_events WHERE stream_id = ? AND idx >= ? ORDER BY idx",
           )
           .all<RawEvent>(streamDid, fromIdx);
 
         if (rawEvents.length > 0) {
-          const decodedEvents: DecodedStreamEvent[] = rawEvents.map(
-            (e): DecodedStreamEvent => ({
+          const decodedEvents: LoggedEvent[] = rawEvents.map(
+            (e): LoggedEvent => ({
               idx: e.idx as StreamIndex,
               event: decode(e.payload) as Event,
               user: e.user as UserDid,
+              receivedAt: e.received_at ?? undefined,
             }),
           );
 

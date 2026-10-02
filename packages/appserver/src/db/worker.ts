@@ -856,6 +856,17 @@ function handleInit(req: WorkerRequest): {
     if (!existingColumns.has("created_at")) {
       eventsDb.exec("alter table stream_events add column created_at integer");
     }
+    if (!existingColumns.has("received_at")) {
+      eventsDb.exec("alter table stream_events add column received_at integer");
+      // Backfill from the ingest clock the log already recorded. Without this
+      // every pre-existing message would fall back to its sender-minted ULID
+      // time on the next rebuild — silently re-sorting history by client
+      // clocks, which is the defect `received_at` exists to prevent. Only
+      // rows with no receipt time are touched, so re-running is a no-op.
+      eventsDb.exec(
+        "update stream_events set received_at = created_at where received_at is null and created_at is not null",
+      );
+    }
   }
 
   return {

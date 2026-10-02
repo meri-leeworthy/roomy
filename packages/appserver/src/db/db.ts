@@ -27,7 +27,7 @@ import { dbPath, spacesDir } from "./paths.ts";
  * schema-space.sql changes — a bump wipes and re-derives every per-space DB
  * (from the event log via re-materialisation).
  */
-export const SPACE_SCHEMA_VERSION = "2";
+export const SPACE_SCHEMA_VERSION = "3";
 
 /**
  * Global DB schema version (`data/global.sqlite`) — re-exported from the
