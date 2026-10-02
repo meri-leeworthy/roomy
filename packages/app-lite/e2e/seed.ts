@@ -67,6 +67,8 @@ import {
   SEED_SPACE_3_ROOM_NAME,
   SEED_SPACE_ID,
   SEED_SPACE_NAME,
+  SEED_VOICE_ROOM_ID,
+  SEED_VOICE_ROOM_NAME,
   TEST_ADMIN_DID,
   TEST_USER_DID,
   TEST_USER_DISPLAY_NAME,
@@ -118,13 +120,14 @@ async function sendEvents(
   }
 }
 
-/** Create a channel through the real write path. */
+/** Create a room through the real write path. */
 async function createRoom(
   origin: string,
   spaceId: string,
   roomId: string,
   name: string,
   callerDid: string = TEST_USER_DID,
+  kind: "space.roomy.channel" | "space.roomy.voice" = "space.roomy.channel",
 ): Promise<void> {
   await sendEvents(
     origin,
@@ -133,7 +136,7 @@ async function createRoom(
       {
         id: roomId,
         $type: "space.roomy.room.createRoom.v0",
-        kind: "space.roomy.channel",
+        kind,
         name,
       },
     ],
@@ -282,9 +285,19 @@ export async function seedFixture(appserverOrigin: string): Promise<void> {
 
   // ── Rooms + messages, through the real write path ────────────────────
   // Two batches: a room created in the same batch as its message is rejected
-  // (the destination room must already be materialised).
   await createRoom(appserverOrigin, SEED_SPACE_ID, SEED_ROOM_ID, SEED_ROOM_NAME);
   await createRoom(appserverOrigin, SEED_SPACE_ID, SEED_ROOM_2_ID, SEED_ROOM_2_NAME);
+  // A voice room in the first space: labelled `space.roomy.voice`, so
+  // `getMetadata` returns it in its `voiceRooms` list and the room route
+  // renders the call panel rather than a message timeline.
+  await createRoom(
+    appserverOrigin,
+    SEED_SPACE_ID,
+    SEED_VOICE_ROOM_ID,
+    SEED_VOICE_ROOM_NAME,
+    TEST_USER_DID,
+    "space.roomy.voice",
+  );
   await createMessage(
     appserverOrigin,
     SEED_SPACE_ID,
