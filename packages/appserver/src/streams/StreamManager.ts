@@ -22,6 +22,7 @@ import { canonicalMessageTimestamp } from "../materialization/sortIdx.ts";
 import { pokeEmbedSweeper } from "../embed/sweeper.ts";
 import { pokePushDispatcher } from "../push/dispatcher.ts";
 import { isPushFresh, PUSH_MAX_MESSAGE_AGE_MS } from "../push/freshness.ts";
+import type { LoggedEvent } from "../materialization/types.ts";
 import type { PushJob } from "../push/types.ts";
 import { resolveReplyToAuthors } from "../queries/mentions.ts";
 import { decodeTime } from "ulidx";
@@ -187,12 +188,26 @@ export class StreamManager {
       params?: unknown[];
     }> = [];
 
+    // The receipt instant recorded for this batch, shared by the log row and
+    // the in-memory events materialised below: the ordering key's time
+    // component is this value, so both derivations of the log must read the
+    // same one. `created_at` (the admin dashboard's window key) tracks it but
+    // is not read back for ordering.
+    const receivedAt = Date.now();
     for (let i = 0; i < encoded.length; i++) {
       const eventType = events[i]!.$type;
       steps.push({
         type: "run",
-        sql: "insert into stream_events (stream_id, idx, user, payload, signature, event_type, created_at) select ?, coalesce(max(idx), -1) + 1, ?, ?, x'', ?, unixepoch() * 1000 from stream_events where stream_id = ?",
-        params: [streamDid, user, encoded[i] as Uint8Array, eventType, streamDid],
+        sql: "insert into stream_events (stream_id, idx, user, payload, signature, event_type, created_at, received_at) select ?, coalesce(max(idx), -1) + 1, ?, ?, x'', ?, ?, ? from stream_events where stream_id = ?",
+        params: [
+          streamDid,
+          user,
+          encoded[i] as Uint8Array,
+          eventType,
+          receivedAt,
+          receivedAt,
+          streamDid,
+        ],
       });
     }
 
@@ -219,12 +234,14 @@ export class StreamManager {
     // gap between insert and materialize (decode → materialize →
     // invalidate → listeners). Different streams are not serialized.
     await this.#runSerialized(streamDid, async () => {
-      // 3. Decode events back to DecodedStreamEvent[]
-      const decodedEvents: DecodedStreamEvent[] = encoded.map(
-        (bytes, i): DecodedStreamEvent => ({
+      // 3. Decode events back to LoggedEvent[] — each carries the receipt
+      //    instant its log row was stamped with.
+      const decodedEvents: LoggedEvent[] = encoded.map(
+        (bytes, i): LoggedEvent => ({
           idx: (startIdx + i) as StreamIndex,
           event: decode(bytes) as Event,
           user: (userOverride ?? "unknown") as UserDid,
+          receivedAt,
         }),
       );
 
