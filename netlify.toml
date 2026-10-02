@@ -13,6 +13,8 @@
 [build.environment]
   # The root package.json requires ^22.15.0; Netlify's default is older.
   NODE_VERSION = "22.15.0"
+  # The app-lite vite build is at Netlify's default heap ceiling.
+  NODE_OPTIONS = "--max-old-space-size=4096"
 
 # adapter-static (see packages/app-lite/svelte.config.js) emits a single-page
 # app with an index.html fallback: every unknown path is a client route and
