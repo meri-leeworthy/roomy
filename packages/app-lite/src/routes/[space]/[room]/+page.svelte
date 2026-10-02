@@ -21,6 +21,7 @@
   import RoomPickerModal from "$lib/components/chat/RoomPickerModal.svelte";
   import type { Message } from "$lib/queries/messages";
   import ChannelBoardView from "$lib/components/thread/ChannelBoardView.svelte";
+  import VoiceRoomPanel from "$lib/components/voice/VoiceRoomPanel.svelte";
   import LinksView from "$lib/components/thread/LinksView.svelte";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { composerCanWrite, refreshWriteRefusal } from "$lib/write-refusal.svelte";
@@ -269,7 +270,7 @@
       setCurrentRoom({
         id: roomId,
         name,
-        kind: kind === "thread" ? "thread" : "channel",
+        kind: kind === "thread" ? "thread" : kind === "voice" ? "voice" : "channel",
         parentChannelId: parentId,
         parentChannelName: parentName,
         ...(sidebarRoomInfo?.federated
@@ -417,6 +418,13 @@
         <ChatInputArea spaceId={effectiveSpaceId} {roomId} canWrite={roomCanWrite} {disableUploads} onForwardSelection={openForward} onMoveSelection={isAdmin ? openMove : undefined} onDeleteSelection={isAdmin ? openDeleteConfirm : undefined} />
       {/key}
     {/if}
+  {:else if roomKind === "voice"}
+    <!-- A voice room has no message timeline: its whole surface is the call.
+         The panel keys on the room so a switch remounts it rather than
+         carrying the previous room's participant list into the new one. -->
+    {#key roomId}
+      <VoiceRoomPanel {roomId} />
+    {/key}
   {:else}
     <!-- Thread rooms only have chat view -->
     <ChatArea spaceId={effectiveSpaceId} {roomId} {highlightMessage} onSeen={() => { if (roomUnreadCount > 0) updateSeen(roomId).catch(() => {}); }} onForward={openForward} onMove={openMove} onRequestDelete={openDeleteConfirm} />
