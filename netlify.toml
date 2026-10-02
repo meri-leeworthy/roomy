@@ -13,6 +13,12 @@
 [build.environment]
   # The root package.json requires ^22.15.0; Netlify's default is older.
   NODE_VERSION = "22.15.0"
+  # The app-lite vite build sits at Node's default ~2 GB heap ceiling, and a
+  # PR that adds a dependency-heavy client package pushes it over: the build
+  # dies with "Ineffective mark-compacts near heap limit" and the deploy
+  # preview fails, which is a required check. Raise the ceiling rather than
+  # chase the marginal build's memory.
+  NODE_OPTIONS = "--max-old-space-size=4096"
 
 # adapter-static (see packages/app-lite/svelte.config.js) emits a single-page
 # app with an index.html fallback: every unknown path is a client route and
