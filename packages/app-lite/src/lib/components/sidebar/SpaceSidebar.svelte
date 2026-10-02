@@ -33,6 +33,7 @@
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { createRoomMetadataQuery } from "$lib/queries/room-metadata";
+  import { createVoiceActiveCallsQuery } from "$lib/queries/voice";
   import { createRoom, updateSidebar } from "$lib/mutations/room";
   import { newUlid, Ulid } from "@roomy-space/sdk";
   import { serverBar, toggleServerBar } from "$lib/components/layout/server-bar.svelte";
@@ -75,6 +76,15 @@
   );
 
   const spacesQuery = createSpacesQuery({ includeLeft: true });
+  // Which of this space's rooms have a live call — the sidebar's call marker.
+  // Space-scoped and invalidated by every call fact in the space, so a marker
+  // appears and clears without the sidebar polling.
+  const activeCallsQuery = createVoiceActiveCallsQuery(() => spaceId ?? "");
+
+  /** Room ids in this space with a live call, for the sidebar's call rings. */
+  const activeCallRoomIds = $derived(
+    new Set((activeCallsQuery.data?.calls ?? []).map((c) => c.roomId)),
+  );
 
   // --- Server bar toggle — the space header (avatar) toggles it. ---
   let isEditing = $state(false);
@@ -89,6 +99,10 @@
   let createChannelOpen = $state(false);
 
   const meta = $derived(spaceId ? metaQuery.data : null);
+  /** Voice room ids in this space, so the active highlight covers them too. */
+  const voiceRoomIds = $derived(
+    new Set((meta?.voiceRooms ?? []).map((r) => r.id)),
+  );
 
   // Register the space header so MainLayout can render it as a full-width bar
   // above the server bar / BigSidebar row (matching the user card behaviour).
@@ -207,7 +221,9 @@
   const activeChannelId = $derived.by(() => {
     const room = page.params.room;
     if (!room) return null;
-    if (channelMap.has(room)) return room;
+    // Voice rooms share the highlight: they are sidebar entries too, they are
+    // just placed by id rather than by category.
+    if (channelMap.has(room) || voiceRoomIds.has(room)) return room;
     // Thread: don't mark the parent channel as active; the thread itself
     // is highlighted by LinkedRoomList via currentRoomId.
     return null;
@@ -732,6 +748,19 @@
               {@render channelItem(channel)}
             {/each}
           {/each}
+          {#if meta.voiceRooms.length > 0}
+            <!-- A voice room has no message timeline, so it is not a category
+                 child: it renders by id under its own heading, with the call
+                 marker the active-call query drives. -->
+            <div
+              class="px-2 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-base-400 dark:text-base-500"
+            >
+              Voice
+            </div>
+            {#each meta.voiceRooms as room (room.id)}
+              {@render voiceItem(room)}
+            {/each}
+          {/if}
         </div>
       {/if}
       </div>
@@ -860,5 +889,23 @@
         hrefFor={(threadId: string) => `/${spaceId}/${threadId}`}
       />
     {/if}
+  </div>
+{/snippet}
+
+{#snippet voiceItem(room: SidebarChannel)}
+  {@const isActive = activeChannelId === room.id}
+  <div class={!room.canRead ? "opacity-50 pointer-events-none" : ""}>
+    <SidebarItemShell
+      variant="channel"
+      name={room.name ?? room.id}
+      href={`/${spaceId}/${room.id}`}
+      active={isActive}
+      hasUnreadDot={false}
+      hasUnread={false}
+    >
+      {#snippet icon()}
+        <ChannelIcon channel={room} kind="voice" callActive={activeCallRoomIds.has(room.id)} />
+      {/snippet}
+    </SidebarItemShell>
   </div>
 {/snippet}
