@@ -4,6 +4,36 @@ import UserNotifications
 import Tauri
 import ObjectiveC
 
+// MARK: - Event bridge
+
+/// Bridges a platform event to the Rust side, which fans it out to the JS
+/// listeners registered with `register_listener`.
+///
+/// `Plugin::trigger` cannot be used: it reaches listeners held by the plugin
+/// object Tauri's own dispatch instantiated, and this plugin bypasses that
+/// dispatch (see the FFI functions below). Rust owns the listener registry
+/// instead, and this calls into it.
+///
+/// The symbol is `mobile_push_emit_event` in `src/ios.rs`, linked here rather
+/// than imported because the Rust library is linked into the same binary.
+@_silgen_name("mobile_push_emit_event")
+private func mobilePushEmitEvent(_ event: UnsafePointer<CChar>, _ payload: UnsafePointer<CChar>)
+
+/// Emits an event, encoding both strings as C strings for the Rust side.
+private func emit(_ event: String, _ payload: [String: Any]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: payload),
+          let json = String(data: data, encoding: .utf8)
+    else {
+        NSLog("[mobile-push] could not serialize the %@ payload", event)
+        return
+    }
+    event.withCString { eventPtr in
+        json.withCString { payloadPtr in
+            mobilePushEmitEvent(eventPtr, payloadPtr)
+        }
+    }
+}
+
 // MARK: - Token Fetcher (thread-safe async token retrieval)
 
 /// Fetches an APNs device token by registering for remote notifications
@@ -35,8 +65,6 @@ private let tokenLock = NSLock()
 private var apnsDelegateSetUp = false
 
 /// Configured foreground presentation options. Set via FFI at plugin init.
-/// Defaults to banner + list + sound + badge for back-compat with 0.1.3 and
-/// earlier, which hardcoded this behavior.
 private var configuredForegroundPresentation: UNNotificationPresentationOptions =
     [.banner, .list, .sound, .badge]
 
@@ -52,7 +80,7 @@ private class PushNotificationHandler: NSObject, UNUserNotificationCenterDelegat
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        MobilePushPlugin.instance?.handleNotification(notification.request.content.userInfo)
+        emit("notification-received", Self.eventPayload(for: notification))
         completionHandler(configuredForegroundPresentation)
     }
 
@@ -61,8 +89,38 @@ private class PushNotificationHandler: NSObject, UNUserNotificationCenterDelegat
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        MobilePushPlugin.instance?.handleNotificationTap(response.notification.request.content.userInfo)
+        emit("notification-tapped", Self.eventPayload(for: response.notification))
         completionHandler()
+    }
+
+    /// Builds the event body from a notification.
+    ///
+    /// The APNs payload's custom keys are the `data` map, matching what the
+    /// Android side reports for the same push, so the JS handler reads one
+    /// shape from both platforms. `aps.alert` is not part of it — the visible
+    /// text is not something a handler navigates on.
+    private static func eventPayload(for notification: UNNotification) -> [String: Any] {
+        var data: [String: Any] = [:]
+        for (key, value) in notification.request.content.userInfo {
+            guard let key = key as? String, key != "aps" else { continue }
+            if let string = value as? String {
+                data[key] = string
+            } else if let number = value as? NSNumber {
+                data[key] = number
+            } else if let nested = value as? [String: Any] {
+                data[key] = nested
+            }
+        }
+
+        var payload: [String: Any] = ["data": data]
+        let content = notification.request.content
+        if !content.title.isEmpty {
+            payload["title"] = content.title
+        }
+        if !content.body.isEmpty {
+            payload["body"] = content.body
+        }
+        return payload
     }
 }
 
@@ -219,7 +277,7 @@ func getDeviceTokenDirect(_ buffer: UnsafeMutablePointer<CChar>, _ bufferLen: In
     return Int32(bytes.count)
 }
 
-// MARK: - Plugin class (kept for event system + lifecycle)
+// MARK: - Plugin class (kept for lifecycle + event callbacks)
 
 @objc(MobilePushPlugin)
 public class MobilePushPlugin: Plugin {
@@ -230,65 +288,16 @@ public class MobilePushPlugin: Plugin {
         NSLog("[mobile-push] Plugin loaded (webview ready)")
     }
 
-    // MARK: - PluginManager command handlers (kept as fallback)
-    // These handle commands routed through run_mobile_plugin / PluginManager.
-    // Currently bypassed by the direct FFI functions above.
-
-    @objc override public func requestPermissions(_ invoke: Invoke) {
-        NSLog("[mobile-push] requestPermissions via PluginManager")
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
-            if let error = error {
-                invoke.reject(error.localizedDescription)
-                return
-            }
-            invoke.resolve(["granted": granted])
-        }
-    }
-
-    @objc public func getToken(_ invoke: Invoke) {
-        NSLog("[mobile-push] getToken via PluginManager")
-        DispatchQueue.main.async {
-            UIApplication.shared.registerForRemoteNotifications()
-        }
-        // Token arrives via handleToken() callback from AppDelegate
-    }
-
     // MARK: - Callbacks from AppDelegate injection
 
     public func handleToken(_ token: Data) {
         let tokenString = token.map { String(format: "%02.2hhx", $0) }.joined()
         NSLog("[mobile-push] handleToken: %@...", String(tokenString.prefix(16)))
-        self.trigger("token-received", data: ["token": tokenString])
+        emit("token-received", ["token": tokenString])
     }
 
     public func handleTokenError(_ error: Error) {
         NSLog("[mobile-push] handleTokenError: %@", error.localizedDescription)
-    }
-
-    public func handleNotification(_ userInfo: [AnyHashable: Any]) {
-        var data: JSObject = [:]
-        for (key, value) in userInfo {
-            guard let stringKey = key as? String else { continue }
-            if let stringValue = value as? String {
-                data[stringKey] = stringValue
-            } else if let numberValue = value as? NSNumber {
-                data[stringKey] = numberValue.intValue
-            }
-        }
-        self.trigger("notification-received", data: data)
-    }
-
-    public func handleNotificationTap(_ userInfo: [AnyHashable: Any]) {
-        var data: JSObject = [:]
-        for (key, value) in userInfo {
-            guard let stringKey = key as? String else { continue }
-            if let stringValue = value as? String {
-                data[stringKey] = stringValue
-            } else if let numberValue = value as? NSNumber {
-                data[stringKey] = numberValue.intValue
-            }
-        }
-        self.trigger("notification-tapped", data: data)
     }
 }
 

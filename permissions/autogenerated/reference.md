@@ -7,6 +7,7 @@ Default permissions for the mobile-push plugin
 - `allow-request-permission`
 - `allow-get-token`
 - `allow-register-listener`
+- `allow-remove-listener`
 
 ## Permission Table
 
@@ -72,6 +73,32 @@ Denies the register_listener command without any pre-configured scope.
 <tr>
 <td>
 
+`mobile-push:allow-remove-listener`
+
+</td>
+<td>
+
+Enables the remove_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-push:deny-remove-listener`
+
+</td>
+<td>
+
+Denies the remove_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `mobile-push:allow-request-permission`
 
 </td>
@@ -117,6 +144,32 @@ Allows requesting push notification permission
 <td>
 
 Allows retrieving the push notification device token
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-push:allow-register-listener`
+
+</td>
+<td>
+
+Allows registering a listener for push notification events
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-push:allow-remove-listener`
+
+</td>
+<td>
+
+Allows removing a push notification event listener
 
 </td>
 </tr>

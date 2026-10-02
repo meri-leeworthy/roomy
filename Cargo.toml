@@ -1,12 +1,12 @@
 [package]
 name = "tauri-plugin-mobile-push"
-version = "0.1.4"
+version = "0.2.0"
 description = "Tauri v2 plugin for push notifications on iOS (APNs) and Android (FCM)"
 authors = ["Yanqiang Lu"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yanqianglu/tauri-plugin-mobile-push"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.80"
 links = "tauri-plugin-mobile-push"
 keywords = ["tauri", "tauri-plugin", "push-notifications", "apns", "fcm"]
 categories = ["gui", "os"]
@@ -14,9 +14,14 @@ categories = ["gui", "os"]
 [dependencies]
 tauri = "2"
 log = "0.4"
+parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# The event bridge is reached from Kotlin through a `native` declaration, so
+# the plugin has to export the JNI symbol itself.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }
