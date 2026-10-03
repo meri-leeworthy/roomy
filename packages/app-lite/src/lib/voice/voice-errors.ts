@@ -13,6 +13,8 @@
  * problem and must not be reported as one.
  */
 
+import { isInsufficientScopeError } from "../scope-guard";
+
 export type MediaDeviceFailureKind =
   | "permission-denied"
   | "not-found"
@@ -139,14 +141,23 @@ export function mediaDeviceErrorMessage(
 }
 
 /**
- * The message for a failure to reach the SFU.
+ * The message for a failure on the way into a call.
  *
- * Connecting to LiveKit is a WebSocket plus ICE: failures here are either
- * "this browser cannot do encrypted media" or "the call server is
- * unreachable", and neither is something the user can fix by re-pressing
- * Join, so they read as explanations rather than retry prompts.
+ * Three causes reach here and none is fixable with a second press: the session
+ * lacks the voice scope (every voice RPC answers 403), the browser cannot do
+ * E2EE media (the SFU handshake needs insertable streams), or the SFU is
+ * unreachable (WebSocket or ICE failed).
  */
 export function connectionErrorMessage(err: unknown): VoiceErrorMessage {
+  // A missing voice scope is tested first: the resource server reports it as a
+  // 403, and reporting one as an unreachable call server would name a cause the
+  // user cannot act on.
+  if (isInsufficientScopeError(err)) {
+    return {
+      title: "Voice permission missing",
+      description: "This session is not allowed to use Roomy's voice endpoints. Sign in again once the server grants voice access.",
+    };
+  }
   const message = err instanceof Error ? err.message : String(err);
   if (/e2ee|cryptor|encoded transform|insertable stream/i.test(message)) {
     return {

@@ -20,9 +20,7 @@
   import { createVoiceParticipantsQuery } from "$lib/queries/voice";
   import { voiceCall } from "$lib/voice/session.svelte";
   import { voicePresence } from "$lib/voice/presence.svelte";
-  import { needsVoiceScopeConsent } from "$lib/voice/voice-scope";
   import { auth } from "$lib/auth.svelte";
-  import { showScopeConsentDialogue } from "$lib/scope-consent-dialogue";
   import VoiceParticipantRow from "./VoiceParticipantRow.svelte";
   import Button from "@roomy/design/components/ui/button/Button.svelte";
   import LoadingSpinner from "@roomy/design/components/helper/LoadingSpinner.svelte";
@@ -73,21 +71,18 @@
   const currentUserDid = $derived(auth.userDid);
 
   /**
-   * Join the call, prompting for the voice scope first if the session lacks
-   * it. A scope the token does not carry makes every voice RPC 403, so the
-   * press is the point to offer the consent round-trip rather than letting
-   * the call fail with the resource server's wording.
+   * Join the call.
+   *
+   * Nothing is asked about scope here. The voice RPCs sit outside `base`
+   * (`scopes.ts`) and their scopes are not registered on the HappyView API
+   * client, so no login may request them and no consent round-trip could grant
+   * them — offering one would turn a recoverable failure into a sign-in outage,
+   * the same reason `blocks` is ceiling-only. A session without the scope
+   * learns that from the join failing, and `connectionErrorMessage` names the
+   * permission rather than the transport. When the scopes are registered, this
+   * is where the consent dialogue returns.
    */
   async function join() {
-    if (needsVoiceScopeConsent(auth.grantedScope)) {
-      const accepted = await showScopeConsentDialogue("voice", {
-        title: "Join voice calls",
-        description:
-          "Joining a call needs permission to use Roomy's voice endpoints. " +
-          "The consent screen shows the exact access it requests.",
-      });
-      if (!accepted) return;
-    }
     await session.join(roomId);
   }
 
