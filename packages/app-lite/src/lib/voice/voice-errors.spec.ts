@@ -6,6 +6,7 @@ import {
   mediaDeviceErrorMessage,
   redactLiveKitError,
 } from "./voice-errors";
+import { SCOPE_MISSING_ERROR_NAME } from "../scope-guard";
 
 /** A DOMException-shaped error, which is what getUserMedia rejects with. */
 function namedError(name: string, message = ""): Error {
@@ -85,6 +86,15 @@ describe("connectionErrorMessage", () => {
   it("explains an E2EE-unsupported browser rather than offering a retry", () => {
     const message = connectionErrorMessage(namedError("Error", "failed to init E2EE cryptor"));
     expect(message.title).toBe("Voice not supported here");
+  });
+
+  it("names the missing permission, not the transport, on a scope-miss", () => {
+    const message = connectionErrorMessage({
+      error: SCOPE_MISSING_ERROR_NAME,
+      status: 403,
+      message: "Missing required scope: rpc:space.roomy.voice.join?aud=*",
+    });
+    expect(message.title).toBe("Voice permission missing");
   });
 
   it("falls back to a reachability explanation", () => {

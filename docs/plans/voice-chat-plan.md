@@ -169,9 +169,14 @@ New client→server messages on `space.roomy.sync.subscribe`: `voice_state` (`{ 
   `livekitUrl` in the `getToken` response, and every field null is the signal
   the UI gates on. Nothing in the join path imports `livekit-client` before
   that response says there is a call.
-- Scope: the voice RPCs are outside the `base` tier (see `scopes.ts`), so the
-  join button offers the consent round-trip (`ScopeConsentDialogue`) when the
-  session lacks the `voice` tier.
+- Scope: the voice RPCs are outside the `base` tier, and their scopes are not
+  registered on the HappyView API client — `voice` is ceiling-only in
+  `scopes.ts`, alongside `blocks`. No login may request it and no consent
+  round-trip could grant it, so the join button asks for nothing: a session
+  without the scope learns it from the join failing, and
+  `connectionErrorMessage` names the missing permission rather than reporting
+  a permission failure as an unreachable call server. The consent dialogue
+  returns to the join button when the scopes are registered.
 
 ## 6. Testing & Verification Plan (Chatto model, adapted to Roomy)
 
