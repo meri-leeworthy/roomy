@@ -12,12 +12,34 @@
  * those unit tests are for; see `docs/plans/voice-chat-plan.md` §6.3–6.4.
  */
 
-import { expect, test, waitForAuthenticated } from "./spec-helpers.ts";
+import { composer, expect, test, waitForAuthenticated } from "./spec-helpers.ts";
+import type { Page } from "@playwright/test";
 import {
+  APPSERVER_HTTP_ORIGIN,
+  SEED_ROOM_PATH,
   SEED_SPACE_ID,
   SEED_VOICE_ROOM_NAME,
   SEED_VOICE_ROOM_PATH,
+  TEST_USER_DID,
 } from "./fixtures.ts";
+
+/** Serve `getFlags` with `voice-chat` removed, before navigation. */
+async function withoutVoiceFlag(page: Page): Promise<void> {
+  // The real flag body is read once, up front, through the test-mode verifier
+  // (the `X-Test-Did` header the base fixture injects cannot be relied on from
+  // inside a route handler). Re-fetching per request would race the app's own
+  // aborted/repeated `getFlags` calls; a fixed body fulfils every one of them.
+  const res = await page.request.get(
+    `${APPSERVER_HTTP_ORIGIN}/xrpc/space.roomy.getFlags`,
+    { headers: { "X-Test-Did": TEST_USER_DID } },
+  );
+  const { flags = [] } = (await res.json()) as { flags?: string[] };
+  const body = { flags: flags.filter((f) => f !== "voice-chat") };
+  await page.route(
+    `${APPSERVER_HTTP_ORIGIN}/xrpc/space.roomy.getFlags*`,
+    (route) => route.fulfill({ json: body }),
+  );
+}
 
 test.describe("voice room", () => {
   test("the sidebar lists the voice room under its own heading", async ({ page }) => {
@@ -66,5 +88,34 @@ test.describe("voice room", () => {
     await expect(page.getByText("In this call")).toHaveCount(0);
     await expect(page.getByText(/could not be reached|not supported here/i)).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Join call" })).toBeVisible();
+  });
+
+  test("flag off: the voice room is neither listed nor given a call surface", async ({
+    page,
+  }) => {
+    await withoutVoiceFlag(page);
+
+    // Direct navigation. The room's kind is on the wire and cannot be
+    // unlearned, but the flag keeps it from becoming a call surface — which
+    // is a derived value, not a mount-order race, so this is deterministic
+    // however the flag body and the room metadata interleave.
+    await page.goto(SEED_VOICE_ROOM_PATH);
+    await waitForAuthenticated(page);
+
+    // The room renders as the ordinary room it is: its timeline and composer,
+    // no call panel — the exact inverse of the flag-on assertions above.
+    await expect(composer(page)).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Voice room" }),
+    ).toHaveCount(0);
+
+    // The sidebar lists this space's channels and no voice section at all:
+    // the channel tree is the proof the sidebar rendered, so the absences
+    // below are the flag's doing rather than a failed load.
+    await expect(
+      page.locator(`.sidebar-body-wrap a[href="${SEED_ROOM_PATH}"]`).first(),
+    ).toBeVisible();
+    await expect(page.getByText("Voice", { exact: true })).toHaveCount(0);
+    await expect(page.locator(`a[href="${SEED_VOICE_ROOM_PATH}"]`)).toHaveCount(0);
   });
 });

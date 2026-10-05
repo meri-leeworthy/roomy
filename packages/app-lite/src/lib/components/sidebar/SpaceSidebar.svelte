@@ -76,10 +76,24 @@
   );
 
   const spacesQuery = createSpacesQuery({ includeLeft: true });
+
+  /**
+   * Voice chat is gated behind the `voice-chat` flag, which defaults off: the
+   * sidebar's voice list and the room's call panel appear only once an admin
+   * enables it. Every read below is gated on this one value, so a disabled
+   * flag costs nothing — no call list, no voice RPC, no voice room.
+   */
+  const voiceChatEnabled = $derived(
+    flagsQuery.data?.flags.includes("voice-chat") ?? false,
+  );
+
   // Which of this space's rooms have a live call — the sidebar's call marker.
   // Space-scoped and invalidated by every call fact in the space, so a marker
-  // appears and clears without the sidebar polling.
-  const activeCallsQuery = createVoiceActiveCallsQuery(() => spaceId ?? "");
+  // appears and clears without the sidebar polling. Enabled only while the
+  // flag is on, so a space with the flag off issues no voice request at all.
+  const activeCallsQuery = createVoiceActiveCallsQuery(() => spaceId ?? "", {
+    enabled: () => voiceChatEnabled,
+  });
 
   /** Room ids in this space with a live call, for the sidebar's call rings. */
   const activeCallRoomIds = $derived(
@@ -99,9 +113,15 @@
   let createChannelOpen = $state(false);
 
   const meta = $derived(spaceId ? metaQuery.data : null);
-  /** Voice room ids in this space, so the active highlight covers them too. */
+  /**
+   * Voice room ids in this space, so the active highlight covers them too.
+   * Empty while the flag is off, which leaves a voice room with no sidebar
+   * entry to highlight.
+   */
   const voiceRoomIds = $derived(
-    new Set((meta?.voiceRooms ?? []).map((r) => r.id)),
+    voiceChatEnabled
+      ? new Set((meta?.voiceRooms ?? []).map((r) => r.id))
+      : new Set<string>(),
   );
 
   // Register the space header so MainLayout can render it as a full-width bar
@@ -748,7 +768,7 @@
               {@render channelItem(channel)}
             {/each}
           {/each}
-          {#if meta.voiceRooms.length > 0}
+          {#if voiceChatEnabled && meta.voiceRooms.length > 0}
             <!-- A voice room has no message timeline, so it is not a category
                  child: it renders by id under its own heading, with the call
                  marker the active-call query drives. -->

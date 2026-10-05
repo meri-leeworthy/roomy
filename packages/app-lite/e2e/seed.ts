@@ -427,11 +427,12 @@ export async function seedFixture(appserverOrigin: string): Promise<void> {
   // `access-settings` gates the user Access settings page and its sidebar
   // entry; `user-blocks` gates the Block action on a profile;
   // `semble-integration` gates both Semble card actions in the message
-  // toolbar. Every flag defaults to off in the appserver, so the specs that
+  // toolbar; `voice-chat` gates the sidebar's voice list and the room's call
+  // panel. Every flag defaults to off in the appserver, so the specs that
   // cover a flagged surface enable it here and the flag-off behaviour is
   // asserted by toggling.
   await readStateDb(db).run(
-    "insert into feature_flags (key, global_enabled) values ('search', 1), ('access-settings', 1), ('user-blocks', 1), ('semble-integration', 1) on conflict(key) do update set global_enabled = 1",
+    "insert into feature_flags (key, global_enabled) values ('search', 1), ('access-settings', 1), ('user-blocks', 1), ('semble-integration', 1), ('voice-chat', 1) on conflict(key) do update set global_enabled = 1",
   );
 
   // ── Global profile row ───────────────────────────────────────────────

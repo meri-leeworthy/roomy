@@ -171,6 +171,24 @@
   const spaceMetaQuery = createSpaceMetadataQuery(() => spaceId);
 
   /**
+   * Which features this session may see. Declared with the other queries, not
+   * beside the tab state that first used it, because `roomKind` below reads it
+   * — and a `$derived` is evaluated at declaration, so a `const` it reads must
+   * already be bound.
+   */
+  const flagsQuery = createFeatureFlagsQuery();
+  /**
+   * Voice chat is gated behind the `voice-chat` flag, which defaults off. A
+   * voice room reached with the flag off renders as an ordinary room — the
+   * timeline it actually has — rather than as a call surface: the room *kind*
+   * is on the wire and cannot be unlearned, but nothing the user sees may
+   * depend on it until the flag is on.
+   */
+  const voiceChatEnabled = $derived(
+    flagsQuery.data?.flags.includes("voice-chat") ?? false,
+  );
+
+  /**
    * Derive room display info from the already-cached getSpaceMetadata sidebar
    * data (shared with the layout + sidebar) so the navbar renders instantly
    * without waiting for a separate room metadata fetch.
@@ -232,8 +250,16 @@
   const roomUnreadThreadCount = $derived(
     roomQuery.data?.unreadThreadCount ?? 0,
   );
+  /**
+   * Gated: with the flag off, `roomKind` never resolves to the call surface,
+   * so every `roomKind === "voice"` read below (the panel, the navbar) sees an
+   * ordinary room.
+   */
   const roomKind = $derived(
-    sidebarRoomInfo?.kind ?? roomQuery.data?.kind,
+    sidebarRoomInfo?.kind ??
+      (roomQuery.data?.kind === "voice" && !voiceChatEnabled
+        ? "channel"
+        : roomQuery.data?.kind),
   );
   /** The server's own answer for this room, before any refusal is applied. */
   const roomServerCanWrite = $derived(
@@ -292,7 +318,6 @@
   // always lands in Chat.
   // The Links tab is gated behind the "links-view" feature flag: it only
   // appears once an admin has enabled the flag. All flags default false.
-  const flagsQuery = createFeatureFlagsQuery();
   const linksViewEnabled = $derived(
     flagsQuery.data?.flags.includes("links-view") ?? false,
   );

@@ -38,13 +38,22 @@ export function createVoiceParticipantsQuery(roomId: () => string) {
  * Space-scoped because the appserver resolves access per space. Invalidated
  * by every call fact in that space, so the marker appears and disappears
  * without the sidebar refetching on a timer.
+ *
+ * `opts.enabled` is the caller's gate, and it is an accessor for the same
+ * reason the room id is: the sidebar stays mounted across spaces, so a plain
+ * boolean would freeze at whatever the flag said on first render.
  */
-export function createVoiceActiveCallsQuery(spaceId: () => string) {
+export function createVoiceActiveCallsQuery(
+  spaceId: () => string,
+  opts?: { enabled?: boolean | (() => boolean) },
+) {
   return createQuery(() => ({
     queryKey: queryKey("space.roomy.voice.getActiveCalls", { spaceId: spaceId() }),
     queryFn: () =>
       px().query("space.roomy.voice.getActiveCalls", { spaceId: spaceId() }),
-    enabled: !!spaceId(),
+    enabled:
+      !!spaceId() &&
+      (typeof opts?.enabled === "function" ? opts.enabled() : opts?.enabled !== false),
     retry: false,
   }));
 }

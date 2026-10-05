@@ -175,6 +175,12 @@ New client→server messages on `space.roomy.sync.subscribe`: `voice_state` (`{ 
   `livekitUrl` in the `getToken` response, and every field null is the signal
   the UI gates on. Nothing in the join path imports `livekit-client` before
   that response says there is a call.
+- Flag: `voice-chat` gates the whole client surface — the sidebar's voice list
+  (and therefore its `getActiveCalls` request) and the room's call panel. Both
+  read the one `getFlags` value, so with the flag off a voice room renders as
+  the ordinary room it is: no sidebar entry, no call surface, no voice RPC.
+  The flag defaults off, so shipping this phase changes nothing a user sees
+  until an admin enables it.
 - Scope: the voice RPCs are outside the `base` tier, and their scopes are not
   registered on the HappyView API client — `voice` is ceiling-only in
   `scopes.ts`, alongside `blocks`. No login may request it and no consent
