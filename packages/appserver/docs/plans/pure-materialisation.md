@@ -1,7 +1,8 @@
 # Pure Materialisation
 
 **Date:** 2026-10-02
-**Status:** Step 1 landed; steps 2–5 not started
+**Status:** Step 1 landed; steps 2–5 not started. Per-space schema changes now
+migrate in place before falling back to a rebuild (§6a).
 **Owner:** appserver
 
 ## 1. Problem
@@ -217,9 +218,12 @@ sender clock. `applyBatch.test.ts` pins the same log materialised twice
 yielding identical keys, equal timestamps ordering by `idx`, the
 `timestampOverride` precedence, and the pre-`received_at` ULID fallback.
 
-**Migration.** `SPACE_SCHEMA_VERSION` is bumped to `3`, so existing per-space
-DBs take the blue-green rebuild path and recompute their keys from the log. No
-bespoke migration.
+**Migration.** `SPACE_SCHEMA_VERSION` is bumped to `3`. Per-space DBs upgrade
+in place (§6): the worker advances the version and schedules the v3 task, which
+recomputes `entities.sort_idx` from the log against the existing DB. A space
+with a `reorderMessage` event in its log declines the in-place path — a reorder
+is defined relative to its neighbours' keys, which an in-place replay over a
+fully-populated DB cannot reproduce — and takes the rebuild instead.
 
 ### Step 2 — Remove the non-log writers
 
@@ -306,16 +310,62 @@ The general form of P3/P7 is worth automating: a harness that materialises a log
 into `:memory:`, snapshots every table, rebuilds, and diffs. That test fails today
 for `comp_embed_link_data`, and would have caught `setHandle`.
 
+## 6a. Per-space schema migration
+
+A per-space schema bump upgrades each space DB **in place**; the blue-green
+rebuild is the fallback, not the default.
+
+The machinery mirrors the global and read-state DBs, which have migrated in
+place for as long as they have existed:
+
+- `db/spaceVersions.ts` is the manifest. Each version is `structural` (the
+  worker applies an `up` when it opens the DB) or `data` (the boot runner runs a
+  task). `SPACE_SCHEMA_VERSION` is derived from it, and `SpaceAsyncVersion`
+  makes a `data` version without a task a type error.
+- `db/worker.ts` `initializeSpaceSchema` reads the on-disk version **first** and
+  only execs the schema on a DB that is fresh, current, or genuinely upgradable.
+  An older version runs every version in `(actual, expected]` in one transaction
+  that also advances the version row; a version this build cannot start from
+  throws `SchemaVersionMismatchError` and the DB is served untouched.
+- `db/spaceMigrations.ts` runs the `data` tasks under the write gate. Completion
+  is stamped per space in `space_schema_migrations` (inside the space DB), so a
+  crash mid-task leaves the marker null and the next boot retries.
+- `streams/reMaterialize.ts` takes the upgrade path for a stale DB **and** for a
+  current-schema DB that still owes a task marker (a pass interrupted between
+  the version bump and the task). Anything the migration declines or fails on is
+  queued for a rebuild.
+
+A `data` task may read the event log, so it runs on the main thread rather than
+in the worker. That is why the two steps are separate: the version advances at
+open, the task runs at boot, and only the marker ties them together.
+
+The write gate covers both windows: `StreamManager.sendEvents` rejects a write
+while the space is migrating or rebuilding, so a request cannot race the pass.
+
+Cost: a bump is now a per-space scan of the log for the versions that need one
+(v3 replays ordering events only) instead of a full replay of every event in
+every space. It remains proportional to the space's log, so a migration that
+does need the whole log is still O(space).
+
+Not every change can migrate. A version whose new derived value depends on the
+order rows are *visited* rather than only on the log cannot be reproduced by an
+in-place replay over a DB that already holds every row. `reorderMessage` is the
+existing instance (§7), and such a task throws `SpaceMigrationNeedsRebuildError`
+so the space falls back.
+
 ## 7. Risks and open questions
 
 - **Ordering is user-visible.** Changing `sort_idx` derivation re-sorts existing
-  spaces on the next rebuild. The schema bump makes that a deliberate, one-time
-  event rather than a silent drift, but it should be a known consequence.
+  spaces on the next migration or rebuild. The schema bump makes that a
+  deliberate, one-time event rather than a silent drift, but it should be a
+  known consequence.
 - **`reorderMessage` is genuinely order-dependent.** A reorder is defined relative
   to its neighbours, so it cannot be a pure function of the single event — it
   needs the surrounding order, which *is* log-derived, but the midpoint arithmetic
   must be pinned so that the same neighbourhood yields the same key. Fractional
-  indexing with a deterministic tie-break is the likely answer.
+  indexing with a deterministic tie-break is the likely answer. Until then it is
+  also the one event an in-place migration cannot replay (§6a), so a space that
+  contains one takes the rebuild path on a bump.
 - **Step 3 changes read behaviour.** If `unread_count` becomes derived, every
   reader of that column changes. The `read_positions` table is read by the sidebar,
   the activity feed, the push digest gate and the room metadata endpoint; the
