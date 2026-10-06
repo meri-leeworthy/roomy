@@ -270,6 +270,22 @@ export async function reMaterializeFromLocalEvents(
         continue;
       }
 
+      // Refresh this space's query-planner statistics. Statistics are what let
+      // the planner see that a point lookup on `entities.id` is cheaper than a
+      // scan of the space's `stream_id` partition; without them it picks the
+      // scan, and a space past ~50k entities pays seconds per lookup on its
+      // only worker (see `handleAnalyze`). Every stream is already visited
+      // here, and `PRAGMA optimize` is a no-op when the stats are current, so
+      // this both fixes the existing DBs and keeps them fixed as they grow.
+      try {
+        await db.forSpace!(stream_id as StreamDid).analyze?.();
+      } catch (err) {
+        log.warn(
+          "startup",
+          `statistics refresh failed for ${stream_id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       // Backfill the global `entity_space` index from this space's
       // per-space DB. Existing per-space DBs materialized before the index
       // existed have no entries, so `openSpaceDbForEntity` would 404 on every
@@ -566,6 +582,20 @@ export async function reMaterializeFromLocalEvents(
   };
 
   await Promise.all(Array.from({ length: cap }, () => replayWorker()));
+
+  // The shared DBs' statistics get the same treatment as the per-space ones.
+  // Their size is event-driven rather than per-space, so the sweep above is
+  // the natural place to catch them, and the global `entity_space` index —
+  // which every room/message handler resolves an owner through — is the one
+  // that grows without bound (`search/backfill.ts`).
+  try {
+    await db.analyzeShared?.();
+  } catch (err) {
+    log.warn(
+      "startup",
+      `shared-database statistics refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   await finishStartupMigrations();
 

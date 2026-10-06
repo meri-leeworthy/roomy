@@ -780,6 +780,8 @@ function handleRequest(req: WorkerRequest): unknown {
       return handleRun(req);
     case "exec":
       return handleExec(req);
+    case "analyze":
+      return handleAnalyze(req);
     case "prepare":
       return handlePrepare(req);
     case "prepareRun":
@@ -1000,6 +1002,33 @@ function handleRun(req: WorkerRequest): {
 
 function handleExec(req: WorkerRequest): void {
   dbForRequest(req).exec(req.sql!);
+}
+
+/**
+ * Refresh a DB's query-planner statistics (`sqlite_stat1`).
+ *
+ * Without statistics SQLite costs indexes by fixed defaults, and for an
+ * equality lookup it prices the single-column index it happens to walk
+ * (`idx_entities_stream_room`) below the table's rowid index. On a space with
+ * six figures of entities that mis-cost picks a scan of its whole `stream_id`
+ * partition to answer `where id in (…) and stream_id = ?`, so a point lookup
+ * becomes a full partition scan on the space's only worker — seconds of
+ * service time on one request while every other request on that worker waits
+ * behind it. Statistics let the planner see the rowid index is the selective
+ * one, and the same query costs microseconds.
+ *
+ * `PRAGMA optimize` rather than a bare `ANALYZE`: it re-analyzes only what its
+ * heuristics say is stale, so a DB whose stats are current pays ~0.1ms, while
+ * the tables that actually grew get re-measured. Statistics persist in the
+ * file, so a DB analyzed on one boot stays planned correctly on the next even
+ * before this runs again.
+ */
+function handleAnalyze(req: WorkerRequest): { analyzed: boolean } {
+  // Statistics are per-database, so this must resolve the request's target the
+  // same way every other handler does — a shared-DB analyze routed to whatever
+  // DB `targetDb` names, a space analyze to its own file.
+  dbForRequest(req).exec("pragma optimize");
+  return { analyzed: true };
 }
 
 function handlePrepare(req: WorkerRequest): { handle: number } {
