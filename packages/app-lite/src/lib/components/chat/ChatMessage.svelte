@@ -736,7 +736,11 @@
     </div>
   </button>
 {:else}
+  <!-- The row says which message it is in every mode, not only under select:
+       a row-level identity is what lets a caller aim at the row rather than at
+       whatever happens to be first in the list. -->
   <div
+    data-message-id={message.id}
     class="flex flex-col w-full relative max-w-full isolate px-2"
     class:message-highlight={highlighted}
   >
