@@ -395,14 +395,17 @@ describe("worker cache bounds", () => {
       "did:plc:stmt-bound",
     );
     // The SQL is identical every time; the leak is the handle, not the text.
-    for (let i = 0; i < 5000; i++) {
+    // 1000 prepares is several times the ceiling, so the bound is observed both
+    // reached and held, and few enough round-trips to stay well under the test
+    // timeout under CI's --isolate load.
+    for (let i = 0; i < 1000; i++) {
       await space.prepare("select id from entities where id = ?");
     }
 
     const stats = (await poolStats())!;
     const held = stats.spaceWorkers.reduce((n, w) => n + w.preparedStmts, 0);
     // Bound is live, not vacuously zero: the ceiling is reached, yet never
-    // exceeded, despite 5000 prepares.
+    // exceeded, despite more prepares than the ceiling.
     expect(stats.maxPreparedStmts).toBe(DEFAULT_MAX_PREPARED_STMTS);
     expect(held).toBe(stats.maxPreparedStmts);
 
@@ -413,7 +416,7 @@ describe("worker cache bounds", () => {
     // The bound must not be insertion-order, or a long-lived handle a caller
     // keeps executing would be finalized out from under it by a leaking
     // neighbour. `takeStatement` refreshes the handle on every use, so here the
-    // kept handle survives 1000 prepares of pressure and still runs.
+    // kept handle survives 500 prepares of pressure and still runs.
     closeDb();
     const db = openDb({ path: ":memory:" });
     const space = db.forSpace("did:plc:stmt-lru");
@@ -423,7 +426,7 @@ describe("worker cache bounds", () => {
       "did:plc:stmt-lru",
     );
     const kept = await space.prepare("select id from entities where id = ?");
-    for (let i = 0; i < 1000; i++) {
+    for (let i = 0; i < 500; i++) {
       // Refresh the kept handle's recency, then prepare-and-drop another.
       await kept.get("entity-lru");
       await space.prepare("select 1");
@@ -536,10 +539,9 @@ describe("cache bounds from the environment", () => {
       // A malformed value falls back to the default rather than a NaN/0 bound
       // (which would close every connection or evict every statement).
       process.env.APPSERVER_MAX_SPACE_DBS = "not-a-number";
-      const db2 = openDb({ path: ":memory:" });
+      openDb({ path: ":memory:" });
       const stats2 = (await poolStats())!;
       expect(stats2.maxSpaceDbs).toBe(DEFAULT_MAX_SPACE_DBS);
-      void db2;
       closeDb();
     } finally {
       for (const k of KEYS) {

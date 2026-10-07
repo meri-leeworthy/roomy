@@ -358,8 +358,13 @@ export class WorkerLink {
   }
 }
 
-/** How long `cacheStats()` waits for a worker's `health` reply. */
-const CACHE_STATS_TIMEOUT_MS = 250;
+/**
+ * How long `cacheStats()` waits for a worker's `health` reply. Well under the
+ * 30s request timeout so a wedged worker cannot hold a scrape, but far above a
+ * healthy round-trip (sub-millisecond warm, tens of ms while a worker is still
+ * starting) so a cold worker's stats are not reported as zeros.
+ */
+const CACHE_STATS_TIMEOUT_MS = 2000;
 
 // ─── DbRoute ──────────────────────────────────────────────────────────────
 
