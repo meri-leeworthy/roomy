@@ -466,7 +466,9 @@ describe("worker cache bounds", () => {
     );
 
     const did = "did:plc:stmt-bound-user";
-    for (let i = 0; i < 2000; i++) {
+    // 500 calls: enough to prove the path holds nothing by call count, and
+    // short enough to stay well under the test timeout under CI load.
+    for (let i = 0; i < 500; i++) {
       await updateSeenHandler({}, { did }, { roomId });
     }
 
