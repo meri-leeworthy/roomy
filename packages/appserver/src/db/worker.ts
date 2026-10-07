@@ -1163,14 +1163,21 @@ function handleTransaction(req: WorkerRequest): unknown {
   const run = db.transaction(() => {
     for (const step of req.steps ?? []) {
       switch (step.type) {
-        case "query":
-          // `db.query` compiles through SQLite's statement cache keyed by SQL
-          // text, so a materialization batch that runs the same step shape
-          // thousands of times reuses one compiled statement instead of
-          // leaving a fresh one per step (the `prepare` shape leaks — see
-          // `handlePrepare`).
-          lastResult = db.query(step.sql).all(...toBindings(step.params));
+        case "query": {
+          // Compile, run, finalize: a transaction step is one-shot, so this
+          // frees the compiled statement immediately instead of leaving one per
+          // step (the leak `handlePrepare` bounds elsewhere). `db.query` would
+          // cache the statement for reuse, which this path must not do — the
+          // same SQL can already be live on the connection from another caller,
+          // and re-entering a cached statement mid-transaction misuses it.
+          const stmt = db.prepare(step.sql);
+          try {
+            lastResult = stmt.all(...toBindings(step.params));
+          } finally {
+            stmt.finalize();
+          }
           break;
+        }
         case "run":
           lastResult = (db.run as (...args: unknown[]) => Changes)(step.sql, ...toBindings(step.params));
           break;

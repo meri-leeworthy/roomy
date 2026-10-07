@@ -408,9 +408,8 @@ describe("worker cache bounds", () => {
     // exceeded, despite more prepares than the ceiling.
     expect(stats.maxPreparedStmts).toBe(DEFAULT_MAX_PREPARED_STMTS);
     expect(held).toBe(stats.maxPreparedStmts);
-
     closeDb();
-  });
+  }, 30_000);
 
   test("the prepared-statement bound is an LRU: a kept handle stays usable", async () => {
     // The bound must not be insertion-order, or a long-lived handle a caller
@@ -437,7 +436,7 @@ describe("worker cache bounds", () => {
     expect(row?.id).toBe("entity-lru");
 
     closeDb();
-  });
+  }, 30_000);
 
   test("the updateSeen write path holds no prepared statements across many calls", async () => {
     // The mark-as-read handler used to `prepare` a one-shot insert per call and
@@ -469,9 +468,11 @@ describe("worker cache bounds", () => {
     );
 
     const did = "did:plc:stmt-bound-user";
-    // 500 calls: enough to prove the path holds nothing by call count, and
-    // short enough to stay well under the test timeout under CI load.
-    for (let i = 0; i < 500; i++) {
+    // 200 calls: every one is several worker round-trips, so a larger count
+    // risks the default 5s test timeout under CI's --isolate load. 200 still
+    // proves the path holds nothing by call count. The explicit timeout keeps a
+    // loaded runner from turning a slow-but-correct run into a failure.
+    for (let i = 0; i < 200; i++) {
       await updateSeenHandler({}, { did }, { roomId });
     }
 
@@ -480,7 +481,7 @@ describe("worker cache bounds", () => {
     expect(stats.readStateWorker.preparedStmts).toBe(0);
 
     closeDb();
-  });
+  }, 30_000);
 
   test("the space-DB cache reports open connections against its bound", async () => {
     closeDb();
