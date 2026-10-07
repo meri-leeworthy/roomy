@@ -212,8 +212,10 @@ describe("per-space query-planner statistics", () => {
     // what let the planner see the rowid index is the selective one.
     //
     // The fixture is inserted as one multi-row statement rather than a loop:
-    // every `run()` is a worker round-trip, and enough of them to cross the
-    // planner's crossover costs more than the test budget.
+    // every `run()` is a worker round-trip, and one per row costs more than the
+    // test budget. The plan is then read through `analyze`, which is the same
+    // call an eviction or the boot sweep makes — the fixture reaches its row
+    // count after the open that would normally have analyzed it.
     const db = openDb({ path: ":memory:", isolated: true });
     const space = "did:plc:plan-stats";
     const rows = 2000;
@@ -235,12 +237,13 @@ describe("per-space query-planner statistics", () => {
   });
 
   test("analyzeShared refreshes the shared databases' statistics", async () => {
-    // A shared DB's statistics are only ever created by this call — nothing
-    // else in the appserver runs ANALYZE — so their presence, and their
-    // agreement with the row count just written, is what "the shared DBs were
-    // refreshed" means. The global `entity_space` index is the one every
-    // room/message handler resolves an owner through, and it grows with the
-    // whole fleet's entities rather than one space.
+    // A shared DB's statistics are only ever created by this call — the
+    // open-time refresh covers per-space DBs, and nothing else runs ANALYZE on
+    // a shared one — so their presence, and their agreement with the row count
+    // just written, is what "the shared DBs were refreshed" means. The global
+    // `entity_space` index is the one every room/message handler resolves an
+    // owner through, and it grows with the whole fleet's entities rather than
+    // one space.
     const db = openDb({ path: ":memory:", isolated: true });
     const space = "did:plc:shared-stats";
     const rows = 2000;

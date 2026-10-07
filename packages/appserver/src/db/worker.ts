@@ -385,9 +385,10 @@ function scheduleSpaceDataMigration(db: Database, version: string): void {
 
 /**
  * Open (or return from the LRU cache) the per-space DB for `spaceDid`.
- * On first open: create the file, apply the per-space schema, and upgrade an
- * older DB to the current version in place. The DB is populated by
- * re-materialising the stream from the event log.
+ * On first open: create the file, apply the per-space schema, upgrade an
+ * older DB to the current version in place, and refresh the query-planner
+ * statistics. The DB is populated by re-materialising the stream from the
+ * event log.
  */
 function openSpaceDb(spaceDid: string): Database {
   if (!spacesDir) throw new Error("Per-space DBs not initialized (no init)");
@@ -418,8 +419,18 @@ function openSpaceDb(spaceDid: string): Database {
     }
   }
 
+  // Refresh the query-planner statistics on the open that populates this
+  // handle: statistics live in the file, so a space the boot sweep already
+  // covered pays the ~0.06ms `PRAGMA optimize` no-op check, while a space that
+  // is new, or was first opened after the sweep passed it, gets its statistics
+  // before it serves a query.
+  analyzeSpaceDb(db);
 
   // LRU eviction: close the least-recently-used handle when over capacity.
+  // Statistics are refreshed immediately before the close, which is the
+  // cadence SQLite documents for `PRAGMA optimize` (periodically, and before
+  // closing a long-lived connection): the handle being evicted is the one that
+  // has been serving writes, so this is where a space's growth gets measured.
   if (spaceDbs.size >= maxSpaceDbs) {
     let oldest: string | null = null;
     let oldestTs = Infinity;
@@ -433,6 +444,7 @@ function openSpaceDb(spaceDid: string): Database {
       const entry = spaceDbs.get(oldest);
       spaceDbs.delete(oldest);
       try {
+        if (entry) analyzeSpaceDb(entry.db);
         entry?.db.close();
       } catch {
         /* best-effort */
@@ -469,6 +481,35 @@ function applySpacePragmas(db: Database): void {
   db.exec("pragma synchronous = normal");
   db.exec("pragma foreign_keys = on");
   db.exec("pragma busy_timeout = 5000");
+}
+
+/**
+ * Refresh a per-space DB's query-planner statistics (`sqlite_stat1`).
+ *
+ * Without statistics SQLite costs indexes by fixed defaults, and for an
+ * equality lookup it prices the single-column index it happens to walk
+ * (`idx_entities_stream_room`) below the table's rowid index. Measured on a
+ * 131k-entity space DB, every `id in (…) and stream_id = ?` lookup — the shape
+ * `readPositions`/`userActiveThreads` issue on each room read — scans the
+ * space's whole `stream_id` partition: 8 ids cost 323 ms unanalyzed against
+ * 0.006 ms analyzed, and the mis-plan starts at ~500 entities.
+ *
+ * `PRAGMA optimize` rather than a bare `ANALYZE`: it re-analyzes only what its
+ * heuristics call stale, so a DB whose statistics are current pays ~0.01ms,
+ * while the tables that actually grew get re-measured. Statistics persist in
+ * the file, so this is a no-op after the first open of each DB.
+ *
+ * Best-effort: statistics are an optimization, so a failure leaves the
+ * previous plan in place rather than failing the open. The worker has no log
+ * sink, so the failure is silent here — the boot sweep's explicit `analyze`
+ * reports it.
+ */
+function analyzeSpaceDb(db: Database): void {
+  try {
+    db.exec("pragma optimize");
+  } catch {
+    /* keep serving with the existing plan */
+  }
 }
 
 function openSpaceDbFile(spaceDid: string): Database {
@@ -1005,29 +1046,16 @@ function handleExec(req: WorkerRequest): void {
 }
 
 /**
- * Refresh a DB's query-planner statistics (`sqlite_stat1`).
+ * Refresh a DB's query-planner statistics (`sqlite_stat1`), on request.
  *
- * Without statistics SQLite costs indexes by fixed defaults, and for an
- * equality lookup it prices the single-column index it happens to walk
- * (`idx_entities_stream_room`) below the table's rowid index. On a space with
- * six figures of entities that mis-cost picks a scan of its whole `stream_id`
- * partition to answer `where id in (…) and stream_id = ?`, so a point lookup
- * becomes a full partition scan on the space's only worker — seconds of
- * service time on one request while every other request on that worker waits
- * behind it. Statistics let the planner see the rowid index is the selective
- * one, and the same query costs microseconds.
- *
- * `PRAGMA optimize` rather than a bare `ANALYZE`: it re-analyzes only what its
- * heuristics say is stale, so a DB whose stats are current pays ~0.1ms, while
- * the tables that actually grew get re-measured. Statistics persist in the
- * file, so a DB analyzed on one boot stays planned correctly on the next even
- * before this runs again.
+ * The boot sweep drives this for every stream and the shared DBs; a space DB
+ * also refreshes itself when it is opened (see `analyzeSpaceDb`). Statistics
+ * are per-database, so this resolves the request's target the same way every
+ * other handler does — a shared-DB analyze routed to whatever DB `targetDb`
+ * names, a space analyze to its own file.
  */
 function handleAnalyze(req: WorkerRequest): { analyzed: boolean } {
-  // Statistics are per-database, so this must resolve the request's target the
-  // same way every other handler does — a shared-DB analyze routed to whatever
-  // DB `targetDb` names, a space analyze to its own file.
-  dbForRequest(req).exec("pragma optimize");
+  analyzeSpaceDb(dbForRequest(req));
   return { analyzed: true };
 }
 

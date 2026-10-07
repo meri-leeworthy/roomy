@@ -270,22 +270,6 @@ export async function reMaterializeFromLocalEvents(
         continue;
       }
 
-      // Refresh this space's query-planner statistics. Statistics are what let
-      // the planner see that a point lookup on `entities.id` is cheaper than a
-      // scan of the space's `stream_id` partition; without them it picks the
-      // scan, and a space past ~50k entities pays seconds per lookup on its
-      // only worker (see `handleAnalyze`). Every stream is already visited
-      // here, and `PRAGMA optimize` is a no-op when the stats are current, so
-      // this both fixes the existing DBs and keeps them fixed as they grow.
-      try {
-        await db.forSpace!(stream_id as StreamDid).analyze?.();
-      } catch (err) {
-        log.warn(
-          "startup",
-          `statistics refresh failed for ${stream_id}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-
       // Backfill the global `entity_space` index from this space's
       // per-space DB. Existing per-space DBs materialized before the index
       // existed have no entries, so `openSpaceDbForEntity` would 404 on every
@@ -298,6 +282,24 @@ export async function reMaterializeFromLocalEvents(
         log.warn(
           "startup",
           `entity_space backfill failed for ${stream_id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      // Refresh this space's query-planner statistics. Without them the
+      // planner prices the single-column index it happens to walk
+      // (`idx_entities_stream_room`) below the table's rowid index and answers
+      // a point lookup by scanning the space's whole `stream_id` partition —
+      // measured from ~500 entities, so it is every space's plan, not just the
+      // large ones. `PRAGMA optimize` costs ~0.01ms once the statistics are
+      // current, so doing it per stream on every boot is what keeps them
+      // correct as the spaces grow. See `handleAnalyze` and
+      // `docs/per-space-stats.md`.
+      try {
+        await db.forSpace!(stream_id as StreamDid).analyze?.();
+      } catch (err) {
+        log.warn(
+          "startup",
+          `statistics refresh failed for ${stream_id}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
 
