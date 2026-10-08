@@ -500,6 +500,51 @@ async function deriveSpacePositions(
 }
 
 /**
+ * Whether any of `roomIds` — all of which live in `spaceDb` — has messages
+ * past its watermark. The existence form of {@link deriveUnreadCounts}, for a
+ * caller that only needs to know if the answer is non-zero.
+ *
+ * Asking the count question and scanning the result would derive a count for
+ * every candidate room to look for one `> 0`, allocating a `ReadPosition`, a
+ * `Map` entry and a result row per room. `spaceHasUnreads` is the per-message
+ * path — a message create asks it once per reader the message made newly
+ * unread — and the candidate set is a space's whole sidebar, so the probe
+ * stops at the first room that answers instead.
+ *
+ * A room with no stored watermark is not a candidate: the caller's
+ * `ensureReadPositions` gives every candidate room a row, and one that is
+ * missing anyway has no position to count past, which its siblings read as
+ * zero unread.
+ */
+async function anyUnread(
+  spaceDb: DbLike,
+  roomIds: readonly string[],
+  watermarks: ReadonlyMap<string, string>,
+): Promise<boolean> {
+  const queries: UnreadQuery[] = [];
+  for (const roomId of roomIds) {
+    const seenUpTo = watermarks.get(roomId);
+    if (seenUpTo !== undefined) queries.push({ roomId, seenUpTo });
+  }
+  if (queries.length === 0) return false;
+
+  const row = await spaceDb
+    .query(
+      `with w(room, wm) as (
+         select json_extract(value, '$.roomId'), json_extract(value, '$.seenUpTo')
+           from json_each(?1)
+       )
+       select 1 as one
+         from w
+        where exists (select 1 from entities e
+                       where e.room = w.room and e.sort_idx > w.wm)
+        limit 1`,
+    )
+    .get<{ one: number }>(JSON.stringify(queries));
+  return row !== null && row !== undefined;
+}
+
+/**
  * Whether any room of `spaceId` has unread messages for `userDid`.
  *
  * The space list carries this level, not counts (see `space.getSpaces`), so
@@ -527,15 +572,21 @@ export async function spaceHasUnreads(
     spaceId,
     memo,
   );
-  const positions = await deriveSpacePositions(
-    readStateDb,
-    spaceDb,
-    userDid,
-    candidates,
-    excludeRoomId,
-  );
-  for (const pos of positions.values()) {
-    if (pos.unreadCount > 0) return true;
+  const keep = (id: string): boolean => id !== excludeRoomId;
+  // The space's own rooms are asked as one group, and each federated origin's
+  // as another: they live in different DBs, so the probe can only short-circuit
+  // within a group — a hit in any group is the answer either way.
+  const ownRooms = [
+    ...candidates.accessibleIds.filter(keep),
+    ...candidates.threadIds.filter(keep),
+  ];
+  const watermarks = await readWatermarks(readStateDb, userDid, [
+    ...ownRooms,
+    ...candidates.federatedIds.filter(keep),
+  ]);
+  if (await anyUnread(spaceDb, ownRooms, watermarks)) return true;
+  for (const [originDb, roomIds] of candidates.federatedByDb) {
+    if (await anyUnread(originDb, roomIds.filter(keep), watermarks)) return true;
   }
   return false;
 }
