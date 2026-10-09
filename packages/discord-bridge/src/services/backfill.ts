@@ -24,6 +24,7 @@ import { getCapacityGate } from "../roomy/capacity.ts";
 import type { RoomyGateway } from "../roomy/gateway.ts";
 import { ingestDiscordMessage } from "./message-ingestion.ts";
 import { ensureRoomyChannel, syncInitialStructure } from "./room-sync.ts";
+import { sendEventOrQueue } from "./send-retry.ts";
 
 const log = createLogger("backfill");
 
@@ -752,12 +753,24 @@ export async function ensureRoomyThreads(
 						},
 					];
 
-					await roomy.sendEvents(spaceDid, events);
-					repo.registerMapping(spaceDid, "thread", threadId, threadUlid);
-
+					// The allowlist row goes in before the send: it is what a subset
+					// bridge reads to carry the thread's messages, it stays inert until
+					// the thread's mapping exists, and a create that queues must not
+					// lose it — the sweep can only replay what the entry stores.
 					if (mode === "subset") {
 						repo.addToAllowlist(spaceDid, threadId, guildId);
 					}
+
+					const landed = await sendEventOrQueue(repo, roomy, {
+						spaceDid,
+						op: "room_create",
+						discordId: threadId,
+						events,
+						mapping: { kind: "thread", value: threadUlid },
+					});
+					if (!landed) continue;
+
+					repo.registerMapping(spaceDid, "thread", threadId, threadUlid);
 
 					created++;
 
@@ -1630,12 +1643,23 @@ export async function ensureAndBackfillArchivedThreads(
 								},
 							];
 
-							await roomy.sendEvents(spaceDid, events);
-							repo.registerMapping(spaceDid, "thread", threadId, threadUlid);
-
+							// Allowlist first, for the same reason as ensureRoomyThreads:
+							// the queued entry cannot carry the row, so it must exist
+							// before a send that might queue.
 							if (mode === "subset") {
 								repo.addToAllowlist(spaceDid, threadId, guildId);
 							}
+
+							const landed = await sendEventOrQueue(repo, roomy, {
+								spaceDid,
+								op: "room_create",
+								discordId: threadId,
+								events,
+								mapping: { kind: "thread", value: threadUlid },
+							});
+							if (!landed) continue;
+
+							repo.registerMapping(spaceDid, "thread", threadId, threadUlid);
 
 							totalThreads++;
 
