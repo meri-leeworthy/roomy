@@ -95,11 +95,10 @@ rebuild and commit `dist` or the import resolves to stale output.
 
 ### The `rev` pin still lags one fix
 
-The pinned commit carries A, B and C. Defect D is fixed as a patch
-(`src-tauri/patches/`), so the `rev` in §2 must move to the commit that lands it
-before the client can rely on it.
-
-### `Cargo.lock` recorded no entry, and has been regenerated
+The pinned commit carries A, B and C. Defect D is fixed as
+`packages/app-lite/src-tauri/patches/tauri-plugin-mobile-push-6ac0683-ios-delegate.patch`,
+so the `rev` in §2 must move to the commit that lands it before the client can
+rely on it.
 
 `packages/app-lite/src-tauri/Cargo.lock` is tracked in git, last touched by
 `2279a7b2d` (the desktop-updater PR) — i.e. **before** the push PR. It contained
