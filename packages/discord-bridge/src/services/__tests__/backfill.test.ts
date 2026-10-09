@@ -50,15 +50,19 @@ import {
 	setBackfillNoticeSender,
 } from "../backfill.ts";
 import { ingestDiscordMessage } from "../message-ingestion.ts";
+import { retryQueuedSends } from "../send-retry.ts";
 import { _setLokiSink } from "../../logger.ts";
 import { CHANNEL_UNREADABLE_REASON } from "../../discord/rest-errors.ts";
 import type { DiscordSender } from "../../discord/sender.ts";
-import { expectToBeDefined } from "./utils.ts";
+import { expectToBeDefined, queuedEvents } from "./utils.ts";
 
 // ─── Test constants ─────────────────────────────────────────────────────
 
 export const SPACE = "did:web:test-space.example";
 export const GUILD = "987654321098765432";
+
+/** Past every backoff the sweep can schedule (capped at 30 min). */
+const LATER = 60 * 60 * 1000;
 
 // ─── Faker-generated in-memory data source ──────────────────────────────
 
@@ -1327,6 +1331,77 @@ describe("ensureRoomyThreads with active threads", () => {
 		// Thread should be in the allowlist
 		expect(repo.isAllowlisted(SPACE, activeThread.id)).toBe(true);
 	});
+
+	/**
+	 * RT06: A thread create whose send fails is queued with its mapping, and
+	 * the sweep registers the mapping when it lands. The allowlist row is
+	 * written before the send, so a queued create does not lose it.
+	 */
+	test("RT06: a failed active-thread create queues its mapping and allowlist row", async () => {
+		const parentChannel: DiscordChannelData = {
+			id: "200000000000000001",
+			type: 0,
+			name: "general",
+			guildId: GUILD,
+		};
+
+		const activeThread: DiscordChannelData = {
+			id: "300000000000000001",
+			type: 11,
+			name: "durable-thread",
+			parentId: parentChannel.id,
+			guildId: GUILD,
+		};
+
+		const discord = FileDiscordDataSource.fromData({
+			guild: { id: GUILD, channels: [parentChannel] },
+			channels: [parentChannel, activeThread],
+			activeThreads: [activeThread],
+		});
+
+		const repo = BridgeRepository.open(":memory:");
+		repo.upsertBridgeConfig(GUILD, SPACE, "subset");
+		repo.addToAllowlist(SPACE, parentChannel.id, GUILD);
+		repo.registerMapping(SPACE, "channel", parentChannel.id, newUlid());
+
+		const roomy = new MockRoomyGateway();
+		roomy.failSends({ $type: "space.roomy.room.createRoom.v0", count: 1 });
+
+		await ensureRoomyThreads(discord, repo, roomy, [
+			{
+				guildId: GUILD,
+				spaceDid: SPACE,
+				mode: "subset",
+				createdAt: 0,
+				updatedAt: 0,
+			},
+		]);
+
+		// The create did not land, so there is no mapping yet — but the
+		// allowlist row is already there for the thread's messages once it does.
+		expect(repo.getRoomyId(SPACE, "thread", activeThread.id)).toBeUndefined();
+		expect(repo.isAllowlisted(SPACE, activeThread.id)).toBe(true);
+
+		const row = repo.listFailedSends()[0];
+		expectToBeDefined(row);
+		expect(row.op).toBe("room_create");
+		expect(row.discordId).toBe(activeThread.id);
+		expect(row.mappingKind).toBe("thread");
+
+		const queued = queuedEvents(row.eventJson);
+		expect(queued.map((event) => event.$type)).toEqual([
+			"space.roomy.room.createRoom.v0",
+			"space.roomy.link.createRoomLink.v0",
+		]);
+		const roomEvent = queued[0];
+		expectToBeDefined(roomEvent);
+		expect(row.mappingValue).toBe(roomEvent.id);
+
+		await retryQueuedSends(repo, roomy, Date.now() + LATER);
+
+		expect(repo.getRoomyId(SPACE, "thread", activeThread.id)).toBe(roomEvent.id);
+		expect(repo.countFailedSends()).toEqual({ pending: 0, terminal: 0 });
+	});
 });
 
 describe("backfill — capacity enforcement", () => {
@@ -1652,6 +1727,60 @@ describe("ensureAndBackfillArchivedThreads", () => {
 		const roomEvents = countThreadRoomEvents(roomy, SPACE);
 		expect(roomEvents).toHaveLength(1);
 		expect(roomEvents[0]?.name).toBe("tb");
+	});
+
+	/**
+	 * AT04: A failed archived-thread create is queued with its mapping rather
+	 * than dropped, and the sweep registers the mapping when it lands. Subset
+	 * mode also covers the allowlist row written before the send.
+	 */
+	test("AT04: a failed archived-thread create queues its mapping for the sweep", async () => {
+		const PARENT = "200000000000000001";
+		const THREAD = "300000000000000001";
+		const source = makeArchivedThreadsSource({
+			parents: [
+				{
+					id: PARENT,
+					name: "general",
+					pages: [[{ id: THREAD, name: "archived" }]],
+				},
+			],
+		});
+
+		const repo = BridgeRepository.open(":memory:");
+		repo.upsertBridgeConfig(GUILD, SPACE, "subset");
+		repo.addToAllowlist(SPACE, PARENT, GUILD);
+		repo.registerMapping(SPACE, "channel", PARENT, newUlid());
+
+		const roomy = new MockRoomyGateway();
+		roomy.failSends({ $type: "space.roomy.room.createRoom.v0", count: 1 });
+
+		await ensureAndBackfillArchivedThreads(source.ds, repo, roomy, [
+			{
+				guildId: GUILD,
+				spaceDid: SPACE,
+				mode: "subset",
+				createdAt: 0,
+				updatedAt: 0,
+			},
+		]);
+
+		// The create did not land; the queue row is the record that survives.
+		expect(repo.getRoomyId(SPACE, "thread", THREAD)).toBeUndefined();
+		expect(repo.isAllowlisted(SPACE, THREAD)).toBe(true);
+
+		const row = repo.listFailedSends()[0];
+		expectToBeDefined(row);
+		expect(row.op).toBe("room_create");
+		expect(row.discordId).toBe(THREAD);
+		expect(row.mappingKind).toBe("thread");
+
+		await retryQueuedSends(repo, roomy, Date.now() + LATER);
+
+		const rooms = countThreadRoomEvents(roomy, SPACE);
+		expect(rooms).toHaveLength(1);
+		expect(repo.getRoomyId(SPACE, "thread", THREAD)).toBe(rooms[0]?.id);
+		expect(repo.countFailedSends()).toEqual({ pending: 0, terminal: 0 });
 	});
 });
 
