@@ -1,5 +1,11 @@
 # Web Tiles × Roomy — Feasibility Research
 
+> **Historical.** This is the 2026-08-31 feasibility read. It is accurate about
+> the DASL Web Tiles spec and the security model, but it was written against
+> the deleted `packages/app` (SQLite-WASM + Leaf) architecture, so §3, the
+> integration points and the phase plan no longer describe this repo. The
+> current plan is `docs/plans/web-tiles-integration.md`.
+
 ## TL;DR
 
 Web Tiles (the `dasl-tiles` toolbox implementing the DASL "Web Tiles" spec) are a good conceptual fit for both of your use cases, and the spec was clearly designed with exactly this kind of application in mind — the spec text literally uses "a poll tile in a group chat app" as its motivating example. The hard parts are not conceptual, they're infrastructural and governance-related:
