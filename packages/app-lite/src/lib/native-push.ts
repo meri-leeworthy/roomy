@@ -24,21 +24,29 @@
  *   to, so {@link ensureNativeSubscription} fails loudly instead.
  * - **The event listeners deliver on both platforms.** `register_listener`
  *   stores the channel in the plugin's own registry, and each platform emits
- *   into it — so token rotation, foreground notifications and taps all reach
+ *   into it, so token rotation, foreground notifications and taps all reach
  *   {@link installNativePushListeners}. A tap that arrives before the app has
  *   run any JavaScript (a cold start from the notification) is held by the
- *   plugin and replayed to the first listener, which is why installing the
- *   listeners during startup is enough to route it.
+ *   plugin and replayed to the first listener.
  * - **A tap on a killed app needs a data message.** The Android tap payload
  *   comes from the notification intent, which carries the sender's `data`; a
  *   notification-only push opens the app with nothing to route.
+ * - **iOS installs its notification delegate lazily.** In the pinned fork the
+ *   `UNUserNotificationCenter.delegate` — the object iOS calls for a tap —
+ *   is set inside `getDeviceToken`, so this process only receives taps after
+ *   something has called `getToken()`. A relaunch that re-registers the token
+ *   it already has in `localStorage` never does, and iOS asks the delegate
+ *   once, so that tap is lost rather than delayed. The gate lives in the
+ *   plugin, not here; `push-route.ts` reads whatever payload does arrive.
  */
-
 import type { PluginListener } from "@tauri-apps/api/core";
 // Type-only: erased at build time, so the runtime module import stays dynamic.
 import type { PushNotification } from "tauri-plugin-mobile-push-api";
 import { goto } from "$app/navigation";
 import { px } from "$lib/auth.svelte";
+// The payload → route contract lives in its own module, free of the plugin and
+// the router, so it is testable without a shell: see `push-route.ts`.
+import { routeFromEvent, routeHref } from "./push-route";
 
 /** Platform that has a native push transport wired up. */
 export type NativePushPlatform = "ios" | "android";
@@ -256,71 +264,19 @@ export async function clearNativeSubscription(): Promise<NativePushOutcome> {
   }
 }
 
-/** Where a notification should take the user. */
-interface NativePushRoute {
-  spaceId: string;
-  roomId: string;
-  messageId?: string;
-}
-
 /**
- * The `spaceId`/`roomId`/`messageId` an event carries, read defensively.
+ * Navigate to the room (and message) an event refers to.
  *
- * Every event the plugin emits is `{ title?, body?, data }`, where `data` is
- * what the sender put in the push: on iOS the APNs payload's non-`aps` keys,
- * on Android the FCM data map. The appserver sends its own payload as a JSON
- * string under `roomy` (see `packages/appserver/src/push/transports/apn.ts`
- * and `fcm.ts`), so the route is inside that string.
- *
- * Every candidate that might carry the route is collected first — the event
- * value itself, its `data`, and the parsed `roomy` JSON string from either of
- * those — then the first one holding a usable `spaceId`/`roomId` pair wins.
- * Every read is guarded, so a payload of an unexpected shape yields "no
- * route" rather than a throw.
+ * Called for both `notification-received` (foreground) and
+ * `notification-tapped`, from inside the plugin's event loop: a malformed
+ * payload must yield "stay put", never a throw into that loop.
  */
-function routeFromEvent(event: unknown): NativePushRoute | null {
-  const data =
-    typeof event === "object" && event !== null && "data" in event
-      ? event.data
-      : undefined;
-  const candidates: unknown[] = [event, data];
-  for (const source of [event, data]) {
-    if (typeof source !== "object" || source === null) continue;
-    if (!("roomy" in source) || typeof source.roomy !== "string") continue;
-    try {
-      candidates.push(JSON.parse(source.roomy));
-    } catch {
-      // Malformed JSON in `roomy` is not fatal — fall through to the other
-      // candidates, and ultimately to "no route".
-    }
-  }
-
-  for (const candidate of candidates) {
-    if (typeof candidate !== "object" || candidate === null) continue;
-    if (!("spaceId" in candidate) || !("roomId" in candidate)) continue;
-    const { spaceId, roomId } = candidate;
-    if (typeof spaceId !== "string" || typeof roomId !== "string") continue;
-    const messageId = "messageId" in candidate ? candidate.messageId : undefined;
-    return {
-      spaceId,
-      roomId,
-      ...(typeof messageId === "string" ? { messageId } : {}),
-    };
-  }
-  return null;
-}
-
-/** Navigate to the room (and message) an event refers to. */
 function navigateFromEvent(event: unknown): void {
   try {
     const route = routeFromEvent(event);
     if (!route) return;
-    const query = route.messageId
-      ? `?message=${encodeURIComponent(route.messageId)}`
-      : "";
-    goto(`/${route.spaceId}/${route.roomId}${query}`);
+    goto(routeHref(route));
   } catch (e) {
-    // Never let a malformed payload throw into the plugin's event loop.
     console.warn("[push:native] could not route notification:", e);
   }
 }
