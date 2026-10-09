@@ -1144,18 +1144,35 @@ anyway), or generalise the media union. The narrower first option is the
 recommendation — `linkEmbeds` is already a separate field for exactly this
 reason, and a tile is not a medium.
 
-**Payload size.** The tile payload rides inside the event, and there is no
-application-level body-size cap on the path (`sendEvents`' input schema caps the
-batch at 50 events, `schemas/procedures/sendEvents.ts:14-17`; the router reads the
-JSON body with no limit, `xrpc/router.ts:236-238`). Small payloads — Mermaid
-source, a game position, a poll's options — are comfortably fine. Large ones
-(diagrams as image data, datasets) are not: the event log is the source of truth
-and is replicated in full, so a megabyte per message is a megabyte in every
-backup. The guidance worth writing down now: **the tile payload is small
-structured data, and any large asset belongs in a blob the tile fetches from its
-manifest** — which the tile can do without a host data channel at all. Worth an
-explicit size bound in the schema's `.describe()` rather than a discovery at
-scale.
+**Payload size.** The tile payload rides inside the event, so its cost is the
+event log's cost. There is no per-event or per-message byte check anywhere on
+the appserver's write path — `sendEvents` validates the batch count only
+(`handlers/space.roomy.space.sendEvents.ts:71-78`, capped at `MAX_BATCH_SIZE = 50`
+at `:30`) and the XRPC router parses the JSON body without a size check
+(`xrpc/router.ts:236-238`).
+
+The one real ceiling is the runtime's: **Bun caps a request body at 128 MiB by
+default** (`maxRequestBodySize`), and this appserver does not override it
+(`appserver.ts:1024-1026` sets only `port`, `idleTimeout`, `fetch` and
+`websocket`). Measured against Bun 1.3.14:
+
+```
+1MB -> 200   64MB -> 200   100MB -> 200   127MB -> 200   129MB -> 413   140MB -> 413
+```
+
+That ceiling is far too coarse to be a design constraint, because the real cost
+is not whether one request fits — it is that **the event log is the source of
+truth and is replicated in full** (`litestream.yml` replicates
+`roomy-events.sqlite` continuously), so every byte of payload is a byte in every
+backup, for the life of the space. A megabyte per message is a megabyte per
+message forever.
+
+The guidance worth writing down now: **the tile payload is small structured
+data, and any large asset belongs in a blob the tile fetches from its own
+manifest** — which milestone A already proves works, and which costs the event
+log nothing. Worth an explicit bound in the new variant's `.describe()`, and an
+appserver-side rejection, rather than discovering the problem at scale. This is
+open question 12.
 
 **What this does not change.** The tile still receives its payload over
 `tp-data` (§7.1): the attachment is the *transport* into Roomy's own data model,
@@ -1314,11 +1331,13 @@ Carried forward into the write-up and the issue list:
     `user-blocks` — `packages/appserver/src/featureFlags.ts:20-60`, defaulting
     off and served by `space.roomy.getFlags`). Given the sandbox is untested in
     production, a flag is the consistent choice and should be assumed.
-12. **Whether the tile payload needs a declared size bound** (§11.1). The event
-    log is the source of truth and is replicated in full, so payload size is a
-    permanent cost; the recommendation is a bound stated in the schema's
-    `.describe()` plus a documented rule that large assets belong in a blob the
-    tile fetches from its manifest.
+12. **Whether the tile payload needs a declared size bound** (§11.1). The only
+    ceiling today is Bun's 128 MiB request-body default, which is far too coarse
+    to matter; the real constraint is that the event log is the source of truth
+    and is replicated in full, so payload bytes are a permanent backup cost. The
+    recommendation is a bound stated in the new variant's `.describe()` plus an
+    appserver-side rejection, and a documented rule that large assets belong in a
+    blob the tile fetches from its manifest.
 
 ---
 
