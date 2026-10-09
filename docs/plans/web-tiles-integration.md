@@ -5,9 +5,10 @@
 Roomy. `docs/plans/web-tiles-roomy-feasibility.md` is the earlier feasibility
 read, kept as a historical record; §0 below states which of its conclusions
 still hold.
-**Next:** Phase 1 — resolve an AT-URI to an `ing.dasl.masl` record and render a
-Bluesky-post tile as a sandboxed card. Blocked on the loading domain (§8.1) and
-on the upstream sandbox question (§3.2).
+**Next:** Milestone A (§11.1) — render a standalone tile in app-lite through a
+tile loading server. That needs a `TileMothership` and a loading domain, and can
+be exercised against the loader's default domain before Roomy deploys its own
+(§11.3).
 **Scope of the funded stint:** two weeks, two features (§5, §6), plus a
 30-day engagement write-up (§10).
 **Verified against:** `origin/next` @ `4276631e`.
@@ -39,6 +40,11 @@ Three sources are collated here:
 3. **A funded implementation proposal** — a two-week stint against the spec
    and the `@dasl/tile-*` tooling, with upstream issues/PRs filed as rough
    edges are hit, and a 30-day engagement write-up. §1 and §11.
+4. **A later refinement to the sequencing** — that rendering support comes
+   first, in two self-contained checkpoints: standalone tiles whose assets are
+   entirely in the manifest and which need no host data, then tiles that accept
+   only data attached to the message. §11.1 is that plan; it sits ahead of
+   feature 1 and does not depend on it.
 
 The old document's headline conclusion survives: Web Tiles are a good
 conceptual fit for Roomy, and the hard parts are infrastructural and
@@ -81,6 +87,15 @@ Two features, in order:
 
 **Within the two weeks:** one context type end to end (calendar events), with
 feature 1 landed first. Other context types are a stretch goal.
+
+**Sequencing.** Before either feature, two smaller milestones prove the render
+pipeline on their own (§11.1): **A**, a standalone tile whose assets are all in
+its manifest and which needs no host data, and **B**, a tile that receives
+arbitrary JSON attached to the message under the tile's AT-URI as key. Both are
+self-contained checkpoints — the first isolates the loading domain and the
+sandbox, the second isolates the message-payload path — and both are `renderContent()`
+on an AT-URI Roomy already has, so neither depends on feature 1's resolution
+work.
 
 **Deliverables.** A working Bluesky-post tile in Roomy; a first version of the
 room-context tile; a short write-up of the experience with the spec and the
@@ -1014,16 +1029,117 @@ deliberately not, and why.
 
 ## 11. Plan
 
-**Phase 0 — the loading domain.** Stand up a tile-loading server on a wildcard
-DNS + wildcard TLS domain, on an origin distinct from app-lite. Verify with a
-hand-published tile loaded through `MemoryTileLoader` that the headers are
-actually served and the sandbox actually isolates. This is a prerequisite for
-everything else and the only part with an outside-the-repo dependency.
+Two classes of work, sequenced so the self-contained checkpoints land first.
+
+### 11.1 The rendering path (milestones A and B)
+
+These are small, standalone checkpoints that prove the render pipeline before any
+of the resolution machinery in §5 exists. Both render a tile from an AT-URI that
+Roomy already has — a hand-placed one for A, the key of a message extension for B.
+Neither needs the *link*-to-tile resolution of feature 1, the content-type
+mapping, or the embed projection.
+
+**Milestone A — standalone tiles.** A tile whose assets are all in its manifest
+and which takes no data from the host: a static web page, an interactive WebGL
+scene. The whole shape is:
+
+1. `TileMothership` in app-lite, `loadDomain` pointed at a loading server (§11.3
+   covers which one for a checkpoint), `addLoader(new ATTileLoader())`.
+2. A component that takes a tile AT-URI, calls `tl.loadTile(uri)`, appends
+   `renderContent()`, and shows the manifest's card via `renderCard()` while
+   loading.
+
+Nothing else is needed: `ATTileLoader` fetches the manifest from the PDS and its
+`ATPathLoader` (`@dasl/tile-loader/at`) serves each manifest path from that same
+PDS. There is no host data channel in the path at all.
+
+This is worth doing first because it isolates the two variables most likely to
+waste a fortnight: whether the loading domain is configured correctly
+(wildcard DNS, wildcard TLS, `service-worker-allowed: /`, the CSP header set),
+and whether the sandbox behaves as the spec claims. It is also the first test of
+the upstream concern in §3.2 — if iframe/worker wiring misbehaves, that is
+evidence for `darobin/dasl.ing#98`, not a Roomy bug.
+
+**Milestone B — message-attached tile data.** A tile receives arbitrary JSON
+attached to the message, keyed by the tile's AT-URI. The motivating case is a
+Mermaid renderer: the attachment carries the diagram source, the tile renders
+it.
+
+The write side is what makes this a self-contained checkpoint. The primary
+writer is an **agent**, not Roomy's UI: an agent posts a message with a
+`space.roomy.message.createMessage.v0` event whose `extensions` map carries the
+tile's AT-URI as the key and the arbitrary JSON as the value. No composer work,
+no attachment UI, no new SDK operation. `createMessage` already accepts an
+arbitrary `extensions` record (`packages/sdk/src/operations/message.ts:35`), so an
+agent-side writer is a few lines against the existing operation.
+
+**What the schema already permits — verified, not assumed.** `parseEvent`
+accepts an `at://did/ing.dasl.masl/<tid>`-keyed extension carrying arbitrary JSON,
+and preserves it verbatim. Run against the built SDK:
+
+```
+"at:// key (milestone B)": { "at://did:plc:abc/ing.dasl.masl/3abc": { mermaid: "graph TD; A-->B" } }
+  => PASS, preserved: {"at://did:plc:abc/ing.dasl.masl/3abc":{"mermaid":"graph TD; A-->B"}}
+```
+
+The mechanism is ArkType's `onUndeclaredKey: "ignore"` default over
+`MessageExtensionMap`'s derived keys: unknown keys are accepted and retained.
+The event still has to clear the appserver's write gate, which is independent of
+the key's shape (`auth/writeAuth.ts:856-863` gates on the event `$type` alone) —
+and `createMessage` is in `ALLOWED_TYPES`.
+
+**There is a real caveat, and the checkpoint is how to find out how big it is.**
+An `at://` key does not survive the *read* path. The DTO is
+`Message.linkEmbeds` and friends (`packages/sdk/src/schemas/queries/_message.ts:92-130`);
+there is no field for extensions, and the message projection reads none
+(`comp_content` holds mime type, bytes, last-edit and timestamp —
+`db/schema-space.sql:153-162`). The raw event *is* durable in `stream_events`
+(`db/eventsSchema.sql`), so nothing is lost — but rendering needs a read-path
+change or something narrower.
+
+The recommendation is to render the message from the event the client already
+has. The appserver owns the **persistent** view (`getMessages`, `getThreads`,
+search, the activity feed, and the cold-load path a `#messageDiff`-only design
+would break); the client already reads the raw event stream for a live message
+via `space.roomy.sync.getEvents`, which returns decoded events by stream cursor
+(`packages/appserver/src/streams/StreamManager.ts:479-489`, exposed at
+`packages/sdk/src/schemas/queries/getEvents.ts:10-22`). Fetching the one event
+for the one message being rendered gives milestone B the extension map with **no
+appserver change and no projection duplication**.
+
+The honest caveat: `getEvents` is currently **admin-only**
+(`handlers/space.roomy.sync.getEvents.ts:4`, `requireAdmin` at `:32`, gated on the
+`APPSERVER_ADMIN_DIDS` allowlist — the `discord-bridge`'s poll path). Rendering
+it for ordinary users needs either a small purpose-built query ("the tile
+extensions of message X", room-read gated) or admin gating in dev. The first is
+the right endpoint and is a few lines: a query over the existing read path, not
+a new projection.
+
+If it turns out the extension must also be queryable server-side — for search,
+for a link preview, for anything that must work without fetching the event —
+that becomes its own change: a column on `comp_content`, or a
+`comp_message_extension` table on the `comp_discord_origin` precedent
+(`db/schema-space.sql:137-143`), with the materialiser in
+`packages/sdk/src/schema/events/message.ts` (SDK-owned) and the usual
+`SPACE_MIGRATIONS` entry.
+
+**Two alternatives, recorded rather than recommended.** A typed extension
+variant — `space.roomy.extension.tile.v0` carrying `{ tileUri, payload }` — also
+passes `parseEvent` (verified) and is more discoverable, because `unionToMap`
+(`primitives.ts:111`) enumerates it in `MessageExtensionMap` and it gets an
+explicit materialiser. It is not what was asked for: the request is an
+`at://`-keyed map, which needs no schema change at all. A third shape — adding a
+`tile` variant to the existing `Attachments` union
+(`extensions/message.ts:105-119`) — is the most "Roomy-native" of the three and
+fits the thread's conclusion that attachment is the better home for tile data
+than a block, but it is a schema change and therefore not a checkpoint.
+
+### 11.2 The resolution path (feature 1, then feature 2)
 
 **Phase 1 — a Bluesky-post tile end to end.** AT-URI recognition → manifest
-resolution (appserver-side, cached) → embed-projection extension → mothership in
-app-lite → sandboxed card. Lands the first funded feature. Expected upstream
-friction: what the embed shape does and does not carry (§5.3), and the
+resolution (appserver-side, cached) → embed-projection extension → sandboxed
+card. Lands the first funded feature, on top of milestones A and B. Expected
+upstream friction: what the embed shape does and does not carry (§5.3), and the
 record-vs-blob reference question (§3.2, `darobin/dasl.ing#43`).
 
 **Phase 2 — room context metadata.** A room-context event and a JSON column,
@@ -1037,13 +1153,31 @@ turn out to be the point at which the feature stops and an upstream conversation
 starts.
 
 **Stretch, only if feature 1 has landed:** additional context types; a richtext
-tile block (§5.3c); a `store.js` implementation (§7.4).
+tile block (§5.3c); a `store.js` implementation (§7.4); the content-type → tile
+mapping becoming a space setting rather than a pinned AT-URI (§5.4).
 
 **Deliverables at the end:** the working Bluesky-post tile, the first room
 context tile, the spec-and-tooling write-up, and links to the upstream issues
 and PRs that came out of it.
 
 **Thirty days after:** the engagement write-up (§10).
+
+### 11.3 Which loading server a checkpoint can use
+
+Worth stating explicitly, because it changes what can be started now. A
+`loadDomain` must be reachable over HTTPS on a wildcard origin — that is not
+negotiable — but it does **not** have to be a deployed service on a Roomy-owned
+domain. `load.webtil.es` is the loader's own default, so milestone A can be
+exercised against the DASL project's server with `loadDomain` left unset, using a
+tile already published on AT. That decouples "does the render pipeline work"
+from "do we have wildcard DNS", and only the latter has an outside-the-repo
+dependency.
+
+Two consequences to accept deliberately: every tile load in a dev/test run then
+touches a third-party server, and any tile rendered that way is served under
+someone else's header policy rather than the one Roomy would ship. Neither
+matters for a checkpoint; both matter before a release.
+
 
 ---
 
@@ -1088,12 +1222,16 @@ Carried forward into the write-up and the issue list:
 7. **Room-read capabilities** (§7.2): none in the first cut, or a small
    read-only verb set? The thread's conclusion that the compute belongs mostly
    on the client argues for handing the tile data the client already has.
-8. **The first public-write capability** (§9.3): is the calendar RSVP the right
+8. **The message-attached extension read path** (§11.1, milestone B): fetch the
+   one event via a purpose-built room-read-gated query, or add a materialised
+   column/table so the extension is queryable server-side? The former is a
+   checkpoint; the latter is what search and previews will eventually need.
+9. **The first public-write capability** (§9.3): is the calendar RSVP the right
    forcing function, and what does the manual-review process actually look like
    on the Roomy side?
-9. **What the 30-day instrumentation measures** (§10), and what it is forbidden
-   from measuring.
-10. **Whether tile use is behind a feature flag.** Every comparable feature here
+10. **What the 30-day instrumentation measures** (§10), and what it is forbidden
+    from measuring.
+11. **Whether tile use is behind a feature flag.** Every comparable feature here
     has shipped behind one (`voice-chat`, `semble-integration`, `links-view`,
     `user-blocks` — `packages/appserver/src/featureFlags.ts:20-60`, defaulting
     off and served by `space.roomy.getFlags`). Given the sandbox is untested in
