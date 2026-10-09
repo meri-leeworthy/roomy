@@ -144,6 +144,11 @@ async function postLobbyMessage(linkUrl?: string): Promise<Posted> {
  * virtualizer re-measures as rows settle, so a toolbar read before that is a
  * toolbar whose position — or whose owning row — can still change underneath
  * the pointer.
+ *
+ * The click waits for that settling out rather than failing on it. A toolbar
+ * caught mid-re-measure is "not stable", and the row can be replaced outright,
+ * detaching the button — both of which Playwright reports at the click, long
+ * after the visibility check above passed.
  */
 async function startSelect(page: Page, messageId: string): Promise<void> {
   const row = messageRow(page, messageId);
@@ -151,9 +156,30 @@ async function startSelect(page: Page, messageId: string): Promise<void> {
   await row.hover();
   const actions = row.getByLabel("More actions");
   await expect(actions).toBeVisible();
-  await actions.click();
+  await expect
+    .poll(
+      async () => {
+        const button = await actions.boundingBox();
+        if (!button) return false;
+        await actions.click({ timeout: 5_000 }).then(
+          () => true,
+          () => false,
+        );
+        return menuIsOpen(page);
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(true);
   await page.getByRole("menuitem", { name: "Select", exact: true }).click();
   await expect(selectBar(page)).toBeVisible();
+}
+
+/** Whether the row's actions menu is open. */
+function menuIsOpen(page: Page): Promise<boolean> {
+  return page
+    .getByRole("menuitem", { name: "Select", exact: true })
+    .isVisible()
+    .catch(() => false);
 }
 
 test.describe("multi-select message actions", () => {
