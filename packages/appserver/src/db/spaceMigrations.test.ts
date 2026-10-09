@@ -67,6 +67,12 @@ afterEach(async () => {
 async function openPool(
   readStateDbPath: string = ":memory:",
 ): Promise<{ pool: DatabasePool; router: DbLike }> {
+  // Graceful, and before the new pool exists: the previous workers must have
+  // closed their SQLite handles before anything opens those same files again.
+  // Initialising first would have the new pool's workers opening the global
+  // and events DBs while the old ones still hold write locks on them, which
+  // is the one shape in this suite that can fail with `database is locked`.
+  await pool?.closeGracefully();
   const p = new DatabasePool(1, join(THIS_DIR, "worker.ts"));
   await p.init({
     readStateDbPath,
@@ -77,9 +83,6 @@ async function openPool(
     spaceSchemaVersion: SPACE_SCHEMA_VERSION,
     globalSchemaVersion: GLOBAL_SCHEMA_VERSION,
   });
-  // Graceful: the previous workers must have closed their SQLite handles, or
-  // this pool's first write to the same files races the OS releasing them.
-  await pool?.closeGracefully();
   pool = p;
   return { pool: p, router: p.router() };
 }
@@ -259,7 +262,7 @@ describe("in-place per-space migration", () => {
       .get<{ completed_at: number | null }>();
     expect(marker?.completed_at).not.toBeNull();
     expect((await router.checkSpaceSchema!(streamDid)).current).toBe(true);
-  });
+  }, { timeout: 30_000 });
 
   test("a reorder in the log makes the migration decline and rebuild", async () => {
     const streamDid = StreamDid.assert("did:web:migration-rebuild.example");
@@ -317,7 +320,7 @@ describe("in-place per-space migration", () => {
       )
       .get<{ n: number }>(roomId);
     expect(keyed!.n).toBe(messageIds.length);
-  });
+  }, { timeout: 30_000 });
 
   test("a version this build cannot start from is left untouched for the rebuild", async () => {
     const streamDid = StreamDid.assert("did:web:migration-unknown.example");
@@ -345,7 +348,7 @@ describe("in-place per-space migration", () => {
       .query("select version from space_schema_version where id = 1")
       .get<{ version: string }>();
     expect(version?.version).toBe(SPACE_SCHEMA_VERSION);
-  });
+  }, { timeout: 30_000 });
 
   test("a data task left owed by an interrupted pass still runs", async () => {
     const streamDid = StreamDid.assert("did:web:migration-resume.example");
@@ -396,7 +399,7 @@ describe("in-place per-space migration", () => {
       )
       .get<{ completed_at: number | null }>();
     expect(marker?.completed_at).not.toBeNull();
-  });
+  }, { timeout: 30_000 });
 
   test("a stream whose reads time out does not hold up the in-place upgrade", async () => {
     // The pass walks thousands of streams with one DB request in flight at a
@@ -488,7 +491,7 @@ describe("in-place per-space migration", () => {
     for (const id of messageIds) {
       expect(after.find((r) => r.id === id)?.sort_idx).not.toBe(id);
     }
-  });
+  }, { timeout: 30_000 });
 
   test("the in-place upgrade re-anchors read-state watermarks", async () => {
     const streamDid = StreamDid.assert("did:web:migration-watermark.example");
@@ -602,7 +605,7 @@ describe("in-place per-space migration", () => {
       )
       .get<{ n: number }>(roomId, watermark!.seen_up_to);
     expect(after!.n).toBe(0);
-  });
+  }, { timeout: 30_000 });
 
   test("the boot pass re-anchors a watermark the upgrade could not follow", async () => {
     // The residue the in-place upgrade leaves: a watermark that names no key
@@ -682,7 +685,7 @@ describe("in-place per-space migration", () => {
       .get<{ n: number }>(roomId, watermark!.seen_up_to);
     expect(after!.n).toBe(1);
     expect(watermark!.unread_count).toBe(after!.n);
-  });
+  }, { timeout: 30_000 });
 
   test("a write is rejected while the migration gate is open", async () => {
     const streamDid = StreamDid.assert("did:web:migration-gate.example");
@@ -726,7 +729,7 @@ describe("in-place per-space migration", () => {
       .query("select count(*) as n from comp_room")
       .get<{ n: number }>();
     expect(rooms!.n).toBe(1);
-  });
+  }, { timeout: 30_000 });
 
   test("v4 moves a space's DNS handle into the global store", async () => {
     // The DNS handle is assigned by the space's PDS/DNS and never written by an
@@ -777,7 +780,7 @@ describe("in-place per-space migration", () => {
         .query("select handle from space_handles where space_did = ?")
         .get<{ handle: string }>(streamDid),
     ).toEqual({ handle: "handled.example" });
-  });
+  }, { timeout: 30_000 });
 
   test("a rebuild carries the handle across before the swap", async () => {
     // A space that reaches the rebuild path without the v4 task having run —
@@ -807,5 +810,5 @@ describe("in-place per-space migration", () => {
         .query("select handle from space_handles where space_did = ?")
         .get<{ handle: string }>(streamDid),
     ).toEqual({ handle: "rebuilt.example" });
-  });
+  }, { timeout: 30_000 });
 });

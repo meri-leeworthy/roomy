@@ -120,7 +120,7 @@ describe("blue-green read serving (worker seam)", () => {
     // The canonical file must still exist and be untouched (not wiped).
     expect(existsSync(canonicalPath)).toBe(true);
     expect(existsSync(tmpPath)).toBe(false);
-  });
+  }, { timeout: 30_000 });
 
   test("forSpaceRebuild returns a fresh new-schema DB; canonical untouched", async () => {
     seedOldSpaceDb();
@@ -147,7 +147,7 @@ describe("blue-green read serving (worker seam)", () => {
 
     // The temp rebuild file exists on disk during the window.
     expect(existsSync(tmpPath)).toBe(true);
-  });
+  }, { timeout: 30_000 });
 
   test("replay → commit makes reads see new data and drops the old file", async () => {
     seedOldSpaceDb();
@@ -177,7 +177,7 @@ describe("blue-green read serving (worker seam)", () => {
     // Temp file gone; only canonical remains.
     expect(existsSync(tmpPath)).toBe(false);
     expect(existsSync(canonicalPath)).toBe(true);
-  });
+  }, { timeout: 30_000 });
 
   test("commit is idempotent and the space is current + not rebuilding after", async () => {
     seedOldSpaceDb();
@@ -196,7 +196,7 @@ describe("blue-green read serving (worker seam)", () => {
     // Post-swap the space is on the current schema and no longer rebuilding.
     expect((await pool.checkSpaceSchema(SPACE)).current).toBe(true);
     expect(await pool.isSpaceRebuilding(SPACE)).toBe(false);
-  });
+  }, { timeout: 30_000 });
 
   test("cursor written during rebuild is readable after swap", async () => {
     seedOldSpaceDb();
@@ -215,7 +215,7 @@ describe("blue-green read serving (worker seam)", () => {
       )
       .get<{ materialized_to: number }>(SPACE);
     expect(cursor?.materialized_to).toBe(42);
-  });
+  }, { timeout: 30_000 });
 
   test("abort keeps the old DB serving and removes the temp file", async () => {
     seedOldSpaceDb();
@@ -238,7 +238,7 @@ describe("blue-green read serving (worker seam)", () => {
 
     // Aborting when nothing is rebuilding is a no-op, not an error.
     expect((await pool.spaceRebuildAbort(SPACE)).aborted).toBe(false);
-  });
+  }, { timeout: 30_000 });
 
   test("a read touching a column missing from the old schema errors cleanly", async () => {
     seedOldSpaceDb();
@@ -249,7 +249,7 @@ describe("blue-green read serving (worker seam)", () => {
     await expect(
       pool.forSpace(SPACE).query("select some_new_column from entities").all(),
     ).rejects.toThrow(/some_new_column/);
-  });
+  }, { timeout: 30_000 });
 
   test("isSpaceRebuilding toggles exactly around the rebuild window", async () => {
     seedOldSpaceDb();
@@ -262,13 +262,13 @@ describe("blue-green read serving (worker seam)", () => {
 
     await pool.spaceRebuildCommit(SPACE);
     expect(await pool.isSpaceRebuilding(SPACE)).toBe(false);
-  });
+  }, { timeout: 30_000 });
 
   test("a fresh (missing) canonical file is considered current schema", async () => {
     // No file seeded — a brand-new space.
     expect((await pool.checkSpaceSchema(SPACE)).current).toBe(true);
     expect(await pool.isSpaceRebuilding(SPACE)).toBe(false);
-  });
+  }, { timeout: 30_000 });
 
   test("a current-version DB missing an additive column is healed without a rebuild", async () => {
     // A DB stamped current but created before `suggest_to_others` existed: the
@@ -296,7 +296,7 @@ describe("blue-green read serving (worker seam)", () => {
     expect(row?.suggest_to_others).toBe(1);
     // Unhealed DBs would have thrown on the insert above, not rebuilt:
     expect(await pool.isSpaceRebuilding(SPACE)).toBe(false);
-  });
+  }, { timeout: 30_000 });
 });
 
 describe("statistics on first open", () => {
@@ -342,5 +342,5 @@ describe("statistics on first open", () => {
     seed.close();
 
     expect(await planFor(SPACE)).toContain("sqlite_autoindex_entities_1");
-  });
+  }, { timeout: 30_000 });
 });

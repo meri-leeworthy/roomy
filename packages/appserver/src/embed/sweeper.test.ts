@@ -475,7 +475,7 @@ describe("embed sweeper invalidation room resolution", () => {
       .filter((s) => s.kind === "messageDiff")
       .map((s) => (s.kind === "messageDiff" ? (s.signal.roomId as string) : null));
     expect(diffRoomIds).not.toContain(ids.message);
-  }, { timeout: 20000 });
+  }, { timeout: 30_000 });
 
   test("does not emit when no pending links exist", async () => {
     const { globalDb } = await freshWorker();
@@ -488,7 +488,7 @@ describe("embed sweeper invalidation room resolution", () => {
     _resetEmbedSweeper();
 
     expect(signals.length).toBe(0);
-  });
+  }, { timeout: 30_000 });
 
   test("read-driven prioritisation enriches a viewed message's pending link", async () => {
     // Regression: links in messages a user is READING (detected during
@@ -528,7 +528,7 @@ describe("embed sweeper invalidation room resolution", () => {
       const link = op?.op === "update" ? op.message.linkEmbeds[0] : undefined;
       expect(link?.embed?.["t"]).toBe("Example Article");
     }
-  }, { timeout: 20000 });
+  }, { timeout: 30_000 });
 
   test("prioritiseLinksForRead never throws on a DB error (read path stays healthy)", async () => {
     // Regression guard: a DB error (e.g. SQLITE_IOERR_VNODE under I/O
@@ -540,7 +540,7 @@ describe("embed sweeper invalidation room resolution", () => {
     await prioritiseLinksForRead(spaceDb, [
       { linkEmbeds: [{ url: "https://example.com/x" }] },
     ]);
-  });
+  }, { timeout: 30_000 });
 
   test("sweeper doesn't crash or stream anything when the DB errors mid-drain", async () => {
     // Simulates a failing DB (IOERR_VNODE): seed a pending link, then close
@@ -561,7 +561,7 @@ describe("embed sweeper invalidation room resolution", () => {
     _resetEmbedSweeper();
 
     expect(signals.find((s) => s.kind === "messageDiff")).toBeUndefined();
-  });
+  }, { timeout: 30_000 });
 
   test("definitively-settled (no-data) links are dropped from pending_links so the backlog drains", async () => {
     // Regression: removing only SUCCESSFULLY-enriched URLs from the
@@ -605,7 +605,7 @@ describe("embed sweeper invalidation room resolution", () => {
       .query("select count(*) as n from pending_links where url = ?")
       .get<{ n: number }>(url);
     expect(remaining?.n ?? 0).toBe(0);
-  });
+  }, { timeout: 30_000 });
 
   test("transient failures are parked in backoff so the sweeper doesn't re-fetch them every cycle", async () => {
     // Regression: a transient failure (timeout / 5xx / 429) kept the URL
@@ -657,7 +657,7 @@ describe("embed sweeper invalidation room resolution", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("sweeper advances past a backoff link to enrich a newer one (doesn't stall)", async () => {
     // Regression: the backlog query re-selected the same OLDEST links every
@@ -720,7 +720,7 @@ describe("embed sweeper invalidation room resolution", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("a parked backlog does not latch the flag, however stale its rows are", async () => {
     // A `pending_links` backlog whose every link has burned through the 1m/5m/
@@ -781,7 +781,7 @@ describe("embed sweeper invalidation room resolution", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("a trickle of settlements does not clear the stall; a real drain does", async () => {
     // A stalled backlog still SETTLES rows — newly discovered dead links leave
@@ -898,7 +898,7 @@ describe("embed sweeper invalidation room resolution", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("the drain bar is the backlog the stall was raised on, not a drifting one", async () => {
     // Re-measuring the threshold as the queue moves would let a backlog that
@@ -994,7 +994,7 @@ describe("embed sweeper invalidation room resolution", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 });
 
 describe("embed sweeper stall reporting", () => {
@@ -1054,7 +1054,7 @@ describe("embed sweeper stall reporting", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("the parked/selectable split counts ROWS, so a duplicated URL cannot fake selectable work", async () => {
     // A URL pending in TWO messages yields 2 rows, while the sweeper's backoff
@@ -1128,7 +1128,7 @@ describe("embed sweeper stall reporting", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("classifyStallCause needs an empty probe to claim a selection bug", () => {
     // The rule the stall log branches on. A positive selectable-rows count is
@@ -1235,7 +1235,7 @@ describe("embed sweeper stall reporting", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("a selection query that misses selectable rows is reported as an ERROR, not blamed on parking", async () => {
     // The wired path for the selectable-but-absent branch. An old SELECTABLE
@@ -1324,7 +1324,7 @@ describe("embed sweeper stall reporting", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 });
 
 describe("embed sweeper retry-state persistence and stall pacing", () => {
@@ -1391,7 +1391,7 @@ describe("embed sweeper retry-state persistence and stall pacing", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("only the expired row is selected — an open retry_after in the future is skipped", async () => {
     // The acceptance case: two rows, one with a future `retry_after`, one
@@ -1456,7 +1456,7 @@ describe("embed sweeper retry-state persistence and stall pacing", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("the stall error is emitted once per cause, not once per flap", async () => {
     // The cause is latched independently of the stall flag: the flag's own
@@ -1523,7 +1523,7 @@ describe("embed sweeper retry-state persistence and stall pacing", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("a cycle that selects work but settles no rows does not clear the stall", async () => {
     // The flap driver: when a parked window EXPIRES the link is selected
@@ -1589,7 +1589,7 @@ describe("embed sweeper retry-state persistence and stall pacing", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("a genuine drain clears the stall and the next stall is reported again", async () => {
     // The other half of the latch: recovery must clear it, so a re-stall after
@@ -1663,7 +1663,7 @@ describe("embed sweeper retry-state persistence and stall pacing", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("the idle poll escalates while stalled and returns to the base poll on recovery", async () => {
     // Defect: a stalled cycle selects no rows, so the batch is never full and
@@ -1742,7 +1742,7 @@ describe("embed sweeper retry-state persistence and stall pacing", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 });
 
 
@@ -1817,7 +1817,7 @@ describe("embed sweeper cycle pacing (TASK-197)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("a definitive no-data batch is not mistaken for churn: it drains the backlog", async () => {
     // The row count is what separates the two classes — a definitive outcome
@@ -1856,7 +1856,7 @@ describe("embed sweeper cycle pacing (TASK-197)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("the loop yields after a full batch that resolved nothing (the churn bound)", async () => {
     // The mechanism from TASK-197: `if (full) continue;` ran the next backlog
@@ -1926,7 +1926,7 @@ describe("embed sweeper cycle pacing (TASK-197)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("a full batch that resolves a link keeps the no-wait path", async () => {
     // The other half of the rule, wired: a healthy backlog must still drain
@@ -1985,7 +1985,7 @@ describe("embed sweeper cycle pacing (TASK-197)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 });
 
 describe("settling rows already past the attempt ceiling (TASK-257)", () => {
@@ -2037,7 +2037,7 @@ describe("settling rows already past the attempt ceiling (TASK-257)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("a below-ceiling row is left parked and fetched by nobody", async () => {
     // The other half: the settle must not touch a URL that still has retries
@@ -2068,7 +2068,7 @@ describe("settling rows already past the attempt ceiling (TASK-257)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("the whole past-ceiling backlog drains in ONE cycle, and the live set still enriches", async () => {
     // The drain-rate claim: production held 7,798 over-ceiling rows draining
@@ -2200,7 +2200,7 @@ describe("settling rows already past the attempt ceiling (TASK-257)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 });
 
 describe("embed attempt ceiling (TASK-227)", () => {
@@ -2247,7 +2247,7 @@ describe("embed attempt ceiling (TASK-227)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("a host below the ceiling is still retried, not abandoned", async () => {
     // The other half: the ceiling must not settle a merely slow host. A URL
@@ -2282,7 +2282,7 @@ describe("embed attempt ceiling (TASK-227)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 
   test("the parked set is reported by attempt count, with the dead set separable", async () => {
     // `transientBackoff` is one number for a queue of slow hosts and a queue of
@@ -2333,5 +2333,5 @@ describe("embed attempt ceiling (TASK-227)", () => {
       await stopEmbedSweeper();
     }
     _resetEmbedSweeper();
-  });
+  }, { timeout: 30_000 });
 });

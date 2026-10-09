@@ -20,7 +20,7 @@
  * what distinguishes the two, and is why this spec fails on the pre-fix build.
  */
 
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { expect, test, waitForAuthenticated } from "./spec-helpers.ts";
 import { newUlid, serializeBlocks } from "@roomy-space/sdk";
 import {
@@ -81,9 +81,11 @@ const ACTIONS_LABEL = "More actions";
  * virtualized, so any of these can be waiting on a row the browser has not
  * rendered or has just unmounted. Unbounded, such a wait runs out the whole
  * test budget and reports only `Test timeout of 60000ms exceeded`, which names
- * neither the toolbar nor the reason.
+ * neither the toolbar nor the reason. It has to outlast the slowest hover, and
+ * under a loaded runner that is well past the 5s a local run needs: at 5s this
+ * ceiling, not the behaviour, was what failed.
  */
-const TOOLBAR_TIMEOUT = 5_000;
+const TOOLBAR_TIMEOUT = 15_000;
 
 /**
  * The toolbar's box, or `null` if it has no visible box.
@@ -199,9 +201,65 @@ async function scrollIntoBodyAndHover(page: Page): Promise<void> {
     )
     .toBeLessThan(8);
 
-  const box = await viewport.boundingBox({ timeout: TOOLBAR_TIMEOUT });
-  if (!box) throw new Error("chat viewport has no box");
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await hoverTallRow(page);
+}
+
+/**
+ * The tall fixture message's row.
+ *
+ * The room accumulates one of these per spec that posts one, so the newest is
+ * the row this test just sent — and the one the viewport is parked in.
+ */
+function tallRow(page: Page): Locator {
+  return page
+    .locator("[data-message-id]")
+    .filter({ hasText: "tall body line 1" })
+    .last();
+}
+
+/**
+ * Hover the tall message row, at a point that is on screen, until its toolbar
+ * is mounted.
+ *
+ * The toolbar mounts on the row's `mouseenter`, so the pointer has to end up
+ * inside the row — and the row is taller than the chat area, so its own centre
+ * can sit outside the viewport. The point used is the middle of the row's
+ * visible intersection with the chat area.
+ *
+ * It polls because a single move is not enough: the list is virtualised, and a
+ * re-anchor replaces the row element after a scroll. The replacement never
+ * receives the `mouseenter` that the original got, so the toolbar stays
+ * unmounted until the pointer actually moves again. Moving once and asserting
+ * therefore reads as "the toolbar is missing" — indistinguishable from the bug
+ * this spec exists to catch — while moving again is what a reader scrolling
+ * with the mouse does anyway.
+ */
+async function hoverTallRow(page: Page): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const vbox = await page
+          .locator(VIEWPORT_SELECTOR)
+          .boundingBox({ timeout: TOOLBAR_TIMEOUT });
+        const rbox = await tallRow(page).boundingBox({
+          timeout: TOOLBAR_TIMEOUT,
+        });
+        if (!vbox || !rbox) return -1;
+
+        const top = Math.max(rbox.y, vbox.y);
+        const bottom = Math.min(rbox.y + rbox.height, vbox.y + vbox.height);
+        if (bottom <= top) return -1;
+
+        const x = vbox.x + vbox.width / 2;
+        const y = (top + bottom) / 2;
+        await page.mouse.move(x + 3, y + 3);
+        await page.mouse.move(x, y);
+
+        return await page.getByLabel(ACTIONS_LABEL).count();
+      },
+      { timeout: TOOLBAR_TIMEOUT },
+    )
+    .toBe(1);
 }
 
 /**
@@ -265,11 +323,24 @@ test.describe("the message toolbar while reading a tall message", () => {
 
     // A different depth inside the same body. The offset must not drift with
     // the content the toolbar is pinned over — that is the difference between
-    // a sticky toolbar and one that merely happens to be on screen.
+    // a sticky toolbar and one that merely happens to be on screen. The
+    // pointer is re-hovered on arrival, so the row now under it is the row
+    // whose toolbar the offset is read from.
     const start = await viewport.evaluate((el) => el.scrollTop);
-    await viewport.evaluate((el) => {
-      el.scrollTop = Math.max(0, el.scrollTop - 400);
-    });
+    const target = Math.max(0, start - 400);
+    await viewport.evaluate((el, next) => {
+      el.scrollTop = next;
+    }, target);
+    // The virtualizer re-anchors rows after a scroll and can nudge the offset,
+    // so the row under the pointer is only settled once the offset holds. The
+    // hover has to wait for that, or the point it moves to belongs to whatever
+    // row was there mid-re-anchor.
+    await expect
+      .poll(async () =>
+        Math.abs((await viewport.evaluate((el) => el.scrollTop)) - target),
+      )
+      .toBeLessThan(8);
+    await hoverTallRow(page);
     await expect
       .poll(async () =>
         start - (await viewport.evaluate((el) => el.scrollTop)),
