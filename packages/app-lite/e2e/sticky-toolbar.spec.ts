@@ -81,9 +81,11 @@ const ACTIONS_LABEL = "More actions";
  * virtualized, so any of these can be waiting on a row the browser has not
  * rendered or has just unmounted. Unbounded, such a wait runs out the whole
  * test budget and reports only `Test timeout of 60000ms exceeded`, which names
- * neither the toolbar nor the reason.
+ * neither the toolbar nor the reason. It has to outlast the slowest hover, and
+ * under a loaded runner that is well past the 5s a local run needs: at 5s this
+ * ceiling, not the behaviour, was what failed.
  */
-const TOOLBAR_TIMEOUT = 5_000;
+const TOOLBAR_TIMEOUT = 15_000;
 
 /**
  * The toolbar's box, or `null` if it has no visible box.

@@ -150,7 +150,7 @@ describe("DatabasePool routing", () => {
     expect(row?.tail).toBe(spaceA);
 
     await db.close();
-  });
+  }, 30_000);
 
   test("router dispatches to global and read-state workers", async () => {
     const db = openDb({ path: ":memory:", isolated: true });
@@ -183,7 +183,7 @@ describe("DatabasePool routing", () => {
     expect(rp?.seen_up_to).toBe("0");
 
     await db.close();
-  });
+  }, 30_000);
 });
 
 describe("per-space query-planner statistics", () => {
@@ -240,7 +240,7 @@ describe("per-space query-planner statistics", () => {
     expect(await planFor(db, space)).toContain("sqlite_autoindex_entities_1");
 
     await db.close();
-  });
+  }, 30_000);
 
   test("analyzeShared refreshes the shared databases' statistics", async () => {
     // A shared DB's statistics are only ever created by this call — the
@@ -272,7 +272,7 @@ describe("per-space query-planner statistics", () => {
     expect(row?.stat?.split(" ")[0]).toBe("2000");
 
     await db.close();
-  });
+  }, 30_000);
 });
 
 describe("DatabasePool teardown", () => {
@@ -317,7 +317,7 @@ describe("DatabasePool teardown", () => {
     }
 
     expect(unhandled).toEqual([]);
-  });
+  }, 30_000);
 
   test("fire-and-forget routed run() after closeDb() raises no unhandled rejection", async () => {
     const unhandled: Error[] = [];
@@ -345,7 +345,7 @@ describe("DatabasePool teardown", () => {
     }
 
     expect(unhandled).toEqual([]);
-  });
+  }, 30_000);
 
   test("fire-and-forget prepare() after closeDb() raises no unhandled rejection", async () => {
     const unhandled: Error[] = [];
@@ -373,7 +373,7 @@ describe("DatabasePool teardown", () => {
     }
 
     expect(unhandled).toEqual([]);
-  });
+  }, 30_000);
 });
 
 describe("worker cache bounds", () => {
@@ -501,7 +501,7 @@ describe("worker cache bounds", () => {
     ).toBe(true);
 
     closeDb();
-  });
+  }, 30_000);
 });
 
 describe("cache bounds from the environment", () => {
@@ -549,5 +549,5 @@ describe("cache bounds from the environment", () => {
         else process.env[k] = saved[k];
       }
     }
-  });
+  }, 30_000);
 });

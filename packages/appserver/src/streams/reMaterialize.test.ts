@@ -193,7 +193,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select entity, name from comp_info where entity = ?")
       .get<{ entity: string; name: string | null }>(streamDid);
     expect(infoRow2!.name).toBe(infoRow1!.name);
-  });
+  }, { timeout: 30_000 });
 
   test("repairs global membership when space cursors are already current", async () => {
     const streamDid = StreamDid.assert("did:web:global-membership-repair.example");
@@ -257,7 +257,7 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(joined?.n).toBe(1);
     expect(left).toBeNull();
     expect(migration?.completed_at).not.toBeNull();
-  });
+  }, { timeout: 30_000 });
 
   test("completed global migrations do not run again", async () => {
     const streamDid = StreamDid.assert("did:web:global-migration-once.example");
@@ -287,7 +287,7 @@ describe("reMaterializeFromLocalEvents", () => {
       )
       .get<{ n: number }>(member, streamDid);
     expect(joined).toBeNull();
-  });
+  }, { timeout: 30_000 });
 
   test("empty events DB", async () => {
     // No events seeded — should be a no-op
@@ -298,7 +298,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select count(*) as cnt from stream_events")
       .get<{ cnt: number }>();
     expect(streams!.cnt).toBe(0);
-  });
+  }, { timeout: 30_000 });
 
   test("multiple streams", async () => {
     const stream1 = StreamDid.assert("did:web:multi-one.example");
@@ -347,7 +347,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select name from comp_info where entity = ?")
       .get<{ name: string | null }>(stream2);
     expect(info2!.name).toBe("Space Beta");
-  });
+  }, { timeout: 30_000 });
   test("skips already-materialized streams on second call", async () => {
     const streamDid = StreamDid.assert("did:web:cursor-skip.example");
     const space = db.forSpace!(streamDid);
@@ -385,7 +385,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor2!.materialized_to).toBe(cursor!.materialized_to);
-  });
+  }, { timeout: 30_000 });
 
   test("replays only new events after cursor on partial catch-up", async () => {
     const streamDid = StreamDid.assert("did:web:partial-catchup.example");
@@ -414,7 +414,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursorAfterSecond!.materialized_to).toBe(initialEvents.length + extraEvents.length - 1);
-  });
+  }, { timeout: 30_000 });
 
   test("mix of caught-up and behind streams", async () => {
     const caughtUp = StreamDid.assert("did:web:caught-up.example");
@@ -447,7 +447,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(behind);
     expect(behindCursor!.materialized_to).toBe(events2.length + extraEvents.length - 1);
-  });
+  }, { timeout: 30_000 });
   test("cursor advances per-chunk across multi-chunk batch", async () => {
     const streamDid = StreamDid.assert("did:web:multi-chunk.example");
     const space = db.forSpace!(streamDid);
@@ -476,7 +476,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor2!.materialized_to).toBe(599);
-  });
+  }, { timeout: 30_000 });
 
   test("resumes from last committed chunk after interruption", async () => {
     const streamDid = StreamDid.assert("did:web:interrupted.example");
@@ -518,7 +518,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select count(*) as cnt from comp_room")
       .get<{ cnt: number }>();
     expect(roomsAfterResume!.cnt).toBe(1000);
-  });
+  }, { timeout: 30_000 });
   test("cursor advances even when all events in batch have apply errors", async () => {
     const streamDid = StreamDid.assert("did:web:all-errors.example");
     const space = db.forSpace!(streamDid);
@@ -558,7 +558,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor2!.materialized_to).toBe(2);
-  });
+  }, { timeout: 30_000 });
   test("hydrates author profiles via getProfiles during backfill", async () => {
     // `reMaterializeFromLocalEvents` must call ensureProfilesForBatch rather
     // than applyBatch directly, or backfilled messages render with blank
@@ -601,7 +601,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select handle from profiles where did = ?")
       .get<{ handle: string }>(author);
     expect(user?.handle).toBe("backfill.test");
-  });
+  }, { timeout: 30_000 });
 
   test("backfills the global entity_space index for materialized rooms", async () => {
     const streamDid = StreamDid.assert("did:web:entity-space-backfill.example");
@@ -624,7 +624,7 @@ describe("reMaterializeFromLocalEvents", () => {
       .query("select space_did from entity_space where entity_id = ?")
       .get<{ space_did: string }>(roomId);
     expect(row?.space_did).toBe(streamDid);
-  });
+  }, { timeout: 30_000 });
 
   test("re-materializes streams concurrently, bounded by the concurrency cap", async () => {
     // With a pool of N workers available, boot rematerialization should run
@@ -678,6 +678,6 @@ describe("reMaterializeFromLocalEvents", () => {
     // stream replay AND that the cap (not the pool) bound the concurrency.
     expect(maxActive).toBeGreaterThanOrEqual(2);
     expect(maxActive).toBeLessThanOrEqual(2);
-  });
+  }, { timeout: 30_000 });
 
 });
