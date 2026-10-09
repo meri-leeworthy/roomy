@@ -44,7 +44,8 @@ Three sources are collated here:
    first, in two self-contained checkpoints: standalone tiles whose assets are
    entirely in the manifest and which need no host data, then tiles that accept
    only data attached to the message. §11.1 is that plan; it sits ahead of
-   feature 1 and does not depend on it.
+   feature 1 and does not depend on it. The message-attached data is carried as
+   a new `Attachment` variant, not as an extension key (§5.3).
 
 The old document's headline conclusion survives: Web Tiles are a good
 conceptual fit for Roomy, and the hard parts are infrastructural and
@@ -91,11 +92,11 @@ feature 1 landed first. Other context types are a stretch goal.
 **Sequencing.** Before either feature, two smaller milestones prove the render
 pipeline on their own (§11.1): **A**, a standalone tile whose assets are all in
 its manifest and which needs no host data, and **B**, a tile that receives
-arbitrary JSON attached to the message under the tile's AT-URI as key. Both are
-self-contained checkpoints — the first isolates the loading domain and the
-sandbox, the second isolates the message-payload path — and both are `renderContent()`
-on an AT-URI Roomy already has, so neither depends on feature 1's resolution
-work.
+arbitrary JSON attached to the message as a new `Attachment` variant carrying the
+tile's AT-URI. Both are self-contained checkpoints — the first isolates the
+loading domain and the sandbox, the second isolates the message-payload path —
+and both render a tile from an AT-URI that is already known, so neither depends
+on feature 1's link-to-tile resolution work.
 
 **Deliverables.** A working Bluesky-post tile in Roomy; a first version of the
 room-context tile; a short write-up of the experience with the spec and the
@@ -562,7 +563,8 @@ entries must use `$type: "blob"` or the PDS will garbage-collect the resources.
 
 ### 5.3 Where the result lands
 
-Three candidate shapes, in increasing order of blast radius:
+The question is how a tile reaches a message. Three candidate shapes, in
+increasing order of blast radius:
 
 - **(a) Extend the existing embed projection.** The AT-URI resolution becomes a
   second enrichment source feeding `comp_embed_link_data`, and
@@ -570,28 +572,39 @@ Three candidate shapes, in increasing order of blast radius:
   renders a `TileCard` when those fields are present. Keeps the current
   rendering, the `#messageDiff` delivery, the retry/backoff machinery and the
   live-update path for free. Requires an SDK DTO change and a projection change.
-- **(b) A new message field** (`Message.tiles`, beside `linkEmbeds`), with its
-  own projection and its own card component. Cleaner separation, but duplicates
-  the delivery machinery the embed pipeline already solved.
+- **(b) A tile attachment** — a new variant in the `Attachment` union carrying
+  the tile's AT-URI and a payload. This is the composed-with-the-message shape,
+  it survives edits, and it rides the read path messages already have. It is
+  what milestone B builds (§11.1), and it is the shape that generalises: the
+  same attachment carries a Bluesky renderer's tile, a Mermaid renderer's
+  source, or a poll's options.
 - **(c) A richtext block** (`space.roomy.richtext.blocks#tile`), so a tile is
   authored into the message body. This is the "tile block" idea from the design
-  thread — drop an AT-URI into the editor and it renders — and it is the most
-  durable shape for *authored* embeds. It requires an explicit arm in
-  `BlocksRenderer` and a new block type in the SDK's open union.
+  thread — drop an AT-URI into the editor and it renders. It requires an
+  explicit arm in `BlocksRenderer` and a new block type in the SDK's open union.
 
-These are not exclusive: (c) is how a user *composes* a tile into a message,
-(a) or (b) is how a link *becomes* one. The recommendation is to start with
-**(a)** because the pipeline it extends already exists end to end, and to
-revisit (c) when the composer side is addressed.
+These are not exclusive. The thread's own conclusion is worth recording: it
+distinguishes an **attachment** from a **block**, and lands on attachment as the
+better home for a tile produced by interacting with an input tile in the
+composer ("you drop an 'input tile', and by interacting with it you produce
+metadata attached to the message, which a renderer tile then renders").
+`Attachment` is also the more natural carrier for *data*: a block is part of the
+message body and is edited as text, whereas an attachment is a structured
+sidecar with its own materialised row, its own DTO field and its own renderer —
+which is what a tile with a payload needs.
 
-Worth recording: the thread distinguishes an **attachment** from a **block**,
-and concludes attachment is the better home for a tile that is produced by
-interacting with an input tile in the composer ("you drop an 'input tile', and
-by interacting with it you produce metadata attached to the message, which a
-renderer tile then renders"). The existing `Attachments` extension union
-(`packages/sdk/src/schema/extensions/message.ts:105-119`) is the attachment
-home, and adding a `TileAttachment` there is a small, precedent-backed change —
-extensions exist only as ArkType schemas, with no lexicon JSON to keep in sync.
+So the division of labour is: **(b) is how a tile is attached to a message**,
+**(a) is how a resolvable link is turned into a card** without the author
+attaching anything, and **(c) remains open** for composing a tile inline as
+message content. Feature 1's first cut is (b) plus (a); (c) is not needed for
+either funded feature.
+
+Two facts about the attachment route that a reader should not have to rediscover,
+both verified against the built SDK and detailed in §11.1: the `Attachment`
+union is **closed**, so an unknown `$type` is rejected at `parseEvent` — a tile
+attachment is a real schema change, not a passthrough; and `updateRoom`'s sibling
+gap does not apply here, because the message edit path *does* carry attachments
+but must be given an explicit branch for the new variant.
 
 ### 5.4 The content-type → tile mapping
 
@@ -1035,8 +1048,8 @@ Two classes of work, sequenced so the self-contained checkpoints land first.
 
 These are small, standalone checkpoints that prove the render pipeline before any
 of the resolution machinery in §5 exists. Both render a tile from an AT-URI that
-Roomy already has — a hand-placed one for A, the key of a message extension for B.
-Neither needs the *link*-to-tile resolution of feature 1, the content-type
+Roomy already has — a hand-placed one for A, the tile attachment's own field for
+B. Neither needs the *link*-to-tile resolution of feature 1, the content-type
 mapping, or the embed projection.
 
 **Milestone A — standalone tiles.** A tile whose assets are all in its manifest
@@ -1060,79 +1073,141 @@ and whether the sandbox behaves as the spec claims. It is also the first test of
 the upstream concern in §3.2 — if iframe/worker wiring misbehaves, that is
 evidence for `darobin/dasl.ing#98`, not a Roomy bug.
 
-**Milestone B — message-attached tile data.** A tile receives arbitrary JSON
-attached to the message, keyed by the tile's AT-URI. The motivating case is a
-Mermaid renderer: the attachment carries the diagram source, the tile renders
-it.
+**Milestone B — the tile attachment.** A tile receives arbitrary JSON attached
+to the message alongside the tile's AT-URI. The motivating case is a Mermaid
+renderer: the attachment carries the tile's AT-URI and the diagram source, and
+the tile renders it.
 
-The write side is what makes this a self-contained checkpoint. The primary
-writer is an **agent**, not Roomy's UI: an agent posts a message with a
-`space.roomy.message.createMessage.v0` event whose `extensions` map carries the
-tile's AT-URI as the key and the arbitrary JSON as the value. No composer work,
-no attachment UI, no new SDK operation. `createMessage` already accepts an
-arbitrary `extensions` record (`packages/sdk/src/operations/message.ts:35`), so an
-agent-side writer is a few lines against the existing operation.
+The carrier is a new variant in the existing `Attachment` union —
+`space.roomy.attachment.tile.v0`, carrying the tile's AT-URI and a payload —
+inside the existing `space.roomy.extension.attachments.v0` extension. This is
+the "Roomy-native" home for it, and it is the shape that survives edits, is
+discoverable in the union, and rides the read path messages already have. The
+cost is that it is a **real schema change**, in a fixed set of places.
 
-**What the schema already permits — verified, not assumed.** `parseEvent`
-accepts an `at://did/ing.dasl.masl/<tid>`-keyed extension carrying arbitrary JSON,
-and preserves it verbatim. Run against the built SDK:
+**The union is closed, so this is not optional — verified, not assumed.** An
+attachment whose `$type` is unknown is *rejected* outright. Against the built
+SDK:
 
 ```
-"at:// key (milestone B)": { "at://did:plc:abc/ing.dasl.masl/3abc": { mermaid: "graph TD; A-->B" } }
+"UNKNOWN tile att, no schema change"
+  => FAIL: extensions["space.roomy.extension.attachments.v0"].attachments[0].$type
+          must be "space.roomy.attachment.comment.v0", "space.roomy.attachment.file.v0", …
+```
+
+So a tile attachment cannot be smuggled through as an unrecognised attachment;
+the variant has to be added. (The inverse of this is what made the earlier
+`at://`-keyed design a zero-schema-change option. Attachments trade that for a
+shape the read path already understands.)
+
+**The touch points, all five of them.** Skipping any one is a silent failure at a
+different layer:
+
+| # | Where | What |
+|---|---|---|
+| 1 | `extensions/message.ts:105-113` | Add `TileAttachment` to the `Attachment` union |
+| 2 | `events/message.ts:76-77` (create) | A branch writing the attachment to storage |
+| 3 | `events/message.ts:305-386` (edit) | The same branch, or edits drop the tile |
+| 4 | `queries/selectMessages.ts:333-374` + DTO | The UNION branch, and the field the client reads |
+| 5 | `app-lite` / `design` | The component that loads and renders the tile |
+
+`createMessage`'s `attachments` option (`operations/message.ts:35`, `:78-83`) is
+already generic over the union, so the SDK operation needs no change — an agent
+passing a tile attachment writes it with no new operation and no composer work.
+
+**The edit path is the trap, and it has a precedent for the bug.** The edit
+materialiser iterates attachments and, for an unrecognised `$type`, falls
+through silently — so a tile attachment would vanish the first time the message
+was edited. That is not hypothetical: `space.roomy.attachment.forward.v0` is
+handled in the create path (`events/message.ts:161`) and has **no branch in the
+edit path** (`events/message.ts:305-386`), so a forward's edge is not rewritten
+on edit. Milestone B must not repeat that. There is a second,
+narrower trap: an edit carrying *only* link attachments takes a non-destructive
+"preview toggle" fast path (`events/message.ts:236-262`), so a tile attachment
+must not be swept into a destructive full-replace by that branch.
+
+**Storage and the read path — the reason to prefer this over the key.** The
+materialised message tables are per-kind components behind `entities`
+(`comp_embed_image`, `comp_embed_video`, `comp_embed_file`, `comp_embed_link` —
+`db/schema-space.sql:199-242`), and the read path is that set UNIONed into a
+flat media list (`queries/selectMessages.ts:333-374`), surfaced as
+`Message.media: Media[]` (`queries/_message.ts:21-33`, `:126`) and rendered by
+`MediaEmbed.svelte`. A `comp_embed_tile` row on that precedent gets the tile to
+the client through `getMessages`, `getThreads`, the activity feed and search with
+**no new endpoint, no admin-gated query, and no duplication of the projection**.
+
+The DTO is the one place to be careful. `Media` is flat and renderer-agnostic
+(one URL, an optional mime type, dimensions) and carries no `$type`, so the
+client cannot currently tell a tile row from an image row. Two options:
+give the tile its own DTO field (`Message.tiles`, which needs a new component
+anyway), or generalise the media union. The narrower first option is the
+recommendation — `linkEmbeds` is already a separate field for exactly this
+reason, and a tile is not a medium.
+
+**Payload size.** The tile payload rides inside the event, and there is no
+application-level body-size cap on the path (`sendEvents`' input schema caps the
+batch at 50 events, `schemas/procedures/sendEvents.ts:14-17`; the router reads the
+JSON body with no limit, `xrpc/router.ts:236-238`). Small payloads — Mermaid
+source, a game position, a poll's options — are comfortably fine. Large ones
+(diagrams as image data, datasets) are not: the event log is the source of truth
+and is replicated in full, so a megabyte per message is a megabyte in every
+backup. The guidance worth writing down now: **the tile payload is small
+structured data, and any large asset belongs in a blob the tile fetches from its
+manifest** — which the tile can do without a host data channel at all. Worth an
+explicit size bound in the schema's `.describe()` rather than a discovery at
+scale.
+
+**What this does not change.** The tile still receives its payload over
+`tp-data` (§7.1): the attachment is the *transport* into Roomy's own data model,
+and the mothership is what hands it to the sandboxed tile. Nothing here requires
+`data.js` to be implemented differently, and nothing here changes milestone A.
+
+### 11.1a Not chosen: the `at://`-keyed extension map
+
+Recorded because it was the first candidate and because the verification is worth
+keeping.
+
+The alternative was an extension keyed directly by the tile's AT-URI, with
+arbitrary JSON as the value:
+
+```json
+{ "extensions": { "at://did:plc:abc/ing.dasl.masl/3abc": { "mermaid": "graph TD; A-->B" } } }
+```
+
+**This passes `parseEvent` and is preserved verbatim** — ArkType's
+`onUndeclaredKey: "ignore"` default over `MessageExtensionMap`'s derived keys
+accepts and retains unknown keys:
+
+```
+"at:// key": { "at://did:plc:abc/ing.dasl.masl/3abc": { "mermaid": "graph TD; A-->B" } }
   => PASS, preserved: {"at://did:plc:abc/ing.dasl.masl/3abc":{"mermaid":"graph TD; A-->B"}}
 ```
 
-The mechanism is ArkType's `onUndeclaredKey: "ignore"` default over
-`MessageExtensionMap`'s derived keys: unknown keys are accepted and retained.
-The event still has to clear the appserver's write gate, which is independent of
-the key's shape (`auth/writeAuth.ts:856-863` gates on the event `$type` alone) —
-and `createMessage` is in `ALLOWED_TYPES`.
+It is genuinely zero-schema-change on the write side: `writeAuth.ts:856-863`
+gates on the event `$type` alone, and `createMessage` is in `ALLOWED_TYPES`.
 
-**There is a real caveat, and the checkpoint is how to find out how big it is.**
-An `at://` key does not survive the *read* path. The DTO is
-`Message.linkEmbeds` and friends (`packages/sdk/src/schemas/queries/_message.ts:92-130`);
-there is no field for extensions, and the message projection reads none
-(`comp_content` holds mime type, bytes, last-edit and timestamp —
-`db/schema-space.sql:153-162`). The raw event *is* durable in `stream_events`
-(`db/eventsSchema.sql`), so nothing is lost — but rendering needs a read-path
-change or something narrower.
+It was set aside for three reasons, all of them read-path:
 
-The recommendation is to render the message from the event the client already
-has. The appserver owns the **persistent** view (`getMessages`, `getThreads`,
-search, the activity feed, and the cold-load path a `#messageDiff`-only design
-would break); the client already reads the raw event stream for a live message
-via `space.roomy.sync.getEvents`, which returns decoded events by stream cursor
-(`packages/appserver/src/streams/StreamManager.ts:479-489`, exposed at
-`packages/sdk/src/schemas/queries/getEvents.ts:10-22`). Fetching the one event
-for the one message being rendered gives milestone B the extension map with **no
-appserver change and no projection duplication**.
+1. **Nothing reads it.** The DTO carries no extensions field
+   (`schemas/queries/_message.ts:92-130`) and the projection reads none —
+   `comp_content` holds mime type, bytes, last-edit and timestamp
+   (`db/schema-space.sql:153-162`). The raw event is durable in `stream_events`
+   (`db/eventsSchema.sql`), so nothing is lost, but rendering would need a new
+   read path; `space.roomy.sync.getEvents` can supply the event
+   (`StreamManager.ts:479-489`) but is **admin-only** today
+   (`handlers/space.roomy.sync.getEvents.ts:4`, `requireAdmin` at `:32`).
+2. **It loses per-kind semantics.** Every existing attachment type has a row, a
+   UNION branch, a DTO entry and a renderer. An `at://`-keyed blob has none, so
+   the read path would have to be built anyway — at which point the union variant
+   is the same amount of work in a shape the codebase already recognises.
+3. **It is undiscoverable.** `unionToMap` (`primitives.ts:111`) enumerates the
+   extension map's legal keys; an `at://` key is one only by accident of
+   ArkType's default, and `MessageExtensionUpdateMap`/`DeleteMap` give it no
+   place in the edit or delete protocol.
 
-The honest caveat: `getEvents` is currently **admin-only**
-(`handlers/space.roomy.sync.getEvents.ts:4`, `requireAdmin` at `:32`, gated on the
-`APPSERVER_ADMIN_DIDS` allowlist — the `discord-bridge`'s poll path). Rendering
-it for ordinary users needs either a small purpose-built query ("the tile
-extensions of message X", room-read gated) or admin gating in dev. The first is
-the right endpoint and is a few lines: a query over the existing read path, not
-a new projection.
-
-If it turns out the extension must also be queryable server-side — for search,
-for a link preview, for anything that must work without fetching the event —
-that becomes its own change: a column on `comp_content`, or a
-`comp_message_extension` table on the `comp_discord_origin` precedent
-(`db/schema-space.sql:137-143`), with the materialiser in
-`packages/sdk/src/schema/events/message.ts` (SDK-owned) and the usual
-`SPACE_MIGRATIONS` entry.
-
-**Two alternatives, recorded rather than recommended.** A typed extension
-variant — `space.roomy.extension.tile.v0` carrying `{ tileUri, payload }` — also
-passes `parseEvent` (verified) and is more discoverable, because `unionToMap`
-(`primitives.ts:111`) enumerates it in `MessageExtensionMap` and it gets an
-explicit materialiser. It is not what was asked for: the request is an
-`at://`-keyed map, which needs no schema change at all. A third shape — adding a
-`tile` variant to the existing `Attachments` union
-(`extensions/message.ts:105-119`) — is the most "Roomy-native" of the three and
-fits the thread's conclusion that attachment is the better home for tile data
-than a block, but it is a schema change and therefore not a checkpoint.
+The verification stands, and if a future need is genuinely "arbitrary keyed
+metadata that must not be modelled", this is the escape hatch and it already
+works. It is not the right shape for a *tile*, which is a modelled thing.
 
 ### 11.2 The resolution path (feature 1, then feature 2)
 
@@ -1207,8 +1282,10 @@ Carried forward into the write-up and the issue list:
 1. **Content-type → tile mapping** (§5.4): publisher allowlist, pinned AT-URI,
    or a Roomy default set? A default set is what makes the feature feel like a
    product, but it presumes a curation process.
-2. **Embed shape** (§5.3): extend `LinkEmbedData`, add `Message.tiles`, or add a
-   richtext block? The recommendation is to start with the first.
+2. **Embed shape** (§5.3): the tile attachment is settled as the carrier for an
+   attached tile, but *how a resolvable link becomes a card* is not — extend
+   `LinkEmbedData` (the recommendation, for the first cut), add a separate
+   `Message.tiles`, or auto-attach a tile attachment on send?
 3. **Resolution site** (§5.5): appserver-side manifest metadata + client-side
    mothership is the recommendation; the alternative (all client-side) is less
    code and leaks the user's link-following to the PDS from the browser.
@@ -1222,10 +1299,11 @@ Carried forward into the write-up and the issue list:
 7. **Room-read capabilities** (§7.2): none in the first cut, or a small
    read-only verb set? The thread's conclusion that the compute belongs mostly
    on the client argues for handing the tile data the client already has.
-8. **The message-attached extension read path** (§11.1, milestone B): fetch the
-   one event via a purpose-built room-read-gated query, or add a materialised
-   column/table so the extension is queryable server-side? The former is a
-   checkpoint; the latter is what search and previews will eventually need.
+8. **The tile attachment's DTO field** (§11.1, milestone B): a separate
+   `Message.tiles` alongside `linkEmbeds`, or a generalised media union that
+   carries the attachment `$type`? The former is narrower and matches how
+   `linkEmbeds` was separated; the latter subsumes four existing renderers and
+   is the better long-run model.
 9. **The first public-write capability** (§9.3): is the calendar RSVP the right
    forcing function, and what does the manual-review process actually look like
    on the Roomy side?
@@ -1236,6 +1314,11 @@ Carried forward into the write-up and the issue list:
     `user-blocks` — `packages/appserver/src/featureFlags.ts:20-60`, defaulting
     off and served by `space.roomy.getFlags`). Given the sandbox is untested in
     production, a flag is the consistent choice and should be assumed.
+12. **Whether the tile payload needs a declared size bound** (§11.1). The event
+    log is the source of truth and is replicated in full, so payload size is a
+    permanent cost; the recommendation is a bound stated in the schema's
+    `.describe()` plus a documented rule that large assets belong in a blob the
+    tile fetches from its manifest.
 
 ---
 
@@ -1264,9 +1347,14 @@ Carried forward into the write-up and the issue list:
 - Slots: `packages/app-lite/src/lib/components/layout/{navbar.svelte.ts,sidebar.svelte.ts,MainLayout.svelte}`;
   `packages/app-lite/src/routes/[space]/[room]/+page.svelte`
 - SDK schemas: `packages/sdk/src/schema/richtext/index.ts`;
-  `packages/sdk/src/schema/extensions/message.ts`; `packages/sdk/src/schema/events/room.ts`;
+  `packages/sdk/src/schema/extensions/message.ts` (the `Attachment` union and
+  the `Attachments` extension); `packages/sdk/src/schema/events/message.ts`
+  (the create and edit materialisers that branch per attachment `$type`);
+  `packages/sdk/src/operations/message.ts` (the `createMessage` constructor and
+  its `attachments` option); `packages/sdk/src/schema/events/room.ts`;
   `packages/sdk/src/schema/events/registry.ts`; `packages/sdk/src/schema/envelope.ts`;
-  `packages/sdk/src/schemas/queries/_message.ts`
+  `packages/sdk/src/schemas/queries/_message.ts` (the `Message`, `Media` and
+  `LinkEmbed` DTOs); `packages/sdk/src/schemas/procedures/sendEvents.ts`
 - Appserver: `packages/appserver/src/embed/{sweeper,enricher,metadata,types}.ts`;
   `packages/appserver/src/queries/selectMessages.ts`;
   `packages/appserver/src/handlers/space.roomy.embed.getLinkMetadata.ts`;
