@@ -20,7 +20,7 @@
  * what distinguishes the two, and is why this spec fails on the pre-fix build.
  */
 
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { expect, test, waitForAuthenticated } from "./spec-helpers.ts";
 import { newUlid, serializeBlocks } from "@roomy-space/sdk";
 import {
@@ -203,7 +203,38 @@ async function scrollIntoBodyAndHover(page: Page): Promise<void> {
 
   const box = await viewport.boundingBox({ timeout: TOOLBAR_TIMEOUT });
   if (!box) throw new Error("chat viewport has no box");
+  await hoverChatArea(page, box);
+}
+
+/** Park the pointer in the middle of the chat area, so a row under it is hovered. */
+async function hoverChatArea(
+  page: Page,
+  box: { x: number; y: number; width: number; height: number },
+): Promise<void> {
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+}
+
+/**
+ * A scroll the pointer's own position survives.
+ *
+ * A stationary pointer does not re-synthesise `mouseenter` for a row that
+ * scrolls under it, so after a plain `scrollTop` assignment the row beneath the
+ * cursor is not hovered and the toolbar is not mounted — the failure reads as
+ * "the toolbar is missing", which is indistinguishable from the bug this spec
+ * exists to catch. Moving to the destination before the scroll leaves the
+ * pointer mid-viewport, and the scroll then carries the target row under it.
+ */
+async function scrollByMovingPointer(
+  page: Page,
+  viewport: Locator,
+  top: number,
+): Promise<void> {
+  const box = await viewport.boundingBox({ timeout: TOOLBAR_TIMEOUT });
+  if (!box) throw new Error("chat viewport has no box");
+  await hoverChatArea(page, box);
+  await viewport.evaluate((el, next) => {
+    el.scrollTop = next;
+  }, top);
 }
 
 /**
@@ -267,11 +298,11 @@ test.describe("the message toolbar while reading a tall message", () => {
 
     // A different depth inside the same body. The offset must not drift with
     // the content the toolbar is pinned over — that is the difference between
-    // a sticky toolbar and one that merely happens to be on screen.
+    // a sticky toolbar and one that merely happens to be on screen. The scroll
+    // is made with the pointer where it will still be afterwards, so the row
+    // it lands on is hovered and the toolbar is mounted.
     const start = await viewport.evaluate((el) => el.scrollTop);
-    await viewport.evaluate((el) => {
-      el.scrollTop = Math.max(0, el.scrollTop - 400);
-    });
+    await scrollByMovingPointer(page, viewport, Math.max(0, start - 400));
     await expect
       .poll(async () =>
         start - (await viewport.evaluate((el) => el.scrollTop)),
