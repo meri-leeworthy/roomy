@@ -348,13 +348,18 @@ The appserver has 39 test files (451 tests: 450 pass, 1 skip) runnable via `bun 
 
 **app-lite:**
 1. **Static** - `@sveltejs/adapter-static` (see `Dockerfile.app-lite` + `Caddyfile`)
+2. **Netlify** - `.github/workflows/netlify.yml`, dispatched by hand, deploys
+   `packages/app-lite/build` to the Netlify site with `netlify deploy --build`.
+   `scripts/netlify_build.sh` is the build entry point; `netlify.toml` carries
+   the command, the publish directory, and `[build] ignore`, which stops
+   Netlify from building pushes and pull requests on its own. Needs repo
+   secrets `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_ID`.
 
 ## Removed with app
 
 The legacy `packages/app` (SQLite WASM + worker architecture + LiveQuery) has been deleted. The following were removed alongside it and have **not** been replaced:
 
 - **Root Dockerfile** — built the legacy app via `turbo build-web-app-prod`; use `Dockerfile.app-lite` instead.
-- **`scripts/netlify_build.sh`** — Netlify deploy script for the legacy app.
 - **`scripts/setup-tauri.sh`** — Tauri setup for the legacy app's desktop builds.
 - **`tsconfig.tests.json`** — root test tsconfig targeting the app's `tests/` and `scripts/`.
 - **`.github/workflows/playwright.yml.skip`** — Playwright E2E for the legacy app (was already `.skip`).

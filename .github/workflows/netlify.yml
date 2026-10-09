@@ -1,0 +1,130 @@
+# Deploy app-lite to Netlify, by hand.
+#
+# This site used to build itself: Netlify's git integration built every push,
+# every pull request (a deploy preview), and every agent run, which spent the
+# free build minutes faster than the site was actually deployed. Builds now
+# happen only when someone dispatches this workflow. netlify.toml `[build]
+# ignore = "true"` stops the automatic ones; that setting is a git-integration
+# hook and does not apply to a locally run build, so this dispatch still
+# deploys.
+#
+# The build path is `netlify deploy --build`, which creates a deploy first and
+# then runs the `[build] command` from netlify.toml — scripts/netlify_build.sh —
+# with that deploy's own URL in DEPLOY_URL. The URL has to be known before the
+# bundle is built: it becomes the OAuth client_id and redirect URI in the
+# deployment's own oauth-client-metadata.json, and the origin shareable links
+# root at. `netlify deploy` is what creates the deploy; `netlify build` builds
+# without one and would have no URL to bake in.
+#
+# This workflow file lives on `main`, the default branch: GitHub only lists a
+# `workflow_dispatch` workflow, and offers its Run-workflow button, when the
+# file is on the default branch. The `ref` input below selects what the run
+# actually checks out and deploys.
+#
+# Prerequisites (repo settings), both on the Netlify site being deployed to:
+#   secrets.NETLIFY_AUTH_TOKEN  — a Netlify personal access token
+#   secrets.NETLIFY_SITE_ID     — that site's Project ID (Netlify's name for
+#                                 it; the CLI calls the same value NETLIFY_SITE_ID)
+name: Netlify Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        # The dispatched ref supplies the site, not this file's branch: a PR's
+        # changes are previewed by dispatching this workflow against it.
+        description: Branch, tag, or SHA to deploy
+        required: true
+        default: next
+        type: string
+      context:
+        # Netlify's deploy context, which selects the environment variables and
+        # [context.*] overrides the build sees. `main` is the production
+        # branch, and a draft deploy is not published to the site's primary URL
+        # until it is promoted, so this is safe to leave as-is.
+        description: Deploy context ("deploy-preview" for a PR, "branch-deploy" for a branch, "production" for main)
+        required: true
+        default: deploy-preview
+        type: string
+
+# One deploy at a time. Netlify's build minutes are what this workflow exists
+# to conserve, so a second dispatch queue behind the first rather than run
+# beside it and spend them twice.
+concurrency:
+  group: netlify-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    # The app-lite vite build plus the install around it. Well under the
+    # default 360, but a hang here is a stuck deploy to cancel by hand.
+    timeout-minutes: 20
+    env:
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
+      # One WebSocket-origin override points BOTH the sync connection and the
+      # XRPC HTTP client at the appserver (config.ts derives the http(s) origin
+      # from it). The DID is the service-auth audience every XRPC call is
+      # scoped to, so the two belong to the same environment and move together.
+      VITE_APPSERVER_WS_ORIGIN: wss://api-staging.roomy.space
+      VITE_APPSERVER_DID: did:web:api-staging.roomy.space
+
+    steps:
+      # A dispatch that cannot authenticate should say so before it installs
+      # and builds. NETLIFY_SITE_ID carries the site to deploy to: without it
+      # the CLI has no linked project and, being non-interactive here, would
+      # auto-create a new one.
+      - name: Check the deploy credentials are configured
+        run: |
+          missing=""
+          [ -z "${NETLIFY_AUTH_TOKEN}" ] && missing="${missing} NETLIFY_AUTH_TOKEN"
+          [ -z "${NETLIFY_SITE_ID}" ] && missing="${missing} NETLIFY_SITE_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::missing repo secret(s):${missing}"
+            exit 1
+          fi
+
+      - name: Checkout the dispatched ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # The deploy names the commit it carries, so the log does too.
+      - name: Show the commit being deployed
+        run: git log -1 --format='%H %s'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.16.1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The build script runs under Bun, as it does for every other build in
+      # this repo.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Netlify builds for deployment, not for review: this workflow deploys
+      # what CI has already been asked to check.
+      - name: Deploy
+        run: >
+          npx --yes netlify-cli@27.12.0 deploy
+          --build
+          --context "${{ inputs.context }}"
+          --message "${{ inputs.ref }}"
