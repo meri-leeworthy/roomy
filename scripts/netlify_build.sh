@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Netlify build entry point (see netlify.toml). Runs for production, branch
-# deploys, and pull-request deploy previews; every one of them builds the
-# app-lite frontend and wires it to the staging appserver.
+# Netlify build entry point (see netlify.toml). Runs from the dispatched
+# `Netlify Deploy` workflow (.github/workflows/netlify.yml), which deploys with
+# `netlify deploy --build`; it builds the app-lite frontend and wires it to the
+# staging appserver.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -11,13 +12,21 @@ cd "$(dirname "$0")/.."
 # The OAuth client metadata is served by the deployment itself: its client_id
 # is `<this deployment>/oauth-client-metadata.json` and its redirect URI is
 # `<this deployment>/`. Both must name the origin the deploy is served from,
-# which only Netlify knows at build time — deploy previews and branch deploys
-# each get their own URL, production gets the site's primary URL.
+# which only Netlify knows once the deploy exists — so this build reads the
+# URL of the deploy it is building.
 #
-# DEPLOY_PRIME_URL is that per-deployment URL in every context; URL is the
-# same value in the contexts where DEPLOY_PRIME_URL can be absent.
-DEPLOY_HOST="${DEPLOY_PRIME_URL:-${URL:?Netlify provided neither DEPLOY_PRIME_URL nor URL}}"
+# DEPLOY_URL names that deploy: `netlify deploy --build` creates the deploy,
+# then builds with its URL in the environment. URL would be the site's primary
+# URL instead, which is a different origin for a draft deploy — an OAuth
+# client_id there would name a deployment this build is not.
+#
+# BUILD_ID is deliberately cleared. It is otherwise inherited from the CLI's
+# own environment, where it is the constant '0'; build-prod.sh falls back to
+# the checkout's commit, which names the revision this bundle actually
+# contains.
+DEPLOY_HOST="${DEPLOY_URL:?Netlify provided no DEPLOY_URL (build outside 'netlify deploy --build'?)}"
 export OAUTH_HOST="$DEPLOY_HOST"
+unset BUILD_ID
 
 # This build IS the web deployment, served from its own origin — so shareable
 # links (invites) must root here rather than at the production default, or a

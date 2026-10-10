@@ -1,14 +1,25 @@
 # Netlify build for app-lite, the SvelteKit thin client.
 #
-# Every pull request gets a deploy preview, and every branch a branch deploy.
-# Each such deployment builds against the staging appserver and points its own
-# OAuth client metadata at its own URL — see scripts/netlify_build.sh for how
-# those are derived. The Netlify site itself needs no build settings in the
-# UI: this file carries the command, the publish directory, and the redirects.
+# Builds run from one place: the `Netlify Deploy` GitHub Actions workflow
+# (.github/workflows/netlify.yml), dispatched by hand, which deploys with
+# `netlify deploy --build`. That path supplies DEPLOY_URL — the URL of the
+# deploy being built — so the bundle is built for the origin it will be served
+# from; scripts/netlify_build.sh derives the OAuth client metadata and the
+# shareable-link origin from it. Nothing else builds this site: `ignore`
+# below stops the automatic build of every push, pull request, and agent run,
+# which would otherwise rebuild the site without a deploy URL to bake in.
+#
+# The Netlify site itself needs no build settings in the UI: this file carries
+# the command, the publish directory, and the redirects.
 
 [build]
   command = "bash scripts/netlify_build.sh"
   publish = "packages/app-lite/build"
+  # `ignore` runs as a git-integration hook, before the build; exit 0 means
+  # "nothing changed, skip this deploy". It is not consulted by a locally run
+  # build, so a dispatched `netlify deploy --build` ignores it — see
+  # scripts/netlify_build.sh and the workflow for the build that does run.
+  ignore = "true"
 
 [build.environment]
   # The root package.json requires ^22.15.0; Netlify's default is older.
