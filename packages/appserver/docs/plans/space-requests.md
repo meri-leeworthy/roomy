@@ -1,7 +1,7 @@
 # Space Requests — Plan
 
-**Date:** 2026-10-05
-**Commit (baseline):** `b9a83213` (`origin/next`)
+**Date:** 2026-10-05 (anchors re-verified 2026-10-12)
+**Commit (baseline):** `c808beae` (`origin/next`)
 **Status:** Plan — no code changes yet
 **Owner:** appserver (surface), app-lite (prompt)
 **Related:** `channel-federation.md` (the request flow being refactored onto this
@@ -16,7 +16,7 @@ abstraction), `denormalised-read-projections.md` (the read-cost model the
 | Who consents? | The **space**, through a `SpaceGovernance` seam whose only implementation today is "caller holds the space's `admin` edge". |
 | Where do requests live? | **Where the fact lives.** Federation keeps the global registry (cross-space fact). The discovery-consent request is a per-space setting (per-space fact). The *read surface* unions them. |
 | New storage table? | **No.** A `space_requests` table would force the SDK materialisers to change table names — an on-protocol-visible break for every SDK consumer. See §4.5 and §9. |
-| Unified read surface? | `space.roomy.space.getMetadata`, as an admin-only `requests[]` array. **No new NSID, no new OAuth scope, no new sync topic, no new route.** |
+| Unified read surface? | `space.roomy.space.getMetadata`, as an admin-only `requests[]` array. **No new NSID, no new OAuth scope, no new sync topic, no new route.** The cost is that a currently-uncached list becomes a cached one, so its invalidation signals are part of the work (§4.2b). |
 | Passive vs active? | A property of the request **kind**, not of the row. Passive never interrupts; active prompts on space open and is dismissible. |
 | Dismissal? | Client-local, session-scoped. It hides the *prompt only*; the request stays in the inbox until answered. |
 | First dispatchable phase | **Phase 1** (§7): the provider seam + federation read-side unification, no behaviour change. |
@@ -31,9 +31,10 @@ Two things today:
    (`channel-federation.md` §0). Nothing about that shape is reused, so the
    second request type pays for all of it again.
 2. **A space's discovery consent has no asking mechanism.** A nullable
-   `suggestToOthers`-style setting (TASK-283, in flight) is `null` until an
-   admin answers. `null` must mean *unanswered*, and something must ask — once
-   per such space, without nagging, and with a way to stop asking.
+   per-space setting, `suggestToOthers`, is `null` until an admin answers. That
+   setting now exists (§5.1), and nothing yet asks: `null` must mean
+   *unanswered*, and something must ask — once per such space, without nagging,
+   and with a way to stop asking.
 
 The plan is one abstraction that both use, with the federation flow refactored
 onto it **without an on-protocol change**, and `null`-consent resolved by it.
@@ -57,9 +58,9 @@ feature, closer to the push path — §6.5); transitive re-federation
   (space_id, federating_space_did)`. It lives in the **global** DB because the
   relationship is cross-space by nature, and is routed there by statement text
   (`packages/appserver/src/materialization/statementRouting.ts:24-37`). Adding
-  it needed no global version bump, because `initializeVersionedSchema`
+  it needed no global version bump, because `initializeGlobalSchema`
   re-execs the schema file idempotently on a matching version
-  (`packages/appserver/src/db/worker.ts:174-177`; `channel-federation.md:17`).
+  (`packages/appserver/src/db/worker.ts:205-235`; `channel-federation.md:17`).
 - **Reads** — four admin-gated queries sharing one gate
   (`packages/appserver/src/handlers/federationAdmin.ts:30-53`):
   `getRequests` (`.../space.roomy.federation.getRequests.ts:35-47`),
@@ -67,10 +68,10 @@ feature, closer to the push path — §6.5); transitive re-federation
   `packages/appserver/src/appserver.ts:412-431`.
 - **Writes** — `FEDERATION_TYPES` (`packages/appserver/src/auth/writeAuth.ts:215-221`)
   dispatched at `:956-972`; `request` requires *admin of B **and** member of A*
-  (`:584-665`, with a 409 on an `active`/`rejected` pair), `respond` requires
-  an admin of A against a `pending` row (`:706-758`), `remove` accepts an admin
-  of either side (`:670-696`), `setReceiverPermission` requires an admin of B
-  (`:767-783`).
+  (`:584-661`, with a 409 on an `active`/`rejected` pair), `respond` requires
+  an admin of A against a `pending` row (`:706-756`), `remove` accepts an admin
+  of either side (`:670-695`), `setReceiverPermission` requires an admin of B
+  (`:767-814`).
 - **Client** — queries `packages/app-lite/src/lib/queries/federation.ts`,
   mutations `.../mutations/federation.ts`, settings page
   `packages/app-lite/src/routes/[space]/settings/federations/+page.svelte`
@@ -79,19 +80,19 @@ feature, closer to the push path — §6.5); transitive re-federation
 
 ### 2.2 The two surfaces a new request type must join
 
-- **`space.roomy.space.getMetadata`** (`packages/appserver/src/handlers/space.roomy.space.getMetadata.ts:91-363`)
+- **`space.roomy.space.getMetadata`** (`packages/appserver/src/handlers/space.roomy.space.getMetadata.ts:100-382`)
   returns space display fields, `isMember`, `isAdmin`, unread counts, and the
   sidebar tree. It is:
   - **cached** server-side (`CACHEABLE_NSIDS`, `packages/appserver/src/cache/index.ts:42-59`);
   - **invalidated** by every space-scoped change, including `updateSpaceInfo`
-    (`packages/appserver/src/invalidation/inferSignals.ts:821-830`);
+    (`packages/appserver/src/invalidation/inferSignals.ts:894-904`);
   - **already fetched on space entry and preloaded for every joined space at
-    login** (`packages/app-lite/src/lib/preload.ts:98-114`), with
+    login** (`packages/app-lite/src/lib/preload.ts:98-112`), with
     `staleTime: Infinity` and the WS as sole freshness authority
-    (`packages/app-lite/src/lib/client.ts:68,92`);
-  - already carrying a caller-scoped field (`isAdmin`, `:355-356`) for which
+    (`packages/app-lite/src/lib/client.ts:55,85`);
+  - already carrying a caller-scoped field (`isAdmin`, `:374-375`) for which
     the cache has per-user eviction semantics
-    (`packages/appserver/src/invalidation/types.ts:60-66`).
+    (`packages/appserver/src/invalidation/types.ts:59-64`).
 - **The invalidation namespace** — `QueryNsid` enumerates the four federation
   nsids (`packages/appserver/src/invalidation/types.ts:42-45`); sync topic
   routing maps them to the space topic (`packages/appserver/src/sync/handler.ts:68-74`).
@@ -100,25 +101,29 @@ feature, closer to the push path — §6.5); transitive re-federation
 
 "Admin of a space" is one query: an `edges` row with `label = 'admin'`
 (`packages/appserver/src/auth/access.ts:185-189`), exposed via
-`spaceAccess(...).isAdmin` (`:150-176`). It is already the sole consent gate for
+`spaceAccess(...).isAdmin` (`:150-157`, memoised body at `:159-177`). It is
+already the sole consent gate for
 federation responses. Adding an admin also inserts a `member` edge
 (`packages/sdk/src/schema/events/space.ts:336-362`).
 
 ### 2.4 The nullable-setting precedent
 
 `allow_public_join` is `null` = unset, defaulting to open:
-schema `packages/appserver/src/db/schema-space.sql:96`, read as
-`coalesce(allow_public_join, 1)` (`packages/appserver/src/auth/access.ts:201-215`),
+schema `packages/appserver/src/db/schema-space.sql:113`, read as
+`coalesce(allow_public_join, 1)` (`packages/appserver/src/auth/access.ts:201-213`),
 projected as `allowPublicJoin: spaceRow.allow_public_join !== 0`
-(`packages/appserver/src/handlers/space.roomy.space.getMetadata.ts:352`),
+(`packages/appserver/src/handlers/space.roomy.space.getMetadata.ts:364`),
 written by `space.roomy.space.updateSpaceInfo.v0`
-(`packages/sdk/src/schema/events/space.ts:137-210`, comp_space upsert at
-`:194-207`), which is admin-gated (`writeAuth.ts:168-176`, dispatched `:937-939`).
+(`packages/sdk/src/schema/events/space.ts:137-214`, comp_space upsert at
+`:198-211`), which is admin-gated (`writeAuth.ts:168-186`, dispatched `:937-939`).
 
 **A nullable setting is therefore indistinguishable from this precedent, and
 that is the point: `suggestToOthers` should behave exactly like
 `allow_public_join`, with the one addition that the request system reads the
 `null`.**
+
+That setting is no longer hypothetical: `suggestToOthers` is the second instance
+of the precedent and is already on `origin/next` (§5.1).
 
 ## 3. The abstraction
 
@@ -166,8 +171,8 @@ Why a seam and not just `access.isAdmin` inline: every rule the request system
 needs from a space — "may this person decide", "who is prompted", later "is this
 decided by a vote/role/arbiter" — flows through these two calls. Swapping the
 implementation for a role-based or quorum-based one is a change to one file.
-This is the whole of Meri's "abstracting over its governance implementation";
-the flat admin list is implementation #1, not a special case.
+This is the whole of the "abstract over the governance implementation"
+requirement; the flat admin list is implementation #1, not a special case.
 
 ### 3.3 State machine
 
@@ -194,10 +199,10 @@ Two invariants, both already true for federation and both worth preserving:
 
 - **Only `pending` is decidable.** `respond`'s materialiser guards on
   `status = 'pending'` (`federation.ts:75-84`) and `writeAuth` mirrors it
-  (`writeAuth.ts:706-758`).
+  (`writeAuth.ts:706-756`).
 - **Re-request re-opens only from `removed`**; a `pending` re-request is an
   idempotent no-op and `active`/`rejected` is a 409 (`federation.ts:40-44`,
-  `writeAuth.ts:626-658`).
+  `writeAuth.ts:634-658`).
 
 ### 3.4 Passive vs active
 
@@ -264,16 +269,19 @@ Two implementations, and only two, because there are only two storage shapes:
   provider can feed a "resolved" view without storing anything.
 
 The aggregator is a loop, a concat, and a sort. Kind-specific behaviour accrues
-*inside a provider*, which is exactly the "request types may accrue custom
-behaviour as we come to them" Meri anticipated — added by writing one file, not
-by widening the core.
+*inside a provider*: request kinds accrue their own behaviour by adding one
+file, not by widening the core.
 
 ## 4. Refactoring federation onto the abstraction
 
 ### 4.1 What does not change (the on-protocol surface)
 
-Nothing. No lexicon changes for the federation path, no new event type, no new
-NSID, no table rename, no migration:
+No new event type, no new NSID, no table rename, no migration. The one artifact
+that does move is the *generated* query lexicon: `getMetadata`'s response gains
+a field, and `src/schemas/lexicons/space.roomy.space.getMetadata.json` is
+regenerated from the TS schema in the same commit. That is a response-shape
+addition on an endpoint already requested by every client — not a new
+capability, and not something a consumer must opt into.
 
 - the five `space.roomy.federation.*` events and their materialisers stay
   byte-identical (`packages/sdk/src/schema/events/federation.ts`);
@@ -296,7 +304,7 @@ worth paying for.
 **a. The read surface.** `getMetadata` gains an admin-only `requests` array:
 `SpaceRequest[]`, assembled from the registered providers (default: pending
 only). Non-admins get no key (or an empty array) — matching how `isAdmin`
-already shapes that response (`getMetadata.ts:355-356`).
+already shapes that response (`getMetadata.ts:374-375`).
 
 *Cost.* The federation provider adds one global-DB query to an admin's
 `getMetadata` call — the same query `getRequests` runs today
@@ -313,7 +321,7 @@ moves behind `detail` only (see §7 Phase 1 acceptance).
 
 **b. Invalidation.** `federation.request.v0` currently invalidates
 `getRequests` and `getOutgoing` only
-(`packages/appserver/src/invalidation/inferSignals.ts:1048-1054`) — space A's
+(`packages/appserver/src/invalidation/inferSignals.ts:1144-1150`) — space A's
 cached `getMetadata` is *not* evicted. Once the request lives there, it must be:
 
 ```ts
@@ -328,8 +336,30 @@ function handleFederationRequest(event) {
 ```
 
 `respond` and `remove` already invalidate `getMetadata` for the receiving
-space B (`:1071`, `:1093`) but not for A; both gain A's `getMetadata` for the
+space B (`:1167`, `:1188`) but not for A; both gain A's `getMetadata` for the
 same reason.
+
+**This is a new exposure, not just a moved one.** `getRequests` is *not* in
+`CACHEABLE_NSIDS` (`cache/index.ts:42-59`), so the request list is uncached
+today and correct by construction. `getMetadata` is cached, with a 60 s TTL as
+the safety net. Folding the list in therefore converts a live read into a cached
+one, and the invalidation above is what keeps it honest — the cache will
+otherwise serve a stale `requests[]` for up to the TTL.
+
+**The profile-update signal is missing too.** `federationProvider`'s `detail`
+carries `requestedByName` / `requestedByHandle` and the peer space name, which
+come from the global profile store. A profile change emits only
+`getMembers` (`inferSignals.ts:1093-1097`), so an admin's cached `getMetadata`
+keeps rendering the old display name indefinitely — the TTL does not help,
+because nothing invalidates the entry. Either add A's `getMetadata` to
+`handleUpdateProfile`, or omit the resolved names from the provider `detail`
+and let the client fall back to the DID — the federation page's `spaceLabel`
+and `requesterLabel` already degrade to the raw DID
+(`federations/+page.svelte:162-171`, used at `:316`), so the fallback needs no
+new client work.
+
+Decide at implementation time; the point is that the "served from the cache the
+sidebar already populates" framing in §4.2a holds only once that is settled.
 
 **c. The client's badge** stops calling `space.roomy.federation.getRequests` and
 counts `metaQuery.data.requests` instead — one fewer query, and it now updates
@@ -341,7 +371,7 @@ cache; its `refresh()` (`:70-80`) already invalidates `getMetadata`.
 
 **e. `space.roomy.federation.getRequests`** stays registered and working, but is
 no longer called by the client. Removing the NSID from the appserver and from
-`APPSERVER_RPCS` (`packages/app-lite/src/lib/scopes.ts:84-135`, entry at `:122`)
+`APPSERVER_RPCS` (`packages/app-lite/src/lib/scopes.ts:87-138`, entry at `:125`)
 is a separate, later, two-gate change: a token leaves the *requested* set but
 stays in the metadata ceiling, and removing it from the ceiling is a deploy-time
 edit (`AGENTS.md`, "Adding an OAuth scope"). Not worth it for one unused
@@ -375,7 +405,7 @@ unified store is justified (see §9 for the trigger), the migration is:
 1. Add `space_requests` to `schema-global.sql` with
    `primary key (kind, space_id, subject)` and the §3.3 vocabulary. Additive DDL
    heals on a matching global version with no bump
-   (`worker.ts:174-177`, `channel-federation.md:17`).
+   (`worker.ts:229-235`, `channel-federation.md:17`).
 2. Add a `kind: "data"` entry to `GLOBAL_MIGRATIONS`
    (`packages/appserver/src/db/globalVersions.ts`) that backfills
    `space_requests` from `space_federations`. It runs once, at boot, and is
@@ -398,11 +428,19 @@ Phase 1 at no protocol cost, and §9 names the trigger that flips the decision.
 
 ### 5.1 The setting
 
-TASK-283 adds a nullable per-space boolean, `null` meaning *unanswered* and
-reading as "yes" — the exact shape of `allow_public_join`
-(`schema-space.sql:96`, `auth/access.ts:201-215`, `getMetadata.ts:352`). The
-request system does not care about the field's name; it cares that the state is
-**three-valued on disk and two-valued on read**:
+The setting exists. `suggestToOthers` landed on `origin/next` as a nullable
+per-space boolean, `null` meaning *unanswered* and reading as "yes" — the exact
+shape of `allow_public_join`
+(`schema-space.sql:120`, `auth/access.ts:201-213`, `getMetadata.ts:370-373`).
+Storage is `comp_space.suggest_to_others`
+(`packages/appserver/src/db/schema-space.sql:115-120`), the read projection is
+tri-state and deliberately not collapsed (`getMetadata.ts:367-373`), and the
+write path is the `updateSpaceInfo` materialiser
+(`packages/sdk/src/schema/events/space.ts:143`, column list built at
+`:164,166`, upsert at `:198-211`).
+
+The request system does not care about the field's name; it cares that the state
+is **three-valued on disk and two-valued on read**:
 
 | stored | request | read |
 |---|---|---|
@@ -410,21 +448,28 @@ request system does not care about the field's name; it cares that the state is
 | `1` | `active` | yes |
 | `0` | `rejected` | no |
 
-**Consequence for TASK-283, named here because it is a deployment cost:** a new
-*column* on `comp_space` cannot be applied idempotently — a `create table if not
-exists` does not alter an existing table, and the per-space DB has no migration
-manifest (only global and read-state do, `globalVersions.ts` /
-`readStateVersions.ts`). The column therefore requires a
-`SPACE_SCHEMA_VERSION` bump, which **wipes and re-derives every per-space DB
-from the event log** (`packages/appserver/src/db/db.ts:26-30`). Reads keep
-serving the old DB throughout via the blue-green path
-(`packages/appserver/src/db/worker.ts:352-374`), and the setting is re-derived
-from its `updateSpaceInfo` event (`sdk/src/schema/events/space.ts:194-208`), so
-this is a rebuild rather than data loss — but it is a real, fleet-wide operation
-and should be sequenced deliberately. The cheaper alternative, a per-space
-`space_settings(key, value)` table that heals without a bump, fragments the
-space's settings and is not recommended for one column. *(TASK-283's actual
-storage choice is not visible on `origin/next` — `[INFERENCE]`.)*
+**There is no schema-version cost, and an earlier draft of this section was
+wrong to claim one.** The per-space DB *does* have a migration manifest
+(`SPACE_MIGRATIONS`, `packages/appserver/src/db/spaceVersions.ts:57-80`), and a
+column added to an existing `comp_space` does not need a version bump at all:
+the worker heals it in place with an idempotent ALTER
+(`healSpaceSchema`, `packages/appserver/src/db/worker.ts:414-428`), under the
+same version, without wiping or re-deriving anything. Even a bump is not a
+rematerialisation trigger — per-space DBs upgrade **in place**; the blue-green
+rebuild is the fallback only when an upgrade cannot be applied
+(`spaceVersions.ts:3-11`; `db.ts:27-36`). The older "a bump wipes and
+re-derives every per-space DB" text this section originally cited describes
+pre-blue-green behaviour and no longer exists in `db.ts`;
+`denormalised-read-projections.md` records it as stale ("does normal operation
+avoid rematerialisation?" §3).
+
+`suggest_to_others` itself is the proof: it shipped through exactly this heal,
+and `db/blueGreen.test.ts:273-298` pins the case — a current-version DB missing
+the column is healed without a rebuild.
+
+The consequence for a *future* setting is therefore the ordinary one: add the
+column to `schema-space.sql`, add the matching `healSpaceSchema` branch, and
+leave `SPACE_SCHEMA_VERSION` alone.
 
 ### 5.2 One request per unanswered space
 
@@ -440,25 +485,34 @@ admins (§3.2), so:
 
 ### 5.3 How the admin is prompted
 
-The data is already there. At login, `preloadSpaceSidebars()`
-(`packages/app-lite/src/lib/preload.ts:98-114`) fetches `getMetadata` for every
+The data is already fetched. At login, `preloadSpaceSidebars()`
+(`packages/app-lite/src/lib/preload.ts:98-112`) fetches `getMetadata` for every
 joined space; admins are always members
 (`sdk/src/schema/events/space.ts:336-362`), so every space the caller can be
 prompted about is in the cache. **No new endpoint, no new query, no server-side
 fan-out** — the client derives the unanswered set from data it already holds.
+
+"Already fetched" is not the same as "fresh", and the difference is worth stating
+because it is the price of the no-new-endpoint choice. The preload uses
+`ensureQueryData`, which does not re-fetch an entry that is already present, and
+the space layout's query (`routes/[space]/+layout.svelte:19`) reads the same
+Tanstack cache. With `staleTime: Infinity` and the WS as sole freshness
+authority (`client.ts:55,85`), a cached `getMetadata` is refreshed only when an
+invalidate frame arrives. So the prompt's correctness rests on the same
+invalidation work as §4.2b — including the profile-update signal — and a prompt
+that has not yet appeared is a missing signal, not a missing endpoint.
 
 Rendering, following the existing precedents:
 
 - **Space-scoped prompt** — inside `packages/app-lite/src/routes/[space]/+layout.svelte`
   (which already reads `metaQuery`, `:19`), rendered only when
   `metaQuery.data.isAdmin === true` and `requests` contains a `pending`
-  `discoverability` entry. This is Meri's "prompts the admin on opening the
-  space".
+  `discoverability` entry — the prompt fires when the admin opens the space.
 - **App shell prompt** — when no space is open (the home route, `routes/+page.svelte`),
   a single prompt for the first unanswered space. The mount point and the
   dismissal model already exist: `EnableNotificationsBanner` is mounted once in
   `MainLayout.svelte:118` and gates itself on a local condition plus a
-  `localStorage` dismissal key (`EnableNotificationsBanner.svelte:7,16,22-26`).
+  `localStorage` dismissal key (`EnableNotificationsBanner.svelte:7,16,22-29`).
   The new prompt is the same component shape with a different condition.
 - **Badge** — the per-space settings badge (`SpaceSidebarButtons.svelte:121-128`)
   counts *all* pending requests, passive and active alike (§3.4).
@@ -472,19 +526,34 @@ space.roomy.space.updateSpaceInfo.v0 { suggestToOthers?: boolean | null }
 ```
 
 - Written via `sendEvents` on the space's stream, exactly like
-  `updateSpaceInfo` today (`app-lite/src/lib/mutations/space.ts:57-82`).
-- Admin-gated by `SPACE_MANAGE_TYPES` (`writeAuth.ts:168-176`, `:937-939`) —
+  `updateSpaceInfo` today (`app-lite/src/lib/mutations/space.ts:61-90`).
+- Admin-gated by `SPACE_MANAGE_TYPES` (`writeAuth.ts:168-186`, `:937-939`) —
   the governance seam and the write gate agree by construction.
-- **Non-breaking.** An optional field on an existing event is compatible in both
-  directions: arktype does not reject undeclared keys (verified against the
-  pinned `arktype@^2.1.29`: a schema for `{a}` accepts `{a, b}`), the appserver
-  is the only write path, and both ends ship together. No new event type, no new
-  consent round-trip, no new OAuth scope.
+- **Already implemented.** The field is on the event schema
+  (`packages/sdk/src/schema/events/space.ts:143`), the materialiser maps it to
+  the column (`:164,166`), the column exists and heals in place (§5.1), and the
+  read projection is tri-state (`getMetadata.ts:367-373`). Answering is a
+  matter of the prompt calling the mutation that already exists, not of adding
+  a field.
+
+  The "additive optional field" framing this section previously used concealed
+  four coordinated edits — schema, materialiser column list, `comp_space`
+  column, read projection — because `updateSpaceInfo`'s materialiser writes an
+  explicit column list rather than the whole event object. A field the
+  materialiser does not name is carried in the event log but never reaches SQL.
+  All four are done for `suggestToOthers`; the shape is worth stating for the
+  next field.
+
+  (The event payload itself is permissive: the appserver validates events with
+  the SDK's `parseEvent`, and arktype's default `onUndeclaredKey` is `"ignore"`,
+  so an unknown field round-trips through the log untouched. That is why the
+  field being absent from the materialiser is silent rather than an error —
+  and why the four edits above are the real contract.)
 
 Answering **resolves** the request, which is what clears it:
 
 - `updateSpaceInfo` already invalidates `getMetadata` and `getSpaces`
-  (`inferSignals.ts:821-830`), so the request disappears from every admin's
+  (`inferSignals.ts:894-904`), so the request disappears from every admin's
   inbox and every badge on the next signal, with no new invalidation plumbing.
 
 ### 5.5 Clearing, dismissing, and the difference
@@ -501,9 +570,9 @@ Dismissal is local because it is a UI preference, not consent: nothing else in
 the system needs to agree on it, and the `EnableNotificationsBanner` precedent
 (`:7`) is exactly this. It is scoped to the prompt so that an admin who dismisses
 never silently loses the request — it remains in the inbox, on the badge, and in
-the General settings row (§5.6) until answered. Meri's "clearable notices"
-is satisfied without a dismissal record, and the unanswered state converges
-rather than leaking.
+the General settings row (§5.6) until answered. Clearable notices are therefore
+satisfied without a dismissal record, and the unanswered state converges rather
+than leaking.
 
 ### 5.6 Where it is surfaced in settings
 
@@ -519,7 +588,7 @@ renders of it:
 
 A dedicated `settings/requests` route is **not** built for two kinds (§6.1).
 
-## 6. Meri's open questions, answered
+## 6. Open questions, answered
 
 ### 6.1 Requests list in space metadata vs a dedicated surface
 
@@ -529,20 +598,20 @@ surfaces are renders.
 Evidence for metadata:
 
 - it is already fetched on every space entry and preloaded for every joined
-  space at login (`preload.ts:98-114`) — the active prompt's data arrives for
+  space at login (`preload.ts:98-112`) — the active prompt's data arrives for
   free;
 - it is already cached and invalidated by every space-scoped signal
-  (`cache/index.ts:42-59`, `inferSignals.ts:821-830`);
+  (`cache/index.ts:42-59`, `inferSignals.ts:894-904`);
 - it already carries the caller-scoped `isAdmin` flag the request list is gated
   on, with per-user cache eviction semantics
-  (`types.ts:60-66`, `getMetadata.ts:355-356`);
+  (`types.ts:59-64`, `getMetadata.ts:374-375`);
 - **it costs no new NSID.** A dedicated `space.roomy.space.getRequests` would
   need a new lexicon, a new handler, a new `QueryNsid` member, a new
   `topicsForSignal` case, and — the expensive part — **an OAuth scope added to
   the metadata ceiling *and* registered on the HappyView API client** before any
-  client could call it (`packages/app-lite/src/lib/scopes.ts:175-178,262-266`,
+  client could call it (`packages/app-lite/src/lib/scopes.ts:178-181,265-269`,
   `AGENTS.md` "Adding an OAuth scope"). Folding into `getMetadata` is already
-  inside `APPSERVER_RPCS` (`scopes.ts:86`).
+  inside `APPSERVER_RPCS` (`scopes.ts:89`).
 
 Against metadata: it is the hot sidebar read (p95 279 ms/7 d,
 `denormalised-read-projections.md` "what is actually slow"). The mitigation is
@@ -578,7 +647,7 @@ banner, not an interstitial.
 - Discovery consent is a fact **about one space**, read only while serving that
   space, consumed by that space's admins, and set by that space's admins. It is
   the same shape as `allow_public_join`, which lives in the per-space
-  `comp_space` (`schema-space.sql:96`). Storing it globally would create a
+  `comp_space` (`schema-space.sql:113`). Storing it globally would create a
   second source of truth for a per-space fact and require cross-DB reconciliation
   on every space update.
 - The one thing a global store would buy — "enumerate every space whose consent
@@ -606,15 +675,15 @@ federation key changes meaning and no federation row is re-keyed.
 
 History handling follows the precedent exactly: one row per key; `removed`
 re-opens to `pending`; `pending` re-request is idempotent; `active`/`rejected`
-is a 409 (`writeAuth.ts:626-658`). The same rules apply to any future kind
+is a 409 (`writeAuth.ts:634-658`). The same rules apply to any future kind
 unless its provider overrides them in its own write path — which is the point of
 the seam.
 
 ### 6.5 User-scoped requests stay out
 
-Meri's framing is right: an individual user's "request" is *not* this. It has no
-space governance, no space-scoped consent gate, and its delivery wants the push
-pipeline (`notification_state`, `readStateSchema.sql:154-163`; the dispatcher in
+An individual user's "request" is *not* this. It has no space governance, no
+space-scoped consent gate, and its delivery wants the push
+pipeline (`notification_state`, `readStateSchema.sql:159-172`; the dispatcher in
 `src/push/`). Forcing it into this model would put per-user state into a
 space-governed table and give the request list a second consenting actor. Keep
 it separate; the `SpaceRequest` record is deliberately space-shaped.
@@ -636,9 +705,15 @@ Each phase is one reviewable PR.
 - `getMetadata` returns `requests: SpaceRequest[]` for admins (pending only).
 - `inferSignals`: `federation.request.v0` (and `respond`/`remove`) invalidate
   space A's `getMetadata` in addition to what they emit today
-  (`inferSignals.ts:1048-1099`).
+  (`inferSignals.ts:1144-1193`), and `handleUpdateProfile` gains A's
+  `getMetadata` so the provider's `detail` names stay correct (§4.2b).
 - SDK `getSpaceMetadata.Response` gains the optional `requests` array
-  (`packages/sdk/src/schemas/queries/getSpaceMetadata.ts:68-87`).
+  (`packages/sdk/src/schemas/queries/getSpaceMetadata.ts:68-95`), and the
+  generated lexicon is regenerated in the same commit:
+  `pnpm --filter @roomy-space/sdk generate:lexicons`. The query lexicons under
+  `src/schemas/lexicons/` are generated from the TS schema by
+  `scripts/generate-lexicons.ts`, and `--check` fails CI when they drift — so a
+  `Response` change that skips this step fails the build, not a later review.
 
 *Acceptance.* For any space with a pending federation request, an admin's
 `getMetadata.requests` contains an entry with `kind: "federation"`, the same
@@ -649,18 +724,19 @@ callers get no requests. Existing federation unit and E2E tests
 (`src/auth/writeAuth.federation.test.ts`, `src/materialization/federation.test.ts`,
 `src/e2e/federation.test.ts`) pass untouched.
 
-*Not in this phase:* any change to events, tables, materialisers, lexicons,
-scopes, or the discovery setting.
+*Not in this phase:* any change to events, tables, materialisers, NSIDs, scopes,
+or the discovery setting. (The generated query lexicon is regenerated, not
+changed by hand — see the deliverable above.)
 
 ### Phase 2 — Discovery-consent request (backend + prompt)
 
-*Deliverable.* The nullable per-space setting and its `updateSpaceInfo`
-materialiser field; `discoverabilityProvider`; the space-layout prompt and the
-app-shell prompt; the General settings row.
+*Deliverable.* `discoverabilityProvider` over the existing
+`suggest_to_others` column; the space-layout prompt and the app-shell prompt;
+the General settings row.
 
-*Depends on:* TASK-283's storage decision and its schema-version sequencing
-(§5.1). If TASK-283 ships the setting first, this phase is purely the provider
-and the UI.
+*Depends on:* nothing outstanding. The setting already exists on `origin/next`
+(§5.1), so this phase is purely the provider and the UI — the schema and
+materialiser work is done, and no `SPACE_SCHEMA_VERSION` sequencing applies.
 
 *Acceptance.* A space whose setting is `null` yields exactly one `pending`
 `discoverability` request to each of its admins; answering from the prompt sets
@@ -691,13 +767,19 @@ warranted for two kinds.
    and after (the perf harness auto-discovers endpoints,
    `packages/appserver/src/appserver.ts:551-558`).
 2. **Cache correctness.** The requests array is caller-scoped (`isAdmin`), so
-   its invalidation must carry the right scope; the existing signal for
-   `updateSpaceInfo` is already caller-scoped in effect
-   (`inferSignals.ts:821-830`). The **new** risk is `federation.request.v0`
-   being currently under-invalidating for A (`:1048-1054`) — Phase 1 fixes it,
-   and without that fix the feature is visibly wrong under the response cache.
-3. **The per-space schema bump** (§5.1). A new `comp_space` column forces a
-   fleet-wide re-materialisation. Sequence it, don't discover it in review.
+   its invalidation must carry the right scope
+   (`invalidation/types.ts:59-64`). The **new** risk is that
+   `federation.request.v0` is currently under-invalidating for A
+   (`inferSignals.ts:1144-1150`) — Phase 1 fixes it, and without that fix the
+   feature is visibly wrong under the response cache. The same class of gap
+   exists for the provider's profile-derived `detail` fields (§4.2b).
+3. **Moving an uncached read into a cached one.** `federation.getRequests` is
+   not in `CACHEABLE_NSIDS`, so the request list is uncached today and stale
+   only if the signal is missing; folded into `getMetadata` it inherits a 60 s
+   TTL and depends on the signals being right. This is the phase's real cost,
+   and it is why the invalidation work in §4.2b is a deliverable rather than a
+   follow-up. (A new per-space column, by contrast, is *not* a risk — see
+   §5.1.)
 4. **Governance seam over-abstraction.** Two methods, one implementation. If a
    second implementation does not appear, resist adding a third method.
 5. **Dismissal semantics.** If dismissals were persisted server-side they would
@@ -718,7 +800,7 @@ warranted for two kinds.
   cleaner separation at the cost of a new lexicon, handler, invalidation
   namespace entry, sync topic case, and — decisively — a new OAuth scope that
   must be registered on the HappyView client before anyone can call it
-  (`scopes.ts:175-178`; `AGENTS.md`). `getMetadata` already ships with all of
+  (`scopes.ts:178-181`; `AGENTS.md`). `getMetadata` already ships with all of
   that infrastructure and is already loaded when the prompt must fire (§6.1).
 - **Server-side dismissal records.** Rejected: durable per-user state for a UI
   preference, with no consumer that needs agreement on it. §5.5.
