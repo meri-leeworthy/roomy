@@ -49,7 +49,7 @@ ios-src = "ios"
 
 ---
 
-## 2. Fork mechanics (fork: `muni-town/tauri-plugin-mobile-push`, consumed via `git` + `rev`)
+## 2. Fork mechanics (consumed via `git` + `rev`)
 
 ### Fork target
 
@@ -58,13 +58,18 @@ a personal account, since this is a load-bearing dependency of a shipped app and
 the fork belongs where the build does. The `rev` pin makes any later move a
 one-line dependency change.
 
+A fix is developed on a personal fork so it can be reviewed, then pushed to the
+org fork by hand. The SHA does not change across that move, so `Cargo.toml`
+names the org fork and the `rev` pin is what keeps the boundary a one-line URL
+change.
+
 ### Consuming it — no crates.io publish
 
 `packages/app-lite/src-tauri/Cargo.toml:38` is:
 
 ```toml
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
-tauri-plugin-mobile-push = { git = "https://github.com/muni-town/tauri-plugin-mobile-push", rev = "6ac0683c7b0b45794a392452bc2d8e7db73042cd" }
+tauri-plugin-mobile-push = { git = "https://github.com/muni-town/tauri-plugin-mobile-push", rev = "86e1e4868d2c1ebe13f59151c98848fc1417ec00" }
 ```
 
 - **Pin `rev`, not `branch`.** A git dependency carries no semver, so `rev` is the
@@ -93,12 +98,12 @@ rebuild and commit `dist` or the import resolves to stale output.
 
 **Net effect: one dependency swapped, not two.**
 
-### The `rev` pin still lags one fix
+### The `rev` pin now carries the iOS fix
 
-The pinned commit carries A, B and C. Defect D is fixed as
-`packages/app-lite/src-tauri/patches/tauri-plugin-mobile-push-6ac0683-ios-delegate.patch`,
-so the `rev` in §2 must move to the commit that lands it before the client can
-rely on it.
+Defect D no longer waits on a patch: it landed as commit
+`86e1e4868d2c1ebe13f59151c98848fc1417ec00`, developed on the personal fork's
+`little-fox/ios-delegate-at-init` branch and pushed to the org fork's `main`.
+The `rev` in §2 pins it and `Cargo.lock` records it.
 
 `packages/app-lite/src-tauri/Cargo.lock` is tracked in git, last touched by
 `2279a7b2d` (the desktop-updater PR) — i.e. **before** the push PR. It contained
@@ -252,11 +257,9 @@ Fixed: the delegate install is split out into
 `installNotificationCenterDelegate()` and called both from
 `init_plugin_mobile_push` and from `setupApnsDelegateInternal` (which keeps its
 lazy behaviour, so a path that reaches a process where the early install did
-not stick is no worse off). It is carried as
-`src-tauri/patches/tauri-plugin-mobile-push-6ac0683-ios-delegate.patch` rather
-than applied to the fork directly, because the GitHub integration attached to
-this VM is read-only for that repository; land the patch, then point the `rev`
-in §2 at the resulting commit.
+not stick is no worse off). It is a commit on the fork —
+`86e1e4868d2c1ebe13f59151c98848fc1417ec00`, on
+`muni-town/tauri-plugin-mobile-push` `main` — and the `rev` in §2 points at it.
 
 Verification on a device or simulator: launch the app, enable notifications,
 force-quit, tap a notification — the app opens on the room the notification
@@ -342,11 +345,12 @@ cannot be exercised without hardware and a paid membership.
 **Goal.** Turn gate 4 from "unknown work" into "a known quantity with a compiling
 prototype", before anything in the app depends on it.
 
-**Where.** The fork, `meri-leeworthy/tauri-plugin-mobile-push` (the personal fork
-has push access; the `muni-town` org fork is read-only for this integration —
-§2). The macOS arm is a *new* module beside `desktop.rs`, not a rewrite of it:
-the existing `#[cfg(desktop)]` module keeps serving Windows and Linux, where
-there is no push service to talk to and the current stub answers correctly.
+**Where.** The personal fork, `meri-leeworthy/tauri-plugin-mobile-push`, which
+this integration can push to for review; the `muni-town` org fork is where a
+reviewed commit is pushed by hand (§2). The macOS arm is a *new* module beside
+`desktop.rs`, not a rewrite of it: the existing `#[cfg(desktop)]` module keeps
+serving Windows and Linux, where there is no push service to talk to and the
+current stub answers correctly.
 
 **What.** `src/desktop.rs` is 13 lines and its own comment says the commands
 "return stub values on desktop". The macOS implementation has to supply:
@@ -789,9 +793,10 @@ prunes on `gone`).
 ## 7. Decisions
 
 1. **Fork location:** `muni-town/tauri-plugin-mobile-push`, consumed via `git` +
-   `rev` (§2). Work lands on a personal fork first and is pushed to the org fork
-   by hand; the `rev` pin is what makes moving the dependency on that boundary a
-   one-line change.
+   `rev` (§2). A fix is developed on the personal fork
+   (`meri-leeworthy/tauri-plugin-mobile-push`) so it can be reviewed, and pushed
+   to the org fork by hand; the SHA does not change, so the pinned `rev` is what
+   makes moving the dependency on that boundary a one-line URL change.
 2. **Android fix ownership:** fixed in the fork (the upstream route), not by
    moving the token path into this repo. The fork was required either way.
 3. **npm fork:** not needed — the JS surface is unchanged (§2).

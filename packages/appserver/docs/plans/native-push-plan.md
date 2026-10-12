@@ -192,10 +192,9 @@ callers do not branch. Every plugin import is dynamic, so the web bundle never
 evaluates it. A registered token is remembered in localStorage
 (`roomy.push.lastNativeToken`), the native analogue of the browser's endpoint.
 
-**The plugin fork (`muni-town/tauri-plugin-mobile-push`) is load-bearing here.**
-Upstream 0.1.4 has two defects that make the native path unusable; the fork at
-`native-push-upstream-edits.md` fixes both, and `src-tauri/Cargo.toml` pins it
-by `rev`.
+**The plugin fork is load-bearing here.** Upstream 0.1.4 has defects that make
+the native path unusable; the fork that fixes them, and the repo/`rev`
+`src-tauri/Cargo.toml` pins, are named in `native-push-upstream-edits.md` §2.
 
 - **Android commands reached Rust stubs.** The crate registers
   `request_permission`/`get_token` in Rust on every target, and Tauri runs a
