@@ -7,6 +7,7 @@
   import { auth, init, logout, updateProfile } from "$lib/auth.svelte";
   import { loadLastLogin } from "$lib/last-login.svelte";
   import { installNativePushListeners } from "$lib/native-push";
+  import { installExternalLinkHandler } from "$lib/external-link-handler";
   import { installPushDebug } from "$lib/push-debug";
   import { preloadSpaceSidebars } from "$lib/preload";
   import { initFaro, setFaroUser } from "$lib/telemetry/faro";
@@ -107,6 +108,9 @@
       saveScrollPositionsToStorage();
     }, 30000);
 
+    // Native shell: route every rendered link — external ones out to the OS,
+    // space/room ones in-app. A no-op on the web. See external-link-handler.ts.
+    const disposeLinkHandler = installExternalLinkHandler();
     // Check for update once on load then every 24 hours
     !dev && updater.tryUpdate()
     const checkUpdate = !dev && updater.enableAutoupdate && setInterval(() => {
@@ -119,6 +123,7 @@
       clearInterval(saveInterval);
       clearInterval(preloadTimer);
       checkUpdate && clearInterval(checkUpdate);
+      disposeLinkHandler();
       saveScrollPositionsToStorage();
     };
   });

@@ -10,6 +10,7 @@
   } from "$lib/queries/membership-status";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { createProCheckout } from "$lib/mutations/pro-checkout";
+  import { openExternal } from "$lib/external-link-handler";
 
   // The Roomy Space's members-area channel. Pro subscribers are granted the
   // 'Members' role (see appserver billing/proRoleReconcile.ts), whose
@@ -31,7 +32,10 @@
     checkoutBusy = true;
     try {
       const url = await createProCheckout();
-      window.location.assign(url);
+      // Polar's checkout is an external page. In the native shell it must leave
+      // the webview — the webview has no address bar or back button to return
+      // from it. `openExternal` is a no-op on the web, which navigates.
+      if (!openExternal(url)) window.location.assign(url);
     } catch (err) {
       checkoutError =
         err instanceof Error ? err.message : "Could not start checkout — try again.";

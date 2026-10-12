@@ -291,6 +291,22 @@ A requested scope must be allowed by **two independently-deployed lists**. Missi
 
 The order that works: add the scope to the ceiling → register it on the HappyView client → move it out of `UNREGISTERED_SCOPES` and into a tier in `REQUESTABLE_SCOPE_SETS`. `packages/app-lite/scripts/check-oauth-scopes.mjs` (CI) fails the build if a requestable tier asks for a token still listed in `UNREGISTERED_SCOPES`, so the middle step cannot be skipped silently.
 
+### Links in the native shell (one interception point)
+
+The Tauri webview has no address bar or back button, so a link that navigates it in place strands the user on the destination. Every rendered link is therefore routed at **one** place — a capture-phase click listener on `window` (`packages/app-lite/src/lib/external-link-handler.ts`) backed by a pure decision (`link-routing.ts`):
+
+| Click | Where it goes |
+|-------|---------------|
+| space/room link (any internal origin) | in-app, via `goto()` — in both builds |
+| other `http(s)` off the app's origin, `mailto:`, `tel:` | out to the OS (system browser/mail/dialer) |
+| app's own origin, `hash`/`blob:`, `download`, modified/non-primary click | left to the platform |
+
+The shell enforces the same rule for navigations no click produces (`window.location.assign`, a redirect) in `src-tauri/src/navigation.rs` via the `navigation-policy` plugin, which opens a refused URL in the OS browser instead of letting it replace the document.
+
+**Do not add per-callsite external-link handling** (a `target="_blank"` on a new `<a>`, an `openUrl` call, a `Button` variant). A new render site is covered automatically; adding site-local handling creates a second convention that drifts from the decision above.
+
+OAuth in the shell already leaves via the OS browser and returns through the `space.roomy:` deep link (`packages/sdk/src/browser/oauth.ts`). A popup webview is not the mechanism: the popup flow needs a same-origin callback page plus `BroadcastChannel` (`@happyview/oauth-client-browser`'s `signInPopup`), while the native flow is registered with a custom-scheme redirect — the browser cannot load `space.roomy:/`.
+
 ## Testing & E2E Verification
 
 ### Local Dev Stack (`pnpm dev:local`)
