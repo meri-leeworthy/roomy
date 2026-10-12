@@ -1,27 +1,28 @@
 /**
  * Materialisation purity tests (plan: docs/plans/pure-materialisation.md §6
- * P3/P7).
+ * P3/P5/P7).
  *
  * The per-space DB is a deterministic projection of the event log, except for
- * values the log does not determine. These tests pin that for every table:
+ * values the log does not determine. These tests pin that:
  *
  *   P3 — the same log materialised twice holds the same rows, the second time
  *        through the real rebuild path (blue-green: replay into a fresh DB and
  *        swap it in).
+ *   P5 — materialising a log makes no outbound network call.
  *   P7 — no per-space table has a writer outside materialisation, beyond the
  *        documented read-path caches, and a replay invalidates those rather
  *        than merging into a stale row.
  *
- * Clock columns are the one documented exclusion (§3.4 of the plan): they carry
- * the *derivation* instant rather than a value the log determines, so two
- * derivations are expected to differ there. `CLOCK_COLUMNS` below is that
- * exclusion list, and a separate assertion pins that the columns it drops
- * really are derivation-time values — an exclusion list that silently covered a
+ * The comparison itself lives in `rebuildEquality.ts`: an oracle any
+ * implementation can call against any per-space DB, which is what makes it
+ * usable for the TS-vs-Rust check as well. What stays here is the log these
+ * assertions run over, and the assertion that the exclusions the oracle applies
+ * are the ones they claim to be — an exclusion list that silently covered a
  * log-determined value would hide exactly the regression this file exists to
  * catch.
  *
  * Self-contained (one shared pool, real temp `spacesDir`, no `openDb()`
- * singleton churn) for the reason documented in blueGreen.test.ts.
+ * singleton churn) for the reason documented in reMaterialize.blueGreen.test.ts.
  */
 
 import {
@@ -32,7 +33,6 @@ import {
   expect,
   test,
 } from "bun:test";
-import { Database } from "bun:sqlite";
 import { encode } from "@atcute/cbor";
 import {
   createDefaultSpaceEvents,
@@ -50,54 +50,26 @@ import { DatabasePool } from "../db/pool.ts";
 import { GLOBAL_SCHEMA_VERSION, SPACE_SCHEMA_VERSION } from "../db/db.ts";
 import { READSTATE_SCHEMA_VERSION } from "../db/readStateDb.ts";
 import type { DbLike } from "../db/types.ts";
-import { reMaterializeFromLocalEvents } from "./reMaterialize.ts";
 import { StreamManager } from "./StreamManager.ts";
 import { selectMessages } from "../queries/selectMessages.ts";
 import {
-  _resetEmbedSweeper,
   _startSweeperNoLoop,
   stopEmbedSweeper,
   sweepCycle,
 } from "../embed/sweeper.ts";
+import {
+  CLOCK_COLUMNS,
+  READ_PATH_CACHES,
+  materialiseAndDiff,
+  materialiseFromLog,
+  recordFetchCalls,
+  snapshotSpaceDb,
+  staleCanonicalDb,
+} from "./rebuildEquality.ts";
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const ADMIN = UserDid.assert("did:plc:purity-admin");
 const OTHER = UserDid.assert("did:plc:purity-other");
-
-/**
- * Columns that carry the derivation's own instant rather than a value the log
- * determines (plan §3.4). Two derivations are expected to differ in these and
- * only these.
- */
-const CLOCK_COLUMNS = new Set([
-  "created_at",
-  "updated_at",
-  "fetched_at",
-  "synced_at",
-  "retry_after",
-]);
-
-/** Tables that are not derived state at all. */
-const NON_DERIVED_TABLES = new Set([
-  "space_schema_version",
-  "space_schema_migrations",
-]);
-
-/**
- * The documented read-path caches (plan §3.3). They hold values the log
- * determines, but they are populated by reads rather than by materialisation: a
- * replay invalidates them and the next read warms them again. So a rebuild
- * leaves them empty where a live write left them populated, which is a
- * difference in *when* they are filled, not in what they would hold.
- */
-const READ_PATH_CACHES = new Set(["room_access", "room_activity"]);
-
-/** A table's rows, with the documented clock columns dropped. */
-interface TableSnapshot {
-  table: string;
-  columns: string[];
-  rows: unknown[][];
-}
 
 describe("materialisation purity", () => {
   let pool: DatabasePool;
@@ -277,81 +249,47 @@ describe("materialisation purity", () => {
     }
   }
 
-  /** Materialise the stream's whole log into the per-space DB. */
-  async function materialiseFromLog(): Promise<void> {
-    await reMaterializeFromLocalEvents(
-      router,
-      (async () => []) as never,
-      null,
-      1,
-    );
-  }
-
-  /**
-   * Stamp the canonical DB with a version this build cannot start from, so the
-   * next pass takes the rebuild path: replay the whole log into a fresh
-   * `.sqlite.new` and swap it in.
-   */
-  function markCanonicalUnupgradable(): void {
-    const raw = new Database(join(spacesDir, `${streamDid}.sqlite`));
-    raw.run("update space_schema_version set version = '0' where id = 1");
-    raw.close();
-  }
-
-  /** Read every derived per-space table, dropping the documented clock columns. */
-  async function snapshot(spaceDb: DbLike): Promise<TableSnapshot[]> {
-    const tables = await spaceDb
-      .query(
-        `select name from sqlite_master
-          where type = 'table' and name not like 'sqlite_%'
-          order by name`,
-      )
-      .all<{ name: string }>();
-
-    const out: TableSnapshot[] = [];
-    for (const { name } of tables) {
-      if (NON_DERIVED_TABLES.has(name)) continue;
-      const info = await spaceDb
-        .query(`select name from pragma_table_info('${name}')`)
-        .all<{ name: string }>();
-      const columns = info
-        .map((c) => c.name)
-        .filter((c) => !CLOCK_COLUMNS.has(c));
-      const rows = await spaceDb
-        .query(
-          `select ${columns.join(", ")} from "${name}" order by ${columns.join(", ")}`,
-        )
-        .all<Record<string, unknown>>();
-      out.push({ table: name, columns, rows: rows.map((r) => Object.values(r)) });
-    }
-    return out;
-  }
-
   test("the same log materialised twice yields identical per-space state", async () => {
     await seedRichLog();
 
     // ── First derivation: replay into the empty canonical DB ────────────
-    await materialiseFromLog();
-    const first = await snapshot(router.forSpace!(streamDid));
-    // Sanity: the derivation wrote rows, so the equality below is not the
-    // equality of two empty databases.
-    expect(first.some((t) => t.rows.length > 0)).toBe(true);
+    await materialiseFromLog(router, streamDid);
 
     // ── Second derivation: the same log, rebuilt into a fresh DB ────────
-    markCanonicalUnupgradable();
-    await materialiseFromLog();
-    const second = await snapshot(router.forSpace!(streamDid));
+    // `materialiseAndDiff` reads the first derivation off the canonical DB,
+    // then rebuilds the space from the log into a fresh one and diffs the two.
+    const { before, after, diverging } = await materialiseAndDiff(
+      router,
+      streamDid,
+    );
+
+    // Sanity: the derivation wrote rows, so the equality below is not the
+    // equality of two empty databases.
+    expect(before.some((t) => t.rows.length > 0)).toBe(true);
 
     // P3: every derived table holds the same rows in both derivations.
-    expect(second).toEqual(first);
+    expect(diverging).toEqual([]);
+    expect(after).toEqual(before);
   });
 
   test("the clock columns the snapshot drops are derivation-time values", async () => {
     // The exclusion list is load-bearing only if those columns really do carry
-    // the derivation instant. `entities.created_at` for a non-ULID id (a DID)
-    // is `Date.now()` at materialisation (SDK `ensureEntity`), so it must land
-    // inside the window of the call that wrote it — not at the log's receipt
-    // instant, which is what a log-determined value would be.
+    // the derivation instant, and only if it is the list anyone expects. The
+    // names are pinned first: widening the list is how a log-determined value
+    // would get hidden, so it has to be an explicit edit here as well.
+    expect(Object.keys(CLOCK_COLUMNS)).toEqual([
+      "created_at",
+      "updated_at",
+      "fetched_at",
+      "synced_at",
+      "retry_after",
+    ]);
+
+    // Then the behaviour, on one column. `entities.created_at` for a non-ULID
+    // id (a DID) is `Date.now()` at materialisation (SDK `ensureEntity`), so it
+    // must land inside the window of the call that wrote it — not at the log's
+    // receipt instant, which is what a log-determined value would be. The
+    // column is absent from every snapshot, so it is read directly.
     await seedEvent(
       router,
       parse({
@@ -364,7 +302,7 @@ describe("materialisation purity", () => {
     );
 
     const before = Date.now();
-    await materialiseFromLog();
+    await materialiseFromLog(router, streamDid);
     const after = Date.now();
 
     const row = await router.forSpace!(streamDid)
@@ -406,13 +344,47 @@ describe("materialisation purity", () => {
     }
   }
 
+  test("materialising a log makes no outbound network call", async () => {
+    // P5: every derived value comes from the log, so the replay reaches
+    // nothing. Both derivations are covered — the replay into the canonical DB
+    // and the blue-green rebuild.
+    //
+    // The one network seam on the path is profile hydration, which
+    // `materialiseFromLog` closes by injecting a fetcher that returns nothing
+    // (profiles resolve from the global store). That is the shape Step 5
+    // finishes, and this assertion is what keeps it finished: a derivation that
+    // grew a fetch of its own — an embed unfurl, a handle lookup — is caught
+    // here whatever seam it used.
+    await seedRichLog();
+
+    const { calls } = await recordFetchCalls(async () => {
+      await materialiseFromLog(router, streamDid);
+      await materialiseAndDiff(router, streamDid);
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  test("the fetch spy reports the calls it refuses", async () => {
+    // Guards the assertion above from passing vacuously: if the spy stopped
+    // recording (a stub that resolved, a `fetch` binding captured before the
+    // swap), P5 would report a clean run while the network was being reached.
+    const { calls } = await recordFetchCalls(async () => {
+      await fetch("https://example.invalid/probe").catch(() => undefined);
+    });
+
+    expect(calls).toEqual([
+      { url: "https://example.invalid/probe", method: "GET" },
+    ]);
+  });
+
   test("a rebuilt space serves enriched link cards without the sweeper having run", async () => {
     // P6: the enrichment is a function of an outbound fetch, not of the log, so
-    // it must survive a re-derivation that never runs a sweeper. Before the
-    // store moved out, the rebuilt space's `comp_embed_link_data` was simply
-    // empty and the message rendered a bare link.
+    // it must survive a re-derivation that never runs a sweeper. A per-space
+    // `comp_embed_link_data` would be empty after a rebuild and the message
+    // would render a bare link; the global store is what makes it survive.
     await seedRichLog();
-    await materialiseFromLog();
+    await materialiseFromLog(router, streamDid);
 
     const url = "https://example.com/a";
     const messageId = await router.forSpace!(streamDid)
@@ -439,8 +411,8 @@ describe("materialisation purity", () => {
 
     // Re-derive the space from the log into a fresh DB — the rebuild path,
     // which runs no sweeper and cannot re-fetch anything.
-    markCanonicalUnupgradable();
-    await materialiseFromLog();
+    await staleCanonicalDb(router, streamDid);
+    await materialiseFromLog(router, streamDid);
 
     const rebuilt = await selectMessages(
       router.forSpace!(streamDid),
@@ -455,7 +427,7 @@ describe("materialisation purity", () => {
 
   test("a replay invalidates the read-path caches instead of merging into them", async () => {
     await seedRichLog();
-    await materialiseFromLog();
+    await materialiseFromLog(router, streamDid);
 
     const spaceDb = router.forSpace!(streamDid);
     const room = await spaceDb
@@ -478,8 +450,8 @@ describe("materialisation purity", () => {
       room!.entity,
     );
 
-    markCanonicalUnupgradable();
-    await materialiseFromLog();
+    await staleCanonicalDb(router, streamDid);
+    await materialiseFromLog(router, streamDid);
 
     // P7: the caches hold values the log determines, so a replay invalidates
     // them rather than carrying the stale rows forward. Either the row is gone
@@ -511,22 +483,21 @@ describe("materialisation purity", () => {
       ADMIN,
     );
 
-    const live = await snapshot(router.forSpace!(streamDid));
-
-    markCanonicalUnupgradable();
-    await materialiseFromLog();
-    const rebuilt = await snapshot(router.forSpace!(streamDid));
+    const live = await snapshotSpaceDb(router.forSpace!(streamDid));
 
     // The read-path caches are the one documented difference in this direction:
     // a live write warms them on the read path, a rebuild leaves them for the
     // next read to warm. Everything materialisation itself writes must match.
-    expect(rebuilt.filter((t) => !READ_PATH_CACHES.has(t.table))).toEqual(
-      live.filter((t) => !READ_PATH_CACHES.has(t.table)),
+    const { after: rebuilt, diverging } = await materialiseAndDiff(
+      router,
+      streamDid,
+      { before: live, ignoredTables: Object.keys(READ_PATH_CACHES) },
     );
+    expect(diverging).toEqual([]);
 
     // The caches did not carry a stale row across — they are simply empty until
     // a read warms them.
-    for (const table of rebuilt.filter((t) => READ_PATH_CACHES.has(t.table))) {
+    for (const table of rebuilt.filter((t) => READ_PATH_CACHES[t.table])) {
       expect(table.rows).toEqual([]);
     }
   });

@@ -65,7 +65,7 @@ Remaining impurities, from the earlier scaling analysis:
 - Profile hydration still runs on the live write path.
 - Search, embed and push are still process-local queues.
 
-The mapping of these items to steps 2 to 5 follows pure-materialisation.md. **Acceptance:** the rebuild-equality harness passes, meaning the same log prefix and the same schema version give a byte-identical projection.
+The mapping of these items to steps 2 to 5 follows pure-materialisation.md. **Acceptance:** the rebuild-equality harness (`src/streams/rebuildEquality.ts`) passes, meaning the same log prefix and the same schema version give a byte-identical projection.
 
 ### WS2. Read-path p95 fixes
 
@@ -112,7 +112,7 @@ WS1 to WS3 are the near-term commitments. WS4 to WS6 are staged without dates.
 
 ## 7. Verification
 
-- **Rebuild-equality harness** at the end of WS1, WS3 and WS4, including TS against Rust.
+- **Rebuild-equality harness** at the end of WS1, WS3 and WS4, including TS against Rust. It lives in `packages/appserver/src/streams/rebuildEquality.ts`: `snapshotSpaceDb` reads every derived per-space table, `diffSnapshots` names the tables two readings disagree on, `digestOf` hashes one reading, and `materialiseAndDiff` composes the TS-only case (derive, rebuild through the blue-green path, diff). The WS4 runner uses the first three — snapshot the Rust worker's per-space DB, snapshot the TS one, compare — and needs no TS materialisation to do it.
 - **Performance:** p95 per endpoint and DB round-trips per message, before and after WS2 and again after WS5.
 - **Replication:** a test that unread counts do not inflate across replicas.
 - **Failover:** a lease expiry test with an in-flight write, confirming a single writer is preserved.

@@ -326,7 +326,9 @@ the same card.
   pattern.
 
 **Acceptance.** Materialisation performs no outbound network calls (assertable by
-failing the test on `fetch`). Background loops run on exactly one owner.
+failing the test on `fetch`) — that assertion is in place and green today
+(`reMaterialize.purity.test.ts`), so the profile-hydration move has to keep it
+green rather than arrive alongside it. Background loops run on exactly one owner.
 
 ## 6. Invariants to pin
 
@@ -334,16 +336,18 @@ failing the test on `fetch`). Background loops run on exactly one owner.
 | --- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
 | P1  | Two derivations of the same log produce identical `sort_idx` for every message | **Step 1** — `reMaterialize.blueGreen.test.ts` (live write vs rebuild), `applyBatch.test.ts` (same log twice) |
 | P2  | Equal-timestamp messages order by log position, not randomly                   | **Step 1** — `applyBatch.test.ts`                                                                             |
-| P3  | For every per-space table, rebuild-from-log equals live state                  | **Step 2** — `reMaterialize.purity.test.ts`                                                                     |
-| P4  | Applying a batch twice leaves read-state unchanged                             | **Step 3**                                                                                                      |
-| P5  | Materialisation performs no outbound network I/O                               | Step 5                                                                                                        |
-| P6  | A rebuilt space serves enriched links without the sweeper                      | **Step 4** — `reMaterialize.purity.test.ts` (enrich, rebuild, render)                                          |
-| P7  | No per-space table has a writer outside materialisation (+ documented caches)  | **Steps 2, 4** — the rebuild-equality harness                                                                    |
+| P3  | For every per-space table, rebuild-from-log equals live state                  | Step 2 — `reMaterialize.purity.test.ts`, via the rebuild-equality oracle                                      |
+| P4  | Applying a batch twice leaves read-state unchanged                             | Step 3                                                                                                        |
+| P5  | Materialisation performs no outbound network I/O                               | `reMaterialize.purity.test.ts` (a `fetch` spy around both derivations)                                        |
+| P6  | A rebuilt space serves enriched links without the sweeper                      | Step 4 — `reMaterialize.purity.test.ts` (enrich, rebuild, render)                                              |
+| P7  | No per-space table has a writer outside materialisation (+ documented caches)  | Steps 2, 4 — the rebuild-equality oracle                                                                       |
 
-The general form of P3/P7 is worth automating: a harness that materialises a log
-into `:memory:`, snapshots every table, rebuilds, and diffs. `reMaterialize.purity.test.ts`
-is that harness; before Step 4 it failed for `comp_embed_link_data`, and it would
-have caught `setHandle`.
+The general form of P3/P7 is automated in `src/streams/rebuildEquality.ts`: a
+harness that materialises a log, snapshots every per-space table, rebuilds, and
+diffs. It knows nothing about how a DB was produced, so it is also the check
+between two implementations — WS4 runs the TS materialiser and the Rust one
+against the same log and compares the two readings (`diffSnapshots` for the
+tables that differ, `digestOf` for one hash per side).
 
 ## 6a. Per-space schema migration
 
