@@ -220,6 +220,74 @@ describe("createAppserver factory", () => {
     expect(body).toContain('endpoint="/xrpc/space.roomy.space.getSpaces"');
   });
 
+  test("unrecognised paths collapse to one catch-all endpoint label", async () => {
+    handle = await createAppserver({
+      port: ephemeralPort(),
+      authVerifier: testAuthVerifier,
+      dbPath: ":memory:",
+      readStateDbPath: ":memory:",
+      quiet: true,
+      ownDid: "did:web:test.example",
+      serviceEndpoint: "http://test.example",
+      disableBackgroundWorkers: true,
+    });
+
+    const base = `http://localhost:${handle.port}`;
+
+    // Scanner-shaped paths plus an NSID the route table does not have (a
+    // deprecated one and a probe). The path string is the caller's, so each
+    // one that reaches the label is a series the process holds for its life.
+    const unrecognised = [
+      "/.env",
+      "/.env.bak",
+      "/.git/config",
+      "/wp-includes/ID3/",
+      "/ALFA_DATA/alfacgiapi/",
+      "/xrpc/space.roomy.space.getRooms",
+      "/xrpc/space.roomy.probe",
+    ];
+    for (const path of unrecognised) await fetch(`${base}${path}`);
+    // Routes the appserver does serve, to prove the catch-all does not swallow
+    // them: a literal route and a registered NSID.
+    await fetch(`${base}/health`);
+    await fetch(`${base}/xrpc/space.roomy.space.getSpaces`);
+
+    const body = await (await fetch(`${base}/metrics`)).text();
+
+    // One series for all seven paths — the counter and its histogram. A label
+    // set lives for the life of the process and is re-emitted on every scrape,
+    // so a per-path label here is unbounded series growth driven by scan
+    // traffic: ~11 series per guessed path (10 buckets + `_count` + counter).
+    const lines = body.split("\n");
+    expect(
+      lines.filter((l) =>
+        l.startsWith('roomy_xrpc_requests_total{endpoint="/other",method="GET"'),
+      ),
+    ).toHaveLength(1);
+    expect(
+      lines.filter((l) =>
+        l.startsWith(
+          'roomy_xrpc_request_duration_seconds_count{endpoint="/other",method="GET"',
+        ),
+      ),
+    ).toHaveLength(1);
+
+    // The scanner path itself is nowhere in the exposition: not as an
+    // `endpoint` value, not as the fold's own spelling.
+    for (const path of unrecognised) expect(body).not.toContain(`endpoint="${path}"`);
+    expect(body).not.toContain('endpoint="/.env"');
+
+    // An unknown `/xrpc/<nsid>` folds too — a probe cannot mint a label by
+    // naming an NSID the router does not have.
+    expect(body).toContain('endpoint="/other/xrpc"');
+    expect(body).not.toContain('endpoint="/xrpc/space.roomy.probe"');
+
+    // The allowlist is the route table plus the literal routes, so a served
+    // route is still spelled as itself.
+    expect(body).toContain('endpoint="/health"');
+    expect(body).toContain('endpoint="/xrpc/space.roomy.space.getSpaces"');
+  });
+
   test("roomy_embed_pending equals /health/embed's pending (both read the DB backlog)", async () => {
     // The gauge must be set from the DB backlog, not the in-memory priority
     // queue: `embedSweeperStats().priorityQueue` reads 0 when the backlog is

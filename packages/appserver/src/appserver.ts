@@ -564,20 +564,67 @@ export function getRegisteredNsids(): { nsid: string; kind: string }[] {
 // ─── Request metrics ──────────────────────────────────────────────────────
 
 /**
+ * Endpoint label value for every request that names no route: scanner probes
+ * (`/.env`, `/.git/config`, `/wp-includes/ID3/`), and any other URL the
+ * appserver does not serve. One value for all of them, because the label set
+ * must be a function of the route table and not of the request.
+ */
+const OTHER_ENDPOINT = "/other";
+
+/**
+ * Label value for a request under `/xrpc/` naming an NSID the router does not
+ * have. Distinct from `OTHER_ENDPOINT` so an unknown-NSID probe stays
+ * distinguishable from a scan for `/.env`; both are bounded, and neither is
+ * spelled `/xrpc/<nsid>`, so nothing that matches a route label picks them up.
+ */
+const OTHER_XRPC_ENDPOINT = `${OTHER_ENDPOINT}/xrpc`;
+
+/**
+ * Routes served outside the XRPC router, each kept as its own label value:
+ * every one is a surface an operator reads separately, and the set is fixed
+ * in this file. Path-parameterised routes are not listed — they collapse to a
+ * prefix (see `metricEndpoint`).
+ */
+const LITERAL_ENDPOINTS: Readonly<Record<string, true>> = {
+  "/metrics": true,
+  "/health": true,
+  "/health/embed": true,
+  "/health/push": true,
+  "/health/search": true,
+  "/health/cache": true,
+  "/health/pool": true,
+  "/.well-known/did.json": true,
+  "/webhooks/livekit": true,
+};
+
+/**
  * Normalise a request path into the `endpoint` label value.
  *
  * The label must be drawn from a bounded set: a Prometheus label set lives
- * for the life of the process, so a label carrying a path parameter grows
- * without limit. Every blob is served under its own `/blob/<did>/<cid>` path,
- * so naming those by the raw pathname would retain one series per blob the
- * process has ever proxied.
+ * for the life of the process and is re-emitted on every scrape, so a label
+ * carrying a caller-chosen string is never reclaimed. `endpoint` is therefore
+ * decided by the route table — `nsids` is the router's own registry — and
+ * everything that names no route folds to `OTHER_ENDPOINT`, regardless of how
+ * many distinct paths arrive. Without that, internet scanners mint one series
+ * per path they guess, at ~11 series each (10 histogram buckets + `_count` +
+ * the counter), which is the bulk of the stack's series growth.
  *
- * Collapsed: `/blob/<did>/<cid>` → `/blob`
- * Unchanged: XRPC nsids, which are bounded by the route table and stay
- * attributable per endpoint, and the literal routes (`/health`, `/metrics`,
- * `/webhooks/livekit`, …).
+ * Kept: `/blob` and the test-mode webhooks, whose path parameters select an
+ * object rather than a route; the literal routes above; and each registered
+ * XRPC NSID, because per-route latency is the point of the metric and the
+ * route table bounds that set.
+ *
+ * Folded to `OTHER_ENDPOINT`: every other path, and to
+ * `OTHER_XRPC_ENDPOINT` every `/xrpc/<nsid>` the registry does not have.
+ * Neither the registered NSIDs nor the literal routes can be reached from
+ * here, so the whole label set is fixed at process start.
+ *
+ * The access log keeps the full path; per-path attribution lives there.
  */
-export function metricEndpoint(pathname: string): string {
+export function metricEndpoint(
+  pathname: string,
+  nsids: ReadonlySet<string>,
+): string {
   // Everything under /blob is one route: the path parameters select a blob,
   // not a route. Collapsing the whole prefix rather than just the
   // two-segment form leaves no spelling of a blob URL — trailing slash, extra
@@ -587,7 +634,14 @@ export function metricEndpoint(pathname: string): string {
   // either way (the route is one of a fixed set), but folding it keeps every
   // path-parameterised route named by its stable prefix.
   if (pathname.startsWith("/webhooks/test/")) return "/webhooks/test";
-  return pathname;
+  // An XRPC nsid is an endpoint when the route table has it. A scanner's
+  // `/xrpc/anything` is not: it is refused with a 404 and belongs on the
+  // catch-all, not on a label of its own.
+  if (pathname.startsWith("/xrpc/")) {
+    const nsid = pathname.slice("/xrpc/".length);
+    return nsids.has(nsid) ? pathname : OTHER_XRPC_ENDPOINT;
+  }
+  return LITERAL_ENDPOINTS[pathname] === true ? pathname : OTHER_ENDPOINT;
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────
@@ -861,6 +915,14 @@ export async function createAppserver(
     },
   );
   const router = buildRouter(authVerifier, syncSubscribeHandler);
+
+  // The router's route table, as the allowlist the `endpoint` label is drawn
+  // from (see metricEndpoint). Read once here: the table is fixed at
+  // construction, and resolving membership per request keeps a probing
+  // `/xrpc/<anything>` off a label of its own.
+  const registeredNsids: ReadonlySet<string> = new Set(
+    router.getRegisteredNsids().map((r) => r.nsid),
+  );
 
   // ─── Query response cache ─────────────────────────────────────────────
   // Process-local LRU cache for hot, expensive queries whose responses are
@@ -1263,7 +1325,7 @@ export async function createAppserver(
     const pathname = new URL(req.url).pathname;
     // Label the metrics with the bounded route, not the raw path (see
     // metricEndpoint); the access log keeps the full path.
-    const endpoint = metricEndpoint(pathname);
+    const endpoint = metricEndpoint(pathname, registeredNsids);
     try {
       const res = await handleFetchInner(req, server);
       const status = res?.status ?? 0; // 0 = ws upgrade (undefined response)
