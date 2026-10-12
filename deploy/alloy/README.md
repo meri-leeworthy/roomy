@@ -205,6 +205,21 @@ built with `adapter-static`, `PUBLIC_FARO_URL` is **inlined at build time**
 passed as a build arg/`ARG`, not just a runtime variable. See
 `packages/app-lite/src/lib/telemetry/faro.ts`.
 
+Set `PUBLIC_ANALYTICS_SALT` on the same service to attribute telemetry to a
+user. Signals carry `meta.user.id` as `sha256(salt + ":" + did)` rather than
+the DID, so the log store never holds a durable identifier. It is **also
+inlined at build time**, so a change needs a rebuild; unlike `PUBLIC_FARO_URL`
+it must stay the **same value across a deployment's builds**, since it is what
+hashes one user to the same pseudonym across releases — rotating it re-counts
+every existing user as new. Unset means no user id is attached and every
+session stays anonymous (sessions are still tracked, by session id).
+`packages/app-lite/src/lib/telemetry/scrub.ts` owns the mapping.
+
+Each signal also carries `meta.session.id` (`SessionInstrumentation`). One
+session spans reloads via the SDK's sticky-session store, so a visit is one
+session across a reload; time-in-app is read as first→last signal per session
+id, since Faro emits no session-end signal.
+
 > **Faro is the one signal that needs a public domain.** Railway's edge only
 > serves 443, so generate a domain for the alloy service and set its
 > **target port to 12345** (Settings → Networking → the domain's port). The

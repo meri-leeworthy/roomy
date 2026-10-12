@@ -1,5 +1,6 @@
 /**
- * Tests for the telemetry URL scrub.
+ * Tests for the telemetry boundary: URL redaction of payloads, and
+ * pseudonymisation of the user DID.
  *
  * An error thrown by `@happyview/oauth-client`'s fetchHandler embeds the full
  * request URL in its message. For `com.atproto.server.getServiceAuth` that URL
@@ -9,13 +10,20 @@
  * telemetry payload, and that the host (what a URL in a log line is read for)
  * does.
  *
+ * The user id must likewise never be a raw DID: a stored DID is a durable,
+ * cross-service identifier, so telemetry names the user by a salted hash. The
+ * pseudonym must be stable for one (deployment, user) pair and useless without
+ * the deployment's salt — a hash that moved on every load would break
+ * retention, and one that ignored the salt would let the same user be
+ * recognised across deployments.
+ *
  * Written against `node:test` + `node:assert` so the file runs under both
  * `bun test` and `node --test --experimental-strip-types`.
  */
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { redactUrls, scrubTelemetryItem } from "./scrub.ts";
+import { pseudonymiseDid, redactUrls, scrubTelemetryItem } from "./scrub.ts";
 
 const PDS = "https://bsky.social";
 const SERVICE_AUTH_URL =
@@ -108,5 +116,41 @@ describe("scrubTelemetryItem", () => {
     assert.equal(item.payload.missing, null);
     assert.equal(item.payload.when, when);
     assert.equal(item.payload.err, err);
+  });
+});
+
+const DID = "did:plc:abc123def456";
+const SALT = "deployment-salt";
+
+describe("pseudonymiseDid", () => {
+  test("is the sha256 of `salt:did`", async () => {
+    // Pinned so the construction (separator, order, hex encoding) is a contract
+    // any other surface naming the same user must reproduce.
+    assert.equal(
+      await pseudonymiseDid(DID, SALT),
+      "88206b3acf6eaa56a69e773bc9a1aca012b3d8d9f313cf39857fac4e6875bec9",
+    );
+  });
+
+  test("is stable for the same did and salt", async () => {
+    assert.equal(await pseudonymiseDid(DID, SALT), await pseudonymiseDid(DID, SALT));
+  });
+
+  test("differs for a different did", async () => {
+    assert.notEqual(await pseudonymiseDid(DID, SALT), await pseudonymiseDid("did:plc:999888777666", SALT));
+  });
+
+  test("differs for a different salt", async () => {
+    assert.notEqual(await pseudonymiseDid(DID, SALT), await pseudonymiseDid(DID, "other-salt"));
+  });
+
+  test("is 64 lower-case hex characters", async () => {
+    assert.match((await pseudonymiseDid(DID, SALT))!, /^[0-9a-f]{64}$/);
+  });
+
+  test("is undefined without a did or a salt, so the session stays anonymous", async () => {
+    assert.equal(await pseudonymiseDid(DID, undefined), undefined);
+    assert.equal(await pseudonymiseDid(DID, ""), undefined);
+    assert.equal(await pseudonymiseDid("", SALT), undefined);
   });
 });

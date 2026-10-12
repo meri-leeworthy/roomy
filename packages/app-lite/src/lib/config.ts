@@ -95,6 +95,16 @@ export const CONFIG = {
    * random browsers from writing to the collector, it is not a secret.
    */
   faroApiKey: dynamicEnv.PUBLIC_FARO_API_KEY || null,
+  /**
+   * Salt for the pseudonymised telemetry user id — the `salt:` half of the
+   * SHA-256 in `pseudonymiseDid` (`lib/telemetry/scrub.ts`). Must be identical
+   * across a deployment's builds, or the same logical user hashes to a new id
+   * each deploy and their history splits at the deploy boundary. Unset means no
+   * id at all, so every session stays anonymous. Like PUBLIC_FARO_API_KEY this
+   * is baked into a static bundle and readable by anyone: it separates one
+   * deployment's id space from another, it is not a secret.
+   */
+  analyticsSalt: dynamicEnv.PUBLIC_ANALYTICS_SALT || null,
 };
 
 /**

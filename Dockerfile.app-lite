@@ -37,6 +37,14 @@ ENV PUBLIC_FARO_URL=$PUBLIC_FARO_URL
 ARG PUBLIC_FARO_API_KEY
 ENV PUBLIC_FARO_API_KEY=$PUBLIC_FARO_API_KEY
 
+# Salt for the pseudonymised telemetry user id (sha256(salt + ":" + did)).
+# Read via $env/dynamic/public and inlined at build time for adapter-static.
+# Must stay stable across a deployment's builds or the same user's id changes
+# each deploy. Baked into the client bundle, so it separates deployments' id
+# spaces, it is not a secret. Unset → sessions stay anonymous.
+ARG PUBLIC_ANALYTICS_SALT
+ENV PUBLIC_ANALYTICS_SALT=$PUBLIC_ANALYTICS_SALT
+
 ARG OAUTH_HOST
 ENV OAUTH_HOST=$OAUTH_HOST
 
@@ -109,7 +117,8 @@ RUN echo "[app-lite build debug] PUBLIC_PDS=$PUBLIC_PDS" && \
     echo "[app-lite build debug] VITE_APPSERVER_DID=$VITE_APPSERVER_DID" && \
     echo "[app-lite build debug] PUBLIC_WEB_ORIGIN=$PUBLIC_WEB_ORIGIN" && \
     echo "[app-lite build debug] VITE_PUBLIC_WEB_ORIGIN=$VITE_PUBLIC_WEB_ORIGIN" && \
-    echo "[app-lite build debug] PUBLIC_FARO_URL=$PUBLIC_FARO_URL"
+    echo "[app-lite build debug] PUBLIC_FARO_URL=$PUBLIC_FARO_URL" && \
+    echo "[app-lite build debug] PUBLIC_ANALYTICS_SALT=$PUBLIC_ANALYTICS_SALT"
 
 RUN bash packages/app-lite/scripts/build-prod.sh
 

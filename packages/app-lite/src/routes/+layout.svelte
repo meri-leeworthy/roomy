@@ -9,7 +9,7 @@
   import { installNativePushListeners } from "$lib/native-push";
   import { installPushDebug } from "$lib/push-debug";
   import { preloadSpaceSidebars } from "$lib/preload";
-  import { initFaro } from "$lib/telemetry/faro";
+  import { initFaro, setFaroUser } from "$lib/telemetry/faro";
   import {
     installNotificationNavigateListener,
     installPushSubscriptionChangeListener,
@@ -167,6 +167,13 @@
     if (auth.authenticated) {
       updateProfile();
     }
+  });
+
+  // Name the telemetry user once a DID is known. `setFaroUser` hashes the DID
+  // before the SDK sees it (scrub.ts), so the raw identifier never leaves the
+  // device; a missing DID or salt leaves the session anonymous.
+  $effect(() => {
+    void setFaroUser(auth.userDid);
   });
 
   // Restore the persisted cache before the sync connection starts and before

@@ -1,7 +1,9 @@
 /**
- * Redaction of absolute URLs from telemetry payloads.
+ * Telemetry boundary: redaction of absolute URLs from payloads, and
+ * pseudonymisation of the telemetry user's DID.
  *
- * Third-party clients put whole request URLs into error messages —
+ * Two durable, sensitive values would otherwise reach the log store. Payloads
+ * first: third-party clients put whole request URLs into error messages —
  * `@happyview/oauth-client`'s fetchHandler appends
  * `_fetch …, url: ${fullUrl}` to its thrown error, and a
  * `com.atproto.server.getServiceAuth` request carries `aud`/`exp`/`lxm` in
@@ -16,6 +18,11 @@
  * actually consulted for — which server was involved — while the path and
  * query string, which can carry a signed capability that outlives the log
  * line, are dropped.
+ *
+ * Identity is the same argument. A DID is a durable, cross-service identifier,
+ * so telemetry names the user by a salted hash of it ({@link pseudonymiseDid})
+ * rather than the identifier itself; the mapping lives here, at the boundary,
+ * instead of at each call site that happens to know a DID.
  */
 
 /** Absolute http(s)/ws(s) URLs, stopping at whitespace and quoting delimiters. */
@@ -82,4 +89,40 @@ function scrubValue(value: unknown, seen = new WeakMap<object, unknown>()): unkn
  */
 export function scrubTelemetryItem<T extends { payload: unknown }>(item: T): T {
   return { ...item, payload: scrubValue(item.payload) as T["payload"] };
+}
+
+/**
+ * The telemetry user id for a DID: lower-case hex SHA-256 of
+ * `` `${salt}:${did}` ``.
+ *
+ * A stored DID is a durable, cross-service identifier, so a log store that
+ * carried it would hold far more than the product analytics it exists for, and
+ * anything later joined against it inherits that reach. Hashing the DID keeps
+ * the id stable for one (deployment, user) pair while the raw identifier never
+ * leaves the device.
+ *
+ * The construction is fixed — separator, argument order, digest encoding —
+ * so any other surface that needs to name the same user derives the identical
+ * string.
+ *
+ * `undefined` means "no id", not a built-in default. A constant that ships in
+ * every bundle separates nothing: every deployment that left the default unset
+ * would mint ids from the same predictable space, re-identifying the same user
+ * across unrelated instances. With no salt, then, the session stays anonymous.
+ *
+ * Async because `crypto.subtle.digest` is. `crypto` is a global in the
+ * browser, in Node 22, and in the Tauri webview, so no import is needed.
+ */
+export async function pseudonymiseDid(
+  did: string,
+  salt: string | undefined,
+): Promise<string | undefined> {
+  if (!did || !salt) return undefined;
+  const bytes = new TextEncoder().encode(`${salt}:${did}`);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  let hex = "";
+  for (const byte of new Uint8Array(digest)) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return hex;
 }

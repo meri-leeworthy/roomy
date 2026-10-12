@@ -1,5 +1,5 @@
 /**
- * Grafana Faro browser telemetry (frontend log collection).
+ * Grafana Faro browser telemetry (frontend log collection + session + user).
  *
  * app-lite is a static SPA — there is no server stdout to collect, so
  * client-side logs/errors are shipped via the Faro browser agent to an
@@ -11,18 +11,40 @@
  * default is disabled (zero network, zero errors, SDK never loaded).
  * Browser-only: guards against SSR/prerender via $app/environment.
  *
- * v1 scope: console.* interception + error instrumentation. No web vitals
- * or tracing.
+ * Scope: console.* interception + error instrumentation, plus the session
+ * (`SessionInstrumentation`) that names a visit. Every signal then carries a
+ * session id, so signals group per visit and time-in-app is readable as
+ * first→last event per id — Faro emits no `session_end`, so the duration is
+ * derived rather than reported.
+ *
+ * That visit is attributed to a salted DID hash, never the DID itself:
+ * `setFaroUser` takes a DID and applies the mapping from `./scrub.ts` here, so
+ * no caller can hand the SDK a raw identifier.
  *
  * Every item is passed through `beforeSend` (`./scrub.ts`) before it leaves
  * the browser: logged errors routinely carry a request URL, which for a
  * `com.atproto.server.getServiceAuth` call is a signed capability.
  */
+import type { Faro } from "@grafana/faro-web-sdk";
 import { browser } from "$app/environment";
 import { CONFIG } from "$lib/config";
-import { scrubTelemetryItem } from "./scrub";
+import { pseudonymiseDid, scrubTelemetryItem } from "./scrub";
 
 let initialized = false;
+
+/**
+ * The live Faro instance. Held here rather than read back from `window.faro`:
+ * that global is an SDK option (`preventGlobalExposure`), not a contract, so
+ * this reference is the one handle the app owns.
+ */
+let faroInstance: Faro | undefined;
+
+/**
+ * Pseudonymised user id set before the SDK finished loading. `initFaro` starts
+ * a dynamic import that resolves after its caller returns, so `setFaroUser`
+ * can land first; without this the id would be dropped.
+ */
+let pendingUser: string | undefined;
 
 /**
  * Initialize Faro once, lazily. Safe to call multiple times (e.g. from
@@ -36,25 +58,58 @@ export function initFaro(): void {
   // Dynamic import keeps @grafana/faro-web-sdk out of the main bundle when
   // telemetry is disabled (the default) — zero payload cost for the 99% of
   // deployments that run without PUBLIC_FARO_URL.
-  void import("@grafana/faro-web-sdk").then(({ initializeFaro, ConsoleInstrumentation, ErrorsInstrumentation }) => {
-    initializeFaro({
-      url: CONFIG.faroUrl!,
-      app: {
-        name: "roomy-app-lite",
-        version: __APP_VERSION__,
-      },
-      ...(CONFIG.faroApiKey ? { apiKey: CONFIG.faroApiKey } : {}),
-      // Errors arrive here from code that logs them whole, including
-      // third-party messages that embed the request URL (a
-      // `getServiceAuth` URL carries a signed token's `exp`/`lxm`). Every
-      // item is scrubbed on its way out — see ./scrub.ts.
-      beforeSend: scrubTelemetryItem,
-      instrumentations: [
-        // Captures console.* calls as log messages.
-        new ConsoleInstrumentation(),
-        // Captures uncaught errors + unhandled promise rejections.
-        new ErrorsInstrumentation(),
-      ],
-    });
-  });
+  void import("@grafana/faro-web-sdk").then(
+    ({ initializeFaro, ConsoleInstrumentation, ErrorsInstrumentation, SessionInstrumentation }) => {
+      faroInstance = initializeFaro({
+        url: CONFIG.faroUrl!,
+        app: {
+          name: "roomy-app-lite",
+          version: __APP_VERSION__,
+        },
+        // One session spans reloads — a reload is the same visit, so a new
+        // session per load would overstate visit count and understate time in
+        // app. `persistent` uses the SDK's sticky-session store. The
+        // instrumentation below is what actually stamps `metas.value.session`
+        // onto every signal; the config alone leaves it undefined.
+        sessionTracking: {
+          enabled: true,
+          persistent: true,
+          samplingRate: 1,
+        },
+        ...(CONFIG.faroApiKey ? { apiKey: CONFIG.faroApiKey } : {}),
+        // Errors arrive here from code that logs them whole, including
+        // third-party messages that embed the request URL (a
+        // `getServiceAuth` URL carries a signed token's `exp`/`lxm`). Every
+        // item is scrubbed on its way out — see ./scrub.ts.
+        beforeSend: scrubTelemetryItem,
+        instrumentations: [
+          // Captures console.* calls as log messages.
+          new ConsoleInstrumentation(),
+          // Captures uncaught errors + unhandled promise rejections.
+          new ErrorsInstrumentation(),
+          // Names the visit: sets the session meta carried by every signal and
+          // emits session_start / session_resume.
+          new SessionInstrumentation(),
+        ],
+      });
+      if (pendingUser !== undefined) faroInstance.api.setUser({ id: pendingUser });
+    },
+  );
+}
+
+/**
+ * Name the telemetry user for a signed-in DID. No-op when there is no id to
+ * report, so a missing DID or salt leaves the session anonymous.
+ *
+ * The SDK is given a salted hash of the DID, never the DID: a stored DID is a
+ * durable, cross-service identifier and the log store has no business holding
+ * one (`pseudonymiseDid`, ./scrub.ts). Applying the mapping here — the single
+ * place that calls `setUser` — is what keeps raw DIDs from reaching the SDK at
+ * all.
+ */
+export async function setFaroUser(did: string | undefined): Promise<void> {
+  const id = await pseudonymiseDid(did ?? "", CONFIG.analyticsSalt ?? undefined);
+  if (id === undefined) return;
+  pendingUser = id;
+  faroInstance?.api.setUser({ id });
 }
