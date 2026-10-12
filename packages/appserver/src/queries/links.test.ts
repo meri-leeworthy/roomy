@@ -16,11 +16,12 @@ import { Database } from "bun:sqlite";
 import { toAsyncDb } from "../db/syncAdapter.ts";
 import type { DbLike } from "../db/types.ts";
 import { ulid } from "ulidx";
-import { dedupeLinks, linkTimestamp, listLinks, cursorForRow } from "./links.ts";
+import { dedupeLinks, linkTimestamp, listLinks, cursorForRow, hydrateLinkEmbeds } from "./links.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SCHEMA_PATH = join(__dirname, "..", "db", "schema-space.sql");
+const GLOBAL_SCHEMA_PATH = join(__dirname, "..", "db", "schema-global.sql");
 
 const SPACE = "did:web:space.example";
 const ROOM_A = "01ROOMA00000000000000000000".slice(0, 26);
@@ -31,6 +32,24 @@ function freshDb(): { db: Database; asyncDb: DbLike } {
   db.exec("pragma foreign_keys = on");
   db.exec(readFileSync(SCHEMA_PATH, "utf8"));
   return { db, asyncDb: toAsyncDb(db) };
+}
+
+/**
+ * A per-space handle plus the in-memory global DB carrying `link_embeds` —
+ * the two halves the read path joins in JS, since they are separate databases.
+ */
+function freshDbWithStore(): {
+  db: Database;
+  store: Database;
+  asyncDb: DbLike;
+  storeAsync: DbLike;
+} {
+  const { db, asyncDb } = freshDb();
+  const store = new Database(":memory:");
+  store.exec("pragma foreign_keys = on");
+  store.exec(readFileSync(GLOBAL_SCHEMA_PATH, "utf8"));
+  const storeAsync = toAsyncDb(store);
+  return { db, store, asyncDb, storeAsync };
 }
 
 /**
@@ -45,12 +64,11 @@ function seedLinkMessage(
     roomId: string;
     url: string;
     sortIdx?: string;
-    embedJson?: string | null;
-    /** When true, also write an enriched embed row. Default: null (no data). */
+    /** When true, also write an enriched row into the store. Default: false. */
     enrich?: boolean;
   },
 ) {
-  const { msgId, roomId, url, sortIdx = msgId, enrich = false } = opts;
+  const { msgId, roomId, url, sortIdx = msgId } = opts;
   db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [roomId, SPACE]);
   db.run(
     "insert into entities (id, stream_id, room, sort_idx) values (?, ?, ?, ?)",
@@ -64,12 +82,18 @@ function seedLinkMessage(
   db.run("insert into comp_embed_link (entity, show_preview) values (?, 1)", [
     url,
   ]);
-  if (enrich) {
-    db.run(
-      "insert into comp_embed_link_data (entity, embed_json) values (?, ?)",
-      [url, opts.embedJson ?? JSON.stringify({ t: "Fancy Title" })],
-    );
-  }
+}
+
+/** Write a store row for `url` — the global `link_embeds` entry. */
+function seedStoreEmbed(
+  store: Database,
+  url: string,
+  embedJson: string = JSON.stringify({ t: "Fancy Title" }),
+): void {
+  store.run("insert into link_embeds (url, embed_json) values (?, ?)", [
+    url,
+    embedJson,
+  ]);
 }
 
 describe("listLinks", () => {
@@ -129,18 +153,46 @@ describe("listLinks", () => {
     ]);
   });
 
-  test("carries the enriched embed when present, null when not", async () => {
+  test("listLinks leaves embed_json null — the store is a separate database", async () => {
+    // The per-space query cannot reach the store, so every row comes back
+    // unhydrated; `hydrateLinkEmbeds` is what fills it (next test).
     const { db, asyncDb } = freshDb();
     const msgA = "01MSGA0000000000000000000000".slice(0, 26);
-    const msgB = "01MSGB0000000000000000000000".slice(0, 26);
-    seedLinkMessage(db, { msgId: msgA, roomId: ROOM_A, url: "https://rich.example/1", enrich: true });
-    seedLinkMessage(db, { msgId: msgB, roomId: ROOM_A, url: "https://bare.example/2", enrich: false });
+    seedLinkMessage(db, { msgId: msgA, roomId: ROOM_A, url: "https://rich.example/1" });
 
     const { links } = await listLinks(asyncDb, { kind: "room", roomId: ROOM_A });
+    expect(links[0]!.embed_json).toBeNull();
+  });
+
+  test("hydrateLinkEmbeds fills the enriched card from the global store", async () => {
+    const { db, store, asyncDb, storeAsync } = freshDbWithStore();
+    const msgA = "01MSGA0000000000000000000000".slice(0, 26);
+    const msgB = "01MSGB0000000000000000000000".slice(0, 26);
+    seedLinkMessage(db, { msgId: msgA, roomId: ROOM_A, url: "https://rich.example/1" });
+    seedLinkMessage(db, { msgId: msgB, roomId: ROOM_A, url: "https://bare.example/2" });
+    seedStoreEmbed(store, "https://rich.example/1");
+
+    const { links } = await listLinks(asyncDb, { kind: "room", roomId: ROOM_A });
+    await hydrateLinkEmbeds(storeAsync, links);
+
     const rich = links.find((l) => l.url === "https://rich.example/1");
     const bare = links.find((l) => l.url === "https://bare.example/2");
     expect(rich!.embed_json).toContain("Fancy Title");
+    // No store row means the enricher has not reached it: no card, not an
+    // error.
     expect(bare!.embed_json).toBeNull();
+  });
+
+  test("listLinks leaves rows unhydrated without a store handle", async () => {
+    // A caller with no global handle (a raw per-space adapter, or a process
+    // with no pool) still gets the page — the cards are simply absent, which
+    // is the correct render for enrichment the caller cannot see.
+    const { db, asyncDb } = freshDb();
+    const msgA = "01MSGA0000000000000000000000".slice(0, 26);
+    seedLinkMessage(db, { msgId: msgA, roomId: ROOM_A, url: "https://rich.example/1" });
+
+    const { links } = await listLinks(asyncDb, { kind: "room", roomId: ROOM_A });
+    expect(links[0]!.embed_json).toBeNull();
   });
 
   test("pagination returns hasMore and cursor that resumes from the next page", async () => {

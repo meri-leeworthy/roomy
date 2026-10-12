@@ -4,20 +4,24 @@
  * A single process-wide background loop owns ALL pending link enrichment.
  * Per-space SpaceMaterializers never fetch embeds themselves — they only
  * call {@link pokeEmbedSweeper} when new links are detected, and this loop
- * drains the global `comp_embed_link` pending set.
+ * drains the global `pending_links` index.
  *
  * Why this exists
  * ---------------
- * Every space shares one process-wide DB, so a per-space fetch path would
- * re-read the *same global* pending list for each space on every event batch
- * (and again at startup and after backfill), fetching and erroring the same
- * URL dozens-to-hundreds of times while the embed service is slow or down.
- * Centralizing avoids all three amplifiers at once:
+ * Every space's pending links share one process-wide index, so a per-space
+ * fetch path would re-read the *same global* pending list for each space on
+ * every event batch (and again at startup and after backfill), fetching and
+ * erroring the same URL dozens-to-hundreds of times while the embed service is
+ * slow or down. Centralizing avoids all three amplifiers at once:
  *   - Exactly one in-flight fetch per URL (dedup lives in `enricher.ts`).
  *   - Every fetch has a hard timeout (see `FETCH_TIMEOUT_MS`).
  *   - Bounded concurrency (see `CONCURRENCY`) — the service can't be flooded.
  *   - A self-healing idle poll catches links detected during backfill or
  *     carried over from a previous session.
+ *
+ * Results are stored in the global `link_embeds` store, so the sweep populates
+ * link cards for every space at once and a space derived by another worker
+ * serves them without running a sweeper of its own.
  */
 
 import type { DbLike } from "../db/types.ts";
@@ -36,7 +40,8 @@ import {
   type EnrichOutcome,
   type PendingLink,
 } from "./enricher.ts";
-import { openSpaceDb } from "../db/db.ts";
+import { selectParkedLinkEmbeds } from "./store.ts";
+import { openSpaceDb, tryOpenGlobalDb } from "../db/db.ts";
 import { selectMessages } from "../queries/selectMessages.ts";
 import type { MessageDto } from "../queries/selectMessages.ts";
 import { log } from "../log.ts";
@@ -514,17 +519,17 @@ const SETTLE_LOOKUP_CHUNK = 500;
  * The window is deliberately IGNORED: it is a retry schedule, and there is no
  * retry left for it to schedule.
  *
- * The per-space write is the settled row the ceiling branch of
- * `storeEmbedData` writes, so the dead set leaves the backlog with the same
- * accounting — `enrichedAbandoned` rises by the set — and the read path sees
- * exactly the null embed it would have seen after the doomed fetch.
+ * The write is the settled row the ceiling branch of `storeEmbedData` writes,
+ * in the global store — one row per URL, however many spaces it is pending in
+ * — so the dead set leaves the backlog with the same accounting
+ * (`enrichedAbandoned` rises by the set) and the read path sees exactly the
+ * null embed it would have seen after the doomed fetch.
  *
- * A URL can be pending in several spaces: the gate is URL-keyed while the
- * backlog is row-keyed, so the spaces are resolved from `pending_links` rather
- * than assumed, or rows in the other spaces would be orphaned.
+ * The `pending_links` rows are still per (space, message), so they are looked
+ * up to find which rows to delete rather than assumed from the URL set.
  *
- * Writes go one statement per (space, chunk) so the first run — a backlog of
- * thousands inherited from a build without a ceiling — settles in a handful of
+ * Deletes go one statement per chunk so the first run — a backlog of thousands
+ * inherited from a build without a ceiling — drains in a handful of
  * round-trips instead of one per row.
  */
 async function settlePastCeiling(globalDb: DbLike): Promise<void> {
@@ -552,39 +557,26 @@ async function settlePastCeiling(globalDb: DbLike): Promise<void> {
     return;
   }
 
-  const spacesByUrl = new Map<string, string[]>();
-  for (const r of rows) {
-    const spaces = spacesByUrl.get(r.url) ?? [];
-    spaces.push(r.spaceDid);
-    spacesByUrl.set(r.url, spaces);
-  }
-
-  const bySpace = new Map<string, Array<{ url: string; attempts: number }>>();
+  const pendingUrls = new Set(rows.map((r) => r.url));
   const toSettle = new Set<string>();
   for (const url of over.keys()) {
-    const spaces = spacesByUrl.get(url);
-    if (!spaces) {
-      transientRetry.delete(url);
-      continue;
-    }
-    toSettle.add(url);
-    for (const spaceDid of spaces) {
-      const arr = bySpace.get(spaceDid) ?? [];
-      arr.push({ url, attempts: over.get(url)! });
-      bySpace.set(spaceDid, arr);
-    }
+    if (pendingUrls.has(url)) toSettle.add(url);
+    else transientRetry.delete(url);
   }
 
-  for (const [spaceDid, entries] of bySpace) {
-    await settleOverCeiling(openSpaceDb(spaceDid), entries);
-    for (let i = 0; i < entries.length; i += SETTLE_DELETE_CHUNK) {
-      const chunk = entries.slice(i, i + SETTLE_DELETE_CHUNK);
-      const valuesPh = chunk.map(() => "(?, ?)").join(", ");
-      await globalDb.run(
-        `delete from pending_links where (space_did, url) in (values ${valuesPh})`,
-        chunk.flatMap((e) => [spaceDid, e.url]),
-      );
-    }
+  await settleOverCeiling(
+    globalDb,
+    [...toSettle].map((url) => ({ url, attempts: over.get(url)! })),
+  );
+
+  const settled = [...toSettle];
+  for (let i = 0; i < settled.length; i += SETTLE_DELETE_CHUNK) {
+    const chunk = settled.slice(i, i + SETTLE_DELETE_CHUNK);
+    const placeholders = chunk.map(() => "?").join(", ");
+    await globalDb.run(
+      `delete from pending_links where url in (${placeholders})`,
+      [...chunk],
+    );
   }
 
   // Only now retire the gate entries: a throw above leaves every URL parked
@@ -784,19 +776,17 @@ function activeBackoffSize(): number {
 
 /**
  * Restore the in-memory retry gate from the PERSISTED retry state
- * (`comp_embed_link_data.retry_after`/`attempts`).
+ * (`link_embeds.retry_after`/`attempts`).
  *
  * Why this is needed: the gate is process-local, but the enricher already
  * WRITES `retry_after`/`attempts` for exactly this purpose and nothing ever
- * read them. A restart therefore dropped all backoff while `pending_links`
- * survived, making every parked row selectable at once and re-fetching the
- * whole backlog — re-paying a ~0.15% success rate instead of remembering it.
+ * read them until here. A restart therefore dropped all backoff while
+ * `pending_links` survived, making every parked row selectable at once and
+ * re-fetching the whole backlog — re-paying a ~0.15% success rate instead of
+ * remembering it.
  *
- * Why the read side lives HERE, and not in the selection query: the retry
- * state is written per space while the work queue (`pending_links`) is global,
- * and `findPendingLinks` reads the global DB alone — it cannot join across the
- * separate per-space DBs. So the map is seeded once, from the spaces that
- * actually have pending rows (a space with none has nothing to park).
+ * The retry state lives in the SAME DB as the work queue, so this is one read
+ * rather than the per-space fan-out the state used to require.
  *
  * Only rows whose window has NOT expired are restored: an expired `retry_after`
  * is selectable now, which is what the gate would say anyway. `attempts` is
@@ -804,42 +794,15 @@ function activeBackoffSize(): number {
  * instead of restarting at the 1-minute step.
  */
 async function seedTransientRetry(globalDb: DbLike): Promise<void> {
-  const now = Date.now();
-  const spaces = await globalDb
-    .query(`select distinct space_did from pending_links`)
-    .all<{ space_did: string }>();
-  let restored = 0;
-  for (const { space_did } of spaces) {
-    try {
-      const rows = await openSpaceDb(space_did)
-        .query(
-          `select entity, attempts, retry_after
-             from comp_embed_link_data
-            where retry_after is not null and retry_after > ?`,
-        )
-        .all<{ entity: string; attempts: number; retry_after: number }>([now]);
-      for (const r of rows) {
-        const existing = transientRetry.get(r.entity);
-        // Never shorten a window this process already recorded.
-        if (existing && existing.retryAt >= r.retry_after) continue;
-        transientRetry.set(r.entity, {
-          attempts: r.attempts,
-          retryAt: r.retry_after,
-        });
-        restored++;
-      }
-    } catch (err) {
-      // One unreadable space DB must not abort the seed — the sweeper
-      // self-heals it on the next fetch. debug, not warn: one line per space
-      // per start, never per cycle.
-      log.debug(`[embed-sweeper] retry-state seed failed for ${space_did}:`, err);
-    }
+  const rows = await selectParkedLinkEmbeds(globalDb, Date.now());
+  for (const r of rows) {
+    const existing = transientRetry.get(r.url);
+    // Never shorten a window this process already recorded.
+    if (existing && existing.retryAt >= r.retryAfter) continue;
+    transientRetry.set(r.url, { attempts: r.attempts, retryAt: r.retryAfter });
   }
-  if (spaces.length > 0) {
-    log.info(
-      `[embed-sweeper] restored ${restored} parked URL(s) from ` +
-        `${spaces.length} space(s) with pending links`,
-    );
+  if (rows.length > 0) {
+    log.info(`[embed-sweeper] restored ${rows.length} parked URL(s)`);
   }
 }
 
@@ -896,10 +859,12 @@ export function pokeEmbedSweeper(urls?: string[]): void {
  * is currently viewing (which were detected during backfill and sit in the
  * backlog).
  *
- * `filterPendingUrls` returns only links with no data row yet, so
+ * `filterPendingUrls` returns only links with no store row yet, so
  * already-enriched links are a no-op and transient-failed links keep their
- * backoff (we don't hammer a down service on every refetch). Cheap: a single
- * LEFT JOIN, skipped entirely when the page has no links.
+ * backoff (we don't hammer a down service on every refetch).
+ *
+ * `db` is the per-space handle the read came from; the store lookup goes to the
+ * global DB through its `global()` route.
  */
 export async function prioritiseLinksForRead(
   db: DbLike,
@@ -910,7 +875,14 @@ export async function prioritiseLinksForRead(
   const linkUrls = messages.flatMap((m) => m.linkEmbeds.map((l) => l.url));
   if (linkUrls.length === 0) return;
   try {
-    const pending = await filterPendingUrls(db, linkUrls);
+    // The process-wide global worker owns the store; a per-space handle's own
+    // `global()` route is the fallback for a caller holding a different pool.
+    // Both resolutions are INSIDE the try because that route throws on a space
+    // worker (`targetDb "global" not available`), which must degrade to "no
+    // prioritisation" rather than fail the read.
+    const globalDb = tryOpenGlobalDb() ?? db.global?.();
+    if (!globalDb) return;
+    const pending = await filterPendingUrls(db, globalDb, linkUrls);
     if (pending.length > 0) pokeEmbedSweeper(pending);
   } catch (err) {
     // Embed prioritisation is best-effort: a transient DB error (e.g. a macOS
@@ -1111,9 +1083,10 @@ async function runSweepCycle(globalDb: DbLike): Promise<SweepCycleResult> {
   let cycleProducedOk = false;
 
   if (pending.length > 0) {
-    // Group pending rows by URL → the set of spaces it is pending in (a URL
-    // can appear in multiple spaces). enrichLinkAcrossSpaces fetches ONCE per
-    // URL and stores the result to every space's DB.
+    // The URLs this batch must enrich, with every (space, message) row each is
+    // pending in — one global write settles a URL for all of them, so the
+    // dedup below is what keeps a URL pending in N spaces from being fetched N
+    // times.
     const spacesByUrl = new Map<string, string[]>();
     for (const p of pending) {
       const arr = spacesByUrl.get(p.url) ?? [];
@@ -1141,7 +1114,7 @@ async function runSweepCycle(globalDb: DbLike): Promise<SweepCycleResult> {
     await mapWithConcurrency([...spacesByUrl.entries()], CONCURRENCY, async ([url, spaces]) => {
       let outcome: EnrichOutcome | null = null;
       try {
-        outcome = await enrichLinkAcrossSpaces(url, spaces);
+        outcome = await enrichLinkAcrossSpaces(globalDb, url);
       } catch (err) {
         // enrichLinkAcrossSpaces only throws for DB (storeEmbedData) errors —
         // fetch errors are handled inside fetchEmbedData (returns a
@@ -1158,9 +1131,11 @@ async function runSweepCycle(globalDb: DbLike): Promise<SweepCycleResult> {
         enrichedUrls.add(url);
         settledUrls.add(url);
         transientRetry.delete(url);
-        // Emit per-URL invalidation routed to each space's per-space DB.
+        // Emit per-URL invalidation for every space the URL is pending in: the
+        // store row is shared, but each space's message carrying it renders
+        // from its own per-space DB.
         for (const spaceDid of spaces) {
-          await emitEnrichmentInvalidation(openSpaceDb(spaceDid), spaceDid, [url]);
+          await emitEnrichmentInvalidation(openSpaceDb(spaceDid), globalDb, spaceDid, [url]);
         }
       } else if (outcome?.status === "definitive") {
         // Settled no-data (page loaded but no OG/oEmbed, or a stable 4xx).
@@ -1199,12 +1174,24 @@ async function runSweepCycle(globalDb: DbLike): Promise<SweepCycleResult> {
     // drains, so the sweeper never reaches newer real links.
     if (settledUrls.size > 0) {
       try {
+        // One statement per (space, chunk of URLs) rather than one per row:
+        // a full batch of settled links otherwise costs 25 round-trips.
+        const urlsBySpace = new Map<string, string[]>();
         for (const p of pending) {
           if (!settledUrls.has(p.url)) continue;
-          await globalDb.run(
-            `delete from pending_links where space_did = ? and url = ?`,
-            [p.spaceDid, p.url],
-          );
+          const arr = urlsBySpace.get(p.spaceDid) ?? [];
+          arr.push(p.url);
+          urlsBySpace.set(p.spaceDid, arr);
+        }
+        for (const [spaceDid, urls] of urlsBySpace) {
+          for (let i = 0; i < urls.length; i += SETTLE_DELETE_CHUNK) {
+            const chunk = urls.slice(i, i + SETTLE_DELETE_CHUNK);
+            const placeholders = chunk.map(() => "?").join(", ");
+            await globalDb.run(
+              `delete from pending_links where space_did = ? and url in (${placeholders})`,
+              [spaceDid, ...chunk],
+            );
+          }
         }
       } catch (err) {
         if (cycleDbError === null) cycleDbError = err;
@@ -1526,6 +1513,7 @@ function invalidate(nsid: QueryNsid, params: Record<string, string>): Invalidati
 
 async function emitEnrichmentInvalidation(
   db: DbLike,
+  globalDb: DbLike,
   spaceDid: string,
   enrichedUrls: string[],
 ): Promise<void> {
@@ -1565,7 +1553,7 @@ async function emitEnrichmentInvalidation(
     messages = (await selectMessages(db, {
       kind: "ids",
       ids: [...messageIdToRoom.keys()],
-    })).messages;
+    }, undefined, globalDb)).messages;
   } catch (err) {
     log.warn("[embed-sweeper] selectMessages failed:", err);
     return;

@@ -329,8 +329,8 @@ async function seedParkedLinks(
   );
   await trackSeedWrites(
     links.map((l) =>
-      spaceDb.run(
-        `insert into comp_embed_link_data (entity, embed_json, attempts, retry_after)
+      globalDb.run(
+        `insert into link_embeds (url, embed_json, attempts, retry_after)
          values (?, null, ?, ?)`,
         [l.seed.url, l.attempts, l.retryAfter],
       ),
@@ -711,8 +711,8 @@ describe("embed sweeper invalidation room resolution", () => {
       await sweepCycle(globalDb);
 
       // newUrl was enriched successfully.
-      const newData = await spaceDb
-        .query("select embed_json from comp_embed_link_data where entity = ?")
+      const newData = await globalDb
+        .query("select embed_json from link_embeds where url = ?")
         .get<{ embed_json: string | null }>(newUrl);
       expect(newData?.embed_json).toBeTruthy();
     } finally {
@@ -808,8 +808,8 @@ describe("embed sweeper invalidation room resolution", () => {
         old,
       );
       // Parked: a window opened by a previous process, still in the future.
-      await spaceDb.run(
-        `insert into comp_embed_link_data (entity, embed_json, attempts, retry_after)
+      await globalDb.run(
+        `insert into link_embeds (url, embed_json, attempts, retry_after)
          values (?, null, 2, ?)`,
         [blockedUrl(i), Date.now() + 30 * 60_000],
       );
@@ -925,8 +925,8 @@ describe("embed sweeper invalidation room resolution", () => {
         },
         old,
       );
-      await spaceDb.run(
-        `insert into comp_embed_link_data (entity, embed_json, attempts, retry_after)
+      await globalDb.run(
+        `insert into link_embeds (url, embed_json, attempts, retry_after)
          values (?, null, 2, ?)`,
         [url(i), Date.now() + 30 * 60_000],
       );
@@ -1173,8 +1173,8 @@ describe("embed sweeper stall reporting", () => {
       [SPACE_DID, "01KVNNNNNNNNNNNNNNNNNNNNNN", url, Date.now() - 60 * 60_000],
     );
     await trackSeedWrites([
-      spaceDb.run(
-        `insert into comp_embed_link_data (entity, embed_json, attempts, retry_after)
+      globalDb.run(
+        `insert into link_embeds (url, embed_json, attempts, retry_after)
          values (?, null, 5, ?)`,
         [url, Date.now() + 2 * 60 * 60_000],
       ),
@@ -1328,7 +1328,7 @@ describe("embed sweeper stall reporting", () => {
 });
 
 describe("embed sweeper retry-state persistence and stall pacing", () => {
-  test("a restart restores parked URL backoff from comp_embed_link_data.retry_after", async () => {
+  test("a restart restores parked URL backoff from link_embeds.retry_after", async () => {
     // Defect: the sweeper's transient-retry gate is process-local while
     // the enricher PERSISTS `retry_after`/`attempts`, so a restart without
     // seeding drops all backoff while `pending_links` survives — every parked
@@ -1346,8 +1346,8 @@ describe("embed sweeper retry-state persistence and stall pacing", () => {
     );
     // The persisted retry state a previous process left behind: a window that
     // is still open, with an escalated attempt count.
-    await spaceDb.run(
-      `insert into comp_embed_link_data (entity, embed_json, attempts, retry_after)
+    await globalDb.run(
+      `insert into link_embeds (url, embed_json, attempts, retry_after)
        values (?, null, 4, ?)`,
       [url, Date.now() + 30 * 60_000],
     );
@@ -1382,8 +1382,8 @@ describe("embed sweeper retry-state persistence and stall pacing", () => {
         .get<{ n: number }>();
       expect(n?.n).toBe(1);
       // The row was NOT re-fetched, so the persisted attempts survive intact.
-      const row = await spaceDb
-        .query("select attempts from comp_embed_link_data where entity = ?")
+      const row = await globalDb
+        .query("select attempts from link_embeds where url = ?")
         .get<{ attempts: number }>(url);
       expect(row?.attempts).toBe(4);
     } finally {
@@ -1413,13 +1413,13 @@ describe("embed sweeper retry-state persistence and stall pacing", () => {
       Date.now() - 60 * 60_000,
     );
     // One window still open; the other expired in the past.
-    await spaceDb.run(
-      `insert into comp_embed_link_data (entity, embed_json, attempts, retry_after)
+    await globalDb.run(
+      `insert into link_embeds (url, embed_json, attempts, retry_after)
        values (?, null, 2, ?)`,
       [futureUrl, Date.now() + 30 * 60_000],
     );
-    await spaceDb.run(
-      `insert into comp_embed_link_data (entity, embed_json, attempts, retry_after)
+    await globalDb.run(
+      `insert into link_embeds (url, embed_json, attempts, retry_after)
        values (?, null, 2, ?)`,
       [expiredUrl, Date.now() - 60_000],
     );
@@ -2026,8 +2026,8 @@ describe("settling rows already past the attempt ceiling (TASK-257)", () => {
       expect(stats.enrichedTransient).toBe(0);
       // The persisted row is settled exactly as the ceiling fetch path leaves
       // it: null embed, no retry schedule, the attempt count preserved.
-      const row = await spaceDb
-        .query("select embed_json, attempts, retry_after from comp_embed_link_data where entity = ?")
+      const row = await globalDb
+        .query("select embed_json, attempts, retry_after from link_embeds where url = ?")
         .get<{ embed_json: string | null; attempts: number; retry_after: number | null }>(url);
       expect(row?.embed_json).toBeNull();
       expect(row?.attempts).toBe(40);
@@ -2129,10 +2129,10 @@ describe("settling rows already past the attempt ceiling (TASK-257)", () => {
       expect(stats.enrichedOk).toBe(1);
       expect(stats.enrichedTransient).toBe(0);
       expect(stats.parkedOverCeiling).toBe(0);
-      // Every dead row is settled in its space DB, none left mid-state.
-      const settled = await spaceDb
+      // Every dead row is settled in the store, none left mid-state.
+      const settled = await globalDb
         .query(
-          `select count(*) as n from comp_embed_link_data
+          `select count(*) as n from link_embeds
             where retry_after is null and embed_json is null`,
         )
         .get<{ n: number }>();
@@ -2148,7 +2148,7 @@ describe("settling rows already past the attempt ceiling (TASK-257)", () => {
     // The gate is URL-keyed while the backlog is row-keyed. Settling only the
     // space the URL was first seen in would orphan the other space's row in
     // `pending_links` forever, since the gate entry that made it selectable is
-    // gone.
+    // gone. The store row is URL-keyed, so it is written once.
     const { globalDb, spaceDb } = await freshWorker();
     const { router } = captureRouter();
     const OTHER = "did:web:other.example";
@@ -2161,11 +2161,7 @@ describe("settling rows already past the attempt ceiling (TASK-257)", () => {
       Date.now() - 60 * 60_000,
       OTHER,
     );
-    await otherSpaceDb.run(
-      `insert into comp_embed_link_data (entity, embed_json, attempts, retry_after)
-       values (?, null, 40, ?)`,
-      [url, Date.now() + 6 * 60 * 60_000],
-    );
+    // The same URL in a second space shares the ONE store row the seed wrote.
 
     const realFetch = globalThis.fetch;
     let fetches = 0;
@@ -2182,13 +2178,11 @@ describe("settling rows already past the attempt ceiling (TASK-257)", () => {
       expect(fetches).toBe(0);
       expect(await countPendingLinks(globalDb)).toBe(0);
       expect(embedSweeperStats().enrichedAbandoned).toBe(1);
-      for (const db of [spaceDb, otherSpaceDb]) {
-        const row = await db
-          .query("select embed_json, retry_after from comp_embed_link_data where entity = ?")
-          .get<{ embed_json: string | null; retry_after: number | null }>(url);
-        expect(row?.retry_after).toBeNull();
-        expect(row?.embed_json).toBeNull();
-      }
+      const row = await globalDb
+        .query("select embed_json, retry_after from link_embeds where url = ?")
+        .get<{ embed_json: string | null; retry_after: number | null }>(url);
+      expect(row?.retry_after).toBeNull();
+      expect(row?.embed_json).toBeNull();
 
       // A second cycle finds nothing left to settle: the gate entries are gone
       // with the rows, so the dead set is not re-counted or re-written.
@@ -2238,8 +2232,8 @@ describe("embed attempt ceiling (TASK-227)", () => {
       expect(stats.enrichedTransient).toBe(0);
       // And its persisted row carries no retry schedule, so nothing re-queues
       // it if the link is seen again.
-      const row = await spaceDb
-        .query("select retry_after from comp_embed_link_data where entity = ?")
+      const row = await globalDb
+        .query("select retry_after from link_embeds where url = ?")
         .get<{ retry_after: number | null }>(url);
       expect(row?.retry_after).toBeNull();
     } finally {
@@ -2272,8 +2266,8 @@ describe("embed attempt ceiling (TASK-227)", () => {
       const stats = embedSweeperStats();
       expect(stats.enrichedAbandoned).toBe(0);
       expect(stats.enrichedTransient).toBe(1);
-      const row = await spaceDb
-        .query("select attempts, retry_after from comp_embed_link_data where entity = ?")
+      const row = await globalDb
+        .query("select attempts, retry_after from link_embeds where url = ?")
         .get<{ attempts: number; retry_after: number | null }>(url);
       expect(row?.attempts).toBe(2);
       expect(row?.retry_after).not.toBeNull();

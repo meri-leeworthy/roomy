@@ -197,8 +197,9 @@ create table did_owners ( did text references dids(did), owner text not null, un
     <li><strong>comp_embed_video</strong> — Video embeds with dimensions, length, blurhash</li>
     <li><strong>comp_embed_file</strong> — File attachments with name and size</li>
     <li><strong>comp_embed_link</strong> — Link embeds with preview toggle</li>
-    <li><strong>comp_embed_link_data</strong> — Cached enriched embed data (title, description, image) fetched asynchronously by the embed sweeper; transient failures retry with exponential backoff (<code>attempts</code>, <code>retry_after</code>)</li>
   </ul>
+
+  <p>Enriched link metadata — the title, description and image a URL resolves to — is not per-space: the URL is the whole key, so it lives in the global <code>link_embeds</code> table and every space that shared the link reads the same row. It is fetched asynchronously by the embed sweeper; transient failures retry with exponential backoff (<code>attempts</code>, <code>retry_after</code>).</p>
 
   <h2>Activity Feed</h2>
 

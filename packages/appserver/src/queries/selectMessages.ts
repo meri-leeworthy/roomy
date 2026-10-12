@@ -21,6 +21,7 @@
  */
 
 import type { DbLike } from "../db/types.ts";
+import { selectEmbedJsonByUrl } from "../embed/store.ts";
 import { decodeContent } from "../db/content.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
 import { hydrateProfiles, resolveProfiles } from "./profileStore.ts";
@@ -230,6 +231,14 @@ export async function selectMessages(
   db: DbLike,
   scope: SelectScope,
   viewerDid?: string,
+  /**
+   * The global `link_embeds` store to hydrate link cards from. Optional
+   * because a per-space handle cannot reach it — the per-space DB and the
+   * store are separate databases on separate workers — so a caller that has
+   * the global handle passes it, and a caller that does not (a raw test
+   * adapter) renders bare links.
+   */
+  globalDb?: DbLike | null,
 ): Promise<{ messages: MessageDto[]; nextCursor: string | null }> {
   // ── Step 1: pull the base rows ────────────────────────────────────────
   let baseRows: BaseRow[];
@@ -316,6 +325,7 @@ export async function selectMessages(
       db,
       { kind: "ids", ids: [...new Set(forwardTargets)], forwardChain: [...chain, ...forwardTargets] },
       viewerDid,
+      globalDb,
     );
     for (const orig of originals) forwardOriginalDto.set(orig.id, orig);
   }
@@ -440,8 +450,10 @@ export async function selectMessages(
   }
 
   // ── Step 3b: batch-fetch enriched link embed data ────────────────────
-  // Fetch cached embed data for all link URLs found in this page.
-  // We need to collect the link URLs first, then query comp_embed_link_data.
+  // The enrichment lives in the global store, keyed by URL, so it is fetched
+  // from there by the URLs this page holds rather than joined to the
+  // per-space rows above — the two are separate DBs, so no statement can span
+  // them.
   const linkUrls = new Set<string>();
   for (const e of embedRows) {
     if (e.mime_type === "text/uri-list") {
@@ -450,19 +462,12 @@ export async function selectMessages(
   }
 
   const linkEmbedDataMap = new Map<string, Record<string, unknown> | null>();
-  if (linkUrls.size > 0) {
-    const urlList = [...linkUrls];
-    const ph = urlList.map(() => "?").join(",");
-    const linkDataRows = await db
-      .query(
-        `select entity, embed_json from comp_embed_link_data
-          where entity in (${ph})`,
-      )
-      .all<{ entity: string; embed_json: string | null }>([...urlList]);
-    for (const row of linkDataRows) {
+  if (linkUrls.size > 0 && globalDb) {
+    const stored = await selectEmbedJsonByUrl(globalDb, [...linkUrls]);
+    for (const [url, embedJson] of stored) {
       linkEmbedDataMap.set(
-        row.entity,
-        row.embed_json ? (JSON.parse(row.embed_json) as Record<string, unknown>) : null,
+        url,
+        embedJson ? (JSON.parse(embedJson) as Record<string, unknown>) : null,
       );
     }
   }

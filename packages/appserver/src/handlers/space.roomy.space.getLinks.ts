@@ -17,8 +17,8 @@
  */
 
 import { createAccessMemo, roomAccessMany } from "../auth/access.ts";
-import { openSpaceDb } from "../db/db.ts";
-import { cursorForRow, dedupeLinks, linkTimestamp, listLinks } from "../queries/links.ts";
+import { openSpaceDb, tryOpenGlobalDb } from "../db/db.ts";
+import { cursorForRow, dedupeLinks, hydrateLinkEmbeds, linkTimestamp, listLinks } from "../queries/links.ts";
 import { parseUserDid, requireSpaceRead } from "../xrpc/authGuards.ts";
 import { optionalInt, optionalString, requireString } from "../xrpc/params.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
@@ -82,6 +82,8 @@ export const getSpaceLinksHandler: QueryHandler<
         (r) => accessByRoom.get(r.room_id)?.canRead ?? false,
       );
       const deduped = dedupeLinks(readable);
+      const globalDb = tryOpenGlobalDb();
+      if (globalDb) await hydrateLinkEmbeds(globalDb, deduped);
 
       let nextCursor: string | null = null;
       if (hasMore && deduped.length > 0) {

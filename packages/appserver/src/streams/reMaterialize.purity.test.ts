@@ -52,6 +52,13 @@ import { READSTATE_SCHEMA_VERSION } from "../db/readStateDb.ts";
 import type { DbLike } from "../db/types.ts";
 import { reMaterializeFromLocalEvents } from "./reMaterialize.ts";
 import { StreamManager } from "./StreamManager.ts";
+import { selectMessages } from "../queries/selectMessages.ts";
+import {
+  _resetEmbedSweeper,
+  _startSweeperNoLoop,
+  stopEmbedSweeper,
+  sweepCycle,
+} from "../embed/sweeper.ts";
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const ADMIN = UserDid.assert("did:plc:purity-admin");
@@ -96,16 +103,24 @@ describe("materialisation purity", () => {
   let pool: DatabasePool;
   let router: DbLike;
   let spacesDir: string;
+  let globalPath: string;
   let nextSpace = 0;
   let streamDid: StreamDid;
 
   beforeAll(async () => {
     spacesDir = mkdtempSync(join(tmpdir(), "roomy-purity-"));
+    // The global DB is a FILE, not `:memory:`, because a `:memory:` DB in a
+    // worker is private to that worker: the global worker's copy would not be
+    // the one a per-space worker's `global()` route reaches, so the link-embed
+    // store would be empty on every read that crosses workers. The space and
+    // read-state DBs stay in memory — a per-space DB is pinned to one worker by
+    // `hashSpace`, so both its writer and its readers land on the same one.
+    globalPath = join(spacesDir, "..", "global.sqlite");
     pool = new DatabasePool(1, join(THIS_DIR, "../db/worker.ts"));
     await pool.init({
       readStateDbPath: ":memory:",
       eventsDbPath: ":memory:",
-      globalDbPath: ":memory:",
+      globalDbPath: globalPath,
       spacesDir,
       readStateSchemaVersion: READSTATE_SCHEMA_VERSION,
       spaceSchemaVersion: SPACE_SCHEMA_VERSION,
@@ -117,6 +132,9 @@ describe("materialisation purity", () => {
   afterAll(async () => {
     await pool.close();
     rmSync(spacesDir, { recursive: true, force: true });
+    for (const suffix of ["", "-wal", "-shm"]) {
+      rmSync(globalPath + suffix, { force: true });
+    }
   });
 
   beforeEach(() => {
@@ -354,6 +372,85 @@ describe("materialisation purity", () => {
       .get<{ created_at: number }>(streamDid);
     expect(row!.created_at).toBeGreaterThanOrEqual(before);
     expect(row!.created_at).toBeLessThanOrEqual(after);
+  });
+
+  /**
+   * Enrich a URL through the real sweeper path, so the store it writes is
+   * covered by the two-derivation comparison below.
+   *
+   * The sweeper is the one writer of the store, and it is not part of
+   * materialisation — which is exactly why the store must be outside the
+   * per-space DB. This drives it against a stubbed fetch so no network call is
+   * made.
+   */
+  async function enrichUrlThroughSweeper(url: string): Promise<void> {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> =>
+      Promise.resolve(
+        new Response(
+          '<html><head><meta property="og:title" content="Purity Link" />' +
+            '<meta property="og:description" content="enriched" /></head></html>',
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        ),
+      )) as typeof globalThis.fetch;
+    try {
+      await stopEmbedSweeper();
+      _startSweeperNoLoop({ globalDb: router.global!() });
+      await sweepCycle(router.global!());
+      await stopEmbedSweeper();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  test("a rebuilt space serves enriched link cards without the sweeper having run", async () => {
+    // P6: the enrichment is a function of an outbound fetch, not of the log, so
+    // it must survive a re-derivation that never runs a sweeper. Before the
+    // store moved out, the rebuilt space's `comp_embed_link_data` was simply
+    // empty and the message rendered a bare link.
+    await seedRichLog();
+    await materialiseFromLog();
+
+    const url = "https://example.com/a";
+    const messageId = await router.forSpace!(streamDid)
+      .query(
+        `select el.entity as url, e.room as message_id
+           from comp_embed_link el join entities e on e.id = el.entity
+          limit 1`,
+      )
+      .get<{ url: string; message_id: string }>();
+    expect(messageId).not.toBeNull();
+
+    await enrichUrlThroughSweeper(url);
+
+    const spaceDb = router.forSpace!(streamDid);
+    const enriched = await selectMessages(
+      spaceDb,
+      { kind: "ids", ids: [messageId!.message_id] },
+      undefined,
+      router.global!(),
+    );
+    expect(enriched.messages[0]?.linkEmbeds?.[0]?.embed).toMatchObject({
+      t: "Purity Link",
+    });
+
+    // Re-derive the space from the log into a fresh DB — the rebuild path,
+    // which runs no sweeper and cannot re-fetch anything.
+    markCanonicalUnupgradable();
+    await materialiseFromLog();
+
+    const rebuilt = await selectMessages(
+      router.forSpace!(streamDid),
+      { kind: "ids", ids: [messageId!.message_id] },
+      undefined,
+      router.global!(),
+    );
+    expect(rebuilt.messages[0]?.linkEmbeds?.[0]?.embed).toMatchObject({
+      t: "Purity Link",
+    });
   });
 
   test("a replay invalidates the read-path caches instead of merging into them", async () => {

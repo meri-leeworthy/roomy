@@ -73,9 +73,14 @@ export const GLOBAL_MIGRATIONS = {
   // populates it on every open. The async task seeds the rows of an existing
   // DB, whose entity_space rows predate the trigger.
   "11": { kind: "data" },
+  // link_embeds, the enriched link metadata store. Structural: schema-global.sql
+  // creates the table on every open. Its rows are copied in by the v5 per-space
+  // migration (which runs over each space before dropping the per-space table
+  // it replaces), so there is no global-side task.
+  "12": { kind: "structural" },
   // Next global schema change goes here, e.g.:
-  //   "12": { kind: "structural" },   // table added to schema-global.sql
-  //   "12": { kind: "data" },         // plus a task in GLOBAL_MIGRATION_TASKS
+  //   "13": { kind: "structural" },   // table added to schema-global.sql
+  //   "13": { kind: "data" },         // plus a task in GLOBAL_MIGRATION_TASKS
 } as const satisfies Record<string, GlobalMigrationEntry>;
 
 /**

@@ -73,10 +73,11 @@ type DataRow = {
   attempts: number;
   retry_after: number | null;
 };
+/** The store row for `url` — enrichment lives in the global `link_embeds`. */
 function dataRow(db: Database, url: string): DataRow | null {
   const row = db
     .query<DataRow, [string]>(
-      "select embed_json, attempts, retry_after from comp_embed_link_data where entity = ?",
+      "select embed_json, attempts, retry_after from link_embeds where url = ?",
     )
     .get(url);
   return row ?? null;
@@ -84,29 +85,29 @@ function dataRow(db: Database, url: string): DataRow | null {
 
 const EMBED: Embed = { v: "1", ts: "x", ty: "link", t: "T" };
 
-describe("embed retry-with-backoff (per-space storeEmbedData)", () => {
+describe("embed retry-with-backoff (storeEmbedData)", () => {
   test("transient failure schedules a retry with escalating backoff", async () => {
-    const { db, asyncDb } = freshDb();
-    seedLink(db, "https://a.example");
+    const { db, asyncDb } = freshGlobalDb();
+    const url = "https://a.example";
 
     // First transient failure: attempts=1, retry_after ~1m in the future.
-    await storeEmbedData(asyncDb, "https://a.example", { status: "transient" });
-    let row = dataRow(db, "https://a.example")!;
+    await storeEmbedData(asyncDb, url, { status: "transient" });
+    let row = dataRow(db, url)!;
     expect(row.attempts).toBe(1);
     expect(row.retry_after).not.toBeNull();
     expect((row.retry_after ?? 0) > Date.now()).toBe(true); // in the future
     const firstRetry = row.retry_after!;
 
     // Second transient failure: attempts=2, backoff escalates (later retry).
-    await storeEmbedData(asyncDb, "https://a.example", { status: "transient" });
-    row = dataRow(db, "https://a.example")!;
+    await storeEmbedData(asyncDb, url, { status: "transient" });
+    row = dataRow(db, url)!;
     expect(row.attempts).toBe(2);
     expect((row.retry_after ?? 0) > firstRetry).toBe(true);
   });
+
   test("a URL that keeps failing transiently is settled at the attempt ceiling", async () => {
-    const { db, asyncDb } = freshDb();
+    const { db, asyncDb } = freshGlobalDb();
     const url = "https://dead.example";
-    seedLink(db, url);
     const ceiling = maxTransientAttempts();
 
     // Every attempt before the ceiling schedules a retry and leaves the row
@@ -128,41 +129,75 @@ describe("embed retry-with-backoff (per-space storeEmbedData)", () => {
   });
 
   test("definitive failure (404 / no-data) settles with no retry", async () => {
-    const { db, asyncDb } = freshDb();
-    seedLink(db, "https://c.example");
-    await storeEmbedData(asyncDb, "https://c.example", { status: "definitive" });
-    const row = dataRow(db, "https://c.example")!;
+    const { db, asyncDb } = freshGlobalDb();
+    const url = "https://c.example";
+    await storeEmbedData(asyncDb, url, { status: "definitive" });
+    const row = dataRow(db, url)!;
     expect(row.embed_json).toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.retry_after).toBeNull();
   });
 
   test("success stores embed data and clears any prior retry state", async () => {
-    const { db, asyncDb } = freshDb();
-    seedLink(db, "https://d.example");
+    const { db, asyncDb } = freshGlobalDb();
+    const url = "https://d.example";
     // Fail transiently first (sets attempts + retry_after), then succeed.
-    await storeEmbedData(asyncDb, "https://d.example", { status: "transient" });
-    await storeEmbedData(asyncDb, "https://d.example", { status: "ok", embed: EMBED });
-    const row = dataRow(db, "https://d.example")!;
+    await storeEmbedData(asyncDb, url, { status: "transient" });
+    await storeEmbedData(asyncDb, url, { status: "ok", embed: EMBED });
+    const row = dataRow(db, url)!;
     expect(row.embed_json).not.toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.retry_after).toBeNull();
   });
 
+  test("a URL enriched once is stored once, however many spaces hold it", async () => {
+    // The store is keyed by URL, so a URL shared in three spaces is one row —
+    // the per-space copy this replaced wrote one per space and made the read
+    // paths unable to serve a space derived by another worker.
+    const { db, asyncDb } = freshGlobalDb();
+    const url = "https://shared.example";
+    await storeEmbedData(asyncDb, url, { status: "ok", embed: EMBED });
+
+    const rows = db
+      .query<{ n: number }, []>("select count(*) as n from link_embeds")
+      .get();
+    expect(rows!.n).toBe(1);
+    expect(dataRow(db, url)!.embed_json).toContain('"T"');
+  });
+
   test("filterPendingUrls (priority) only returns never-attempted links", async () => {
-    const { db, asyncDb } = freshDb();
-    seedLink(db, "https://new.example");
-    seedLink(db, "https://failed.example");
-    await storeEmbedData(asyncDb, "https://failed.example", { status: "transient" });
-    const got = await filterPendingUrls(asyncDb, [
+    const { db: spaceDb, asyncDb } = freshDb();
+    const { db: globalDb, asyncDb: globalAsyncDb } = freshGlobalDb();
+    seedLink(spaceDb, "https://new.example");
+    seedLink(spaceDb, "https://failed.example");
+    await storeEmbedData(globalAsyncDb, "https://failed.example", {
+      status: "transient",
+    });
+    const got = await filterPendingUrls(asyncDb, globalAsyncDb, [
       "https://new.example",
       "https://failed.example",
     ]);
     // Priority is for freshly-detected (never-attempted) links only — a
-    // transiently-failed URL already has a data row (with a future retry_after)
-    // and must wait for its backoff via the backlog, not jump the queue again.
+    // transiently-failed URL already has a store row (with a future
+    // retry_after) and must wait for its backoff via the backlog, not jump the
+    // queue again.
     expect(got).toContain("https://new.example");
     expect(got).not.toContain("https://failed.example");
+  });
+
+  test("filterPendingUrls only returns URLs the space actually holds", async () => {
+    // The per-space side is what narrows the candidates: the store is global,
+    // so a URL enriched by another space must not be prioritised here unless
+    // one of this space's messages contains it.
+    const { db: spaceDb, asyncDb } = freshDb();
+    const { asyncDb: globalAsyncDb } = freshGlobalDb();
+    seedLink(spaceDb, "https://held.example");
+
+    const got = await filterPendingUrls(asyncDb, globalAsyncDb, [
+      "https://held.example",
+      "https://not-held.example",
+    ]);
+    expect(got).toEqual(["https://held.example"]);
   });
 });
 
@@ -329,9 +364,8 @@ describe("fetchEmbedData status classification", () => {
 
 describe("embed attempt ceiling", () => {
   test("a URL that keeps failing transiently is settled at the ceiling", async () => {
-    const { db, asyncDb } = freshDb();
+    const { db, asyncDb } = freshGlobalDb();
     const url = "https://dead.example";
-    seedLink(db, url);
     const ceiling = maxTransientAttempts();
 
     // Every attempt before the ceiling schedules a retry and leaves the row
@@ -356,11 +390,10 @@ describe("embed attempt ceiling", () => {
     // Attempts recorded by a build that had no ceiling exceed the new one.
     // The row must settle rather than be retried forever, or the inherited
     // dead set keeps re-entering the backlog under the new code.
-    const { db, asyncDb } = freshDb();
+    const { db, asyncDb } = freshGlobalDb();
     const url = "https://inherited.example";
-    seedLink(db, url);
     db.run(
-      `insert into comp_embed_link_data (entity, embed_json, attempts, retry_after)
+      `insert into link_embeds (url, embed_json, attempts, retry_after)
        values (?, null, 40, ?)`,
       [url, Date.now() + 60 * 60_000],
     );

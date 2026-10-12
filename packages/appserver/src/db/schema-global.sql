@@ -89,6 +89,32 @@ create table if not exists pending_links (
 ) strict;
 create index if not exists idx_pending_links_created on pending_links(created_at);
 
+-- Enriched link metadata, fetched from the external embed service. Keyed by
+-- the URL itself, so it is the same row for every space that shared the link
+-- and is written ONCE rather than per space.
+--
+-- The value is a function of an outbound HTTP response, not of the event log,
+-- so it does not belong in a per-space projection: a space rebuilt from the
+-- log (or derived on a second worker) would render bare links until its own
+-- sweeper happened to re-fetch them. The read paths join against this table in
+-- JS, after collecting the URLs their page holds.
+--
+-- `embed_json` is null when the service had no data. `retry_after` is a
+-- millisecond epoch: when set (and in the past) the row is a TRANSIENT failure
+-- (timeout / 5xx / network) eligible for re-enrichment; null means no retry is
+-- needed (success, or a definitive failure such as a 404). `attempts` counts
+-- consecutive transient failures for backoff escalation.
+create table if not exists link_embeds (
+  url text primary key,
+  embed_json text, -- JSON-serialized EmbedV1; null when no data
+  attempts integer not null default 0, -- consecutive transient-failure count
+  retry_after integer, -- epoch ms; transient failures retry after this backoff, else null
+  fetched_at integer not null default (unixepoch() * 1000),
+  created_at integer not null default (unixepoch() * 1000),
+  updated_at integer not null default (unixepoch() * 1000)
+) strict;
+create index if not exists idx_link_embeds_retry_after on link_embeds(retry_after);
+
 -- Global mentions index. One row per (mentioned DID, message). Dual-written
 -- during materialization so a client subscribed to the `mentions:<did>` sync
 -- topic can backfill history via `space.roomy.mention.getMentions` with a

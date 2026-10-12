@@ -316,6 +316,7 @@ async function recomputeSortIdxFromLog(
 const SPACE_MIGRATION_TASKS: Record<SpaceAsyncVersion, SpaceMigrationTask> = {
   "3": recomputeSortIdxFromLog,
   "4": moveSpaceHandleToGlobal,
+  "5": moveLinkEmbedsToGlobal,
 };
 
 type SpaceMigrationTask = (
@@ -387,6 +388,121 @@ async function moveSpaceHandleToGlobal(
 
   await spaceDb.run("alter table comp_space drop column handle");
   log.info("startup", `moved the DNS handle of ${streamDid} into the global store`);
+}
+
+/**
+ * Copy a space's enriched link rows out of the per-space
+ * `comp_embed_link_data` into the global `link_embeds` store.
+ *
+ * The value is fetched from an external service, not derived from the log, so
+ * it could not be reproduced by a replay and did not belong in a per-space
+ * projection. It is now keyed by URL in the global DB, where the sweeper
+ * already works, and read paths resolve it from there.
+ *
+ * Called from the v5 migration (which then drops the table) and from the boot
+ * sweep's fallback to a blue-green rebuild, whose fresh DB has no such table
+ * and would otherwise discard the rows with the old file. Idempotent: the
+ * store UPSERTs on the URL, so a re-run rewrites the same rows.
+ *
+ * `insert or ignore` on the store's behalf is deliberately NOT used — a row
+ * carried across must not overwrite one the sweeper has since re-fetched and
+ * settled, but the migration runs before any sweep of this build, and a
+ * re-fetch that lands first carries strictly fresher state. Last writer wins is
+ * the same rule the store already applies to two sweeps racing the same URL.
+ */
+export async function carryLinkEmbedsToGlobal(
+  db: DbLike,
+  streamDid: StreamDid,
+): Promise<void> {
+  const spaceDb = db.forSpace?.(streamDid);
+  if (!spaceDb) return;
+  const globalDb = db.global?.();
+  if (!globalDb) return;
+
+  // The source may already be on the current schema — a fresh DB is created
+  // from a `schema-space.sql` that no longer declares the table — in which case
+  // there is nothing to carry and the copy is a no-op rather than an error.
+  const tables = await spaceDb
+    .query(
+      "select name from sqlite_master where type = 'table' and name = 'comp_embed_link_data'",
+    )
+    .all<{ name: string }>();
+  if (tables.length === 0) return;
+
+  const rows = await spaceDb
+    .query(
+      `select entity, embed_json, attempts, retry_after, fetched_at, created_at, updated_at
+         from comp_embed_link_data`,
+    )
+    .all<{
+      entity: string;
+      embed_json: string | null;
+      attempts: number;
+      retry_after: number | null;
+      fetched_at: number;
+      created_at: number;
+      updated_at: number;
+    }>();
+  if (rows.length === 0) return;
+
+  for (let i = 0; i < rows.length; i += APPLY_CHUNK) {
+    await globalDb.transaction(
+      rows.slice(i, i + APPLY_CHUNK).map((r) => ({
+        type: "run" as const,
+        sql: `insert into link_embeds
+                (url, embed_json, attempts, retry_after, fetched_at, created_at, updated_at)
+              values (?, ?, ?, ?, ?, ?, ?)
+              on conflict(url) do update set
+                embed_json = excluded.embed_json,
+                attempts = excluded.attempts,
+                retry_after = excluded.retry_after,
+                fetched_at = excluded.fetched_at,
+                updated_at = excluded.updated_at`,
+        params: [
+          r.entity,
+          r.embed_json,
+          r.attempts,
+          r.retry_after,
+          r.fetched_at,
+          r.created_at,
+          r.updated_at,
+        ],
+      })),
+    );
+  }
+  log.info(
+    "startup",
+    `moved ${rows.length} enriched link row(s) of ${streamDid} into the global store`,
+  );
+}
+
+/**
+ * v5: move the enriched link metadata to the global store and drop the
+ * per-space table.
+ *
+ * The copy must happen before the DDL removes the rows, and the worker applies
+ * structural `up`s at open — ahead of this task — so the removal is here rather
+ * than in the version's `up`.
+ */
+async function moveLinkEmbedsToGlobal(
+  db: DbLike,
+  streamDid: StreamDid,
+): Promise<void> {
+  await carryLinkEmbedsToGlobal(db, streamDid);
+  const spaceDb = db.forSpace?.(streamDid);
+  if (!spaceDb) {
+    throw new Error(`moveLinkEmbedsToGlobal: no per-space handle for ${streamDid}`);
+  }
+
+  const tables = await spaceDb
+    .query(
+      "select name from sqlite_master where type = 'table' and name = 'comp_embed_link_data'",
+    )
+    .all<{ name: string }>();
+  if (tables.length === 0) return;
+
+  await spaceDb.run("drop table comp_embed_link_data");
+  log.info("startup", `dropped the per-space embed link table of ${streamDid}`);
 }
 
 /**

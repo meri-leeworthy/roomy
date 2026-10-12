@@ -237,23 +237,6 @@ create table if not exists comp_embed_link (
   updated_at integer not null default (unixepoch() * 1000)
 ) strict;
 
--- Cached enriched embed data fetched from the external embed service.
--- Populated asynchronously after materialization by the embed enricher.
--- `embed_json` is null when the service had no data. `retry_after` is a
--- millisecond epoch: when set (and in the past) the row is a TRANSIENT
--- failure (timeout / 5xx / network) eligible for re-enrichment; null means
--- no retry is needed (success, or a definitive failure such as a 404).
--- `attempts` counts consecutive transient failures for backoff escalation.
-create table if not exists comp_embed_link_data (
-  entity text primary key references entities(id) on delete cascade, -- URI
-  embed_json text, -- JSON-serialized EmbedV1; null when no data
-  attempts integer not null default 0, -- consecutive transient-failure count
-  retry_after integer, -- epoch ms; transient failures retry after this backoff, else null
-  fetched_at integer not null default (unixepoch() * 1000),
-  created_at integer not null default (unixepoch() * 1000),
-  updated_at integer not null default (unixepoch() * 1000)
-) strict;
-
 create table if not exists comp_last_read (
   entity text primary key references entities(id) on delete cascade,
   last_read integer not null,

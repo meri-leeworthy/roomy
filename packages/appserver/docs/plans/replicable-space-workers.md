@@ -59,9 +59,9 @@ These keep the Rust worker from being written twice:
 
 Remaining impurities, from the earlier scaling analysis:
 
-- `setHandle` still writes `comp_space.handle` with no event.
-- Unread counters are still incremented and decremented. Step 3 makes them a recomputation from `last_read`.
-- `comp_embed_link_data` has no log provenance and is read on the message and activity-feed hot paths.
+- ~~`setHandle` still writes `comp_space.handle` with no event.~~ Moved to the global `space_handles` store (Step 2).
+- ~~Unread counters are still incremented and decremented.~~ Step 3 made them a recomputation from `last_read`.
+- ~~`comp_embed_link_data` has no log provenance and is read on the message and activity-feed hot paths.~~ Moved to the global `link_embeds` store (Step 4).
 - Profile hydration still runs on the live write path.
 - Search, embed and push are still process-local queues.
 

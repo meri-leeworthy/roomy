@@ -1,7 +1,7 @@
 # Pure Materialisation
 
 **Date:** 2026-10-02
-**Status:** Steps 1–3 landed; steps 4 and 5 not started. Per-space schema changes
+**Status:** Steps 1–4 landed; step 5 not started. Per-space schema changes
 now migrate in place before falling back to a rebuild (§6a).
 **Owner:** appserver
 
@@ -32,8 +32,9 @@ are visible today, before any replication:
   (`handlers/space.roomy.space.setHandle.ts:65-73`), so a space rebuilt from the
   log lost its handle. (Resolved by Step 2: the handle now lives in the global
   DB, since its value comes from the PDS/DNS rather than the log.) Embed data
-  (`comp_embed_link_data`) is written by the sweeper, never by the log, and is
-  read on the message and activity-feed paths.
+  (`comp_embed_link_data`) was written by the sweeper, never by the log, and read
+  on the message and activity-feed paths. (Resolved by Step 4: it moved to the
+  global `link_embeds` store, keyed by URL.)
 
 This matters because the per-space DB is the unit of scale. Making it a
 deterministic projection of the log is what lets more than one process derive it,
@@ -115,14 +116,15 @@ which is exactly where the current complexity, and the replay hazard, come from.
 | ~~`queries/joinedSpaces.ts:186,191,218,223`~~                             | ~~`entities` seeding + `edges` (`joinedSpace` / `leftSpace`)~~ | Deleted by Step 2 — exported, no production caller (`createSpace` uses `recordGlobalMembership`).                         |
 | `auth/access.ts:265,581` → `queries/roomAccessProjection.ts:262`          | `room_access` (read-path warm)                             | Derived cache of log data. Benign **provided** replay invalidates it — which `applyBatch.ts:248-272` does.                 |
 | `queries/threadActivity.ts:233` → `queries/roomActivityProjection.ts:350` | `room_activity` (read-path warm)                           | Same.                                                                                                                      |
-| `embed/enricher.ts:298,329,382`                                           | `comp_embed_link_data`                                     | **Not derived from the log at all.** Moves out (see §3.5).                                                                 |
+| `embed/enricher.ts` (resolved by Step 4)                                  | `link_embeds` (global)                                     | **Not derived from the log at all.** Moved out (see §3.5).                                                                 |
 
 The read-path warms are acceptable: they are caches of values the log determines,
 and a replay invalidates them (it never populates them) so the next read warms
 them from the replayed tables — audited in Step 2. The rule to hold is _a
 non-materialisation writer may only write a value the log already determines, and
-must be invalidated by replay._ `comp_embed_link_data` still breaks that rule
-(Step 4).
+must be invalidated by replay._ `comp_embed_link_data` broke that rule; Step 4
+removed it from the per-space DB rather than teaching a replay to invalidate it,
+because the log determines nothing about it.
 
 ### 3.4 Clock columns (D, cosmetic)
 
@@ -264,7 +266,7 @@ The same file pins that a replay invalidates those caches instead of merging int
 a stale row. `spaceMigrations.test.ts` covers the handle moving into the global
 store and surviving a rebuild.
 
-### Step 3 — Move unread out of the materialiser
+### Step 3 — Move unread out of the materialiser — **landed**
 
 **Change.** Delete the read-state writes from `applyBundle`, `moveMessages` and
 `deleteMessage`, along with the `readStateDb` parameter. Unread becomes a value
@@ -287,19 +289,29 @@ change in every place that reads `unread_count` today.
 Replaying a space's full log from empty produces the same unread state as
 materialising it live.
 
-### Step 4 — Move embed data out of the per-space DB
+### Step 4 — Move embed data out of the per-space DB — **landed**
 
-**Change.** `comp_embed_link_data` is written only by the sweeper and read by
-`selectMessages`, `activityFeed` and `links`. Move it to the global/gateway layer
-keyed by URL, where the sweeper already works, and have the read paths join
-against it in JS rather than reading a per-space row. The `comp_embed_link`
+**Change.** `comp_embed_link_data` was written only by the sweeper and read by
+`selectMessages`, `activityFeed` and `links`. It now lives in the global
+`link_embeds` store, keyed by URL — the entity IS the bare URL, so nothing about
+the row is space-scoped — and the read paths hydrate from it in JS: the
+per-space DB and the global DB are separate files, so no statement can join
+them. `filterPendingUrls` compares the per-space `comp_embed_link` set against
+the store in two queries rather than a cross-DB join. The `comp_embed_link`
 (which links a message contains) stays per-space — that part _is_ log-derived.
+
+The per-space table is dropped by the v5 migration, which copies each space's
+rows into the store first (the two-phase data-then-structural shape Step 2
+established for the handle); a rebuild carries them across before the swap for
+the same reason.
 
 **Why.** It is the one per-space table with no log provenance, and it is on the
 read hot path, so any second derivation of a space renders bare links.
 
 **Acceptance.** A freshly rebuilt space serves enriched link cards without having
-run the sweeper.
+run the sweeper — `reMaterialize.purity.test.ts` enriches a URL through the real
+sweeper, re-derives the space from the log, and asserts both derivations render
+the same card.
 
 ### Step 5 — Take network and process-local work off the path
 
@@ -322,15 +334,16 @@ failing the test on `fetch`). Background loops run on exactly one owner.
 | --- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
 | P1  | Two derivations of the same log produce identical `sort_idx` for every message | **Step 1** — `reMaterialize.blueGreen.test.ts` (live write vs rebuild), `applyBatch.test.ts` (same log twice) |
 | P2  | Equal-timestamp messages order by log position, not randomly                   | **Step 1** — `applyBatch.test.ts`                                                                             |
-| P3  | For every per-space table, rebuild-from-log equals live state                  | Step 2                                                                                                        |
-| P4  | Applying a batch twice leaves read-state unchanged                             | Step 3                                                                                                        |
+| P3  | For every per-space table, rebuild-from-log equals live state                  | **Step 2** — `reMaterialize.purity.test.ts`                                                                     |
+| P4  | Applying a batch twice leaves read-state unchanged                             | **Step 3**                                                                                                      |
 | P5  | Materialisation performs no outbound network I/O                               | Step 5                                                                                                        |
-| P6  | A rebuilt space serves enriched links without the sweeper                      | Step 4                                                                                                        |
-| P7  | No per-space table has a writer outside materialisation (+ documented caches)  | Steps 2, 4                                                                                                    |
+| P6  | A rebuilt space serves enriched links without the sweeper                      | **Step 4** — `reMaterialize.purity.test.ts` (enrich, rebuild, render)                                          |
+| P7  | No per-space table has a writer outside materialisation (+ documented caches)  | **Steps 2, 4** — the rebuild-equality harness                                                                    |
 
 The general form of P3/P7 is worth automating: a harness that materialises a log
-into `:memory:`, snapshots every table, rebuilds, and diffs. That test fails today
-for `comp_embed_link_data`, and would have caught `setHandle`.
+into `:memory:`, snapshots every table, rebuilds, and diffs. `reMaterialize.purity.test.ts`
+is that harness; before Step 4 it failed for `comp_embed_link_data`, and it would
+have caught `setHandle`.
 
 ## 6a. Per-space schema migration
 

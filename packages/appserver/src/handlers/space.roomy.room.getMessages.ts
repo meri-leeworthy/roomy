@@ -5,7 +5,7 @@
  * older than the cursor are returned.
  */
 
-import { openSpaceDbForEntity } from "../db/db.ts";
+import { openSpaceDbForEntity, tryOpenGlobalDb } from "../db/db.ts";
 import { prioritiseLinksForRead } from "../embed/sweeper.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
@@ -64,7 +64,7 @@ export const getMessagesHandler: QueryHandler<
             roomId,
             limit,
             cursor,
-          }, userDid ?? "");
+          }, userDid ?? "", tryOpenGlobalDb());
           s.setAttribute("roomy.message_count", result.messages.length);
           return result;
         },

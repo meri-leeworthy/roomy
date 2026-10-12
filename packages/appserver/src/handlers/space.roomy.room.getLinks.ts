@@ -16,8 +16,8 @@
  */
 
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
-import { openSpaceDbForEntity } from "../db/db.ts";
-import { cursorForRow, dedupeLinks, linkTimestamp, listLinks } from "../queries/links.ts";
+import { openSpaceDbForEntity, tryOpenGlobalDb } from "../db/db.ts";
+import { cursorForRow, dedupeLinks, hydrateLinkEmbeds, linkTimestamp, listLinks } from "../queries/links.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { optionalInt, optionalString, requireString } from "../xrpc/params.ts";
@@ -72,8 +72,11 @@ export const getRoomLinksHandler: QueryHandler<
 
       // A single-room read: the room is already verified readable, so no
       // per-link access check is needed. Dedup attachment-encoded duplicates
-      // of the same URL (see dedupeLinks).
+      // of the same URL (see dedupeLinks), then resolve the surviving URLs
+      // against the global store.
       const deduped = dedupeLinks(raw);
+      const globalDb = tryOpenGlobalDb();
+      if (globalDb) await hydrateLinkEmbeds(globalDb, deduped);
 
       let nextCursor: string | null = null;
       if (hasMore && deduped.length > 0) {

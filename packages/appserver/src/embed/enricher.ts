@@ -1,7 +1,7 @@
 /**
  * Embed enricher: detects URLs in message content, enriches them with link
- * metadata via the in-appserver OG + oEmbed pipeline, and caches results in
- * `comp_embed_link_data`.
+ * metadata via the in-appserver OG + oEmbed pipeline, and caches results in the
+ * global `link_embeds` store (see `./store.ts`).
  *
  * Enrichment is best-effort and non-blocking — failures are settled (or
  * scheduled for retry) but never crash the materialization pipeline.
@@ -9,8 +9,14 @@
 
 import type { DbLike } from "../db/types.ts";
 import type { Embed } from "./types.ts";
-import { openSpaceDb } from "../db/db.ts";
 import { probeLinkMetadata } from "./metadata.ts";
+import {
+  filterUnevaluatedUrls,
+  selectAttempts,
+  settleLinkEmbeds,
+  writeSettledLinkEmbed,
+  writeTransientLinkEmbed,
+} from "./store.ts";
 
 /**
  * In-flight dedup: maps a URL to the enrichment promise currently fetching
@@ -115,24 +121,34 @@ export async function fetchEmbedData(
 // ─── Database helpers ────────────────────────────────────────────────────
 
 /**
- * Of the given URLs, return those that are still pending enrichment —
- * present in `comp_embed_link` but with no `comp_embed_link_data` row yet.
- * Used by the sweeper to prioritise freshly-detected links without
- * re-fetching ones that are already enriched (e.g. a popular URL reposted).
+ * Of the given URLs, return those that are still pending enrichment — held by
+ * a `comp_embed_link` row in `spaceDb` but with no row yet in the global
+ * `link_embeds` store.
+ *
+ * Two queries rather than one join: which links a message contains is
+ * log-derived and stays per-space, while the enriched metadata is a function of
+ * an outbound fetch and lives in the global DB — separate files, so no single
+ * statement can span them. The per-space side narrows the candidates; the store
+ * lookup then drops the ones already attempted.
+ *
+ * Used by the sweeper to prioritise freshly-detected links without re-fetching
+ * ones that are already enriched (e.g. a popular URL reposted).
  */
-export async function filterPendingUrls(db: DbLike, urls: string[]): Promise<string[]> {
+export async function filterPendingUrls(
+  spaceDb: DbLike,
+  globalDb: DbLike,
+  urls: string[],
+): Promise<string[]> {
   if (urls.length === 0) return [];
   const placeholders = urls.map(() => "?").join(",");
-  const rows = await db
+  const rows = await spaceDb
     .query(
-      `select el.entity
-         from comp_embed_link el
-         left join comp_embed_link_data eld on eld.entity = el.entity
-        where eld.entity is null
-          and el.entity in (${placeholders})`,
+      `select entity from comp_embed_link where entity in (${placeholders})`,
     )
     .all<{ entity: string }>([...urls]);
-  return rows.map((r) => r.entity);
+  if (rows.length === 0) return [];
+  const held = rows.map((r) => r.entity);
+  return filterUnevaluatedUrls(globalDb, held);
 }
 
 /**
@@ -282,34 +298,18 @@ export async function storeEmbedData(
   result: FetchResult,
 ): Promise<boolean> {
   if (result.status === "transient") {
-    const row = await db
-      .query(
-        `select attempts from comp_embed_link_data where entity = ?`,
-      )
-      .get<{ attempts: number }>([url]);
-    const attempts = (row?.attempts ?? 0) + 1;
+    const attempts = (await selectAttempts(db, url)) + 1;
     if (attempts >= maxTransientAttempts()) {
       // The ceiling: settle it like a definitive failure. `attempts` is kept
       // (rather than reset) so the row records how many tries the host got.
-      await writeSettled(db, url, null, attempts);
+      await writeSettledLinkEmbed(db, url, null, attempts);
       return true;
     }
-    await db.run(
-      `insert into comp_embed_link_data
-         (entity, embed_json, attempts, retry_after, fetched_at, updated_at)
-       values (?, null, ?, ?, (unixepoch() * 1000), (unixepoch() * 1000))
-       on conflict(entity) do update set
-         embed_json = null,
-         attempts = excluded.attempts,
-         retry_after = excluded.retry_after,
-         fetched_at = excluded.fetched_at,
-         updated_at = excluded.updated_at`,
-      [url, attempts, Date.now() + backoffMs(attempts)],
-    );
+    await writeTransientLinkEmbed(db, url, attempts, Date.now() + backoffMs(attempts));
     return false;
   }
   // Success or definitive failure — settled, no retry.
-  await writeSettled(
+  await writeSettledLinkEmbed(
     db,
     url,
     result.status === "ok" ? JSON.stringify(result.embed) : null,
@@ -317,30 +317,6 @@ export async function storeEmbedData(
   );
   return false;
 }
-
-/** Write a settled row (embed or null) with no pending retry. */
-async function writeSettled(
-  db: DbLike,
-  url: string,
-  embedJson: string | null,
-  attempts: number,
-): Promise<void> {
-  await db.run(
-    `insert into comp_embed_link_data
-       (entity, embed_json, attempts, retry_after, fetched_at, updated_at)
-     values (?, ?, ?, null, (unixepoch() * 1000), (unixepoch() * 1000))
-     on conflict(entity) do update set
-       embed_json = excluded.embed_json,
-       attempts = excluded.attempts,
-       retry_after = null,
-       fetched_at = excluded.fetched_at,
-       updated_at = excluded.updated_at`,
-    [url, embedJson, attempts],
-  );
-}
-
-/** Max URLs per settle statement — stays well inside SQLite's bind limit. */
-const SETTLE_CHUNK = 200;
 
 /**
  * Settle URLs that are already at or past {@link maxTransientAttempts}, WITHOUT
@@ -374,27 +350,12 @@ export async function settleOverCeiling(
   db: DbLike,
   entries: ReadonlyArray<{ url: string; attempts: number }>,
 ): Promise<void> {
-  for (let i = 0; i < entries.length; i += SETTLE_CHUNK) {
-    const chunk = entries.slice(i, i + SETTLE_CHUNK);
-    const valuesPh = chunk.map(() => "(?, null, ?, null, (unixepoch() * 1000), (unixepoch() * 1000))").join(", ");
-    const params = chunk.flatMap((e) => [e.url, e.attempts]);
-    await db.run(
-      `insert into comp_embed_link_data
-         (entity, embed_json, attempts, retry_after, fetched_at, updated_at)
-       values ${valuesPh}
-       on conflict(entity) do update set
-         embed_json = excluded.embed_json,
-         attempts = excluded.attempts,
-         retry_after = null,
-         fetched_at = excluded.fetched_at,
-         updated_at = excluded.updated_at`,
-      params,
-    );
-  }
+  await settleLinkEmbeds(db, entries);
 }
 
 /**
- * Enrich a single URL: fetch embed data and store in the database.
+ * Enrich a single URL: fetch embed data and store it in the global
+ * `link_embeds` store.
  *
  * Deduplicated via `inFlightLinks` — concurrent calls for the same URL
  * share one fetch + one write.
@@ -445,10 +406,13 @@ export async function enrichLink(
 }
 
 /**
- * Enrich a single URL and store the result to EVERY per-space DB where it is
- * pending (a URL can appear in multiple spaces). Fetches ONCE per URL (reusing
- * the {@link inFlightLinks} dedup pattern shared with {@link enrichLink}), then
- * calls {@link storeEmbedData} for each space's DB.
+ * Enrich a single URL into the global store, where every space that shared it
+ * reads the result.
+ *
+ * A URL is pending in one row per (space, message) in `pending_links`, so the
+ * sweeper selects the same URL several times in a batch; the
+ * {@link inFlightLinks} dedup means the fetch happens once and the single
+ * global write settles it for all of them.
  *
  * Returns the fetch outcome — `{ status, embed }` where `status` is
  * `"ok"` (embed stored), `"definitive"` (settled: no data / stable 4xx — the
@@ -467,8 +431,8 @@ export type EnrichOutcome =
   | { status: "transient"; embed: null };
 
 export async function enrichLinkAcrossSpaces(
+  globalDb: DbLike,
   url: string,
-  spaces: string[],
   signal?: AbortSignal,
 ): Promise<EnrichOutcome> {
   const existing = inFlightLinks.get(url);
@@ -477,10 +441,7 @@ export async function enrichLinkAcrossSpaces(
   const promise = (async () => {
     try {
       const result = await fetchEmbedData(url, signal);
-      let abandoned = false;
-      for (const spaceDid of spaces) {
-        abandoned = (await storeEmbedData(openSpaceDb(spaceDid), url, result)) || abandoned;
-      }
+      const abandoned = await storeEmbedData(globalDb, url, result);
       if (result.status === "ok") return { status: "ok" as const, embed: result.embed };
       if (abandoned) return { status: "abandoned" as const, embed: null };
       return { status: result.status, embed: null };

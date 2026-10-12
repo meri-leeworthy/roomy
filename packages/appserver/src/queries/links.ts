@@ -53,6 +53,7 @@
 
 import { decodeTime } from "ulidx";
 import type { DbLike } from "../db/types.ts";
+import { selectEmbedJsonByUrl } from "../embed/store.ts";
 
 export interface LinkDto {
   /** The shared URL. */
@@ -86,6 +87,12 @@ export interface RawLinkRow {
  * `dedupeLinks` does that. `hasMore` reports whether more than `limit` raw
  * rows existed (before dedup), so callers can decide whether a next page is
  * available without over-fetching.
+ *
+ * `embed_json` is null on every row: the enrichment lives in the global
+ * `link_embeds` store, keyed by URL, and a per-space statement cannot reach
+ * another database. `hydrateLinkEmbeds` fills it from the store once the page
+ * has been deduped, so the values come from the URLs that survive pagination
+ * rather than from every row the page over-fetched.
  */
 export async function listLinks(
   db: DbLike,
@@ -133,12 +140,10 @@ export async function listLinks(
       `select el.entity as url,
               msg.room as room_id,
               link.room as message_id,
-              coalesce(msg.sort_idx, msg.id) as sort_key,
-              eld.embed_json as embed_json
+              coalesce(msg.sort_idx, msg.id) as sort_key
          from entities link
          join entities msg on msg.id = link.room
          left join comp_embed_link el on el.entity = link.id
-         left join comp_embed_link_data eld on eld.entity = link.id
         where ${whereClause}
         order by sort_key desc, el.entity asc
         limit ?`,
@@ -148,16 +153,39 @@ export async function listLinks(
       room_id: string;
       message_id: string;
       sort_key: string;
-      embed_json: string | null;
     }>([...params, limit + 1]);
 
   if (rows.length === 0) return { links: [], hasMore: false };
 
   const hasMore = rows.length > limit;
-  return {
-    links: (hasMore ? rows.slice(0, limit) : rows) as RawLinkRow[],
-    hasMore,
-  };
+  const links = (hasMore ? rows.slice(0, limit) : rows).map((r) => ({
+    ...r,
+    embed_json: null,
+  })) as RawLinkRow[];
+  return { links, hasMore };
+}
+
+/**
+ * Fill each row's `embed_json` from the global `link_embeds` store.
+ *
+ * Keyed by the row's own `url`, exactly as the store's own key: a link
+ * entity's id IS the URL the enricher wrote. Call AFTER deduping — the page
+ * over-fetches by one row and collapses attachment-encoded duplicates, so this
+ * binds the URLs that are actually served rather than every raw row the query
+ * returned.
+ *
+ * A row with no store entry keeps a null `embed_json`, which the handlers read
+ * as "no card" — the correct render for a URL the enricher has not reached.
+ */
+export async function hydrateLinkEmbeds(
+  globalDb: DbLike,
+  rows: RawLinkRow[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  const stored = await selectEmbedJsonByUrl(globalDb, rows.map((r) => r.url));
+  for (const row of rows) {
+    row.embed_json = stored.get(row.url) ?? null;
+  }
 }
 
 /**

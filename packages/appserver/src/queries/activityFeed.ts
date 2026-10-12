@@ -13,6 +13,7 @@ import type { UserDid } from "@roomy-space/sdk";
 import { decodeTime } from "ulidx";
 import { decodeContent } from "../db/content.ts";
 import { openSpaceDb } from "../db/db.ts";
+import { selectEmbedJsonByUrl } from "../embed/store.ts";
 import { hydrateProfiles } from "./profileStore.ts";
 import { selectJoinedSpaceDids } from "./userSpaceMembership.ts";
 import { deriveUnreadCounts } from "./readPositions.ts";
@@ -139,6 +140,13 @@ export async function selectActivityFeed(
   mainDb: DbLike,
   userDid: string,
   scope: ActivityFeedScope,
+  /**
+   * The global `link_embeds` store. Optional for the same reason as in
+   * `selectMessages`: a per-space handle cannot reach it, so the caller that
+   * holds the global handle passes it and one that does not renders bare
+   * links.
+   */
+  linkEmbedDb?: DbLike | null,
 ): Promise<{ feed: ActivityFeedItem[]; cursor: string | null }> {
   // Step 0: determine the set of space DIDs from durable membership intent.
   let spaceDids: string[];
@@ -274,23 +282,45 @@ export async function selectActivityFeed(
     arr.push(last);
   }
   const mediaByMsg = new Map<string, Array<{ url: string; type: string; alt?: string; width?: number; height?: number; blurhash?: string; size?: number; length?: number; name?: string }>>();
-  const linkEmbedsByMsg = new Map<string, Array<{ url: string; embed?: Record<string, unknown> | null }>>();
+  const pageLinkUrls = new Set<string>();
+  const linkEmbedUrlsByMsg = new Map<string, string[]>();
   const reactionsByMsg = new Map<string, Array<{ emoji: string; count: number; myReactionId?: string }>>();
   for (const [spaceDid, lastMsgIds] of lastMsgIdsBySpace) {
     const spaceDb = openSpaceDb(spaceDid);
-    const { mediaByMsg: m, linkEmbedsByMsg: l } = await batchFetchEmbeds(spaceDb, lastMsgIds);
+    const { mediaByMsg: m, linkEmbedUrlsByMsg: l, linkUrls } = await batchFetchEmbeds(spaceDb, lastMsgIds);
     for (const [k, v] of m) mediaByMsg.set(k, v);
-    for (const [k, v] of l) linkEmbedsByMsg.set(k, v);
+    for (const [k, v] of l) linkEmbedUrlsByMsg.set(k, v);
+    for (const u of linkUrls) pageLinkUrls.add(u);
     const rxn = await batchFetchReactions(spaceDb, lastMsgIds, userDid);
     for (const [k, v] of rxn) reactionsByMsg.set(k, v);
   }
+
+  // The enrichment is global and keyed by URL, so one lookup covers every
+  // space on the page — resolved once here rather than per space, and after
+  // the per-space loop has collected the full URL set.
+  const linkEmbedDataMap = new Map<string, Record<string, unknown> | null>();
+  if (pageLinkUrls.size > 0 && linkEmbedDb) {
+    const stored = await selectEmbedJsonByUrl(linkEmbedDb, [...pageLinkUrls]);
+    for (const [url, embedJson] of stored) {
+      linkEmbedDataMap.set(
+        url,
+        embedJson ? (JSON.parse(embedJson) as Record<string, unknown>) : null,
+      );
+    }
+  }
+
   for (const it of feed) {
     const last = it.messages[0];
     if (!last) continue;
     const media = mediaByMsg.get(last.id);
     if (media && media.length > 0) last.media = media;
-    const linkEmbeds = linkEmbedsByMsg.get(last.id);
-    if (linkEmbeds && linkEmbeds.length > 0) last.linkEmbeds = linkEmbeds as Array<{ url: string; embed?: Record<string, unknown> }>;
+    const linkUrlsForMsg = linkEmbedUrlsByMsg.get(last.id);
+    if (linkUrlsForMsg && linkUrlsForMsg.length > 0) {
+      last.linkEmbeds = linkUrlsForMsg.map((url) => {
+        const embedData = linkEmbedDataMap.get(url);
+        return { url, ...(embedData != null ? { embed: embedData } : {}) };
+      }) as Array<{ url: string; embed?: Record<string, unknown> }>;
+    }
     const reactions = reactionsByMsg.get(last.id);
     if (reactions && reactions.length > 0) last.reactions = reactions;
   }
@@ -443,23 +473,27 @@ interface EmbedRow {
 }
 
 /**
- * Batch-fetch media attachments + link embeds for a set of message IDs.
+ * Batch-fetch media attachments and link embeds for a set of message IDs.
  *
  * Mirrors the embed query in `selectMessages.ts`: a single UNION ALL across
  * comp_embed_image / _video / _file / _link joined to `entities` (whose `room`
- * points at the owning message), then a follow-up query for cached link-embed
- * enrichment data. Returns two maps keyed by message ID.
+ * points at the owning message). The per-space side supplies the link and media
+ * rows; the enrichment for the link URLs comes from the global `link_embeds`
+ * store, so the URLs are returned for the caller to resolve in one lookup
+ * across every space on the page.
  */
 async function batchFetchEmbeds(
   db: DbLike,
   messageIds: string[],
 ): Promise<{
   mediaByMsg: Map<string, Array<{ url: string; type: string; alt?: string; width?: number; height?: number; blurhash?: string; size?: number; length?: number; name?: string }>>;
-  linkEmbedsByMsg: Map<string, Array<{ url: string; embed?: Record<string, unknown> | null }>>;
+  linkEmbedUrlsByMsg: Map<string, string[]>;
+  linkUrls: Set<string>;
 }> {
   const mediaByMsg = new Map<string, Array<{ url: string; type: string; alt?: string; width?: number; height?: number; blurhash?: string; size?: number; length?: number; name?: string }>>();
-  const linkEmbedsByMsg = new Map<string, Array<{ url: string; embed?: Record<string, unknown> | null }>>();
-  if (messageIds.length === 0) return { mediaByMsg, linkEmbedsByMsg };
+  const linkEmbedUrlsByMsg = new Map<string, string[]>();
+  const linkUrls = new Set<string>();
+  if (messageIds.length === 0) return { mediaByMsg, linkEmbedUrlsByMsg, linkUrls };
 
   const idPh = messageIds.map(() => "?").join(",");
   const embedRows = await db
@@ -505,42 +539,15 @@ async function batchFetchEmbeds(
     // once per branch (4× total). bun:sqlite has no positional reuse here.
     .all<EmbedRow>([...messageIds, ...messageIds, ...messageIds, ...messageIds]);
 
-  // Collect link URLs so we can pull cached enrichment data in one query.
-  const linkUrls = new Set<string>();
-  for (const e of embedRows) {
-    if (e.mime_type === "text/uri-list") linkUrls.add(e.url);
-  }
-
-  const linkEmbedDataMap = new Map<string, Record<string, unknown> | null>();
-  if (linkUrls.size > 0) {
-    const urlList = [...linkUrls];
-    const ph = urlList.map(() => "?").join(",");
-    const linkDataRows = await db
-      .query(
-        `select entity, embed_json from comp_embed_link_data
-          where entity in (${ph})`,
-      )
-      .all<{ entity: string; embed_json: string | null }>([...urlList]);
-    for (const row of linkDataRows) {
-      linkEmbedDataMap.set(
-        row.entity,
-        row.embed_json ? (JSON.parse(row.embed_json) as Record<string, unknown>) : null,
-      );
-    }
-  }
-
   for (const e of embedRows) {
     if (e.mime_type === "text/uri-list") {
-      let arr = linkEmbedsByMsg.get(e.message_id);
+      let arr = linkEmbedUrlsByMsg.get(e.message_id);
       if (!arr) {
         arr = [];
-        linkEmbedsByMsg.set(e.message_id, arr);
+        linkEmbedUrlsByMsg.set(e.message_id, arr);
       }
-      const embedData = linkEmbedDataMap.get(e.url);
-      arr.push({
-        url: e.url,
-        ...(embedData != null ? { embed: embedData } : {}),
-      });
+      arr.push(e.url);
+      linkUrls.add(e.url);
     } else {
       let arr = mediaByMsg.get(e.message_id);
       if (!arr) {
@@ -560,7 +567,7 @@ async function batchFetchEmbeds(
     }
   }
 
-  return { mediaByMsg, linkEmbedsByMsg };
+  return { mediaByMsg, linkEmbedUrlsByMsg, linkUrls };
 }
 
 interface ReactionRow {

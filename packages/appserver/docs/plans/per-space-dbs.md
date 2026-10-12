@@ -49,7 +49,6 @@ A **worker pool** (N = 4–8, matching CPU cores) handles per-space DB requests.
 | `comp_user` | User profiles within space context |
 | `comp_reaction` | Message reactions |
 | `comp_embed_image` / `comp_embed_video` / `comp_embed_file` / `comp_embed_link` | Media embeds |
-| `comp_embed_link_data` | Cached enriched embed data |
 | `comp_bans` | Banned users |
 | `comp_calendar_link` / `comp_calendar_event` | Calendar integration |
 | `comp_page_edits` / `comp_comment` | Page edits |
@@ -90,7 +89,7 @@ These queries touch data across spaces and need special handling:
 2. **`getActivityFeed` (no space filter)** — reads `activity_item` across all joined spaces. Fan-out to per-space DBs, merge in JS
 3. **`getSpaceUnreadCount`** — joins `read_positions` (read-state DB) with `entities.stream_id`. With per-space DBs, `stream_id` moves to per-space DBs. Solution: store `stream_id` in `read_positions` directly, or query per-space DB for entity existence
 4. **`userHydration`** — reads `edges` for `joinedSpace` from the global DB (`head = userDid`). Pure global-DB work
-5. **Embed sweeper** — reads `comp_embed_link` / `comp_embed_link_data` across all spaces. Solution: maintain a global `pending_links` index table, dual-written during materialization
+5. **Embed sweeper** — reads `comp_embed_link` across all spaces. Solution: maintain a global `pending_links` index table, dual-written during materialization. The enriched metadata those sweeps produce is itself global (`link_embeds`, keyed by URL), since it is a function of an outbound fetch rather than of the log
 6. **`inferSignals` → `handleCreateMessage`** — calls `selectMessages` which reads per-space data. Already per-space; just needs the right DB handle
 
 ## Architecture
@@ -458,7 +457,7 @@ This is the most expensive cross-space query. For a user in 50 spaces, it's 50 p
 
 ### 1e. Embed Sweeper Changes
 
-The embed sweeper currently reads `comp_embed_link` and `comp_embed_link_data` from the monolithic DB. With per-space DBs, it needs to find pending links across all spaces.
+The embed sweeper needs to find pending links across all spaces. Which links a message contains is log-derived and stays per-space (`comp_embed_link`); the enriched metadata is a function of an outbound fetch and lives in the global `link_embeds` store, keyed by URL.
 
 **Phase 1 approach**: Dual-write a global `pending_links` table during materialization. When `detectAndStoreLinks` runs (inside `applyBatch`), it writes to both the per-space `comp_embed_link` table AND the global `pending_links` table.
 
@@ -474,7 +473,7 @@ if (detected.length > 0) {
 }
 ```
 
-The sweeper then reads from `pending_links` (global DB) to find work, and writes enrichment results to the per-space `comp_embed_link_data` table (via the pool).
+The sweeper then reads from `pending_links` (global DB) to find work, and writes enrichment results to the global `link_embeds` table — one row per URL, however many spaces shared the link.
 
 When enrichment completes, the sweeper deletes the row from `pending_links`:
 

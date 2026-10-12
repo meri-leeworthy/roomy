@@ -10,7 +10,7 @@
  */
 
 import { createAccessMemo, roomAccessMany, type RoomAccess } from "../auth/access.ts";
-import { openReadStateDb, openSpaceDb } from "../db/db.ts";
+import { openReadStateDb, openSpaceDb, tryOpenGlobalDb } from "../db/db.ts";
 import {
   selectActivityFeed,
   type ActivityFeedItem,
@@ -58,6 +58,7 @@ export const getActivityFeedHandler: QueryHandler<
     mainDb,
     userDid,
     { spaceId, limit, cursor },
+    tryOpenGlobalDb(),
   );
 
   // Filter by room-level read access: silently skip rooms the user can't read.

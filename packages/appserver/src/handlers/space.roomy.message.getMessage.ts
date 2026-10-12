@@ -5,7 +5,7 @@
  * access on that room is enforced before assembling the message.
  */
 
-import { openSpaceDbForEntity } from "../db/db.ts";
+import { openSpaceDbForEntity, tryOpenGlobalDb } from "../db/db.ts";
 import { prioritiseLinksForRead } from "../embed/sweeper.ts";
 import { selectMessages, type MessageDto } from "../queries/selectMessages.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
@@ -41,7 +41,12 @@ export const getMessageHandler: QueryHandler<QueryParams, MessageDto> = async (
 
   await requireRoomRead(db, row.room!, userDid);
 
-  const { messages } = await selectMessages(db, { kind: "ids", ids: [messageId] }, userDid ?? undefined);
+  const { messages } = await selectMessages(
+    db,
+    { kind: "ids", ids: [messageId] },
+    userDid ?? undefined,
+    tryOpenGlobalDb(),
+  );
   const message = messages[0];
   if (!message) {
     throw new XrpcError(404, "NotFound", `Message not found: ${messageId}`);

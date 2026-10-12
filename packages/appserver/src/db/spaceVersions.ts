@@ -74,9 +74,16 @@ export const SPACE_MIGRATIONS = {
   // value must be read out before the DDL removes it, and `up` runs at open,
   // ahead of the boot runner's tasks.
   "4": { kind: "data" },
+  // `comp_embed_link_data` moved to the global DB (`link_embeds`), keyed by
+  // URL. The value comes from an outbound fetch rather than the log, so a
+  // replayed space could not reproduce it, and the hot read paths resolved it
+  // against the per-space table. The task copies each space's rows into the
+  // global store, then drops the table — `data`, not a structural `up`, because
+  // the rows must be read out before the DDL removes them.
+  "5": { kind: "data" },
   // Next per-space schema change goes here, e.g.:
-  //   "4": { kind: "structural", up(db) { /* alter table … */ } },
-  //   "4": { kind: "data" },          // plus a task in SPACE_MIGRATION_TASKS
+  //   "6": { kind: "structural", up(db) { /* alter table … */ } },
+  //   "6": { kind: "data" },          // plus a task in SPACE_MIGRATION_TASKS
 } as const satisfies Record<string, SpaceMigrationEntry>;
 
 /**
