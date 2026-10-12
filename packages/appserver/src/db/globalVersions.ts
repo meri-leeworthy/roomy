@@ -68,9 +68,14 @@ export const GLOBAL_MIGRATIONS = {
   // for every boot and every stream, so an existing dataset self-heals) — a
   // data migration here would duplicate that sweep.
   "10": { kind: "structural" },
+  // search_backfill_space, the backfill sweeper's candidate list. Structural:
+  // schema-global.sql creates the table and the entity_space trigger that
+  // populates it on every open. The async task seeds the rows of an existing
+  // DB, whose entity_space rows predate the trigger.
+  "11": { kind: "data" },
   // Next global schema change goes here, e.g.:
-  //   "11": { kind: "structural" },   // table added to schema-global.sql
-  //   "11": { kind: "data" },         // plus a task in GLOBAL_MIGRATION_TASKS
+  //   "12": { kind: "structural" },   // table added to schema-global.sql
+  //   "12": { kind: "data" },         // plus a task in GLOBAL_MIGRATION_TASKS
 } as const satisfies Record<string, GlobalMigrationEntry>;
 
 /**

@@ -303,3 +303,80 @@ describe("global schema v9 — mentions.kind column", () => {
     }
   });
 });
+
+describe("global schema v11 — search backfill candidate list", () => {
+  test("an entity_space insert registers the space with the sweeper", () => {
+    const db = new Database(":memory:");
+    db.exec(readFileSync(GLOBAL_SCHEMA_PATH, "utf8"));
+
+    db.run(
+      "insert or ignore into entity_space (entity_id, space_did) values (?, ?)",
+      ["01ENTITY", "did:web:space.example"],
+    );
+    // Re-materialising an entity re-applies the same insert; the ignored
+    // duplicate must leave the candidate list alone rather than raise.
+    db.run(
+      "insert or ignore into entity_space (entity_id, space_did) values (?, ?)",
+      ["01ENTITY", "did:web:space.example"],
+    );
+
+    const candidates = db
+      .query("select space_did from search_backfill_space")
+      .all();
+    expect(candidates).toEqual([{ space_did: "did:web:space.example" }]);
+    db.close();
+  });
+
+  test("migration seeds spaces indexed before the trigger existed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "roomy-global-schema-v11-"));
+    cleanup.push(dir);
+    const globalPath = join(dir, "global.sqlite");
+    const old = new Database(globalPath, { create: true });
+    old.exec(readFileSync(GLOBAL_SCHEMA_PATH, "utf8"));
+    // A pre-v11 DB: the index rows were written with no trigger to register
+    // their spaces, so the sweeper has no candidate to pick.
+    old.exec("drop trigger entity_space_search_backfill");
+    old.run(
+      "insert into entity_space (entity_id, space_did) values (?, ?)",
+      ["01ENTITY", "did:web:space.example"],
+    );
+    old.run("insert into global_schema_version (id, version) values (1, '10')");
+    old.close();
+
+    const pool = new DatabasePool(1, join(THIS_DIR, "worker.ts"));
+    try {
+      await pool.init({
+        readStateDbPath: ":memory:",
+        eventsDbPath: ":memory:",
+        globalDbPath: globalPath,
+        spacesDir: join(dir, "spaces"),
+        readStateSchemaVersion: READSTATE_SCHEMA_VERSION,
+        spaceSchemaVersion: SPACE_SCHEMA_VERSION,
+        globalSchemaVersion: GLOBAL_SCHEMA_VERSION,
+      });
+      await runPendingGlobalMigrations(pool.router(), []);
+
+      const global = pool.global();
+      const candidates = await global
+        .query("select space_did from search_backfill_space")
+        .all();
+      expect(candidates).toEqual([{ space_did: "did:web:space.example" }]);
+
+      // The trigger is back, so spaces materialised from here on register
+      // themselves.
+      await global.run(
+        "insert into entity_space (entity_id, space_did) values (?, ?)",
+        ["01ENTITY2", "did:web:second.example"],
+      );
+      const after = await global
+        .query("select space_did from search_backfill_space order by space_did")
+        .all();
+      expect(after).toEqual([
+        { space_did: "did:web:second.example" },
+        { space_did: "did:web:space.example" },
+      ]);
+    } finally {
+      await pool.close();
+    }
+  });
+});

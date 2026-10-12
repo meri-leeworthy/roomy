@@ -119,6 +119,31 @@ create table if not exists search_backfill_cursor (
   updated_at integer not null default (unixepoch() * 1000)
 ) strict;
 
+-- Search backfill candidate list. One row per space the Qdrant backfill
+-- sweeper considers, registered by the first insert into `entity_space` for
+-- that space. The sweeper's idle heartbeat asks "which space's cursor is
+-- oldest?" once a minute forever, and answering that from `entity_space`
+-- meant `select distinct space_did` over the whole index on every cycle —
+-- a cost proportional to the entity count that buys nothing once the corpus
+-- is caught up. The candidate list plus `search_backfill_cursor` answer it
+-- from two small tables.
+--
+-- Derived data: the next entity materialised for a space re-registers it.
+create table if not exists search_backfill_space (
+  space_did text primary key
+) strict;
+
+-- Register a space with the backfill sweeper as it enters the entity→space
+-- index. A trigger rather than a second statement at every `entity_space`
+-- write site: the index is written by materialisation, by the boot per-space
+-- backfill and by test seeds, and the candidate list has to stay complete
+-- for all of them.
+create trigger if not exists entity_space_search_backfill
+after insert on entity_space
+begin
+  insert or ignore into search_backfill_space (space_did) values (new.space_did);
+end;
+
 -- Channel-federation registry. Cross-space by nature, so it lives in the
 -- global DB. `space_id` is the origin space (A) whose channels are exposed;
 -- `federating_space_did` is the receiving space (B). One row per (A, B).

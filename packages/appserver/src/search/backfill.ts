@@ -13,6 +13,12 @@
  * re-indexed from the beginning. Cursor-less spaces are picked in
  * updated_at round-robin order (absent cursors first, oldest first).
  *
+ * The spaces a cycle may pick come from `search_backfill_space` — a small
+ * global table that an `entity_space` insert trigger keeps current — never
+ * from a `distinct space_did` aggregate over the entity→space index. The
+ * idle heartbeat runs that selection every minute for the life of the
+ * process, and the index grows with the whole corpus.
+ *
  * Mirrors the embed sweeper's `pending_links` pattern: a global-DB-backed
  * backlog drained by a background loop with poke support.
  */
@@ -541,12 +547,15 @@ export async function runSpaceBackfill(
   };
 }
 
-/** True when any space is missing a `search_backfill_cursor` row (backlog). */
+/**
+ * True when any candidate space is missing a `search_backfill_cursor` row
+ * (backlog).
+ */
 async function hasCursorlessBacklog(globalDb: DbLike): Promise<boolean> {
   const row = await globalDb
     .query(
       `select s.space_did as id
-         from (select distinct space_did from entity_space) s
+         from search_backfill_space s
          left join search_backfill_cursor c on c.space_did = s.space_did
         where c.space_did is null
         limit 1`,
@@ -555,14 +564,18 @@ async function hasCursorlessBacklog(globalDb: DbLike): Promise<boolean> {
   return row !== null;
 }
 
-/** Pick the space whose cursor is oldest/absent (round-robin fairness). */
-async function nextCursorSpace(globalDb: DbLike): Promise<string | null> {
+/**
+ * Pick the space whose cursor is oldest/absent (round-robin fairness). Reads
+ * only the two sweeper-owned tables, so the idle heartbeat does not touch
+ * `entity_space`.
+ */
+export async function nextCursorSpace(globalDb: DbLike): Promise<string | null> {
   const row = await globalDb
     .query(
       `select s.space_did as id
-         from (select distinct space_did from entity_space) s
+         from search_backfill_space s
          left join search_backfill_cursor c on c.space_did = s.space_did
-        order by coalesce(c.updated_at, 0) asc
+        order by coalesce(c.updated_at, 0) asc, s.space_did asc
         limit 1`,
     )
     .get<{ id: string }>();

@@ -35,6 +35,10 @@ const GLOBAL_MIGRATION_TASKS: Record<GlobalAsyncVersion, GlobalMigrationTask> = 
   // table predates it — add the column and backfill existing rows to
   // 'mention' so the dual-write never hits a missing column.
   "9": backfillMentionsKind,
+  // v11: the backfill sweeper's candidate list (`search_backfill_space`) is
+  // populated by a trigger on `entity_space`, so index rows written before
+  // the trigger existed have no candidate row. Seed them from the index.
+  "11": seedSearchBackfillCandidates,
 };
 
 
@@ -128,6 +132,30 @@ async function backfillMentionsKind(
       sql: `update mentions set kind = 'mention' where kind is null`,
     },
   ]);
+}
+
+/**
+ * v11: seed the search-backfill candidate list from the entity→space index.
+ *
+ * The sweeper picks the space whose cursor is oldest out of
+ * `search_backfill_space` rather than aggregating `entity_space` on every
+ * idle heartbeat. That table is maintained by an `entity_space` insert
+ * trigger, so an existing global DB — whose index rows were written before
+ * the trigger — has no rows in it. Idempotent: a space that is already
+ * registered is left alone.
+ */
+async function seedSearchBackfillCandidates(
+  db: DbLike,
+  _streamDids: StreamDid[],
+): Promise<void> {
+  const globalDb = db.global?.();
+  if (!globalDb) return;
+
+  const { changes } = await globalDb.run(
+    `insert or ignore into search_backfill_space (space_did)
+       select distinct space_did from entity_space`,
+  );
+  log.info("startup", `search backfill candidates seeded: ${changes}`);
 }
 
 /**
