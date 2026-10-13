@@ -948,8 +948,9 @@ review notes:
    space), or **describe the post-moderation posture in the review notes** —
    reporting, blocking, removal and human review — and accept the risk that a
    reviewer wants the fourth bullet demonstrated. The first is a small project
-   of its own; the second is free and is what several UGC apps do. The plan
-   records the choice as open (§9.2) rather than pretending it is covered.
+  of its own; the second is free and is what several UGC apps do. The plan
+  records the choice as open (§8.2's first row, item 8 above) rather than
+  pretending it is covered.
 9. **The response-time commitment is real.** Guideline 1.2 asks for *timely*
    responses, and no code can assert that. Before submitting, name who watches
    the queue and at what cadence — and, when Phase 2 lands, that the notification
