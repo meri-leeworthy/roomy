@@ -1,20 +1,23 @@
 # User-level blocks — Implementation Plan
 
-**Date:** 2026-09-26 (revised 2026-09-27, 2026-09-28)
-**Status:** Ready to dispatch. §7 is a decision record — every open question is
-answered (§7.7 and §7.11 revised 2026-09-27; §7.12–§7.16 added 2026-09-28 with
-the admin-reveal exception, §3.6).
+**Date:** 2026-09-26 (revised 2026-09-27, 2026-09-28, 2026-10-13)
+**Status:** Phase 1 shipped (#317, `9731537c5`). Phases 2–6 are ready to
+dispatch; §7 is a decision record and every question in it is answered.
 
-**Revision 2026-09-28 — the admin reveal.** A space admin may reveal a hidden
-message in a space they administer, for blocks they placed themselves. The rule
-is stated in §3.6 and decided in §7.12; the open questions it leaves — the
-per-space personal setting versus a role permission, the audit, the service
-path, and whether a reveal is per-message or a mode — are §7.13–§7.16, each
-with a recommendation. It **adds an exception** to §7.7's mutual redaction; it
-does not reverse it. Every constraint this plan stated before that revision
-still holds for every viewer who is not an admin revealing their own block, and
-§3.4/§4.4 are the two places that said "no exception exists" and now say what
-the exception is.
+**Revision 2026-10-13 — the reveal is a transient read, not a state.** An
+admin may *look at* a message from an account they personally blocked, in a
+space they administer. The act changes nothing: it writes no row, is not
+audited, and is not attributable to anyone. Server-side the reveal is
+therefore a single route — `space.roomy.message.getMessage` returns the full
+message to a caller who is an admin of the message's space and whose own block
+set names the author. Every other message-returning route, and every pushed
+frame, unread count and push payload, is redacted for that caller exactly as
+it is for everyone else. The per-block `revealInSpaces` field (§1.1) and the
+`block_reveals` audit table (§7.14) of the earlier revisions are **removed**:
+the reveal is a view rather than an act, so there is nothing to record, and no
+per-space grant for the record to carry. It **adds an exception** to §7.7's
+mutual redaction; it does not reverse it. §3.6 and §7.12–§7.16 state the rule
+in full.
 **Packages:** `packages/appserver`, `packages/app-lite`, `packages/design`,
 `packages/sdk`, `packages/docs`
 
@@ -105,9 +108,10 @@ author predicate, so a block is a new predicate over the same rows.
 ### Every route that can carry a blocked author's content
 
 This list is the no-reveal checklist — every route that can carry a blocked
-author's content, and therefore every route that has to be held to §3.6's
-predicate once the admin reveal exists. Each row is a distinct leak surface,
-not a variation of one:
+author's content, and therefore every route that has to be redacted. Each row
+is a distinct leak surface, not a variation of one. Row 2 is the **only** row
+that carries §3.6's admin reveal; every other row is redacted for every caller,
+admins included (§3.4 tabulates the pushed and counted surfaces):
 
 | # | Surface | Where | What leaks |
 |---|---|---|---|
@@ -172,11 +176,6 @@ what the record means, `required` naming the mandatory fields — compare
             "format": "did",
             "description": "DID of the blocked account. May be an atproto DID or a bridged did:discord:<snowflake>."
           },
-          "revealInSpaces": {
-            "type": "array",
-            "description": "Spaces where the blocker permits an admin of that space to reveal their own blocked messages (§3.6, §7.13). Absent or empty means no reveal anywhere — the field fails closed, and a record written before this field existed reveals nothing. Only blocks the blocker placed themselves are ever revealable; the value is a promise the client keeps, not one the server can verify (§7.12).",
-            "items": { "type": "string", "format": "did" }
-          },
           "createdAt": { "type": "string", "format": "datetime" }
         }
       }
@@ -207,14 +206,11 @@ The mirroring is deliberate and load-bearing: the two collections are
 field-for-field convertible, so the bootstrap is a copy rather than a
 translation, and a future migration in either direction is mechanical.
 
-**`revealInSpaces` is the one field that does not mirror,** and the asymmetry
-is deliberate (§7.13). A Bluesky block has no equivalent because Bluesky has no
-admin-reveal feature; the conversion the mirroring buys is one-directional for
-this field — a Bluesky block imports with `revealInSpaces` absent (so it
-reveals nothing, ever), and a Roomy block written back to Bluesky drops it.
-That is the correct default in both directions: an imported block was asserted
-in another app with different semantics, and the user did not opt in to a
-reveal there.
+**No field is Roomy-only,** so the conversion is a copy in both directions
+rather than a translation in one: a Bluesky block imports as-is, and a Roomy
+block exports as-is. Nothing on the record says *where* a block may be acted
+on — the reveal is a property of who is looking, not of what was written
+(§3.6).
 
 The alternative — `key: "literal:self"` with a `subjects: string[]` array, like
 `profile.json` — is rejected: it is a read-modify-write on every block, two
@@ -259,23 +255,25 @@ set to the NSID, in the repo of the NSID authority. The authority is derived
 from the NSID — drop the name segment, reverse the rest, look up
 `_lexicon.<that domain>` — and resolution is not hierarchical, so a resolver
 never falls back to a parent domain. For `space.roomy.user.block` that is
-`_lexicon.user.roomy.space`, which is **absent** (measured 2026-10-02). The
-`_lexicon.roomy.space` record that does exist
-(`did=did:plc:cyqufxsezk33hqulcilckna6`, the `roomy.space` account) governs
-`space.roomy.authComplete` and does not apply here.
+`_lexicon.user.roomy.space`, which resolves to
+`did:plc:cyqufxsezk33hqulcilckna6` (the `roomy.space` account — the authority
+`_lexicon.roomy.space` already names). The record itself is **not** in that
+repo: `com.atproto.repo.getRecord` for
+`at://did:plc:cyqufxsezk33hqulcilckna6/com.atproto.lexicon.schema/space.roomy.user.block`
+returns `RecordNotFound` (checked 2026-10-13).
 
-Two steps are therefore outstanding, both out-of-band and neither in this
-phase's scope:
+One step is therefore outstanding, out-of-band and outside every phase's
+scope — `putRecord` the lexicon into the authority's repo:
 
-1. Create `_lexicon.user.roomy.space` in the Cloudflare zone for `roomy.space`,
-   pointing at a DID that has a PDS repo — `did:plc:cyqufxsezk33hqulcilckna6` is
-   the natural choice, since it already has one.
-2. `putRecord` the lexicon into that repo.
+```
+bun run scripts/publish-lexicons.ts space.roomy.user.block
+```
 
-The appserver's own `did:web:api.roomy.space` cannot serve here: its DID
-document has no `#atproto_pds` service, so there is no repo to publish into.
-Until both steps are done the lexicon does not resolve for third parties;
-nothing in the build or deploy depends on it.
+with `LEXICON_AUTHORITY_IDENTIFIER` / `LEXICON_AUTHORITY_PASSWORD` set
+(`packages/appserver/README.md`). Nothing in the build, the deploy, the
+appserver or the client reads the published record — the appserver writes the
+collection name as a literal and never resolves the lexicon — so it exists for
+third-party resolution only, and it blocks no phase.
 
 ### 1.4 SDK and docs touch points
 
@@ -520,11 +518,9 @@ So Phase 2 adds one authenticated procedure:
 The client calls it immediately after `putRecord`/`deleteRecord` succeeds. The
 TTL remains the convergence path for a block written by *another* client.
 
-The same call covers a change to `revealInSpaces` (§3.6, §7.13): turning a
-space's reveal on or off rewrites the block record, so the resolved set the
-appserver memoises has to be dropped for the writer the same way. There is no
-separate procedure for it — a reveal permission is a property of the block, and
-the block is what `refreshBlocks` re-reads.
+There is nothing else for the procedure to invalidate: the reveal is not
+recorded in the block set or anywhere else (§3.6), so a block's only effect on
+the server's state is its membership in `hiddenBy`.
 
 ---
 
@@ -608,6 +604,16 @@ The alternative — omit the row entirely — cannot draw a per-message indicato
 at all, and is the design that produces the truncation described above. The
 task's UI requirement and the pagination requirement point at the same answer.
 
+**The tombstone is the shape for every route; the reveal is a route, not a
+row.** The tombstone above is what `room.getMessages` returns for a hidden
+author, for every caller including an admin who blocked them. The reveal
+(§3.6) is not a third variant of this row: it is a single message fetched by id
+through `space.roomy.message.getMessage`, which returns the full DTO for
+exactly one class of caller and the tombstone for everyone else. The asymmetry
+is deliberate and it is what keeps the fan-out one object per room — see
+§3.6 for the rule and §3.4 for the surfaces that consequently never carry a
+reveal.
+
 ### 3.2 The SQL
 
 Add a blocked-author flag to the base query rather than filtering rows. The
@@ -621,15 +627,15 @@ predicate returns the right rows — and JSON1 is already in use in the tree
 -- added to the select list of both room-scope and ids-scope. The predicate is
 -- the mutual block relation (visible(a, b) = a ∉ hiddenBy(b)), never a plain
 -- membership test on the row's own block set.
-(case when author_e.tail in (select value from json_each(?N))
+(case when author_e.tail in (select value from json_each(?H))
       then 1 else 0 end) as blocked
 ```
 
-with `?N` = `JSON.stringify([...hiddenBy(viewerDid)])`, or `'[]'` when the
+with `?H` = `JSON.stringify([...hiddenBy(viewerDid)])`, or `'[]'` when the
 viewer has none. Bound as one parameter, not one-per-DID, so the statement text
 is stable and the room scope's keyset still walks `idx_entities_room_sort_key`
 — the same reason `#292` left the order expression unwrapped
-(`selectMessages.ts:181-185`). The parameter index is not fixed at `?N`: the
+(`selectMessages.ts:181-185`). The parameter index is not fixed at `?H`: the
 room scope gains this parameter *before* the cursor parameters, so a cursor
 page binds `roomId, hidden, cursorKey, cursor`, not the current
 `roomId, cursorKey, cursor` (`:230`).
@@ -637,9 +643,15 @@ page binds `roomId, hidden, cursorKey, cursor`, not the current
 In the assembly step (`selectMessages.ts:477-555`), a row with `blocked = 1`
 short-circuits to the tombstone before content decoding, before the reaction /
 media / link-embed maps are consulted, and before
-`hydrateProfiles` (`:570-579`) would attach a name and avatar. A row with
-`blocked = 2` is the §3.6 admin reveal: it assembles in full and carries
-`revealed: true` alongside `blocked: true`.
+`hydrateProfiles` (`:570-579`) would attach a name and avatar.
+
+**The reveal is not in this statement, and that is the point.** `selectMessages`
+is the room and thread page builder; every caller of it that returns a *page*
+returns the same tombstones to every caller. Adding a caller-dependent widening
+here would mean a per-caller shape on the fan-out path (§3.4) and a second
+query variant for one surface. The reveal lives in the single-message route
+instead (§3.6), so the `blocked` flag stays a boolean and `?H` is the only
+parameter this feature adds.
 
 Two further guards, because the batch queries are keyed on the page's ids and
 would otherwise pull a blocked message's content into the response:
@@ -756,33 +768,32 @@ space itself (`selectMessages.ts:516-519`: `system` is
 `author_did === stream_id`). Blocking a member must not erase "X joined the
 space" notices, and the space DID is not a blockable identity.
 
-**Which of these surfaces gain the admin exception, and which do not.** The
-rule (§3.6) is client-*pull*, so the default answer for everything the server
-*pushes* is "no exception", and the plan has to say so surface by surface
-rather than leave it implied:
+**No surface on this page carries the reveal.** The reveal exists on exactly
+one route — `space.roomy.message.getMessage`, fetched by id (§3.6) — so every
+surface here is redacted for every viewer, including an admin who blocked the
+author. The reason is structural rather than a policy choice: the live frames
+are built once per room topic and fanned to every subscriber
+(`#deliverRoomFrame`, above), so a per-admin widening there would mean building
+a second frame per connection; the counters and the push evaluator do not run
+with the caller present at all, so there is no caller to widen for. The table
+records that per surface, because "the reveal is a route, not a row" is the
+kind of sentence a later reader re-derives wrongly:
 
-| Surface | Gains the exception? | Why |
+| Surface | Reveal? | Why |
 |---|---|---|
-| Room timeline (`getMessages`) | **Yes** | The caller is present, the space is known, and §3.6's predicate is evaluated in the same statement that builds the tombstone |
-| Single message (`getMessage`) | **Yes** | Same statement, `{ kind: "ids" }`; the handler already resolves the room, so it resolves the space the same way |
-| Search hits and reply context | **Yes** | The caller is present and the space is known per hit; redaction happens in the hydration loop, so the reveal is one predicate there |
-| Activity feed, board previews, participants | **Yes** | Caller-scoped reads of a space the caller named; the same predicate applies in the read-time redaction already specified |
-| Mentions, link index, reactions | **Yes** | Caller-scoped, space-scoped, read-time |
-| Forwarded copies, reply previews, client cache | **Yes** | Client-side consequences of a revealed row; §4.4 carries them |
-| Live `#messageDiff` | **No** | A frame is built once per room topic and fanned to every subscriber (§3.4, `#deliverRoomFrame`). Delivering a *revealed* body therefore means building a second, per-connection frame for the connections that hold the exception — the one place this design would stop being one-object-per-room. The alternative is a second round trip after the fact |
-| Live `#roomActivityDiff`, `#mention` | **No** | Same fan-out; previews and snapshots, not the message |
-| Unread counters, `#roomMetadataDiff` | **No** | The counter is a count, not content, and it is incremented once for every user tracking the room (`applyBundle.ts:184-204`); an admin who revealed a message does not thereby acquire an unread row for it. Revealing is reading a page, not receiving |
-| Push payloads, including the `dialog` digest | **No** | A push is delivered without the caller present. The digest's `count` and `first_unseen_at` come from `notification_state` and its `unseen_count` (`queries/notificationState.ts:60-107`), and the digest's `authorName` from the `message`-type fact build (`push/evaluate.ts:175-195`) — but the payload is *count-based and author-named* rather than content-based: `notificationText` renders `${author} in ${room}` with body `${count} new messages` (`packages/app-lite/src/lib/notificationText.ts:34-40`). So the digest leaks identity and volume, never the withheld body |
-| `#roomy` / space-card link previews | **No** | `SpaceRoomBadge` fetches `getSpaceSummary` — a space name and avatar, no message content, no author. There is no blocked content on this surface to reveal |
+| Live `#messageDiff` | **No** | Built once per room topic, fanned to every subscriber. A revealed body here would mean a second, per-connection frame — the one place this design would stop being one object per room |
+| Live `#roomActivityDiff`, `#mention` | **No** | Same fan-out; previews and snapshots rather than the message |
+| Unread counters, `#roomMetadataDiff` | **No** | A count, not content; it is incremented once for every user tracking the room under the mutual predicate. Reading a message you fetched by id does not create an unread row, and an admin who blocked the author has no more claim to one than anyone else |
+| Push payloads, including the `dialog` digest | **No** | Delivered without the caller present. The digest is *count-based and author-named* rather than content-based: `notificationText` renders `${author} in ${room}` with body `${count} new messages` (`packages/app-lite/src/lib/notificationText.ts:34-40`), so it leaks identity and volume, never the withheld body |
+| `#roomy` / space-card link previews | **No** | `SpaceRoomBadge` fetches `getSpaceSummary` — a space name and avatar, no message content, no author. There is no blocked content on this surface |
 | Raw `#streamEvents` and `space.roomy.sync.getEvents` | **No** | Not per-viewer at all; §7.15 |
 
-**The consequence to accept, stated plainly:** an admin who reveals a message
-sees it on the next read of the room, not in the live frame that delivered it.
-For a moderation action that is a real difference — the message arrives as an
-indicator, and the reveal is one click behind it — and it is the price of
-keeping the fan-out one object per room. If the delay is judged unacceptable
-later, the fix is a per-connection rebuild for connections whose reveal set is
-non-empty, which is a change to `#deliverRoomFrame` and nothing else.
+**The one consequence to accept, stated plainly:** an admin who blocked
+someone still sees their ordinary timeline as indicators. The reveal is one
+click on one row — `getMessage` by id — and it is deliberately a fetch rather
+than a mode, so there is no state anywhere that makes a whole room readable to
+that admin. That is the design, not a limitation of it: a stateless reveal has
+nowhere to live except the route that serves it (§3.6, §7.14).
 
 ### 3.5 Mutual hiding: one block, two redacted directions
 
@@ -843,130 +854,98 @@ is a shield, and a shield is not silent.
 
 **The rule, stated precisely.**
 
-> A viewer is permitted to reveal a hidden message when **all** of the
-> following hold:
+> A viewer may reveal a hidden message when **both** of the following hold:
 >
-> 1. the tombstone's author is hidden from the viewer *because the viewer
->    blocked that author* — i.e. `authorDid ∈ blocks(viewerDid)`, not merely
->    `authorDid ∈ hiddenBy(viewerDid)`;
+> 1. the message's author is hidden from the viewer *because the viewer blocked
+>    that author* — i.e. `authorDid ∈ blocks(viewerDid)`, not merely
+>    `authorDid ∈ hiddenBy(viewerDid)`; and
 > 2. the viewer holds the admin edge (`edges.label = 'admin'`) on the space
->    that materialised the message's room; and
-> 3. the block's `space.roomy.user.block` record lists the space that
->    materialised the room in its `revealInSpaces` array (§1.1, §7.13).
+>    that materialised the message's room.
 >
-> Nothing else opens a tombstone. In particular the reveal is **not** available
-> for a block that was imported from Bluesky (`source = 'bluesky'`), because
-> that record has no such field and the user asserted the block in another app.
+> Nothing else opens a tombstone. The reveal is available only for a block the
+> viewer placed themselves, and only in a space they administer.
 
-Clauses 1 and 2 are the rule as given — "admins should be able to reveal
-messages from users *they* have blocked in spaces they are admins of". Both are
+Both clauses are the rule as given — "admins should be able to reveal messages
+from users *they* have blocked in spaces they are admins of". Both are
 necessary: clause 2 alone would let any admin unmask anyone's block, which is
 the moderation-power reading of the same sentence and is not what was asked
-for; clause 1 alone is the §7.13 personal setting considered on its own.
-Clause 3 is the mechanism §7.13 recommends for reconciling the two, recorded as
-an open question rather than a decision; the array is a list of space DIDs and
-nothing else — no "all spaces" sentinel, because a sentinel would silently cover
-spaces the user joins later, and the reveal should be a promise made about a
-space rather than a standing permission the user keeps re-granting.
+for; clause 1 alone would make the reveal global rather than space-scoped.
 
-**A third predicate, not a widening of the second.** §3.5 made
-`hiddenBy` direction-agnostic on purpose: it never asks *who* blocked. The
-admin reveal is precisely a question of *who*, so it must not be folded into
-`hiddenBy` — doing so would make `hiddenBy` directional again and re-open every
-surface §3.5 closed. It is a separate, strictly narrower relation, the set of
-DIDs for which *this* caller may lift *their own* redaction:
+**The reveal is a read, not a state.** Looking is the whole act: the server
+records nothing, the client persists nothing on the server, and no row changes.
+Three consequences follow directly and each removes a piece of design the
+earlier revisions carried:
 
-```ts
-// queries/userBlocks.ts — the fourth and last predicate over the block set.
-// revealableBy(viewerDid, spaceId) ⊆ blocks(viewerDid) ⊆ hiddenBy(viewerDid).
-// Empty for an anonymous viewer, and empty when the caller is not an admin of
-// that space — the admin check is the first thing it does, so the
-// non-admin case costs nothing beyond the memoised access lookup.
-```
+- **No audit.** There is no `block_reveals` table and no write on the reveal
+  path (§7.14). A read is not attributable, and the design does not pretend to
+  make it so.
+- **No per-block permission.** There is no `revealInSpaces` field on
+  `space.roomy.user.block` (§1.1) and no `revealableBy` predicate over it. The
+  gate is the space's admin edge, a property of the *space*, not of the block.
+- **No client-side reveal state to reconcile.** The client holds a set of
+  message ids it has fetched as revealed for the current session; nothing about
+  it survives a reload, and a fresh page load shows indicators again.
 
-Evaluated once per call site, not per row, and memoised on the same 60 s
-discipline as the rest of the block set.
+**Where it is evaluated: one route, `space.roomy.message.getMessage`.** This is
+the load-bearing decision of the revision, so the reasoning is stated rather
+than implied.
 
-**Where it is evaluated: `selectMessages`, in the same SQL as the flag.**
+The server has to answer "may this caller see this author's body" and the
+answer is caller-dependent. Every message-returning route in §3.3 is a *page*
+whose shape is shared across callers, built by `selectMessages` and fanned out
+by §3.4. Widening any of them for admins would either put a caller-dependent
+row shape on the fan-out path or fork the query per caller. A single,
+by-id route does neither: it is already caller-scoped, it already returns one
+message, and its response is shared with nobody.
 
-The tombstone is produced by one expression, and the reveal is the same
-expression with the predicate widened rather than a second column. The base-row
-flag becomes a two-value column:
+So the reveal is `getMessage` returning the full DTO instead of the tombstone,
+subject to the two clauses above. The gate runs in the handler, after the room
+and message are resolved, which is exactly where the space DID and the caller's
+DID are both in hand:
 
-```sql
--- §3.2's blocked flag, extended. `?H` is hiddenBy(viewerDid) and `?R` is
--- revealableBy(viewerDid, <this room's space>) — two bound JSON arrays, not
--- one-per-DID, so the statement text and the index walk are unchanged.
-(case when author_e.tail in (select value from json_each(?H)) then
-        case when author_e.tail in (select value from json_each(?R)) then 2
-             else 1 end
-      else 0 end) as blocked
-```
+- **The author's own block set is the only set consulted.** `blocks(viewerDid)`
+  is already resolved and cached (§2.3); no new query and no reverse lookup.
+- **The admin check is `isAdmin(db, spaceId, did)`**
+  (`auth/access.ts:124-131`) — the per-space edge, **not** the
+  `APPSERVER_ADMIN_DIDS` service allowlist (`admin.ts:39-51`). The two are
+  unrelated, and a check written against the wrong one would grant every
+  allowlisted service DID the power to unmask every block it holds. §7.15
+  restates this because the bridge's reads make the distinction concrete.
+- **A viewer who is not an admin, or who is hidden from the author rather than
+  hiding them, gets the tombstone** — the ordinary §3.1 path, unchanged. The
+  mutual direction (§3.5) deliberately does **not** reveal: being blocked gives
+  no licence to read the blocker's messages, and an admin who is blocked by
+  someone has, if anything, less reason to read them.
 
-- `0` — an ordinary row, assembled exactly as today.
-- `1` — the §3.1 tombstone: content, name, avatar, reactions, media, link
-  embeds and reply/forward context all dropped before decoding, before the
-  batch maps are consulted, before `hydrateProfiles`.
-- `2` — a **reveal**: the row assembles normally **and** carries
-  `blocked: true` (the author is still blocked; the client must keep saying so,
-  §4.4). One new optional field on the tombstone path distinguishes the two
-  states on the wire, `revealed?: boolean`. Without it a reveal is
-  indistinguishable from an ordinary row, and a client that has lost the local
-  block set cannot tell that the author it is now rendering is one it blocked.
+**What the reveal carries: the full DTO, not the author-suppressed shape.** The
+question "does a reveal return content, or the same author-suppressed shape used
+elsewhere" is answered by what the reveal is *for*: an admin who blocked someone
+and needs to read a message — a report, a dispute — has to see what was written.
+A shape that suppressed the author cannot be acted on, because the decision is
+about *that author*. So the revealed response is the complete `MessageDto`:
+content, mime type, author name and avatar, reactions, media, link embeds, reply
+context, forward originals. There is no half-revealed variant; either the
+tombstone or the message.
 
-The room's space DID is already in hand at the `selectMessages` call site,
-which matters because clause 2 needs it: `selectMessages` runs against the
-*space-scoped* DB (`openSpaceDbForEntity(roomId)`, `getMessages.ts:41-49`), and
-the message's `stream_id` is that space's DID — the same value
-`materialization/applyBundle.ts` writes into `read_positions.space_did`. So
-`revealableBy` is computed by the **caller** and passed in as `?R`, because
-the admin edge lives in the space DB that `selectMessages` is already querying
-and `selectMessages` does not consult auth at all. Adding an access check
-inside it would put the auth layer behind a query layer that every internal
-reader (`skipProfileHydration`, the invalidation router, the forward
-recursion) also calls.
+**The reveal does not reach `selectMessages`' batch queries by accident.** §3.2
+excludes hidden ids from the reaction / embed / link-data batches so a blocked
+message's media URLs and enriched link cards never enter the process. The
+revealed row needs them, so the batch ids are the *tombstoned* ids only — but
+this is moot on the reveal path in practice: `getMessage` fetches exactly one
+id, and on the reveal branch that id is not tombstoned.
 
-**What the reveal carries: the full DTO, not the author-suppressed shape.**
+**Two properties worth naming because they are easy to lose.**
 
-The question "does a reveal return content, or the same author-suppressed shape
-used elsewhere" is answered by what the reveal is *for*: an admin acting on a
-report has to read the message. A shape that suppressed the author — the way a
-moderation queue might present a message without its name — cannot be acted on,
-because the admin's decision is about *that author*. So `revealed` rows carry
-the complete `MessageDto`: content, mime type, author name and avatar,
-reactions, media, link embeds, reply context, forward originals. There is no
-half-revealed variant; either the tombstone or the message.
-
-**The reveal does not reach the batch queries by accident.** §3.2 excludes
-hidden ids from the reaction / embed / link-data batches so a blocked message's
-media URLs and enriched link cards never enter the process. A revealed id is
-*not* excluded — otherwise the reveal would return a full body with no
-reactions, no media and no link previews, which is a silently degraded
-message rather than the full one the rule promises. The id list the batches
-receive is therefore the page's ids minus the *tombstoned* ids, not minus the
-whole hidden set.
-
-**The forward recursion is where the two predicates interact.** A forward row
-and its nested original are redacted independently, because they are authored
-by different people (§3.2). The rule applies to each on its own terms: a
-revealed forward whose *original's* author the admin also blocked is still
-revealed throughout, and a tombstoned forward with a revealed original stays
-tombstoned — the forwarder's row is the row. The recursion carries both `?H`
-and `?R`, so `{ kind: "ids" }` calls made by the recursion are consistent with
-the page that spawned them.
-
-**Two properties the rule keeps, worth naming because they are easy to lose.**
-
-- **The reveal is viewer-local.** It changes what one admin receives and
-  nothing else: not the materialised row, not another admin's response, not a
-  live frame to a different connection. That is the same property that made
-  read-time redaction the right design (§3.1) and it is what keeps §7.5's
-  reaction-tooltip hiding — which is about *other people's* messages — intact
-  for the revealer.
-- **The reveal is not an un-block.** The author stays hidden: still no push
-  (§3.4), still no unread bump, still tombstoned in every space the admin
-  does not administer, still tombstoned in *this* space for a message
-  authored before the block was scoped here (§7.12's honest-limit note).
+- **The reveal is viewer-local and stateless.** It changes what one caller
+  receives and nothing else: not the materialised row, not another admin's
+  response, not a live frame to a different connection. That is the same
+  property that made read-time redaction the right design (§3.1), and it is what
+  keeps §7.5's reaction-tooltip hiding — which is about *other people's*
+  messages — intact for the revealer.
+- **The reveal is not an un-block.** The author stays hidden everywhere else:
+  still no push, still no unread bump, still an indicator in the timeline, in
+  search, in the activity feed and in every other surface of §3.3 and §3.4.
+  Only the one fetched message is readable, and only until the page is reloaded.
 
 ---
 
@@ -985,32 +964,33 @@ The tombstone satisfies the schema as written: `content: ""`, `authorName: ""`,
 and empty reaction/media/link arrays are all valid; `blocked` is the only new
 field, and it is what distinguishes "blocked" from "a genuinely empty message".
 
-**One further field, on the same object:** `revealed?: boolean` (§3.6). It is
-present only on a row that is blocked *and* whose content the server has
-returned under the admin reveal, and it is what tells a client that a full-
-bodied row is a revealed one rather than an ordinary message. A tombstone never
-carries it; a row with neither field is ordinary. Two booleans, three states,
-and the third state is the one §4.2's render branch and §4.4's affordance need
-to exist.
+**`blocked?: boolean` is the only field the reveal needs, and `getMessage`
+carries it in both states.** A revealed fetch is a full-bodied row that is
+*also* `blocked: true`: the client asked for it by id precisely because the
+author is blocked, and it must keep saying so, or the viewer cannot tell the
+message they are reading apart from an ordinary one. There is no second wire
+field: unlike the earlier draft, a `revealed` flag would only ever describe a
+row the client itself requested by id and therefore already knows it revealed.
+Two states on the wire (`blocked` present or absent), and the third client
+state — "fetched as revealed in this session" — is local (§4.4).
 
 **The field is deliberately direction-blind.** It says "this author is hidden
 from you", never which of the two directions produced that (§3.5). A mutual
 block is two different product states — you blocked them, they blocked you —
-and a single boolean cannot tell them apart; if the UI ever needs to, the
-client asks `space.roomy.user.getBlocks` for its own written set and treats a
+and a single boolean cannot tell them apart; if the UI needs to, the client asks
+for its own written set (`mutations/blocks.ts`'s `listBlocks`) and treats a
 hidden author *absent* from it as the reverse case. That keeps the wire schema
 one field and keeps the server from having to decide what to disclose. The
-reveal (§3.6) is the one place the client *does* need the direction, and it
-needs it on the client: the affordance's gate is "this is a block I wrote",
-which the local block set already answers.
+reveal (§3.6) needs the direction only to decide whether to *offer* the fetch,
+and `listBlocks` already answers it.
 
 **Nothing here is cached across callers.** The XRPC response cache keys on
 `(nsid, params, userDid)` (`cache/queryCacheKey.ts:35-41`) and only these NSIDs
 are cacheable at all: `space.getMetadata`, `room.getMetadata`, `getSpaces`,
-`space.getThreads`, `space.getActivityFeed` (`cache/index.ts:36-49`). No
-message-returning query is in that set, so the reveal cannot be served to
-another caller from cache; the per-user component of the key is what would
-prevent it if one were added.
+`space.getThreads`, `space.getActivityFeed` (`cache/index.ts:36-49`). `getMessage`
+is not in that set, so a revealed body cannot be served to another caller from
+cache; the per-user component of the key is what would prevent it if one were
+added.
 
 ### 4.2 Hiding the row
 
@@ -1044,23 +1024,23 @@ alongside the existing props (`:384-400`). Everything else on the row is
 suppressed: no toolbar, no reactions, no edit/delete/forward/select actions, no
 hover affordances, no profile link, no `onAvatarClick`.
 
-**The row the reveal renders is a full row.** A `revealed` message is not the
-suppressed row with content spliced into it: the suppression listed above
-exists to make an indicator out of a row with nothing in it, and a revealed row
-has a body, an author, reactions and a media set. So the render branch is on
-the pair, not on `blocked` alone:
+**A revealed fetch renders as an ordinary row, plus the blocked marker.** It is
+not the suppressed row with content spliced into it: the suppression listed
+above exists to make an indicator out of a row with nothing in it, and a
+revealed row is a full `MessageDto` — body, author, reactions, media. The
+render branch is therefore on `blocked` *and* on whether this row was fetched
+as a reveal (§4.4), not on `blocked` alone:
 
-| `blocked` | `revealed` | Row |
+| `blocked` | fetched as reveal? | Row |
 |---|---|---|
 | falsy | — | The ordinary row, exactly as today |
-| `true` | falsy | Indicator in the avatar slot, no body, no toolbar, no actions |
-| `true` | `true` | The ordinary row, plus the "blocked" marker §4.4 specifies |
+| `true` | no | Indicator in the avatar slot, no body, no toolbar, no actions |
+| `true` | yes | The ordinary row, plus the "blocked" marker §4.4 specifies |
 
-The middle row is §3.1's tombstone and the bottom row is §3.6's reveal; the
-only difference between them on the client is which of the two the server
-sent. A row that renders as an ordinary message while its author is blocked is
-the state §4.4's affordance exists to make legible, which is why `revealed`
-travels with `blocked` rather than replacing it.
+The middle row is §3.1's tombstone in the timeline; the bottom row is §3.6's
+reveal, which only ever arrives from `getMessage`. A row that renders as an
+ordinary message while its author is blocked is the state §4.4's marker exists
+to make legible.
 
 **The row is kept, not filtered, in `ChatArea`.** `mergeTimeline`
 (`components/chat/timeline.ts`) preserves input order and count, and the
@@ -1082,16 +1062,17 @@ same treatment in Phase 4:
 - **`components/feed/ActivityFeed.svelte`** — hand-rolled rows with their own
   avatar (`:181-195`) and content (`:231`), not `MessageBubble` at all.
 
-**Which of these carry the reveal, once it exists.** The reveal is a per-row
-affordance and these are not `MessageBubble` rows, so it has to be decided per
-surface rather than inherited:
+**Only surfaces that render `MessageBubble` carry the reveal.** The affordance
+lives in `MessageBubble` (§4.4), so a surface inherits it by using that
+component and does not by not using it — there is no second implementation and
+no per-surface server predicate to keep in step:
 
 | Surface | Reveal? | Why |
 |---|---|---|
-| Room timeline, `getMessage` (a deep link) | **Yes** | These are the surfaces a moderator acts on; the indicator sits on a row with a known id and the space is the one being read |
-| `SearchResultsList` | **Yes** | Same row shape, same id, same space; a moderator searching for a report needs the message, and the hit is already a full server-redacted row. Its duplicated reply-preview markup (`:368-412`) gets the same branch |
-| `ActivityFeed` | **No** | Previews, one line of context, rendered in a hand-rolled row with no message id on it. A reveal here would be a second implementation of the same control on a surface nobody moderates from; the row links into the room, where the reveal lives |
-| `MessageContextReply` | **No** | A reply preview inside another message's body; it is context for a message, not a moderation target |
+| Room timeline, and the `?message=` deep link | **Yes** | `MessageBubble` rows with a message id and a known space; this is where a moderator acts |
+| `SearchResultsList` | **Yes, by inheritance** | It renders `MessageBubble` compact (`:330`), so it gets the affordance. Its duplicated reply-preview markup (`:368-412`) gets the blocked branch and **no** affordance — a preview is not a message row |
+| `ActivityFeed` | **No** | Previews, one line of context, a hand-rolled row with no message id on it. It links into the room, where the affordance lives |
+| `MessageContextReply` | **No** | A reply preview inside another message's body; context for a message, not a moderation target |
 
 The rule behind the table: **the affordance belongs where a message id is
 rendered as a message.** A preview is not one, and duplicating the control onto
@@ -1100,7 +1081,7 @@ without adding a way to act on it.
 
 ### 4.4 The reveal surface, client-side
 
-The server redaction is the guarantee. The client adds a second layer because
+The server redaction is the guarantee. The client holds a second layer because
 `staleTime: Infinity` means the TanStack cache holds rows fetched *before* the
 block:
 
@@ -1115,61 +1096,63 @@ So a client-side block set lives in its own module — the established app-lite
 pattern of module-level `$state` in a `.svelte.ts` file, e.g.
 `lib/components/layout/settings-bar.svelte.ts` — and `ChatArea` derives
 `timeline` through a redaction pass over the cached array rather than mutating
-it. The set is seeded from the same records the user just wrote (so blocking is
-instant on the blocking device) and refreshed on login by reading the user's
-own collections plus `space.roomy.user.getBlocks` — the reverse index §3.5
-needs, and the only way a client learns it was blocked while offline. Phase 2
-adds that query; `refreshBlocks` (§2.4) is the write-through.
+it. The set is the user's **own written blocks**, read with `listBlocks`
+(`mutations/blocks.ts`) so it is seeded from the records the user just wrote and
+refreshed on login. The reverse direction (§3.5) is not in this set and is not
+needed on the client: the server sends the tombstone for it, and the client's
+job is only to render what it is given and to decide whether to *offer* a
+reveal, which is a question about the viewer's own blocks.
 
 The client layer is explicitly **belt, not guarantee**: it exists to close the
 window between a local block and the server's refreshed set, and to survive a
 stale cache. It is not the enforcement point and must not be described as one.
 
-**The reveal affordance.** The tombstone row is no longer content-free for
-everybody: an admin looking at a row they are permitted to reveal (§3.6) gets a
-control on it, and it is the only interactive thing on that row.
+**The reveal affordance.** The tombstone row is not content-free for everybody:
+an admin looking at a row for an author they blocked, in a space they
+administer, gets a control on it, and it is the only interactive thing on that
+row.
 
 - **Where.** In the avatar slot's indicator position, on hover, beside the
   blocked glyph — the slot `MessageBubble` already swaps between an avatar and
   a pending-send spinner (`MessageBubble.svelte:205-233`). One more branch in
   the same `{#if}`, so nothing moves.
 - **What it says.** "Show blocked message", phrased as the temporary act it is.
-  Not "unblock", which this is not — the author stays blocked, stays
-  tombstoned everywhere else, and the next page load hides them again. If §7.13
-  lands as the personal setting rather than the per-block record, the label
-  becomes "Show in <space name>".
+  Not "unblock", which this is not — the author stays blocked, stays tombstoned
+  on every other surface, and the next page load hides them again.
 - **When it is absent.** For every viewer who is not an admin of that space,
-  and for every admin who did not place the block. This is not only a UX rule:
+  and for every admin who did not block that author. This is not only a UX rule:
   the client must not *offer* an affordance the server will not honour, so the
-  gate is the same predicate the server evaluates (§3.6) — `isAdmin` is
-  already available in `ChatArea` (`ChatArea.svelte:54-55`, via
+  gate is the same two clauses the server evaluates (§3.6). `isAdmin` is already
+  available in `ChatArea` (`ChatArea.svelte:54-55`, via
   `createSpaceMetadataQuery` → `space.getMetadata`, which returns
   `isAdmin: access.isAdmin` at `handlers/space.roomy.space.getMetadata.ts:339`),
-  and the client's own block set tells it which of the blocks are its own.
-- **What happens on click.** The reveal is a server-side predicate, so the
-  control cannot be a pure client-side cache edit: it marks the id as revealed
-  in the client's block-set module (so the row renders immediately on the next
-  paint) **and** asks the server for the revealed row (`getMessage`, which
-  carries the reveal through §3.6). If the server returns a tombstone — a stale
-  admin edge, a space the admin has since been removed from — the client drops
-  its local reveal mark and leaves the indicator. The server is the arbiter;
-  the local mark is optimistic paint, the same shape as a pending send. The
-  mark is per-message and per-id, never a per-room mode (§7.16): revealing one
-  row must not reveal the next.
-- **What a revealed row shows.** The full row, with a "blocked" marker on it
-  (§4.2's third row) so the viewer can see that the author they are reading is
+  and the client's own block set answers clause 1.
+- **What happens on click.** The row is replaced by the result of
+  `message.getMessage` for that id (§3.6). On a full DTO the id goes into a
+  session-local revealed set and the row renders as an ordinary message plus
+  the blocked marker (§4.2). On a tombstone — a stale admin edge, a space the
+  admin has since left — nothing changes and the indicator stays. The server is
+  the arbiter; the client holds no optimistic copy of a body it never had.
+- **What a revealed row shows.** The full row with a "blocked" marker on it
+  (§4.2's third row), so the viewer can see that the author they are reading is
   one they blocked, and can reverse it. The reveal must never look like an
   ordinary message: an admin scanning a room should not have to remember which
   rows were blocked.
+
+**The session-local set is the whole of the client's reveal state.** It is a
+set of message ids, per message and never a per-room mode (§7.16): revealing
+one row must not reveal the next. It is not persisted, so a reload returns the
+room to indicators — which is the client half of §3.6's "the reveal is a read,
+not a state".
 
 **The client cannot reveal what the server did not send.** The redaction pass
 runs over rows the server already redacted, so there is no cached body for a
 tombstone in the common case. The one case where there is: a row cached *before*
 the block (§4.4's opening premise). Those rows live in the TanStack cache, and
 the client-side pass must hold them to the same rule as the server — a cached
-body for a hidden author is rendered as the indicator unless the viewer holds
-the reveal permission *for that row*, in which case it renders revealed. That
-is what keeps the block instant and the reveal honest without a refetch.
+body for a hidden author renders as the indicator unless its id is in the
+session's revealed set. That is what keeps the block instant without a refetch,
+and it is belt: the server's tombstone is what a fresh fetch returns.
 
 ---
 
@@ -1230,14 +1213,15 @@ and §3.5's `blockedBy` does nothing for them. The asymmetry is a property of th
 identity model, not of the block set, and the UI label §5 already requires
 ("blocked on Roomy only") is where it shows.
 
-One consequence for the reveal: a `did:discord:` author holds no repo, so a
-block naming one carries no `revealInSpaces` — the field lives on the *blocker's*
-record, not on the blocked party's, so this is fine. The blocker is an ATProto
-account and can name the space; a bridged author remains revealable by the admin
-who blocked them, on the same terms as any other author. What cannot happen is
-the reverse: a bridged author can never be the admin in §3.6 clause 2, because
-bridged DIDs hold no member or admin edge (`queries/members.ts:146-152`), so
-they never appear in `isAdmin`'s answer.
+One consequence for the reveal: a `did:discord:` author holds no repo, so
+nothing about the block lives on their side, and that is irrelevant to the
+reveal — the gate is the *blocker's* admin edge in a space and their own block
+set, neither of which involves the blocked party's identity beyond the DID.
+A bridged author is revealable by the admin who blocked them, on exactly the
+same terms as any other author. What cannot happen is the reverse: a bridged
+author can never be the admin in §3.6 clause 2, because bridged DIDs hold no
+member or admin edge (`queries/members.ts:146-152`), so they never appear in
+`isAdmin`'s answer.
 
 ---
 
@@ -1250,17 +1234,13 @@ previous phase is merged or green, on a stacked branch.
 
 ```
 next
- └── sorrel/user-blocks-p1      (record + write path, flag off)
-      └── feat/user-blocks-p2   (appserver block set)
-           ├── feat/user-blocks-p3   (timeline + getMessage + indicator)
-           │    ├── feat/user-blocks-p4  (other read surfaces)
-           │    ├── feat/user-blocks-p5  (live path, counters, push)
-           │    └── feat/user-blocks-p6  (block management UX, flag on)
+ └── <worker>/user-blocks-p1      (record + write path, flag off)   — shipped
+      └── <worker>/user-blocks-p2   (appserver block set)
+           └── <worker>/user-blocks-p3   (timeline + getMessage + indicator)
+                ├── <worker>/user-blocks-p4  (other read surfaces)
+                ├── <worker>/user-blocks-p5  (live path, counters, push)
+                └── <worker>/user-blocks-p6  (block management UX, flag on)
 ```
-
-Every branch rebases onto its parent head before its PR is opened, and each
-phase's PR states its base branch explicitly. Phase 4, 5 and 6 are independent
-of one another and may run as three workers off Phase 3.
 
 A new server-side feature flag `user-blocks` is registered in
 `packages/appserver/src/featureFlags.ts:21-47` (alongside `search`,
@@ -1276,13 +1256,12 @@ without the enforcement behind it.
 **Base:** `next`. **Depends on:** nothing.
 
 1. Add `packages/appserver/lexicons/space/roomy/user/block.json` (§1.1).
-2. (Optional, nothing depends on it) Publish the lexicon on the network as a
-   `com.atproto.lexicon.schema` record — out-of-band, documented in the package
-   README. This needs one DNS record first: the authority for
-   `space.roomy.user.block` is `_lexicon.user.roomy.space`, which does not exist
-   (§1.3). Nothing in this phase reads the published record — the appserver
-   writes the collection name as a literal and does not resolve the lexicon —
-   so the record is for third-party resolution, not for the feature.
+2. (Out-of-band, nothing depends on it) Publish the lexicon on the network as
+   a `com.atproto.lexicon.schema` record — documented in the package README.
+   The authority `_lexicon.user.roomy.space` resolves; the record is not in the
+   repo yet (§1.3). Nothing in this phase reads the published record — the
+   appserver writes the collection name as a literal and does not resolve the
+   lexicon — so the record is for third-party resolution, not for the feature.
 3. Add `repo:space.roomy.user.block` to `packages/app-lite/src/lib/config.ts`
    (beside `:144`) **and** the matching `SCOPE+=` line in
    `packages/app-lite/scripts/build-prod.sh` (beside `:57`). Run the build to
@@ -1313,7 +1292,7 @@ metadata contains the scope, and nothing is hidden yet.
 
 ### Phase 2 — The appserver block set
 
-**Base:** `feat/user-blocks-p1`. **Depends on:** Phase 1 (the collection must
+**Base:** `<worker>/user-blocks-p1`. **Depends on:** Phase 1 (the collection
 exist for the fetch to have anything to read).
 
 1. `packages/appserver/src/materialization/blocks.ts` — `fetchBlockRecords`
@@ -1354,58 +1333,58 @@ affected yet.
 
 ### Phase 3 — Timeline redaction and the indicator
 
-**Base:** `feat/user-blocks-p2`. **Depends on:** Phase 2. **This is the phase
+**Base:** `<worker>/user-blocks-p2`. **Depends on:** Phase 2. **This is the
 that satisfies the core requirement.**
 
-1. Add `blocked?: boolean` and `revealed?: boolean` to
-   `packages/sdk/src/schemas/queries/_message.ts`; regenerate lexicons.
+1. Add `blocked?: boolean` to `packages/sdk/src/schemas/queries/_message.ts`;
+   regenerate lexicons. One field; no `revealed` flag (§4.1).
 2. `selectMessages`: carry the hidden set into both scopes; add the
    `case when … json_each` flag column to the base SQL (§3.2), renumbering the
    room-scope bind parameters; build the tombstone in the assembly step;
-   exclude hidden ids from the reaction / embed / link-data batches; thread the
-   hidden set through the forward-original recursion.
-3. `queries/userBlocks.ts`: `revealableBy(userDid, spaceId)` (§3.6) — the
-   per-block `revealInSpaces` check behind the `isAdmin(db, spaceId, did)` gate
-   (`auth/access.ts:124-131`). Wire it into the two `selectMessages` call sites
-   that are caller-facing (`getMessages`, `getMessage`) as the `?R` parameter,
-   and into the client pull path the reveal affordance uses (§4.4). Empty set
-   when the caller is not an admin of that space, so the non-admin path costs
-   the memoised access lookup and nothing else.
-4. `message.getMessage` picks the behaviour up through `{ kind: "ids" }`; add
-   a test that the route returns a tombstone, not the row.
-5. `packages/design/`: `MessageBubble` gains `blocked`, renders the indicator
-   in the avatar slot and no body (`MessageBubble.svelte:205-233`);
+   exclude **tombstoned** ids from the reaction / embed / link-data batches;
+   thread the hidden set through the forward-original recursion. The statement
+   gains exactly one parameter, `?H`.
+3. `message.getMessage`: on a tombstoned row, return the full DTO when the
+   caller satisfies both of §3.6's clauses — `authorDid ∈ blocks(viewerDid)`
+   (the set already resolved for `hiddenBy`'s forward half, §2.3) and
+   `isAdmin(db, spaceId, did)` (`auth/access.ts:124-131`) for the space that
+   materialised the room. Otherwise the row stays a tombstone. This is the only
+   route that changes shape; `getMessages` returns tombstones to everyone.
+4. `packages/design/`: `MessageBubble` gains `blocked`, renders the indicator
+   in the avatar slot and no body (`MessageBubble.svelte:205-233`), and exposes
+   the reveal affordance when its owner passes it `canReveal`;
    `icons/index.ts` gains `IconBlocked`.
-6. `ChatMessage.svelte` computes and forwards `blocked` (including
+5. `ChatMessage.svelte` computes and forwards `blocked` (including
    `original.blocked` for forwards) and suppresses the toolbar, reactions and
-   actions on a blocked row; a revealed row renders ordinary plus the blocked
-   marker (§4.2).
-7. Client-side redaction pass over the cached array in `ChatArea` (§4.4), plus
-   the block-set module and the reveal affordance (§4.4).
-8. Tests: `selectMessages` returns a full-length page with tombstones in place
+   actions on a blocked row; a row the viewer fetched as revealed renders
+   ordinary plus the blocked marker (§4.2).
+6. Client-side redaction pass over the cached array in `ChatArea` (§4.4), the
+   own-blocks module, the session-local revealed set, and the reveal click that
+   calls `getMessage` (§4.4).
+7. Tests: `selectMessages` returns a full-length page with tombstones in place
    and an unchanged `nextCursor`; the tombstone carries no content, media, link
    embeds, reactions or profile fields; a forward of a hidden author's message
    is redacted; `ChatArea.loadOlderMessages` still pages past a fully-hidden
    block of history; and a page with a cursor bound correctly against the
-   renumbered room-scope parameters (§3.2). For the reveal: the tombstone opens
-   for an admin who placed the block, stays shut for an admin who did not, for
-   a non-admin who did, for a block whose `revealInSpaces` omits that space,
-   and for every Bluesky-sourced block; a revealed row carries the full DTO
-   including reactions, media and link embeds (§3.6); and the reveal is
-   viewer-local — a second connection on the same room, and the same admin's
-   unread count, are unchanged.
+   renumbered room-scope parameters (§3.2). For the reveal: `getMessage` returns
+   the full DTO for an admin who blocked the author, and the tombstone for a
+   non-admin who blocked them, for an admin who did not, for an admin the author
+   blocked (the mutual direction), and for a Bluesky-sourced block; the DTO
+   carries reactions, media and link embeds (§3.6); `getMessages` still returns
+   the tombstone to that same admin; and no row is written anywhere on the
+   reveal path.
 
 **Acceptance:** with the flag on, a hidden author's messages appear as an
-indicator-only row in the room timeline and in `getMessage` — **in both
-directions** — and paging past them is uninterrupted. An admin who placed the
-block and whose block permits it in that space can open that row and gets the
-full message; nobody else can, on any surface.
+indicator-only row in the room timeline — **in both directions** — and paging
+past them is uninterrupted. `message.getMessage` returns the full message to an
+admin of the space who blocked that author, and a tombstone to everyone else.
+No other route, and no pushed frame, carries a revealed body.
 
 ---
 
 ### Phase 4 — Every other read surface
 
-**Base:** `feat/user-blocks-p3`. **Depends on:** Phase 3. Independent of
+**Base:** `<worker>/user-blocks-p3`. **Depends on:** Phase 3. Independent of
 Phase 5.
 
 1. `search.messages`: redact hits and `reply.message` (§3.3).
@@ -1416,23 +1395,23 @@ Phase 5.
 5. `getLinks` (room + space): redact rows whose sharing message is blocked.
 6. `getReactions`: drop blocked DIDs from the reactor list.
 7. app-lite: the blocked branch in `SearchResultsList.svelte` (including its
-   duplicated reply-preview markup) and `ActivityFeed.svelte`.
-8. Each of these reads is caller-scoped, so each carries §3.6's `?R`
-   parameter alongside `?H` — a reveal that worked in the timeline and not in
-   search would be a moderator's dead end. `SearchResultsList` carries the
-   reveal affordance (§4.3); `ActivityFeed` does not.
-9. Tests, one per surface, each asserting that no blocked content, name or
-   avatar appears in the response.
+   duplicated reply-preview markup) and `ActivityFeed.svelte`. The reveal
+   affordance arrives with `MessageBubble` and is not re-implemented on the
+   preview rows (§4.3).
+8. Tests, one per surface, each asserting that no blocked content, name or
+   avatar appears in the response — for every caller, admins included; none of
+   these routes carries a reveal.
 
 **Acceptance:** the §"Every route" checklist is covered end-to-end by a test
-per row. The reveal opens the same rows it opens in the timeline — search hits
-and reply context included — and opens nothing on the surfaces §7.12 excludes.
+per row, and each row asserts the redaction holds for an admin of the space as
+well as for an ordinary member. The reveal stays where §3.6 puts it: the single
+`getMessage` fetch.
 
 ---
 
 ### Phase 5 — Live path, counters, push
 
-**Base:** `feat/user-blocks-p3`. **Depends on:** Phase 3. Independent of
+**Base:** `<worker>/user-blocks-p3`. **Depends on:** Phase 3. Independent of
 Phase 4.
 
 1. `sync/handler.ts`: per-connection redaction in `#deliverRoomFrame` for
@@ -1460,7 +1439,7 @@ content, in either direction — for every viewer, admins included.
 
 ### Phase 6 — Block management UX and flag on
 
-**Base:** `feat/user-blocks-p3`. **Depends on:** Phase 3. Independent of
+**Base:** `<worker>/user-blocks-p3`. **Depends on:** Phase 3. Independent of
 Phases 4 and 5, but must not ship before them.
 
 1. A "Blocked users" page under `routes/user/settings/blocks/`, listing the
@@ -1474,23 +1453,15 @@ Phases 4 and 5, but must not ship before them.
    offers to delete the `app.bsky.graph.block` record too (§7.9). The list
    distinguishes "you blocked" from "you were blocked by" (§4.1), which is the
    first place the §7.7 consequence becomes visible to a user.
-3. If §7.13 lands as recommended, the block action gains an "allow admins of
-   …" control that writes `revealInSpaces` (§1.1), and the list on this page
-   shows, per block, which spaces permit a reveal. Off by default, per block
-   and per space — the setting is the thing that keeps §7.12's exception in the
-   user's hands, so it ships with the feature rather than after it.
-4. If §7.14 lands as recommended, the reveal writes its audit row (§7.14).
-5. Enable `user-blocks` by default.
-6. E2E: seed a block (the seeder already inserts feature flags directly —
+3. Enable `user-blocks` by default.
+4. E2E: seed a block (the seeder already inserts feature flags directly —
    `packages/app-lite/e2e/seed.ts:230-235`), open the room, assert the
    indicator renders in the avatar position and the body is absent; as an admin
-   with a permitted block, reveal it and assert the body appears with the
-   blocked marker, and that a second non-admin session still sees the
-   indicator.
+   who blocked that author, reveal the row and assert the body appears with the
+   blocked marker, and that a second non-admin session still sees the indicator.
 
-**Acceptance:** the flag is on, blocked users are listed and manageable, each
-block's reveal permission is visible and editable, and the E2E suite covers
-both the blocked and the revealed rendering.
+**Acceptance:** the flag is on, blocked users are listed and manageable, and the
+E2E suite covers both the blocked and the revealed rendering.
 
 ---
 
@@ -1501,13 +1472,10 @@ each one except 7, which is reversed. The plan states the outcome rather than a
 preference, and records an alternative only where a future reader would
 otherwise re-propose it.
 
-§7.12–§7.16 were added by the 2026-09-28 revision. §7.12 is decided — an admin
-may reveal a block they placed themselves, in a space they administer — and
-§7.13–§7.16 are the questions that decision raises and does not settle: the
-mechanism behind the exception, the audit of it, its interaction with the
-service-DID paths, and whether a reveal is per-message or a mode. Each carries
-a recommendation; none of the four blocks dispatch, because §3.6 is complete
-without them and each has a stated default.
+§7.12–§7.16 were added by the 2026-09-28 revision and rewritten by the
+2026-10-13 one. §7.12 states the rule; §7.13–§7.16 record the consequences of
+the reveal being a transient read rather than a recorded act, and every one of
+them is settled — nothing here is an open question or a pending preference.
 
 **1. Record key: `tid` (one record per block) or `literal:self` (one list
 record)?**
@@ -1592,11 +1560,15 @@ expect from Bluesky.
 **What it costs in the appserver, stated plainly:** the blocker's repo is the
 only place the reverse fact lives, so the reverse set must be *recovered* from
 public repos (§3.5). That is an enumeration of the viewer's space-members'
-repos, a new `space.roomy.user.getBlocks` query, and a fan-out
-invalidation on `refreshBlocks` — all in Phase 2, none of it a new phase or a
-new read path. HappyView's `filter = { field = "subject" }` lookup would answer
-it in one call but only at Jetstream freshness, which §2.1 already rejected as
-a safety property; it is the right optimisation later, not the v1 mechanism.
+repos and a `blockedBy` predicate over the cached sets — all in Phase 2, none of
+it a new phase or a new read path. There is no `space.roomy.user.getBlocks`
+query and no fan-out on `refreshBlocks` beyond the writer and the block's
+subject: the client reads its own blocks straight from its own repo with
+`listBlocks` (`mutations/blocks.ts`), and the server never needs to answer "who
+blocked me" over HTTP. HappyView's `filter = { field = "subject" }` lookup would
+answer the server-side reverse question in one call but only at Jetstream
+freshness, which §2.1 already rejected as a safety property; it is the right
+optimisation later, not the v1 mechanism.
 
 **8. Should blocking in Roomy also write an `app.bsky.graph.block` record?**
 **Decided: no.** Blocking on Roomy is a Roomy act; silently changing a
@@ -1653,134 +1625,89 @@ visible, not less. The tombstone decision (§7.3) rests on that derivation, and
 it is unchanged. Confirmed by reading `origin/next` at `0f336883`.
 
 **12. May an admin reveal a message hidden by a block they placed?**
-**Decided: yes, for their own blocks, in spaces where they hold admin.** The
-rule is §3.6, stated there in full. This is an **exception to §7.7, not a
-reversal of it**: mutual redaction stands, and the reveal opens a tombstone for
-one principal — the admin who wrote the block — in one scope — a space where
-that admin holds the admin edge — and nowhere else.
+**Decided: yes — for their own blocks, in spaces where they hold admin, as a
+transient read.** The rule is §3.6, stated there in full. This is an
+**exception to §7.7, not a reversal of it**: mutual redaction stands, and the
+reveal opens a tombstone for one principal — the admin who wrote the block — in
+one scope — a space where that admin holds the admin edge — and nowhere else.
 
 **Why it is not a widening of the moderation model.** The tree has no
-permission system for this to attach to (see §7.13), and the alternative
-reading of the same sentence — any admin may reveal any block — is a real
-change to what blocking means: it would turn a user's block into something an
-admin can override, in spaces the user may have nothing to do with. The
-decision taken is the narrower one and is the one the requirement states. It
-is worth naming plainly because the two readings are one word apart and only
-one of them is a safety feature.
+permission system for this to attach to (§7.13), and the alternative reading of
+the same sentence — any admin may reveal any block — is a real change to what
+blocking means: it would turn a user's block into something an admin can
+override, in spaces the user may have nothing to do with. The decision taken is
+the narrower one and is the one the requirement states. It is worth naming
+plainly because the two readings are one word apart and only one of them is a
+safety feature.
+
+**The act is a read, and that is what shapes everything below.** The admin
+looks at a message; nothing is recorded, nothing is granted, and nothing
+persists. The single route that serves it is `space.roomy.message.getMessage`
+(§3.6): every other surface — the timeline, search, the activity feed, the live
+frames, the counters, push — is redacted for that admin exactly as it is for
+everyone else. §3.4 tabulates that per surface.
 
 **What it costs, stated plainly.** The reveal is a genuine hole in the
-invariant this plan spent §3 building, and it is the *only* one. Everything
-that follows from that:
+invariant §3 built, and it is the *only* one. §3.1's "content is not revealable
+through any route" is now "…except by the admin who blocked the author, in a
+space they administer, for their own block, one message at a time". Three
+limits keep it narrow, and all three are properties of the design rather than
+policy promises:
 
-- §3.1's "content is not revealable through any route" is now "…except by the
-  admin who blocked the author, in a space they administer, for their own
-  block".
-- §3.6's third clause — the record carrying a per-block `revealInSpaces` — is
-  what keeps the hole user-controlled rather than automatic. Without it, every
-  admin who blocks someone silently acquires the power to unmask them, and the
-  block becomes advisory. It is recommended as §7.13's answer for that reason,
-  and if §7.13 lands the other way the cost is named there.
-- The reveal is one click and is not reversible by the author: a user cannot
-  tell whether an admin revealed their message, which is why §7.14 is a real
-  question and not a formality.
+- **It is per-message and per-fetch.** There is no mode and no stored flag
+  (§7.16): the widened response is produced by one request for one id, and a
+  reload brings the indicators back.
+- **It is space-scoped by the admin edge.** The gate is
+  `isAdmin(db, spaceId, did)` for the space that materialised the room, so an
+  admin who blocks someone reads them in the spaces they moderate and nowhere
+  else.
+- **It cannot be reached by a service identity.** The gate is the per-space
+  admin edge, never the `APPSERVER_ADMIN_DIDS` allowlist (§7.15).
 
-**Honest limit, and it is not small.** The third clause is a field on a record
-in the blocker's own repo, which means the *client* decides what goes in it at
-block time, and the server has no way to tell a `revealInSpaces` the user
-chose from one an admin UI set on their behalf. The reveal is therefore a
-client-enforced promise on top of a server-enforced block: the server enforces
-"only an admin, only their own block, only here", and the client is what makes
-"only if the user opted in" true. That is the same trust shape as the block
-itself (§1.2 — the record is public and the client writes it), and it is the
-reason the alternative in §7.13 is worth considering at all.
+**The limit that is not a bug, and should be said out loud:** the reveal
+exists only where a message id is fetched as a message. An admin scanning a
+room, a search result list or the activity feed sees indicators; the reveal is
+one click on one row, and then one message is readable. That is the design, not
+a gap to be closed later — a stateless reveal has nowhere to live except the
+route that serves it.
 
 **13. What is the mechanism behind the exception — a per-space setting on the
-block, or a role permission?** *(open)*
-**Recommendation: the per-space setting on the block record** — a
-`revealInSpaces` array of space DIDs on `space.roomy.user.block` (§1.1),
-default absent, so the reveal is **off** unless the user names a space, per
-block and per space.
+block, or a role permission?**
+**Decided: neither. The gate is the space's admin edge, and the block record
+carries no reveal field.** The earlier revisions proposed a `revealInSpaces`
+array on `space.roomy.user.block` and a `revealableBy` predicate over it; both
+are **removed** (§1.1). They existed to keep a *persistent* exception in the
+user's hands. Once the exception is a transient read that changes no state
+(§7.12), there is nothing for the user to grant and nothing to record, so a
+per-block permission would add a field, a UI, a client-enforced promise the
+server cannot verify, and a second gate to keep in step — for no gain.
 
-The thread that produced this requirement landed on exactly that shape —
-*"admins should be able to reveal hidden messages in a space but otherwise
-not, or maybe it could be a personal setting… personal setting for the
-blocker"* — and it is the only one of the two that is implementable in this
-tree today:
+The two shapes that were rejected, and why, are worth one line each because
+they will be re-proposed otherwise:
 
-| | Per-space setting on the block record | Role permission |
-|---|---|---|
-| What it attaches to | The block record the user already writes (§1.1) | The `admin` edge, or a new role permission |
-| Does the tree support it? | Yes — one more property on a record being added anyway | **No.** Roles exist (`roles`, `member_roles`, `role_rooms`, `schema-space.sql:277-302`) but a role carries only *room* access: `role_rooms.permission` is `check(permission in ('read','readwrite'))` (`:298-300`), written by `space.roomy.role.setRoleRoomPermission`, whose `permission` is `'read' | 'readwrite' | null` (`packages/sdk/src/schema/events/roles.ts:93-97`). There is no moderation permission, and no non-room role capability at all |
-| Cost | A property, a UI toggle at block time, and a default-empty that fails closed | A new permission kind across the lexicon, the materialiser, `role_rooms`'s schema and its check constraint, `writeAuth`'s role evaluation, the permissions settings page (`routes/[space]/settings/permissions/+page.svelte`), and the SDK — and it would still be *space*-scoped, which cannot express "this space and not that one" for a block the user placed before either existed |
-| Who it protects | The blocker, explicitly, per block | Nobody in particular — it is admin authority, granted by the space |
-
-The role-permission reading ("a permission for moderation purposes") solves a
-different problem: it lets a space delegate moderation to a non-admin, which
-is a real need and a much larger project. It does not answer *whose* block may
-be revealed, and without clause 1 it grants admins power over blocks that are
-not theirs — the widening §7.12 rejected.
-
-**What the setting would change if adopted:** `revealableBy` (§3.6) reads the
-field per `(blocker, space)` instead of treating every own-block as
-revealable. Everything else in §3.6 stands. The default must be empty, so the
-feature ships with the reveal off and turns on per block and per space — which
-also means Phase 3 can land the enforcement path before the setting exists,
-with `revealableBy` returning the empty set.
+| Shape | Verdict |
+|---|---|
+| `revealInSpaces` array on the block record (the earlier recommendation) | Removed. It made the reveal a standing permission attached to a permanent record. A read needs no permission to grant and no field to carry one |
+| A role permission (a moderation capability on the `admin` edge or a new role kind) | Rejected, and not implementable in this tree today: a role carries only *room* access — `role_rooms.permission` is `check(permission in ('read','readwrite'))`, written by `space.roomy.setRoleRoomPermission` whose type is `'read' \| 'readwrite' \| null` — and it would answer a different question (delegating moderation to a non-admin), not *whose* block may be read |
 
 **14. Is a reveal audited, or attributable to the admin who performed it?**
-*(open)*
-**Recommendation: yes, and the plan should say so before Phase 3 ships the
-affordance.** A reveal is the one action in this design that defeats a
-user-visible guarantee, and it is performed by someone with authority over the
-space. It is the classic case for an audit trail.
+**Decided: no. Nothing is recorded, and the plan does not pretend otherwise.**
+The earlier revisions recommended a `block_reveals` table with one row per
+reveal. A read is not an act a user performs on a resource; it is the ordinary
+consequence of a permission they hold, and recording every fetch would either
+write to the hottest read path in the system (`getMessages`/`getMessage`) or
+invent a new event for something that changes no state. The reveal is
+therefore **not** attributable, and §3.6 says so rather than implying a
+guarantee it does not keep:
 
-**What a minimal audit is.** There is no audit or moderation table anywhere in
-the tree (both schema files were checked; neither contains one), so this is a
-new table, and the honest cost is that it is new. The minimum that makes a
-reveal attributable:
-
-```sql
--- readstate, schema v12 (or the space DB — see below). One row per reveal.
--- Room-scoped like the message, because a reveal is an act on a message.
-create table if not exists block_reveals (
-  id          text primary key,        -- ulid
-  space_id    text not null,
-  room_id     text not null,
-  message_id  text not null,
-  admin_did   text not null,           -- who revealed
-  author_did  text not null,           -- whose message it was
-  created_at  integer not null default (unixepoch() * 1000)
-) strict;
-```
-
-**Three shapes, ranked:**
-
-1. **Record on reveal, in the readstate DB.** The admin's reveal is already an
-   explicit action (§4.4 — it is a click, not a passive read), so there is
-   exactly one place to write the row. Cheap, and it is the shape that makes
-   the feature defensible.
-2. **Record nothing, but make the reveal explicit on the client** (which §4.4
-   already requires — it is never a silent widening). The weakest defensible
-   position, and only if the audit is deliberately deferred.
-3. **Record every *read* of a revealed message.** Rejected: it multiplies a
-   write onto the hottest read path in the system (`getMessages`) to answer a
-   question the reveal action already answers.
-
-**The recommendation is 1**, with the caveat that the row must not leak the
-content it is recording — ids only, no body, because the audit table would
-otherwise become a second copy of the message the block existed to hide, in a
-table with different access rules from the message itself.
-
-**Two things to decide with it, both cheap:** whether the *blocked* user may
-learn that a reveal happened (recommendation: no — it re-opens the
-confrontation §7.7's consequence was accepted for, without the benefit that
-made that acceptable), and whether the audit is ever surfaced in the product
-(recommendation: not in v1; it exists to be answerable, not to be browsed).
+- No table, no write, and no audit on the reveal path.
+- No client-side record either: the session-local revealed set (§4.4) is not
+  persisted, so there is nothing to surface later.
+- The blocked user cannot learn that a reveal happened — which follows from
+  there being nothing to learn, not from a policy about disclosure.
 
 **15. Do the Discord bridge's service-DID reads interact with the reveal?**
-*(open)*
-**Recommendation: no change, and the plan should state that the bridge's path
-is unaffected in both directions.**
+**Decided: no change, in either direction.**
 
 The facts, verified:
 
@@ -1807,48 +1734,43 @@ The facts, verified:
   §7.6's topic restriction. No TypeScript call site in either the bridge or
   app-lite invokes `getEvents`; the bridge's live read path is the WebSocket.
 
-**Why neither is affected.** The bridge is not a viewer: it holds no blocks
-and is never the *blocker* in §3.6's predicate, so the reveal cannot open
-anything for it, and it is not in `hiddenBy` for anyone either. And the
-service path is not per-viewer in the first place — it returns raw
-events to a service DID, so it bypasses the redaction §3.6 excepts from
-*by construction*, exactly as it bypasses the redaction §3.1 added.
-That asymmetry is pre-existing, is what §7.6 addresses for `stream:` topics,
-and is not changed by the reveal in either direction.
+**Why neither is affected.** The bridge is not a viewer: it holds no blocks and
+is never the *blocker* in §3.6's predicate, so the reveal cannot open anything
+for it, and it is not in `hiddenBy` for anyone either. And the service path is
+not per-viewer in the first place — it returns raw events to a service DID, so
+it bypasses the redaction §3.1 added, by construction. That asymmetry is
+pre-existing, is what §7.6 addresses for `stream:` topics, and is unchanged by
+the reveal in either direction.
 
-**The one thing the revision does add here:** §3.6's predicate must not be
+**The one thing this section exists to prevent:** §3.6's gate must not be
 implemented anywhere near a service identity. `APPSERVER_ADMIN_DIDS` is a
 process-wide allowlist and the space admin edge is per-space and per-user; the
 two are unrelated, and a check written against the wrong one would grant every
-allowlisted service DID the power to unmask every block it holds — which,
-since services may hold blocks, is not hypothetical. §3.6's clause 2 is
+allowlisted service DID the power to unmask every block it holds — which, since
+services may hold blocks, is not hypothetical. §3.6's clause 2 is
 `isAdmin(db, spaceId, did)` (`auth/access.ts:124-131`), the space-edge check,
-and the plan should say so at the call site.
+and the plan says so at the call site.
 
-**16. Is a reveal per-message, or a mode the admin turns on?** *(open)*
-**Recommendation: per-message, and it is the only shape §3.6 supports.**
+**16. Is a reveal per-message, or a mode the admin turns on?**
+**Decided: per-message, and it is the only shape §3.6 supports.**
 
 The requirement's own phrasing is per-message — *"reveal hidden messages… in a
 space"* — and the design follows it: each tombstone is opened by acting on that
 row, and §4.4's affordance lives on the row it opens. A mode ("reveal all
-blocked messages in this space") is a different feature and would change what
-§3.6 has to say:
+blocked messages in this space") is a different feature, and with the reveal
+now stateless (§7.12, §7.14) it is not merely a design preference but a
+different mechanism:
 
-| | Per-message (recommended) | A sticky mode |
+| | Per-message (decided) | A sticky mode |
 |---|---|---|
-| Server shape | Exactly §3.6 as written — `?R` is a property of `(viewer, space)`, and the row still has to pass clause 1 | The same predicate, applied to every row: no server change at all |
-| What the client does | Marks one id revealed; the row is re-fetched | Marks the space revealed; every blocked row renders |
-| Cost | One click per message a moderator needs to read | One click for all of them — cheaper for a moderator clearing a queue |
-| Risk | None beyond §3.6 | The reveal stops being an act and becomes a state: a moderator who turns it on and forgets has effectively unblocked that author in that space, and the *blocker's* own intent (§7.13) is what a mode most easily overrides |
+| Server shape | One `getMessage` fetch widened for one id, gated per request | Needs a persistent per-(admin, space) flag somewhere, or a client-side set that re-fetches every blocked row on load |
+| State written | **None** | A flag to store, or a client cache to persist |
+| What the client does | Marks one id revealed for the session | Marks the space revealed; re-fetches every blocked row |
 | Reversibility | Automatic — the next page load hides the row again | Needs an explicit "hide again", and until then the block is not in force for that admin |
 
-**The recommendation is per-message**, because the reveal is a deliberate act on
-a specific message and the mode's convenience is bought with the property that
-makes the exception acceptable: that it is narrow, momentary and attributable
-(§7.14). If a mode is wanted later, it is a client-side accumulation of the
-per-message reveal — a set of ids rather than a flag — and neither §3.6 nor the
-server changes. Recording it that way now is what keeps the option open without
-paying for it in v1.
+The per-message shape is what keeps the exception acceptable: narrow,
+momentary, and requiring no state to hold it. A mode would need state, and the
+whole point of §7.12 is that there is none.
 
 ---
 
@@ -1914,6 +1836,12 @@ security-relevant read rather than a convenience.
 - `packages/appserver/src/handlers/space.roomy.message.getReactions.ts`
 - `packages/appserver/src/queries/readPositions.ts:514-524`
 - `packages/appserver/src/handlers/space.roomy.room.updateSeen.ts:23-117`
+- `packages/appserver/src/handlers/space.roomy.message.getMessage.ts:44` — the
+  one route §3.6 widens: it resolves the room and the space before the
+  tombstone/reveal decision
+- `packages/appserver/src/materialization/blocks.ts` (new) and
+  `packages/appserver/src/queries/userBlocks.ts` (new) — `fetchBlockRecords`
+  and the `blocks` / `hiddenBy` predicates §3.6's gate reads
 
 **In-tree — the admin reveal (§3.6, §7.12–§7.16)**
 - `packages/appserver/src/auth/access.ts:124-131` — `isAdmin(db, spaceId, did)`,
