@@ -101,11 +101,13 @@ export interface ActiveThreadEntry {
  * board read. The scan remains the fallback for a DB whose projection table
  * cannot answer the batch.
  *
- * The caller is responsible for filtering by access.
+ * The caller is responsible for filtering by access. Authors in `hidden` are
+ * dropped from every `latestMembers`, before any profile is layered on.
  */
 export async function resolveThreadsByIds(
   db: DbLike,
   threadIds: string[],
+  hidden?: ReadonlySet<string>,
 ): Promise<Map<string, {
   name: string | null;
   latestTimestamp: string | null;
@@ -187,6 +189,14 @@ export async function resolveThreadsByIds(
       latestMembers: participantsMap.get(tid) ?? [],
       canonicalParent: parentMap.get(tid) ?? null,
     });
+  }
+
+  // Drop hidden authors before hydration, so a blocked participant is gone
+  // from the entry and never hydrated in the first place.
+  if (hidden && hidden.size > 0) {
+    for (const entry of result.values()) {
+      entry.latestMembers = entry.latestMembers.filter((m) => !hidden.has(m.did));
+    }
   }
 
   // Resolve participant profiles from the global store (with an in-memory

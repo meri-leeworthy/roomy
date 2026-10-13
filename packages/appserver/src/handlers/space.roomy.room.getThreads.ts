@@ -72,7 +72,14 @@ export const getRoomThreadsHandler: QueryHandler<
   const memo = createAccessMemo();
   await requireRoomRead(db, roomId, userDid, memo);
 
-  const { threads: all, cursor: nextCursor } = await listThreadActivity(db, { kind: "channel", channelId: roomId }, limit, cursor, search);
+  const { threads: all, cursor: nextCursor } = await listThreadActivity(
+    db,
+    { kind: "channel", channelId: roomId },
+    limit,
+    cursor,
+    search,
+    { viewerDid: userDid },
+  );
 
   // Collect all thread IDs for batch unread lookup
   const threadIds = all.map((t) => t.id);

@@ -17,6 +17,7 @@ import {
 } from "../queries/readPositions.ts";
 import { queryActiveThreads, resolveThreadsByIds } from "../queries/userActiveThreads.ts";
 import { getSpaceHandle } from "../queries/spaceHandles.ts";
+import { hiddenBy } from "../queries/userBlocks.ts";
 import { parseUserDid } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { requireString } from "../xrpc/params.ts";
@@ -277,7 +278,7 @@ export const getMetadataHandler: QueryHandler<
 
     if (activeThreadEntries.length > 0) {
       const threadIds = activeThreadEntries.map((t) => t.id);
-      const threadMetaMap = await resolveThreadsByIds(db, threadIds);
+      const threadMetaMap = await resolveThreadsByIds(db, threadIds, await hiddenBy(userDid));
 
       // Build active thread objects with access checks and read positions.
       const threadReadPositions = await getReadPositions(mainDb, db, userDid, threadIds);

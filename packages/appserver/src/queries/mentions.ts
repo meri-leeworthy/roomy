@@ -305,9 +305,15 @@ export async function getMentions(
  * `entities`/`comp_*` tables they join against) live in per-space DBs — so
  * this routes each space's message batch to that space's DB. Querying the
  * global DB here would fail with "no such table: entities".
+ *
+ * `viewerDid` is the mention owner: a mention of a message whose author is
+ * hidden from them comes back as the tombstone `selectMessages` builds for a
+ * hidden author — empty body, no author name, no avatar — so the row stays in
+ * the list without carrying the blocked content.
  */
 export async function loadMentionMessages(
   rows: MentionRow[],
+  viewerDid?: UserDid | null,
 ): Promise<Map<Ulid, MessageDto>> {
   const bySpace = new Map<StreamDid, Ulid[]>();
   for (const row of rows) {
@@ -317,10 +323,11 @@ export async function loadMentionMessages(
   }
   const out = new Map<Ulid, MessageDto>();
   for (const [spaceDid, ids] of bySpace) {
-    const { messages } = await selectMessages(openSpaceDb(spaceDid), {
-      kind: "ids",
-      ids,
-    });
+    const { messages } = await selectMessages(
+      openSpaceDb(spaceDid),
+      { kind: "ids", ids },
+      viewerDid,
+    );
     for (const m of messages) out.set(m.id as Ulid, m);
   }
   return out;

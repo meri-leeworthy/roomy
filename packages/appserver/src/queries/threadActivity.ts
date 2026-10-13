@@ -19,8 +19,9 @@
 
 import type { DbLike } from "../db/types.ts";
 import { decodeContent, decodeRichTextBody } from "../db/content.ts";
-import { RICHTEXT_MIME, blocksToPlaintext } from "@roomy-space/sdk";
+import { RICHTEXT_MIME, blocksToPlaintext, type UserDid } from "@roomy-space/sdk";
 import { hydrateProfiles } from "./profileStore.ts";
+import { hiddenBy } from "./userBlocks.ts";
 import {
   readRoomActivityProjectionFor,
   rebuildRoomActivity,
@@ -63,6 +64,8 @@ export type ThreadScope =
 export interface ListActivityOptions {
   /** Room kinds to include (defaults to `["thread"]`). */
   kinds?: Array<"thread" | "channel">;
+  /** Viewer whose blocks redact activity rows (null/absent: no redaction). */
+  viewerDid?: UserDid | null;
 }
 
 /**
@@ -167,7 +170,8 @@ export async function listThreadActivity(
   const pageThreads = hasMore ? threads.slice(0, limit) : threads;
 
   const threadIds = pageThreads.map((t) => t.id);
-  const activityByRoom = await fetchRoomActivity(db, threadIds);
+  const hidden = opts.viewerDid ? await hiddenBy(opts.viewerDid) : undefined;
+  const activityByRoom = await fetchRoomActivity(db, threadIds, hidden);
 
   const results: ThreadActivity[] = pageThreads.map((t) => {
     const act = activityByRoom.get(t.id);
@@ -210,12 +214,18 @@ export async function listThreadActivity(
 export async function fetchRoomActivity(
   db: DbLike,
   roomIds: string[],
+  hidden?: ReadonlySet<string>,
 ): Promise<Map<string, ThreadActivity>> {
   if (roomIds.length === 0) return new Map();
 
   const projected = await fetchProjectedRoomActivity(db, roomIds);
   const out = projected ?? (await scanRoomActivity(db, roomIds));
 
+  // Redact after the page is assembled and before any profile is layered on,
+  // so a hidden author is gone from both the participants and the preview.
+  if (hidden && hidden.size > 0) {
+    for (const t of out.values()) redactActivity(t, hidden);
+  }
   // Warm on miss — the `room_access` pattern (queries/roomAccessProjection.ts).
   // The scan below has just derived every room's answer from the live tables, so
   // writing those rows now means this page is projected from the next read on.
@@ -242,10 +252,13 @@ export async function fetchRoomActivity(
   // for cross-stream users. The global `profiles` table is authoritative; the
   // per-space value (if any) acts as a fallback. Shared by both paths so a
   // projected row and a scanned row hydrate identically.
+  // A hidden author is skipped, so the global store never re-attaches the name
+  // or avatar `redactActivity` just stripped.
   const membersToHydrate: ThreadMember[] = [];
   for (const t of out.values()) {
     membersToHydrate.push(...t.latestMembers);
-    if (t.latestMessage?.author) membersToHydrate.push(t.latestMessage.author);
+    const author = t.latestMessage?.author;
+    if (author && !hidden?.has(author.did)) membersToHydrate.push(author);
   }
   await hydrateProfiles(
     membersToHydrate,
@@ -257,6 +270,26 @@ export async function fetchRoomActivity(
   );
 
   return out;
+}
+
+/**
+ * Drop the authors a viewer must not see from one activity row.
+ *
+ * A room whose latest message is hidden keeps its `latestTimestamp`: the time
+ * orders the room in the board and is not the author's, so hiding an author
+ * never moves the room. `latestMembers` simply carries fewer entries.
+ */
+function redactActivity(activity: ThreadActivity, hidden: ReadonlySet<string>): void {
+  activity.latestMembers = activity.latestMembers.filter((m) => !hidden.has(m.did));
+  const message = activity.latestMessage;
+  if (message !== null && hidden.has(message.author.did)) {
+    activity.latestMessage = {
+      id: message.id,
+      content: "",
+      author: { did: message.author.did, name: null, avatar: null },
+      timestamp: message.timestamp,
+    };
+  }
 }
 
 /**

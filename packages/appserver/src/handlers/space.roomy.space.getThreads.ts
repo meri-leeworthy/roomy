@@ -94,7 +94,7 @@ export const getSpaceThreadsHandler: QueryHandler<
             limit,
             cursor,
             search,
-            { kinds: ["thread", "channel"] },
+            { kinds: ["thread", "channel"], viewerDid: userDid },
           );
           s.setAttribute("roomy.thread_count", result.threads.length);
           return result;

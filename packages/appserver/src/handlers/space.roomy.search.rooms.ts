@@ -22,6 +22,7 @@ import { createAccessMemo, roomAccess } from "../auth/access.ts";
 import { openReadStateDb, openSpaceDb } from "../db/db.ts";
 import { fetchRoomActivity } from "../queries/threadActivity.ts";
 import { getEngagedThreadIds, getReadPositions, type ReadPosition } from "../queries/readPositions.ts";
+import { hiddenBy } from "../queries/userBlocks.ts";
 import { parseUserDid, requireSpaceRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { optionalInt, requireString } from "../xrpc/params.ts";
@@ -208,7 +209,8 @@ export const searchRoomsHandler: QueryHandler<
   // `space.getThreads`. Fetched in one batched pass over the matched rooms.
   if (rooms.length > 0) {
     const roomIds = rooms.map((r) => r.id);
-    const activityByRoom = await fetchRoomActivity(db, roomIds);
+    const hidden = userDid ? await hiddenBy(userDid) : undefined;
+    const activityByRoom = await fetchRoomActivity(db, roomIds, hidden);
     const readStateDb = openReadStateDb();
     const readPositions = userDid
       ? await getReadPositions(readStateDb, db, userDid, roomIds)

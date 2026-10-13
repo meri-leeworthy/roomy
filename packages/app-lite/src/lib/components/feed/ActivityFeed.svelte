@@ -19,18 +19,36 @@
   import { RICHTEXT_MIME } from "@roomy-space/sdk";
   import type { Block } from "@roomy-space/sdk";
   import { auth } from "$lib/auth.svelte";
+  import { blockState, ensureOwnBlocks } from "$lib/blocks-state.svelte";
   import { IconChevronRight } from "@roomy/design/icons";
 
   let { spaceId, showSpaceInfo = true, limit = 20 }: { spaceId?: string; showSpaceInfo?: boolean; limit?: number } = $props();
 
   const feedQuery = createActivityFeedQuery(() => ({ spaceId, limit }));
 
+  // The viewer's own written blocks. The server drops a hidden author's
+  // message from the feed, but `staleTime: Infinity` keeps a row fetched
+  // before the block until the query refetches, so the render filters the
+  // cached set too. A feed item whose messages all vanish still renders its
+  // header: the feed is previews and carries no reveal.
+  $effect(() => {
+    // Reading the DID makes this re-run on sign-in and account switch.
+    auth.userDid;
+    ensureOwnBlocks();
+  });
+  const blockedAuthors = $derived(blockState.ownBlockedDids);
+  const visibleFeed = $derived(
+    (feedQuery.data?.feed ?? []).map((item) => ({
+      ...item,
+      messages: item.messages.filter((m) => !blockedAuthors.has(m.author.did)),
+    })),
+  );
+
   // Warm badge-summary cache for internal links across the feed's messages
   // (preceding context + last message of each activity item) so badges mount
   // with cache hits. One pass per feed load, not per badge render.
   $effect(() => {
-    const feed = feedQuery.data?.feed;
-    if (!feed || feed.length === 0) return;
+    const feed = visibleFeed;
     const contents: string[] = [];
     const blocksList: Block[][] = [];
     for (const item of feed) {
@@ -75,7 +93,7 @@
     </div>
   {:else}
     <div class="flex flex-col w-full">
-      {#each feed as item, i (item.threadId)}
+      {#each visibleFeed as item, i (item.threadId)}
         <a
           href={roomHref(item)}
           class="flex flex-col gap-2 p-4 transition-colors group no-underline hover:bg-base-100 dark:hover:bg-base-800/40 hover:shadow-[2px_2px_0_0_var(--color-base-300)] dark:hover:shadow-[2px_2px_0_0_var(--color-base-800)]"

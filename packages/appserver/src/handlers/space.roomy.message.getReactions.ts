@@ -8,6 +8,7 @@
 
 import { openSpaceDbForEntity } from "../db/db.ts";
 import { resolveProfiles } from "../queries/profileStore.ts";
+import { hiddenBy } from "../queries/userBlocks.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { requireString } from "../xrpc/params.ts";
@@ -67,7 +68,7 @@ export const getReactionsHandler: QueryHandler<
   // NULL here. The global `profiles` store (written by the profile fetch
   // path) is authoritative; the per-space value acts as a fallback, exactly
   // as for message authors (see selectMessages → hydrateProfiles).
-  const rows = await db
+  const reactionRows = await db
     .query(
       `select r.reaction, r.user, u.handle, i.name, i.avatar
        from comp_reaction r
@@ -83,6 +84,16 @@ export const getReactionsHandler: QueryHandler<
       handle: string | null;
       avatar: string | null;
     }>(messageId);
+
+  // A reactor hidden from the viewer — in either direction — is dropped here,
+  // before any profile is resolved, so a blocked reactor's name and avatar
+  // never enter the process. Grouping the survivors means an emoji whose every
+  // reactor is hidden simply has no group. The emoji count on the message DTO
+  // is computed in selectMessages, not here, and is untouched.
+  const hidden = userDid ? await hiddenBy(userDid) : undefined;
+  const rows = hidden
+    ? reactionRows.filter((r) => !hidden.has(r.user))
+    : reactionRows;
 
   // Resolve reactor profiles from the global store (with an in-memory
   // cache), filling in name/handle/avatar that the per-space join missed.

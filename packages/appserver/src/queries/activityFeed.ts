@@ -17,6 +17,7 @@ import { selectEmbedJsonByUrl } from "../embed/store.ts";
 import { hydrateProfiles } from "./profileStore.ts";
 import { selectJoinedSpaceDids } from "./userSpaceMembership.ts";
 import { deriveUnreadCounts } from "./readPositions.ts";
+import { hiddenBy } from "./userBlocks.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -207,6 +208,11 @@ export async function selectActivityFeed(
   const pageRows = hasMore ? filtered.slice(0, scope.limit) : filtered;
   if (pageRows.length === 0) return { feed: [], cursor: null };
 
+  // The author DIDs hidden from this viewer by a block, in either direction.
+  // Resolved once for the page so the message fetch below drops a hidden
+  // author before its body, name or avatar is read.
+  const hidden = await hiddenBy(userDid as UserDid);
+
   // Step 5: batch-fetch full message data per space, merging into a shared map.
   const messagesData = new Map<string, ActivityMessage>();
   const bySpace = new Map<string, ActivityItemRow[]>();
@@ -227,7 +233,7 @@ export async function selectActivityFeed(
     }
     if (msgIds.length === 0) continue;
     const spaceDb = openSpaceDb(spaceDid);
-    const fetched = await batchFetchMessages(spaceDb, msgIds);
+    const fetched = await batchFetchMessages(spaceDb, msgIds, hidden);
     for (const [k, v] of fetched) messagesData.set(k, v);
   }
 
@@ -354,6 +360,12 @@ interface MessageRow {
 async function batchFetchMessages(
   db: DbLike,
   messageIds: string[],
+  /**
+   * The author DIDs hidden from the viewer, from `hiddenBy`. A row whose
+   * author is in this set is dropped before `hydrateProfiles` runs, so a
+   * blocked author's name and avatar never enter the process.
+   */
+  hidden: ReadonlySet<string>,
 ): Promise<Map<string, ActivityMessage>> {
   const result = new Map<string, ActivityMessage>();
   if (messageIds.length === 0) return result;
@@ -380,6 +392,11 @@ async function batchFetchMessages(
     )
     .all<MessageRow>(messageIds)
   for (const r of rows) {
+    // A hidden author's message is dropped before hydration. The feed shows
+    // previews with no indicator and no reveal, so it is simply absent rather
+    // than tombstoned. Each message's `author` object IS the feed item's
+    // participant, so dropping the message drops the participant with it.
+    if (hidden.has(r.author_did ?? "")) continue;
     result.set(r.id, {
       id: r.id,
       content: decodeContent(r.mime_type, r.data),

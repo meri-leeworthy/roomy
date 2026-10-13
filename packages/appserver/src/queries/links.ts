@@ -78,6 +78,12 @@ export interface RawLinkRow {
   message_id: string;
   sort_key: string;
   embed_json: string | null;
+  /**
+   * The DID of the author of `message_id` (the message that shared the URL),
+   * or `''` when the message carries no author edge. The caller redacts rows
+   * whose author is hidden from the viewer (§ user blocks).
+   */
+  author_did?: string;
 }
 
 /**
@@ -140,9 +146,11 @@ export async function listLinks(
       `select el.entity as url,
               msg.room as room_id,
               link.room as message_id,
-              coalesce(msg.sort_idx, msg.id) as sort_key
+              coalesce(msg.sort_idx, msg.id) as sort_key,
+              coalesce(author_e.tail, '') as author_did
          from entities link
          join entities msg on msg.id = link.room
+         left join edges author_e on author_e.head = msg.id and author_e.label = 'author'
          left join comp_embed_link el on el.entity = link.id
         where ${whereClause}
         order by sort_key desc, el.entity asc
@@ -153,6 +161,7 @@ export async function listLinks(
       room_id: string;
       message_id: string;
       sort_key: string;
+      author_did: string;
     }>([...params, limit + 1]);
 
   if (rows.length === 0) return { links: [], hasMore: false };

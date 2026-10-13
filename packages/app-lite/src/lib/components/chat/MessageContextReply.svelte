@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
-  import { IconReplyLine, IconForward } from "@roomy/design/icons";
+  import { IconReplyLine, IconForward, IconBlocked } from "@roomy/design/icons";
   import { createMessageQuery } from "$lib/queries/message";
   import { resolveBlobUrl } from "$lib/utils";
   import { messageContentToPlaintext } from "./messagePreview";
@@ -28,10 +28,28 @@
     forwardedFrom?.message?.mimeType ?? target.data?.mimeType,
   );
 
+  // A hidden author's message previews as the indicator alone: no author, no
+  // snippet. A preview is not a message row, so it carries no reveal — the
+  // target is fetched by id only to fill this line.
+  const isBlocked = $derived(target.data?.blocked === true);
   let isBridged = $derived(target.data?.authorDid?.startsWith("did:discord:") ?? false);
 </script>
 
-{#if target.data}
+{#if target.data && isBlocked}
+  <div class="flex gap-1 items-center" data-testid="blocked-preview">
+    <div class="flex gap-1 items-center shrink-0">
+      <IconReplyLine
+        width="28px"
+        height="12px"
+        class="relative -bottom-1 ml-2 mr-1 left-0.75 stroke-black/25 dark:stroke-white/50 dark:stroke-1"
+      />
+      <IconBlocked
+        class="size-4 shrink-0 text-base-400 dark:text-base-500"
+        aria-label="Blocked user"
+      />
+    </div>
+  </div>
+{:else if target.data}
   <div class="flex gap-1 items-center shrink-0">
     <IconReplyLine
       width="28px"

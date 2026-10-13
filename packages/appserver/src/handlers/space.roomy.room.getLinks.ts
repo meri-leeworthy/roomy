@@ -18,6 +18,7 @@
 import { createAccessMemo, roomAccess } from "../auth/access.ts";
 import { openSpaceDbForEntity, tryOpenGlobalDb } from "../db/db.ts";
 import { cursorForRow, dedupeLinks, hydrateLinkEmbeds, linkTimestamp, listLinks } from "../queries/links.ts";
+import { hiddenBy } from "../queries/userBlocks.ts";
 import { parseUserDid, requireRoomRead } from "../xrpc/authGuards.ts";
 import { XrpcError } from "../xrpc/errors.ts";
 import { optionalInt, optionalString, requireString } from "../xrpc/params.ts";
@@ -70,17 +71,27 @@ export const getRoomLinksHandler: QueryHandler<
         () => listLinks(db, { kind: "room", roomId }, limit, cursor),
       );
 
-      // A single-room read: the room is already verified readable, so no
-      // per-link access check is needed. Dedup attachment-encoded duplicates
-      // of the same URL (see dedupeLinks), then resolve the surviving URLs
-      // against the global store.
-      const deduped = dedupeLinks(raw);
+      // A link row names the message that shared it; a blocked author's shared
+      // URLs must not surface. Drop the hidden authors' rows BEFORE dedup, so
+      // a URL shared by both a hidden and a visible author survives through
+      // the visible occurrence rather than being collapsed away.
+      const hidden = userDid ? await hiddenBy(userDid) : undefined;
+      const visible = hidden
+        ? raw.filter((r) => !hidden.has(r.author_did ?? ""))
+        : raw;
+      const deduped = dedupeLinks(visible);
       const globalDb = tryOpenGlobalDb();
       if (globalDb) await hydrateLinkEmbeds(globalDb, deduped);
 
+      // Pagination is derived from the deduped page BEFORE the author filter
+      // (the same last row the unfiltered code used): a page whose only row
+      // was filtered out would otherwise return no cursor and strand the
+      // reader on that page. `deduped` is already the unfiltered dedup when
+      // nothing was hidden.
+      const cursorPage = hidden ? dedupeLinks(raw) : deduped;
       let nextCursor: string | null = null;
-      if (hasMore && deduped.length > 0) {
-        nextCursor = cursorForRow(deduped[deduped.length - 1]!);
+      if (hasMore && cursorPage.length > 0) {
+        nextCursor = cursorForRow(cursorPage[cursorPage.length - 1]!);
       }
 
       const links: LinkRow[] = deduped.map((r) => {

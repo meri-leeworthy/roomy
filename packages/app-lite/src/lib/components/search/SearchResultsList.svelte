@@ -27,6 +27,7 @@
     IconNeedleThread,
     IconForward,
     IconReplyLine,
+    IconBlocked,
   } from "@roomy/design/icons";
 
   let {
@@ -327,6 +328,9 @@
                     {@render locationHeader(m)}
                   {/if}
 
+                  <!-- A hidden author's row renders only the indicator in the
+                       avatar slot. Search offers no reveal; the hit links into
+                       the room, where the timeline does. -->
                   <MessageBubble
                     compact
                     authorDid={original ? original.authorDid : m.authorDid}
@@ -339,6 +343,7 @@
                     timestamp={new Date(original ? original.timestamp : m.timestamp)}
                     isBridged={effBridged}
                     isSystem={m.system === true}
+                    blocked={m.blocked === true}
                   >
                     {#snippet replyContext()}
                       {#if m.forwardedFrom}
@@ -354,6 +359,26 @@
                         />
                       {:else if m.replyTo}
                         {#if replyPreview}
+                          {#if replyPreview.blocked}
+                            <!-- A preview of a hidden author's message: the
+                                 indicator takes the avatar's place, and
+                                 neither the name nor the snippet renders. A
+                                 preview is not a message row, so it carries
+                                 no reveal. -->
+                            <div class="flex gap-1 items-center" data-testid="blocked-preview">
+                              <div class="flex gap-1 items-center shrink-0">
+                                <IconReplyLine
+                                  width="28px"
+                                  height="12px"
+                                  class="relative -bottom-1 ml-2 mr-1 left-0.75 stroke-black/25 dark:stroke-white/50 dark:stroke-1"
+                                />
+                                <IconBlocked
+                                  class="size-4 shrink-0 text-base-400 dark:text-base-500"
+                                  aria-label="Blocked user"
+                                />
+                              </div>
+                            </div>
+                          {:else}
                           <!-- MessageBubble renders the snippet into a plain
                                block div — the avatar row and the message
                                snippet are separate divs, so they need an
@@ -413,6 +438,7 @@
                             </span>
                           </div>
                           </div>
+                          {/if}
                         {:else}
                           <span class="italic text-base-400">Reply unavailable</span>
                         {/if}
@@ -421,7 +447,7 @@
 
                     {#snippet content()}
                       {#if isForward}
-                        {#if original}
+                        {#if original && original.blocked !== true}
                           <MessageContent content={original.content} mimeType={original.mimeType} />
                         {:else}
                           <span class="italic text-base-400 text-sm">Original message unavailable</span>

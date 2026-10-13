@@ -19,6 +19,7 @@
 import { createAccessMemo, roomAccessMany } from "../auth/access.ts";
 import { openSpaceDb, tryOpenGlobalDb } from "../db/db.ts";
 import { cursorForRow, dedupeLinks, hydrateLinkEmbeds, linkTimestamp, listLinks } from "../queries/links.ts";
+import { hiddenBy } from "../queries/userBlocks.ts";
 import { parseUserDid, requireSpaceRead } from "../xrpc/authGuards.ts";
 import { optionalInt, optionalString, requireString } from "../xrpc/params.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
@@ -81,13 +82,27 @@ export const getSpaceLinksHandler: QueryHandler<
       const readable = raw.filter(
         (r) => accessByRoom.get(r.room_id)?.canRead ?? false,
       );
-      const deduped = dedupeLinks(readable);
+      // A link row names the message that shared it; a blocked author's shared
+      // URLs must not surface. Drop the hidden authors' rows BEFORE dedup, so
+      // a URL shared by both a hidden and a visible author survives through
+      // the visible occurrence rather than being collapsed away.
+      const hidden = userDid ? await hiddenBy(userDid) : undefined;
+      const visible = hidden
+        ? readable.filter((r) => !hidden.has(r.author_did ?? ""))
+        : readable;
+      const deduped = dedupeLinks(visible);
       const globalDb = tryOpenGlobalDb();
       if (globalDb) await hydrateLinkEmbeds(globalDb, deduped);
 
+      // Pagination is derived from the deduped page BEFORE the author filter
+      // (the same last row the unfiltered code used): a page whose only row
+      // was filtered out would otherwise return no cursor and strand the
+      // reader on that page. `deduped` is already the unfiltered dedup when
+      // nothing was hidden.
+      const cursorPage = hidden ? dedupeLinks(readable) : deduped;
       let nextCursor: string | null = null;
-      if (hasMore && deduped.length > 0) {
-        nextCursor = cursorForRow(deduped[deduped.length - 1]!);
+      if (hasMore && cursorPage.length > 0) {
+        nextCursor = cursorForRow(cursorPage[cursorPage.length - 1]!);
       }
 
       const links: LinkRow[] = deduped.map((r) => {
