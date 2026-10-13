@@ -1,0 +1,84 @@
+<!--
+  A Web Tile rendered in Roomy.
+
+  Takes a tile's AT-URI and renders it: the manifest card first (metadata only,
+  cheap), and the tile's own content in a sandboxed iframe once the card is
+  clicked. The card's click handler is the loader's — it replaces the card with
+  the content frame in place — so this component only supplies the container.
+
+  The tile's assets come from its PDS, never from Roomy: `ATTileLoader` fetches
+  the manifest record and serves each manifest path as a blob from the same
+  repository. There is no host data channel, and nothing about the tile reaches
+  the app's own data model.
+
+  The loader is browser-only and heavy (zip, mime, TOML), so it is reached
+  through `$lib/tiles/mothership` — a dynamic import that runs on first render,
+  keeping the packages out of the base bundle.
+-->
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { getTileMothership } from "$lib/tiles/mothership";
+  import { parseTileAddress, TILE_COLLECTION } from "$lib/tiles/at-uri";
+
+  type Props = {
+    /** The `ing.dasl.masl` record to render. */
+    uri: string;
+  };
+
+  let { uri }: Props = $props();
+
+  let container: HTMLDivElement | undefined = $state();
+  let error: string | null = $state(null);
+
+  // The address is checked before anything loads, so a string that is not a
+  // tile record gets a reason rather than the loader's blanket "no loader
+  // matched" — `ATTileLoader` declines a malformed URI and a non-masl
+  // collection with the same `false`.
+  const problem = $derived(
+    parseTileAddress(uri) === null
+      ? `Not a Web Tile address — expected at://<did:plc:…>/${TILE_COLLECTION}/<rkey>.`
+      : null,
+  );
+
+  onMount(() => {
+    if (parseTileAddress(uri) === null) return;
+    // `renderCard` builds detached DOM, so the card is placed once and the
+    // loader swaps it for the content frame itself.
+    let cancelled = false;
+    void (async () => {
+      try {
+        const mothership = await getTileMothership();
+        const tile = await mothership.loadTile(uri);
+        if (cancelled) return;
+        if (!tile) {
+          error =
+            "No loader matched that address, or its manifest could not be read from its PDS.";
+          return;
+        }
+        const card = await tile.renderCard();
+        if (cancelled) return;
+        container?.replaceChildren(card);
+      } catch (err) {
+        if (!cancelled) error = err instanceof Error ? err.message : String(err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+</script>
+
+<div
+  class="my-1 max-w-full overflow-hidden rounded-lg border border-base-300 dark:border-base-700"
+>
+  <!-- The container stays mounted whatever the load did: a card, a message, or
+       nothing at all until one arrives. -->
+  <div bind:this={container}></div>
+  {#if problem}
+    <p class="px-4 py-3 text-sm text-base-500 dark:text-base-400">{problem}</p>
+  {:else if error}
+    <p class="px-4 py-3 text-sm text-base-500 dark:text-base-400">
+      This tile could not be loaded: {error}
+    </p>
+  {/if}
+</div>
