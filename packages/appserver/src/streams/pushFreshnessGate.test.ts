@@ -54,7 +54,6 @@ beforeEach(async () => {
   db = openDb({ path: ":memory:" });
   sm = new StreamManager(db, {
     appserverUrl: "http://test.example",
-    getProfiles: undefined,
     // Capture what the write path offers the dispatcher — the observable seam.
     pokePush: (jobs: PushJob[]) => {
       poked.push(jobs);

@@ -11,12 +11,6 @@ import { encode, decode } from "@atcute/cbor";
 import type { DbLike } from "../db/types.ts";
 import type { InvalidationRouter } from "../invalidation/types.ts";
 import { applyBatch } from "../materialization/applyBatch.ts";
-import {
-  ensureProfilesForBatch,
-  ensureProfilesRoomyFirst,
-  type GetProfilesFn,
-} from "../materialization/profiles.ts";
-import type { HappyViewConfig } from "../happyview.ts";
 import { toAppliedEvent } from "../materialization/toAppliedEvent.ts";
 import { canonicalMessageTimestamp } from "../materialization/sortIdx.ts";
 import { pokeEmbedSweeper } from "../embed/sweeper.ts";
@@ -63,8 +57,6 @@ export class StreamManager {
   readonly #db: DbLike;
   readonly #invalidationRouter?: InvalidationRouter;
   readonly #appserverUrl: string;
-  readonly #getProfiles?: GetProfilesFn;
-  readonly #happyView: HappyViewConfig | null;
   /** Arbiter config. When set, new spaces are provisioned as real ATProto accounts. */
   readonly #arbiter: ArbiterConfig | null;
   /** Push enqueue sink. Defaults to the process-wide dispatcher poke. */
@@ -87,9 +79,6 @@ export class StreamManager {
     opts: {
       invalidationRouter?: InvalidationRouter;
       appserverUrl: string;
-      getProfiles?: GetProfilesFn;
-      /** HappyView profile index config. When `null`, Bluesky-only. */
-      happyView?: HappyViewConfig | null;
       /** Arbiter config. When set, new spaces are provisioned via the arbiter. */
       arbiter?: ArbiterConfig | null;
       /** The appserver's own DID (arbiter policy owner + service record host). */
@@ -105,11 +94,6 @@ export class StreamManager {
     this.#db = db;
     this.#invalidationRouter = opts.invalidationRouter;
     this.#appserverUrl = opts.appserverUrl;
-    // When no custom fetcher is provided (production), use the Roomy-first
-    // path (ensureProfilesRoomyFirst). When a custom fetcher is provided
-    // (tests), use the injectable ensureProfilesForBatch path.
-    this.#getProfiles = opts.getProfiles;
-    this.#happyView = opts.happyView ?? null;
     this.#arbiter = opts.arbiter ?? null;
     this.#ownDid = opts.ownDid ?? "";
     this.#pokePush = opts.pokePush ?? pokePushDispatcher;
@@ -252,17 +236,7 @@ export class StreamManager {
         }),
       );
 
-      // 4. Ensure profiles for batch. When a custom fetcher is provided
-      //    (tests), use the injectable path. Otherwise use the HappyView-first
-      //    fetcher (HappyView → Bluesky fallback, or Bluesky-only when
-      //    HappyView is not configured).
-      if (this.#getProfiles) {
-        await ensureProfilesForBatch(this.#db, decodedEvents, this.#getProfiles);
-      } else {
-        await ensureProfilesRoomyFirst(this.#db, decodedEvents, this.#happyView);
-      }
-
-      // 5. Apply batch to materialize. The per-space DB is the source of
+      // 4. Apply batch to materialize. The per-space DB is the source of
       // truth; the global DB receives membership edges + the
       // entity→space index.
       const globalDb = this.#db.global?.();
@@ -270,11 +244,11 @@ export class StreamManager {
         isBackfill: false,
       }, globalDb);
 
-      // 6. Convert to applied events once — shared by invalidation (6a) and
-      //    the push dispatcher poke (6b).
+      // 5. Convert to applied events once — shared by invalidation (5a) and
+      //    the push dispatcher poke (5b).
       const appliedEvents = decodedEvents.map((e) => toAppliedEvent(e, streamDid));
 
-      // 6a. Emit invalidation signals for live events.
+      // 5a. Emit invalidation signals for live events.
       if (this.#invalidationRouter) {
         await withSpan(
           "sendEvents.invalidation",
@@ -289,7 +263,7 @@ export class StreamManager {
         );
       }
 
-      // 6b. Poke the embed sweeper and the push dispatcher for createMessage
+      // 5b. Poke the embed sweeper and the push dispatcher for createMessage
       // events. Both are process-wide background loops the materialiser pokes
       // but never drives inline: embed enrichment and push delivery are
       // network-bound and must not block sendEvents.

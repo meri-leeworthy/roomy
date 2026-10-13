@@ -75,7 +75,6 @@ beforeEach(async () => {
     quiet: true,
     disableBackgroundWorkers: true,
     ownDid: SPACE,
-    getProfiles: async () => [],
     // Configured, but unreachable: nothing here mints a token or lists rooms,
     // so presence must work without an SFU in reach.
     liveKit: {

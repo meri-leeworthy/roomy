@@ -96,11 +96,6 @@ export async function startAppserver(): Promise<E2eContext> {
     // Tests that exercise the loops start them explicitly (e.g.
     // search.test.ts starts the backfill sweeper itself).
     disableBackgroundWorkers: true,
-    // Keep E2E runs hermetic: without a stub, materialization falls back to
-    // live api.bsky.app profile fetches, which pile up under parallel load
-    // and blow the 5s per-test timeout. Tests don't assert on profile
-    // materialization, so a no-op fetcher is safe.
-    getProfiles: async () => [],
   });
 
   const baseUrl = `http://localhost:${handle.port}`;

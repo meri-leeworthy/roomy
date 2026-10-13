@@ -29,8 +29,6 @@ beforeEach(async () => {
 
   sm = new StreamManager(db, {
     appserverUrl: "http://test.example",
-    // No profile fetcher — avoid HTTP calls to bsky.app.
-    getProfiles: undefined,
   });
 });
 
@@ -161,7 +159,6 @@ describe("createStream", () => {
 
     const failingSm = new StreamManager(mockDb, {
       appserverUrl: "http://test.example",
-      getProfiles: undefined,
     });
 
     await expect(failingSm.createStream(ADMIN)).rejects.toThrow(
@@ -202,7 +199,6 @@ describe("createStream", () => {
       };
       const arbiterSm = new StreamManager(db, {
         appserverUrl: "http://test.example",
-        getProfiles: undefined,
         arbiter,
         ownDid: "did:web:api.roomy.space",
       });

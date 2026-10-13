@@ -94,7 +94,6 @@ describe("e2e: read-state schema migration on an existing DB", () => {
       port: 0,
       quiet: true,
       disableBackgroundWorkers: true,
-      getProfiles: async () => [],
     });
     baseUrl = `http://localhost:${handle.port}`;
 

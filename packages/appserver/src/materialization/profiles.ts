@@ -20,8 +20,6 @@
 import type { DbLike } from "../db/types.ts";
 import { tryOpenGlobalDb } from "../db/db.ts";
 import {
-  type DecodedStreamEvent,
-  type EventType,
   UserDid,
   type,
 } from "@roomy-space/sdk";
@@ -38,22 +36,10 @@ import { log } from "../log.ts";
 
 
 /**
- * Cooldown for re-fetching profiles with stale handles.
- * A user whose handle is `handle.invalid` (expired domain) will be re-checked
- * at most once per this interval, regardless of how many events reference them.
- * Once the handle resolves to something valid, it stops being re-checked.
- */
-const STALE_HANDLE_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
-
-/**
  * Freshness TTL for *existing* profile rows. A row older than this is
- * eligible for re-fetch on the next event/reference, so a display-name or
- * avatar change on the PDS (Roomy record or Bluesky profile) propagates to
+ * eligible for re-fetch on the next read that resolves it, so a display-name
+ * or avatar change on the PDS (Roomy record or Bluesky profile) propagates to
  * message lists without a manual visit to the profile page.
- *
- * Distinct from `STALE_HANDLE_COOLDOWN_MS` (handle-expiry recovery): that is a
- * backoff on an *invalid* handle; this is a periodic refresh of a *valid*
- * row. The two combine — a row is re-fetched when either threshold applies.
  *
  * Exported so the read path (profileStore's on-demand hydration) honours the
  * same cadence instead of drifting.
@@ -67,14 +53,14 @@ export const PROFILE_REFRESH_TTL_MS = 30 * 60 * 1000; // 30 minutes
  * A cache row is only written from a successful fetch result, so a DID that
  * neither HappyView nor the Bluesky appview can resolve — a brand-new DID, a
  * `did:web`, an appview hiccup — has no row to find. Without this backoff
- * `filterMissing` returns it again and the write path re-runs the full
- * pipeline (HappyView + Bluesky, two HTTP round-trips) on every event by that
- * author, and N concurrent writes by the same unresolved author each issue
+ * the negative cache returns it again, the read path re-runs the full
+ * pipeline (HappyView + Bluesky, two HTTP round-trips) on every read by that
+ * author, and N concurrent reads by the same unresolved author each issue
  * their own copy.
  *
- * Keyed by DID and shared by both callers of this pipeline: materialisation's
- * `ensureProfilesForBatch`/`ensureProfilesRoomyFirst` and the read path's
- * on-demand hydration, so a failure in one is not repeated by the other.
+ * Keyed by DID and shared by every caller of this pipeline — the read path's
+ * on-demand hydration and the profile page — so a failure in one is not
+ * repeated by the other.
  *
  * The TTL is deliberately short (a minute, not the stale-handle cooldown's
  * hour): a DID that resolves nowhere *today* may be a user whose Roomy profile
@@ -130,13 +116,6 @@ export function recordUnresolvedProfiles(
 export function _resetProfileNegativeCache(): void {
   negativeCache.clear();
 }
-
-/** Event $types that signal a user we may not yet have a profile for. */
-const NEW_USER_SIGNALS: EventType[] = [
-  "space.roomy.space.addAdmin.v0",
-  "space.roomy.space.joinSpace.v0",
-  "space.roomy.message.createMessage.v0",
-];
 
 export type GetProfilesFn = (dids: UserDid[]) => Promise<ProfileViewDetailed[]>;
 /**
@@ -293,151 +272,6 @@ export async function getProfilesRoomyFirst(
 }
 
 /**
- * Ensure a global `profiles` row exists for every user DID referenced by a
- * profile-relevant event in the batch.
- *
- * Uses the Roomy-first fetcher (`getProfilesRoomyFirst`) by default. Tests
- * can pass a custom `getProfiles` to bypass HappyView/Bluesky calls.
- *
- * Silent no-op if `getProfiles` is undefined — tests pass no fetcher and
- * don't need profile materialisation.
- */
-export async function ensureProfilesForBatch(
-  db: DbLike,
-  events: DecodedStreamEvent[],
-  getProfiles: GetProfilesFn | undefined,
-): Promise<void> {
-  if (!getProfiles) return;
-
-  const candidates = collectCandidateDids(events);
-  if (candidates.size === 0) return;
-
-  const missing = await filterMissing(db, candidates);
-  if (missing.length === 0) return;
-
-  const profiles = await getProfiles(missing);
-  if (profiles.length === 0) return;
-
-  await insertProfiles(db, profiles);
-}
-
-/**
- * Like `ensureProfilesForBatch` but uses the HappyView-first fetcher that
- * queries HappyView in batch, then falls back to Bluesky. Used by the live
- * event stream and backfill paths.
- *
- * When `happyView` is `null`, goes straight to Bluesky (the original fast
- * path). This makes startup re-materialization fast even without HappyView
- * deployed.
- */
-export async function ensureProfilesRoomyFirst(
-  db: DbLike,
-  events: DecodedStreamEvent[],
-  happyView: HappyViewConfig | null = null,
-): Promise<void> {
-  const candidates = collectCandidateDids(events);
-  if (candidates.size === 0) return;
-
-  const missing = await filterMissing(db, candidates);
-  if (missing.length === 0) return;
-
-  const { profiles, extras } = await getProfilesRoomyFirst(missing, happyView);
-  if (profiles.length === 0) return;
-
-  await insertProfilesWithExtras(db, profiles, extras);
-}
-
-/** Scan a batch for user DIDs that warrant a profile lookup. */
-function collectCandidateDids(events: DecodedStreamEvent[]): Set<UserDid> {
-  const candidates = new Set<UserDid>();
-  for (const e of events) {
-    if (!NEW_USER_SIGNALS.includes(e.event.$type as EventType)) continue;
-    const user = e.user;
-    if (user && typeof user === "string") {
-      candidates.add(user as UserDid);
-    }
-    // Also collect authorOverride DIDs from createMessage extensions
-    if (e.event.$type === "space.roomy.message.createMessage.v0") {
-      const ext = (e.event as Record<string, unknown>).extensions as
-        | Record<string, unknown>
-        | undefined;
-      const override = ext?.["space.roomy.extension.authorOverride.v0"] as
-        | { did?: string }
-        | undefined;
-      if (override?.did && typeof override.did === "string") {
-        candidates.add(override.did as UserDid);
-      }
-    }
-  }
-  return candidates;
-}
-
-/**
- * Narrow to DIDs we can resolve via the bsky appview AND that don't yet have
- * a profile row in the global store. DIDs that don't start with `did:plc:` or
- * `did:web:` are skipped — they're synthetic (e.g. `did:space:...`,
- * `did:discord:...`) and have no profile to fetch.
- *
- * We key "have we fetched this profile" off the global `profiles` table (the
- * authoritative per-user Roomy profile store), NOT the per-space
- * `comp_info`/`comp_user` rows: those are a denormalised copy and may lag the
- * global store (or be absent entirely for a space that hasn't re-materialised
- * a cross-stream author). Checking the global store retries until the profile
- * is actually materialised there.
- *
- * When the worker-backed global DB isn't available (e.g. a raw in-memory
- * `Database` in tests), we can't tell which profiles already exist, so we
- * return all resolvable candidates and let the fetch path decide.
- */
-async function filterMissing(db: DbLike, candidates: Set<UserDid>): Promise<UserDid[]> {
-  const resolvable = [...candidates].filter(
-    (d) => d.startsWith("did:plc:") || d.startsWith("did:web:"),
-  );
-  if (resolvable.length === 0) return [];
-
-  const globalDb = tryOpenGlobalDb();
-  // No worker-backed global DB (e.g. a raw in-memory Database in tests) —
-  // can't tell which profiles already exist, so return all resolvable
-  // candidates.
-  if (!globalDb) return resolvable;
-
-  const placeholders = resolvable.map(() => "?").join(",");
-
-  // DIDs that already have a profile in the global store
-  const present = new Set(
-    (await globalDb
-      .query(`select did from profiles where did in (${placeholders})`)
-      .all<{ did: string }>(...resolvable)
-    ).map((r) => r.did),
-  );
-
-  // DIDs with a stale handle.invalid — re-fetch if cooldown has elapsed
-  const cutoff = Date.now() - STALE_HANDLE_COOLDOWN_MS;
-  const staleHandleDids = new Set(
-    (await globalDb
-      .query(`select did from profiles where handle = 'handle.invalid' and updated_at < ? and did in (${placeholders})`)
-      .all<{ did: string }>(cutoff, ...resolvable)
-    ).map((r) => r.did),
-  );
-
-  // DIDs whose row is older than the freshness TTL — re-fetch regardless of
-  // handle state so a display-name/avatar change on the PDS propagates to
-  // message lists instead of the first-fetched values being pinned forever.
-  // Bounded by the TTL: a row is re-fetched at most once per interval.
-  const refreshCutoff = Date.now() - PROFILE_REFRESH_TTL_MS;
-  const staleRows = new Set(
-    (await globalDb
-      .query(`select did from profiles where updated_at < ? and did in (${placeholders})`)
-      .all<{ did: string }>(refreshCutoff, ...resolvable)
-    ).map((r) => r.did),
-  );
-
-  return resolvable.filter(
-    (d) => !present.has(d) || staleHandleDids.has(d) || staleRows.has(d),
-  );
-}
-
-/**
  * Write a profile to the global `profiles` table (the authoritative per-user
  * Roomy profile store). The atproto collection lexicon defines one global
  * profile per user, so this is the cross-space home for profile data; the
@@ -554,21 +388,6 @@ export async function writeSetUserProfileToGlobal(event: {
        updated_at = unixepoch() * 1000`,
     [event.did, handle, name, avatar, description],
   );
-}
-
-/**
- * Insert one batch of profile rows (Bluesky-only path) into the global
- * `profiles` table.
- *
- * Profiles are global — the authoritative copy lives in the global
- * `profiles` table. The per-space `entities`/`comp_user`/`comp_info` writes
- * are dropped; per-space DBs keep their own denormalised copy via their own
- * materialisation, and cross-stream reads resolve from the global store.
- */
-async function insertProfiles(db: DbLike, profiles: ProfileViewDetailed[]): Promise<void> {
-  for (const p of profiles) {
-    await writeGlobalProfile(p, undefined);
-  }
 }
 
 /**

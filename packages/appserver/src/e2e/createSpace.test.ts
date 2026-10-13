@@ -148,7 +148,6 @@ describe("space.roomy.space.createSpace (via arbiter)", () => {
         ownDid: OWN_DID,
         arbiter: mock.config,
         disableBackgroundWorkers: true,
-        getProfiles: async () => [],
       });
 
       try {

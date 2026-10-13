@@ -147,10 +147,6 @@ beforeEach(async () => {
     // Pin the service DID so the self-write tests below don't depend on the
     // ambient APPSERVER_DID.
     ownDid: SERVICE_DID,
-    // Hermetic: without a stub, materialization hits live api.bsky.app
-    // profile fetches, which pile up under parallel load and blow the
-    // 5s per-test timeout.
-    getProfiles: async () => [],
   });
 
   baseUrl = `http://localhost:${handle.port}`;

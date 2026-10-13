@@ -106,7 +106,6 @@ beforeEach(async () => {
   setStreamManager(
     new StreamManager(db, {
       appserverUrl: "http://test.example",
-      getProfiles: undefined,
       // The sweep writes as the StreamManager's own DID; supply the service
       // DID here so it matches the DID the sendEvents endpoint authorizes.
       ownDid: SERVICE_DID,

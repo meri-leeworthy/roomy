@@ -9,7 +9,11 @@ import {
 import type { ProfileViewDetailed } from "@atproto/api/dist/client/types/app/bsky/actor/defs";
 
 import { closeDb, openDb, openGlobalDb } from "../db/db.ts";
-import { defaultGetProfiles, ensureProfilesForBatch, _resetProfileNegativeCache } from "./profiles.ts";
+import {
+  defaultGetProfiles,
+  getProfilesRoomyFirst,
+  _resetProfileNegativeCache,
+} from "./profiles.ts";
 import type { DbLike } from "../db/types.ts";
 
 const ALICE = UserDid.assert("did:plc:alice");
@@ -63,255 +67,6 @@ function createMessageEvent(authorOverride?: string): Event {
       : {},
   } as unknown as Event;
 }
-
-describe("ensureProfilesForBatch", () => {
-  test("is a no-op when getProfiles is undefined", async () => {
-    const { globalDb } = freshGlobal();
-    const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
-
-    await ensureProfilesForBatch(globalDb, events, undefined);
-
-    expect(
-      (await globalDb
-        .query("select count(*) as count from profiles")
-        .get<{ count: number }>())?.count,
-    ).toBe(0);
-  });
-
-  test("is a no-op when no events trigger profile lookup", async () => {
-    const { globalDb } = freshGlobal();
-    // createRoom isn't a NEW_USER_SIGNAL — should not trigger fetch.
-    const events = [
-      decodedAs(
-        {
-          $type: "space.roomy.room.createRoom.v0",
-          id: newUlid(),
-          kind: "space.roomy.channel",
-        } as unknown as Event,
-        1,
-        ALICE,
-      ),
-    ];
-    const getProfiles = mock(async () => [] as ProfileViewDetailed[]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-    expect(getProfiles).toHaveBeenCalledTimes(0);
-  });
-
-  test("fetches profiles for joinSpace authors and inserts a global profile row", async () => {
-    const { globalDb } = freshGlobal();
-    const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
-    const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    expect(getProfiles).toHaveBeenCalledTimes(1);
-    expect(getProfiles).toHaveBeenCalledWith([ALICE]);
-
-    const row = await globalDb
-      .query("select did, handle, name, avatar from profiles where did = ?")
-      .get<{ did: string; handle: string; name: string; avatar: string }>(ALICE);
-    expect(row?.did).toBe(ALICE);
-    expect(row?.handle).toBe("alice.test");
-    expect(row?.name).toBe("alice.test display");
-    expect(row?.avatar).toBe("https://cdn.example/alice.test.png");
-  });
-
-  test("skips DIDs we already have a global profile row for", async () => {
-    const { globalDb } = freshGlobal();
-    await globalDb.run(
-      "insert into profiles (did, handle, name) values (?, ?, ?)",
-      [ALICE, "alice.test", "alice.test display"],
-    );
-
-    const events = [
-      decodedAs(joinSpaceEvent(), 1, ALICE),
-      decodedAs(joinSpaceEvent(), 2, BOB),
-    ];
-    const getProfiles = mock(async () => [profileFor(BOB, "bob.test")]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    expect(getProfiles).toHaveBeenCalledTimes(1);
-    expect(getProfiles).toHaveBeenCalledWith([BOB]);
-  });
-
-  test("retries DIDs that have no global profile row (failed fetch recovery)", async () => {
-    // A DID whose profile fetch failed has no row in the global `profiles`
-    // table, so it must be retried, not skipped.
-    const { globalDb } = freshGlobal();
-    // NOTE: no profile row for ALICE — her profile fetch failed.
-
-    const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
-    const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    expect(getProfiles).toHaveBeenCalledTimes(1);
-    expect(getProfiles).toHaveBeenCalledWith([ALICE]);
-    expect(
-      (await globalDb
-        .query("select name from profiles where did = ?")
-        .get<{ name: string }>(ALICE))?.name,
-    ).toBe("alice.test display");
-  });
-
-  test("filters out non-bsky DIDs (e.g. did:discord:)", async () => {
-    const { globalDb } = freshGlobal();
-    const events = [decodedAs(joinSpaceEvent(), 1, DISCORD_USER)];
-    const getProfiles = mock(async () => [] as ProfileViewDetailed[]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    expect(getProfiles).toHaveBeenCalledTimes(0);
-  });
-
-  test("includes authorOverride DIDs from createMessage extensions", async () => {
-    const { globalDb } = freshGlobal();
-    const events = [
-      decodedAs(createMessageEvent("did:plc:override-author"), 1, ALICE),
-    ];
-    const getProfiles = mock(async () => [
-      profileFor(ALICE, "alice.test"),
-      profileFor("did:plc:override-author", "override.test"),
-    ]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    expect(getProfiles).toHaveBeenCalledTimes(1);
-    const arg = (getProfiles.mock.calls as unknown as UserDid[][][])[0]![0];
-    expect(new Set(arg)).toEqual(
-      new Set([ALICE, UserDid.assert("did:plc:override-author")]),
-    );
-  });
-
-  test("dedupes the same DID across events", async () => {
-    const { globalDb } = freshGlobal();
-    const events = [
-      decodedAs(joinSpaceEvent(), 1, ALICE),
-      decodedAs(joinSpaceEvent(), 2, ALICE),
-      decodedAs(joinSpaceEvent(), 3, ALICE),
-    ];
-    const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    expect(getProfiles).toHaveBeenCalledTimes(1);
-    expect(getProfiles).toHaveBeenCalledWith([ALICE]);
-  });
-
-  test("tolerates getProfiles returning fewer profiles than requested", async () => {
-    const { globalDb } = freshGlobal();
-    const events = [
-      decodedAs(joinSpaceEvent(), 1, ALICE),
-      decodedAs(joinSpaceEvent(), 2, BOB),
-    ];
-    // Bob is unresolvable — appview returned only alice.
-    const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    expect(
-      (await globalDb
-        .query("select count(*) as count from profiles")
-        .get<{ count: number }>())?.count,
-    ).toBe(1);
-  });
-
-  test("re-fetches profiles for handle.invalid after cooldown elapses", async () => {
-    const { globalDb } = freshGlobal();
-    // Seed ALICE with handle.invalid and an old updated_at (past cooldown)
-    await globalDb.run(
-      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
-      [ALICE, "handle.invalid", "alice display", Date.now() - 2 * 60 * 60 * 1000], // 2 hours ago
-    );
-
-    const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
-    const getProfiles = mock(async () => [profileFor(ALICE, "alice.renewed.test")]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    // Should have fetched despite a profile existing, because handle is stale
-    expect(getProfiles).toHaveBeenCalledTimes(1);
-    expect(getProfiles).toHaveBeenCalledWith([ALICE]);
-    expect(
-      (await globalDb
-        .query("select handle from profiles where did = ?")
-        .get<{ handle: string }>(ALICE))?.handle,
-    ).toBe("alice.renewed.test");
-  });
-
-  test("does NOT re-fetch handle.invalid within cooldown period", async () => {
-    const { globalDb } = freshGlobal();
-    // Seed ALICE with handle.invalid and a recent updated_at (within cooldown)
-    await globalDb.run(
-      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
-      [ALICE, "handle.invalid", "alice display", Date.now() - 10 * 60 * 1000], // 10 minutes ago
-    );
-
-    const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
-    const getProfiles = mock(async () => [profileFor(ALICE, "alice.renewed.test")]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    // Should NOT fetch — cooldown hasn't elapsed
-    expect(getProfiles).toHaveBeenCalledTimes(0);
-    expect(
-      (await globalDb
-        .query("select handle from profiles where did = ?")
-        .get<{ handle: string }>(ALICE))?.handle,
-    ).toBe("handle.invalid");
-  });
-
-  test("re-fetches an existing row older than the freshness TTL", async () => {
-    // A *valid* (non-handle.invalid) row older than PROFILE_REFRESH_TTL_MS
-    // must be re-fetched, so a display-name/avatar change on the PDS
-    // propagates instead of pinning the first-fetched values forever.
-    const { globalDb } = freshGlobal();
-    await globalDb.run(
-      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
-      // 2 hours ago — past the 30-minute refresh TTL.
-      [ALICE, "alice.test", "old display", Date.now() - 2 * 60 * 60 * 1000],
-    );
-
-    const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
-    const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    // Should fetch despite a valid handle, because the row is TTL-stale.
-    expect(getProfiles).toHaveBeenCalledTimes(1);
-    expect(getProfiles).toHaveBeenCalledWith([ALICE]);
-    // The refreshed name/avatar replace the stale values.
-    expect(
-      (await globalDb
-        .query("select name from profiles where did = ?")
-        .get<{ name: string }>(ALICE))?.name,
-    ).toBe("alice.test display");
-  });
-
-  test("does NOT re-fetch an existing row within the freshness TTL", async () => {
-    const { globalDb } = freshGlobal();
-    await globalDb.run(
-      "insert into profiles (did, handle, name, updated_at) values (?, ?, ?, ?)",
-      // 10 minutes ago — within the 30-minute refresh TTL.
-      [ALICE, "alice.test", "alice display", Date.now() - 10 * 60 * 1000],
-    );
-
-    const events = [decodedAs(joinSpaceEvent(), 1, ALICE)];
-    const getProfiles = mock(async () => [profileFor(ALICE, "alice.test")]);
-
-    await ensureProfilesForBatch(globalDb, events, getProfiles);
-
-    // Fresh row, valid handle — no fetch.
-    expect(getProfiles).toHaveBeenCalledTimes(0);
-    expect(
-      (await globalDb
-        .query("select name from profiles where did = ?")
-        .get<{ name: string }>(ALICE))?.name,
-    ).toBe("alice display");
-  });
-});
 
 describe("defaultGetProfiles", () => {
   const realFetch = globalThis.fetch;
@@ -750,21 +505,25 @@ describe("profile fetch negative cache", () => {
     expect(calls).toBe(1);
   });
 
-  test("materialisation skips a backed-off author instead of re-running the pipeline", async () => {
-    const { globalDb } = freshGlobal();
+  test("a backed-off author is skipped by the pipeline instead of re-running it", async () => {
     const appview = mockAppview();
+    const prevNodeEnv = process.env.NODE_ENV;
+    delete process.env.NODE_ENV; // defeat the test-mode short-circuit
+    try {
+      // First lookup: the pipeline runs and resolves nothing.
+      expect((await getProfilesRoomyFirst([BOB], null)).profiles).toEqual([]);
+      expect(appview.calls).toBe(1);
 
-    // First event from BOB: the pipeline runs and resolves nothing.
-    await ensureProfilesForBatch(globalDb, [decodedAs(joinSpaceEvent(), 1, BOB)], defaultGetProfiles);
-    expect(appview.calls).toBe(1);
-
-    // Second event from BOB: no fetch at all.
-    await ensureProfilesForBatch(globalDb, [decodedAs(joinSpaceEvent(), 2, BOB)], defaultGetProfiles);
-    expect(appview.calls).toBe(1);
+      // Second lookup: the backoff short-circuits before any fetch.
+      await getProfilesRoomyFirst([BOB], null);
+      expect(appview.calls).toBe(1);
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+    }
   });
 
   test("a backed-off DID recovers once its profile becomes resolvable", async () => {
-    const { globalDb } = freshGlobal();
     let resolvable = false;
     globalThis.fetch = (async () => {
       return {
@@ -774,23 +533,22 @@ describe("profile fetch negative cache", () => {
           resolvable ? { profiles: [profileFor(BOB, "bob.test")] } : { profiles: [] },
       } as unknown as Response;
     }) as unknown as typeof globalThis.fetch;
-
-    await ensureProfilesForBatch(globalDb, [decodedAs(joinSpaceEvent(), 1, BOB)], defaultGetProfiles);
-    expect(
-      await globalDb.query("select did from profiles where did = ?").get(BOB),
-    ).toBeNull();
-
-    resolvable = true;
-    setSystemTime(Date.now() + 61 * 1000);
+    const prevNodeEnv = process.env.NODE_ENV;
+    delete process.env.NODE_ENV; // defeat the test-mode short-circuit
     try {
-      await ensureProfilesForBatch(globalDb, [decodedAs(joinSpaceEvent(), 2, BOB)], defaultGetProfiles);
+      expect((await getProfilesRoomyFirst([BOB], null)).profiles).toEqual([]);
+
+      resolvable = true;
+      setSystemTime(Date.now() + 61 * 1000);
+      try {
+        const recovered = await getProfilesRoomyFirst([BOB], null);
+        expect(recovered.profiles.map((p) => p.handle)).toEqual(["bob.test"]);
+      } finally {
+        setSystemTime();
+      }
     } finally {
-      setSystemTime();
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
     }
-    expect(
-      (await globalDb
-        .query("select handle from profiles where did = ?")
-        .get<{ handle: string }>(BOB))?.handle,
-    ).toBe("bob.test");
   });
 });

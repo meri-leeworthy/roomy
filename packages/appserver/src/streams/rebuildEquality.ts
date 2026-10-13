@@ -253,17 +253,17 @@ export function digestOf(tables: TableSnapshot[]): string {
  * Derive `streamDid`'s per-space state from its event log, through the path the
  * boot pass uses.
  *
- * Profiles are hydrated through an injected fetcher that returns nothing, so
- * the pass makes no outbound request (`recordFetchCalls` pins that). A profile
- * missing from the global store renders as a bare author until something else
- * fills it; the global profile store is not per-space state, so it is outside
- * what this oracle compares.
+ * The pass hydrates nothing: profiles are resolved at read time from the global
+ * `profiles` table, so materialisation makes no outbound request
+ * (`recordFetchCalls` pins that). A profile missing from the store renders as a
+ * bare author until a read fills it; the global profile store is not per-space
+ * state, so it is outside what this oracle compares.
  */
 export async function materialiseFromLog(
   db: DbLike,
   streamDid: StreamDid,
 ): Promise<void> {
-  await reMaterializeFromLocalEvents(db, async () => [], null, 1);
+  await reMaterializeFromLocalEvents(db, 1);
 }
 
 /**

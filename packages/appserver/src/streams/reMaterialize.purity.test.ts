@@ -52,6 +52,7 @@ import { READSTATE_SCHEMA_VERSION } from "../db/readStateDb.ts";
 import type { DbLike } from "../db/types.ts";
 import { StreamManager } from "./StreamManager.ts";
 import { selectMessages } from "../queries/selectMessages.ts";
+import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
 import {
   _startSweeperNoLoop,
   stopEmbedSweeper,
@@ -349,12 +350,10 @@ describe("materialisation purity", () => {
     // nothing. Both derivations are covered — the replay into the canonical DB
     // and the blue-green rebuild.
     //
-    // The one network seam on the path is profile hydration, which
-    // `materialiseFromLog` closes by injecting a fetcher that returns nothing
-    // (profiles resolve from the global store). That is the shape Step 5
-    // finishes, and this assertion is what keeps it finished: a derivation that
-    // grew a fetch of its own — an embed unfurl, a handle lookup — is caught
-    // here whatever seam it used.
+    // The path's one network seam, profile hydration, is gone: profiles resolve
+    // at read time from the global store. This assertion is what keeps it gone —
+    // a derivation that grew a fetch of its own, an embed unfurl or a handle
+    // lookup, is caught here whatever seam it used.
     await seedRichLog();
 
     const { calls } = await recordFetchCalls(async () => {
@@ -475,7 +474,6 @@ describe("materialisation purity", () => {
     // path (not just replayed) is what a rebuild reproduces.
     const sm = new StreamManager(router, {
       appserverUrl: "https://appserver.example",
-      getProfiles: (async () => []) as never,
     });
     await sm.sendEvents(
       streamDid,
@@ -499,6 +497,51 @@ describe("materialisation purity", () => {
     // a read warms them.
     for (const table of rebuilt.filter((t) => READ_PATH_CACHES[t.table])) {
       expect(table.rows).toEqual([]);
+    }
+  });
+
+  test("the write path performs no outbound fetch", async () => {
+    // P5: materialisation is a function of the log, so the live write path must
+    // not reach the network. A join by an author with no profile row is what
+    // used to make `sendEvents` look the author up in HappyView/Bluesky; the
+    // spy refuses the request and records it, so a regression fails here rather
+    // than in production.
+    const author = UserDid.assert("did:plc:purity-network-freedom");
+    _resetProfileNegativeCache();
+
+    const realFetch = globalThis.fetch;
+    const calls: string[] = [];
+    const prevNodeEnv = process.env.NODE_ENV;
+    // The profile pipeline skips its appview leg under `bun test`. That
+    // suppression belongs to the test runner, not to materialisation, so lift
+    // it for this assertion.
+    delete process.env.NODE_ENV;
+    globalThis.fetch = ((input: RequestInfo | URL) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push(url);
+      return Promise.reject(
+        new Error(`outbound request during a write: ${url}`),
+      );
+    }) as typeof globalThis.fetch;
+    try {
+      const sm = new StreamManager(router, {
+        appserverUrl: "https://appserver.example",
+      });
+      await sm.sendEvents(
+        streamDid,
+        [
+          {
+            id: newUlid(),
+            $type: "space.roomy.space.joinSpace.v0",
+          } as unknown as Event,
+        ],
+        author,
+      );
+      expect(calls).toEqual([]);
+    } finally {
+      globalThis.fetch = realFetch;
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
     }
   });
 });

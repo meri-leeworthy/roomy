@@ -121,7 +121,7 @@ describe("reMaterializeFromLocalEvents", () => {
     await seedEvents(db, streamDid, events);
 
     // ── First pass ──────────────────────────────────────────────────────
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     // Snapshot materialized row counts (per-space DB)
     const entities1 = await space
@@ -160,7 +160,7 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(infoRow1!.name).toBe("Idempotent Space");
 
     // ── Second pass — should not change anything ──────────────────────
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     const entities2 = await space
       .query("select count(*) as cnt from entities")
@@ -213,7 +213,7 @@ describe("reMaterializeFromLocalEvents", () => {
       events.length,
     );
 
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     const globalDb = db.global!();
     await globalDb.run(
@@ -237,7 +237,7 @@ describe("reMaterializeFromLocalEvents", () => {
     // The per-space cursor is current, so no events are replayed. The pending
     // global migration must still reconstruct membership from the retained
     // member edge, then mark itself complete.
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     const joined = await globalDb
       .query(
@@ -271,7 +271,7 @@ describe("reMaterializeFromLocalEvents", () => {
       member,
       events.length,
     );
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     const globalDb = db.global!();
     await globalDb.run(
@@ -279,7 +279,7 @@ describe("reMaterializeFromLocalEvents", () => {
       member,
       streamDid,
     );
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     const joined = await globalDb
       .query(
@@ -291,7 +291,7 @@ describe("reMaterializeFromLocalEvents", () => {
 
   test("empty events DB", async () => {
     // No events seeded — should be a no-op
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     // No streams in the event-log DB → nothing materialized anywhere.
     const streams = await db
@@ -312,7 +312,7 @@ describe("reMaterializeFromLocalEvents", () => {
     await seedEvents(db, stream1, events1);
     await seedEvents(db, stream2, events2);
 
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     // Both streams should have entities (in their own per-space DBs)
     const stream1Entities = await space1
@@ -356,7 +356,7 @@ describe("reMaterializeFromLocalEvents", () => {
     await seedEvents(db, streamDid, events);
 
     // First call: full replay (no cursor row → materialized_to defaults to -1)
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     const entitiesAfterFirst = await space
       .query("select count(*) as cnt from entities where stream_id = ?")
@@ -372,7 +372,7 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(cursor!.materialized_to).toBe(events.length - 1);
 
     // Second call: cursor is current → stream is skipped, no replay
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     // Row counts unchanged
     const entitiesAfterSecond = await space
@@ -395,7 +395,7 @@ describe("reMaterializeFromLocalEvents", () => {
     await seedEvents(db, streamDid, initialEvents);
 
     // First call: materialize all initial events
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     const cursorAfterFirst = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
@@ -407,7 +407,7 @@ describe("reMaterializeFromLocalEvents", () => {
     await seedEvents(db, streamDid, extraEvents, ADMIN, initialEvents.length);
 
     // Second call: should only replay the new events (idx > cursor)
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     // Cursor should advance to the new latest idx
     const cursorAfterSecond = await space
@@ -429,14 +429,14 @@ describe("reMaterializeFromLocalEvents", () => {
     await seedEvents(db, behind, events2);
 
     // First call: materialize both
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     // Add more events to "behind" only
     const extraEvents = createDefaultSpaceEvents({ name: "Behind Extra" });
     await seedEvents(db, behind, extraEvents, ADMIN, events2.length);
 
     // Second call: "caughtUp" should be skipped, "behind" should replay extras
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     const caughtUpCursor = await caughtUpSpace
       .query("select materialized_to from materialization_cursor where stream_id = ?")
@@ -456,7 +456,7 @@ describe("reMaterializeFromLocalEvents", () => {
     const events = makeRoomEvents(600);
     await seedEvents(db, streamDid, events);
 
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     // Cursor should be at the last event idx (599)
     const cursor = await space
@@ -471,7 +471,7 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(roomCount!.cnt).toBe(600);
 
     // Second call: cursor is current → skipped
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
     const cursor2 = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
@@ -505,7 +505,7 @@ describe("reMaterializeFromLocalEvents", () => {
 
     // Now simulate a restart: reMaterializeFromLocalEvents should see the
     // cursor at 499 and only replay events 500-999 (the second chunk).
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     // Cursor should now be at 999
     const cursorAfterResume = await space
@@ -553,54 +553,11 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(cursor!.materialized_to).toBe(2); // last event idx (0-indexed)
 
     // reMaterializeFromLocalEvents should skip this stream (cursor is current)
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
     const cursor2 = await space
       .query("select materialized_to from materialization_cursor where stream_id = ?")
       .get<{ materialized_to: number }>(streamDid);
     expect(cursor2!.materialized_to).toBe(2);
-  }, { timeout: 30_000 });
-  test("hydrates author profiles via getProfiles during backfill", async () => {
-    // `reMaterializeFromLocalEvents` must call ensureProfilesForBatch rather
-    // than applyBatch directly, or backfilled messages render with blank
-    // author profiles. Passing a getProfiles fn must hydrate
-    // comp_info/comp_user for did:plc authors referenced by profile-relevant
-    // events (joinSpace here).
-    const streamDid = StreamDid.assert("did:web:profile-backfill.example");
-    const space = db.forSpace!(streamDid);
-    const author = UserDid.assert("did:plc:backfill-author");
-
-    const joinEvent = {
-      $type: "space.roomy.space.joinSpace.v0",
-      id: newUlid(),
-    };
-    await seedEvents(db, streamDid, [joinEvent], author);
-
-    const getProfiles = mock(async () => [
-      {
-        did: author,
-        handle: "backfill.test",
-        displayName: "Backfill Author",
-        avatar: "https://cdn.example/backfill.png",
-      },
-    ]);
-
-    await reMaterializeFromLocalEvents(db, getProfiles as never);
-
-    expect(getProfiles).toHaveBeenCalledTimes(1);
-    expect(getProfiles).toHaveBeenCalledWith([author]);
-    // Profiles are written to the global `profiles` table (the
-    // authoritative per-user Roomy profile store), not per-space comp_info.
-    const info = await db
-      .global!()
-      .query("select name, avatar from profiles where did = ?")
-      .get<{ name: string; avatar: string }>(author);
-    expect(info?.name).toBe("Backfill Author");
-    expect(info?.avatar).toBe("https://cdn.example/backfill.png");
-    const user = await db
-      .global!()
-      .query("select handle from profiles where did = ?")
-      .get<{ handle: string }>(author);
-    expect(user?.handle).toBe("backfill.test");
   }, { timeout: 30_000 });
 
   test("backfills the global entity_space index for materialized rooms", async () => {
@@ -615,7 +572,7 @@ describe("reMaterializeFromLocalEvents", () => {
       },
     ]);
 
-    await reMaterializeFromLocalEvents(db, async () => []);
+    await reMaterializeFromLocalEvents(db);
 
     // The room entity must be resolvable via the global entity_space index
     // (openSpaceDbForEntity reads this to find the owning space).
@@ -627,13 +584,12 @@ describe("reMaterializeFromLocalEvents", () => {
   }, { timeout: 30_000 });
 
   test("re-materializes streams concurrently, bounded by the concurrency cap", async () => {
-    // With a pool of N workers available, boot rematerialization should run
-    // several streams at once (different spaces land on different pool
-    // workers) rather than strictly one at a time — but never more than the
-    // `concurrency` cap, keeping memory bounded. We observe concurrency via
-    // the injected getProfiles fetcher: each stream hydrates its author
-    // before materializing, so in-flight getProfiles calls measure how many
-    // streams are being replayed simultaneously.
+    // With a pool of N workers available, boot rematerialization runs several
+    // streams at once (different spaces land on different pool workers)
+    // rather than strictly one at a time — but never more than the
+    // `concurrency` cap, keeping memory bounded. Each stream's replay commits
+    // its chunk in one `db.transaction()`, so wrapping that call measures how
+    // many streams are being replayed at the same time.
     const streamCount = 4;
     const streams = Array.from({ length: streamCount }, (_, i) =>
       StreamDid.assert(`did:web:concurrent-${i}.example`),
@@ -641,16 +597,42 @@ describe("reMaterializeFromLocalEvents", () => {
 
     let active = 0;
     let maxActive = 0;
-    const getProfiles = mock(async (dids: UserDid[]) => {
-      active++;
-      maxActive = Math.max(maxActive, active);
-      await new Promise((r) => setTimeout(r, 100));
-      active--;
-      return dids.map((d) => ({
-        did: d,
-        handle: `${d.replace(/:/g, "-")}.test`,
-        displayName: "Concurrent Author",
-      }));
+    // Resolved once two streams are replaying at once, so the measurement
+    // never depends on how long a replay takes: the first two reach the gate
+    // together, and only then does either continue.
+    const { promise: twoReplaying, resolve: twoReplayingReached } =
+      Promise.withResolvers<void>();
+    const probeDb: DbLike = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "forSpace") {
+          return (spaceDid: string) =>
+            new Proxy(target.forSpace!(spaceDid), {
+              get(handle, member) {
+                if (member === "transaction") {
+                  return async (
+                    steps: Parameters<DbLike["transaction"]>[0],
+                  ) => {
+                    active++;
+                    maxActive = Math.max(maxActive, active);
+                    if (active === 2) twoReplayingReached();
+                    await twoReplaying;
+                    try {
+                      return await handle.transaction(steps);
+                    } finally {
+                      active--;
+                    }
+                  };
+                }
+                const value = Reflect.get(handle, member) as unknown;
+                return typeof value === "function"
+                  ? value.bind(handle)
+                  : value;
+              },
+            });
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
     });
 
     for (let i = 0; i < streamCount; i++) {
@@ -663,7 +645,7 @@ describe("reMaterializeFromLocalEvents", () => {
       ], author);
     }
 
-    await reMaterializeFromLocalEvents(db, getProfiles as never, null, 2);
+    await reMaterializeFromLocalEvents(probeDb, 2);
 
     // All streams were materialized.
     for (const s of streams) {
@@ -674,8 +656,8 @@ describe("reMaterializeFromLocalEvents", () => {
       expect(cnt!.cnt).toBeGreaterThan(0);
     }
 
-    // Exactly 2 profile fetches were in flight at once — proving parallel
-    // stream replay AND that the cap (not the pool) bound the concurrency.
+    // Exactly 2 stream replays were in flight at once — proving parallel
+    // stream replay AND that the cap (not the pool) bounded the concurrency.
     expect(maxActive).toBeGreaterThanOrEqual(2);
     expect(maxActive).toBeLessThanOrEqual(2);
   }, { timeout: 30_000 });

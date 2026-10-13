@@ -156,7 +156,7 @@ async function materialiseSkewedSpace(
       Date.now(),
     );
   }
-  await reMaterializeFromLocalEvents(db, (async () => []) as never, null, 1);
+  await reMaterializeFromLocalEvents(db, 1);
   return { roomId, messageIds };
 }
 
@@ -180,7 +180,7 @@ async function seedSpaceWithCompSpaceRow(
     0,
     Date.now(),
   );
-  await reMaterializeFromLocalEvents(db, (async () => []) as never, null, 1);
+  await reMaterializeFromLocalEvents(db, 1);
 }
 
 function keysOf(
@@ -228,8 +228,6 @@ describe("in-place per-space migration", () => {
     expect((await router.checkSpaceSchema!(streamDid)).current).toBe(false);
     await reMaterializeFromLocalEvents(
       router,
-      (async () => []) as never,
-      null,
       1,
     );
 
@@ -287,8 +285,6 @@ describe("in-place per-space migration", () => {
     );
     await reMaterializeFromLocalEvents(
       router,
-      (async () => []) as never,
-      null,
       1,
     );
 
@@ -297,8 +293,6 @@ describe("in-place per-space migration", () => {
     ({ router } = await openPool());
     await reMaterializeFromLocalEvents(
       router,
-      (async () => []) as never,
-      null,
       1,
     );
 
@@ -340,8 +334,6 @@ describe("in-place per-space migration", () => {
     // cannot upgrade, and the pass rebuilds it rather than serving it as-is.
     await reMaterializeFromLocalEvents(
       router,
-      (async () => []) as never,
-      null,
       1,
     );
     const version = await router.forSpace!(streamDid)
@@ -380,8 +372,6 @@ describe("in-place per-space migration", () => {
     expect((await router.checkSpaceSchema!(streamDid)).current).toBe(true);
     await reMaterializeFromLocalEvents(
       router,
-      (async () => []) as never,
-      null,
       1,
     );
 
@@ -437,8 +427,6 @@ describe("in-place per-space migration", () => {
     );
     await reMaterializeFromLocalEvents(
       router,
-      (async () => []) as never,
-      null,
       1,
     );
     const live = (await keysOf(router, streamDid)).filter(
@@ -471,8 +459,6 @@ describe("in-place per-space migration", () => {
 
     await reMaterializeFromLocalEvents(
       router,
-      (async () => []) as never,
-      null,
       1,
       { streamStep: { attempts: 2, backoffMs: 0 } },
     );
@@ -536,8 +522,6 @@ describe("in-place per-space migration", () => {
     );
     await reMaterializeFromLocalEvents(
       router,
-      (async () => []) as never,
-      null,
       1,
     );
 
@@ -572,8 +556,6 @@ describe("in-place per-space migration", () => {
     ({ router } = await openPool(readStatePath));
     await reMaterializeFromLocalEvents(
       router,
-      (async () => []) as never,
-      null,
       1,
     );
 
@@ -649,7 +631,7 @@ describe("in-place per-space migration", () => {
         receivedAt + i * 3_600_000,
       );
     }
-    await reMaterializeFromLocalEvents(router, (async () => []) as never, null, 1);
+    await reMaterializeFromLocalEvents(router, 1);
 
     const keys = await router.forSpace!(streamDid)
       .query("select id, sort_idx from entities where room = ? order by sort_idx")
@@ -666,7 +648,7 @@ describe("in-place per-space migration", () => {
       [ADMIN, roomId, streamDid, orphan, receivedAt],
     );
 
-    await reMaterializeFromLocalEvents(router, (async () => []) as never, null, 1);
+    await reMaterializeFromLocalEvents(router, 1);
 
     const watermark = await router.readState!()
       .query(
@@ -693,7 +675,6 @@ describe("in-place per-space migration", () => {
 
     const sm = new StreamManager(router, {
       appserverUrl: "https://appserver.example",
-      getProfiles: (async () => []) as never,
     });
 
     // Open the gate the way the upgrade pass does, then assert the space's
@@ -753,7 +734,7 @@ describe("in-place per-space migration", () => {
 
     // Deploy: a fresh pool over the same files upgrades the space in place.
     ({ router } = await openPool());
-    await reMaterializeFromLocalEvents(router, (async () => []) as never, null, 1);
+    await reMaterializeFromLocalEvents(router, 1);
 
     expect(
       await router.global!()
@@ -772,7 +753,7 @@ describe("in-place per-space migration", () => {
     const stale = new Database(join(spacesDir, `${streamDid}.sqlite`));
     stale.run("update space_schema_version set version = '0' where id = 1");
     stale.close();
-    await reMaterializeFromLocalEvents(router, (async () => []) as never, null, 1);
+    await reMaterializeFromLocalEvents(router, 1);
 
     expect(
       await router.global!()
@@ -802,7 +783,7 @@ describe("in-place per-space migration", () => {
     raw.close();
 
     ({ router } = await openPool());
-    await reMaterializeFromLocalEvents(router, (async () => []) as never, null, 1);
+    await reMaterializeFromLocalEvents(router, 1);
 
     expect(
       await router.global!()

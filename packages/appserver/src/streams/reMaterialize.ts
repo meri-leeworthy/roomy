@@ -22,12 +22,6 @@ import {
 } from "@roomy-space/sdk";
 import type { DbLike } from "../db/types.ts";
 import { applyBatch } from "../materialization/applyBatch.ts";
-import {
-  ensureProfilesForBatch,
-  ensureProfilesRoomyFirst,
-  type GetProfilesFn,
-} from "../materialization/profiles.ts";
-import type { HappyViewConfig } from "../happyview.ts";
 import { log } from "../log.ts";
 import { runPendingGlobalMigrations } from "../db/globalMigrations.ts";
 import { refreshSpaceStats } from "../queries/spaceStats.ts";
@@ -118,11 +112,6 @@ async function withStreamStepRetry<T>(
  * cursor is already at the latest event idx are skipped entirely (no event
  * reads, no materialization).
  *
- * Profiles for any user DIDs referenced by profile-relevant events
- * (joinSpace / createMessage / addAdmin) are hydrated from the bsky appview
- * before the batch is applied — the live `sendEvents` path does the same, and
- * without it backfilled messages render with blank author profiles.
- *
  * Logs progress at info level. Errors for individual streams are logged but
  * do not abort the overall process — a failed stream will be re-materialized
  * on demand when first accessed.
@@ -156,8 +145,6 @@ async function hasPendingSpaceMigrations(
 
 export async function reMaterializeFromLocalEvents(
   db: DbLike,
-  getProfiles: GetProfilesFn | undefined = undefined,
-  happyView: HappyViewConfig | null = null,
   concurrency: number = DEFAULT_REMATERIALIZE_CONCURRENCY,
   opts: ReMaterializeOpts = {},
 ): Promise<void> {
@@ -514,18 +501,6 @@ export async function reMaterializeFromLocalEvents(
               createdAt: e.created_at ?? undefined,
             }),
           );
-
-          // Hydrate profiles for any new-user events in this batch before
-          // materializing, mirroring the live sendEvents path. Without this,
-          // backfilled messages render with blank author profiles. When a
-          // custom fetcher is provided (tests), use the injectable path.
-          // Otherwise use the HappyView-first fetcher (HappyView → Bluesky
-          // fallback, or Bluesky-only when HappyView is not configured).
-          if (getProfiles) {
-            await ensureProfilesForBatch(db, decodedEvents, getProfiles);
-          } else {
-            await ensureProfilesRoomyFirst(db, decodedEvents, happyView);
-          }
 
           const globalDb = db.global?.();
           const stats = await applyBatch(

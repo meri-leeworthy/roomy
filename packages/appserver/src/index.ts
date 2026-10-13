@@ -22,7 +22,6 @@ import {
 } from "./streams/reMaterialize.ts";
 import { openDb, poolStats } from "./db/db.ts";
 import { runPendingReadStateMigrationsWithRetry } from "./db/userSpaceMembershipMigration.ts";
-import { getHappyView } from "./happyview.ts";
 
 // ─── Fatal-exit visibility ─────────────────────────────────────────────────
 // Install before anything that can throw or reject: a boot failure must leave
@@ -70,10 +69,9 @@ const db = openDb();
 // resumable, so the orchestrator's restart retries it from where it left off.
 await runPendingReadStateMigrationsWithRetry(db);
 
-const happyView = getHappyView();
 const poolSize = (await poolStats())?.size;
 const concurrency = poolSize ?? DEFAULT_REMATERIALIZE_CONCURRENCY;
-reMaterializeFromLocalEvents(db, undefined, happyView, concurrency).catch((err) => {
+reMaterializeFromLocalEvents(db, concurrency).catch((err) => {
   log.error("startup", `re-materialization failed: ${err instanceof Error ? err.message : String(err)}`);
 });
 

@@ -73,7 +73,6 @@ beforeEach(async () => {
     quiet: true,
     disableBackgroundWorkers: true,
     ownDid: SPACE,
-    getProfiles: async () => [],
     liveKit: CONFIG,
   });
 });

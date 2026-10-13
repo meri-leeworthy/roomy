@@ -150,7 +150,7 @@ describe("blue-green rematerialization", () => {
   }
 
   test(
-    "rebuilds a stale space while serving old reads and rejecting writes",
+    "a stale space is rebuilt while the write gate rejects writes",
     async () => {
       const author = UserDid.assert("did:plc:bluegreen-author");
       seedOldSpaceDb();
@@ -173,7 +173,6 @@ describe("blue-green rematerialization", () => {
 
       const sm = new StreamManager(router, {
         appserverUrl: "https://appserver.example",
-        getProfiles: (async () => []) as never,
       });
 
       // While the space is marked rebuilding, the single write gate in
@@ -181,7 +180,7 @@ describe("blue-green rematerialization", () => {
       // event log. This is checked with a controlled begin→abort cycle (no
       // concurrent reMaterialize hammering the same single worker, which is
       // flaky under bun:test) — the gate's predicate `isSpaceRebuilding` is
-      // exactly what the window also sets (verified below via waitFor).
+      // exactly what the rebuild window sets.
       await router.spaceRebuildBegin!(streamDid);
       // Note: assert the rejection with a manual catch. bun:test's
       // `expect(...).rejects` matcher hangs when the rejection originates from
@@ -207,40 +206,7 @@ describe("blue-green rematerialization", () => {
       await router.spaceRebuildAbort!(streamDid);
       expect(await router.isSpaceRebuilding!(streamDid)).toBe(false);
 
-      // Slow getProfiles: blocks the first profile hydration so the rebuild
-      // window stays open until we've asserted reads.
-      let release!: () => void;
-      const blocked = new Promise<void>((r) => (release = r));
-      const getProfiles = mock(async (dids: UserDid[]) => {
-        await blocked;
-        return dids.map((d) => ({
-          did: d,
-          handle: "bluegreen.test",
-          displayName: "BlueGreen Author",
-        }));
-      });
-
-      const remat = reMaterializeFromLocalEvents(
-        router,
-        getProfiles as never,
-        null,
-        1,
-      );
-
-      // Wait until the rebuild has begun (temp DB created, space marked
-      // rebuilding) — the window is now open.
-      await waitFor(() => router.isSpaceRebuilding!(streamDid));
-
-      // During the window, reads serve the OLD DB, not empty/partial.
-      const oldRow = await router
-        .forSpace!(streamDid)
-        .query("select id from entities where id = ?")
-        .get<{ id: string }>("entity-old");
-      expect(oldRow?.id).toBe("entity-old");
-
-      // Release the window; await the rebuild completing.
-      release();
-      await remat;
+      await reMaterializeFromLocalEvents(router, 1);
 
       // After swap, the new DB is a complete rematerialisation — the old
       // row is gone and the new room is present (comp_room row + comp_info name).
@@ -272,7 +238,7 @@ describe("blue-green rematerialization", () => {
       expect(await router.isSpaceRebuilding!(streamDid)).toBe(false);
 
       // A second cold rematerialisation is a no-op (cursor unchanged).
-      await reMaterializeFromLocalEvents(router, getProfiles as never, null, 1);
+      await reMaterializeFromLocalEvents(router, 1);
       const cursor2 = await router
         .forSpace!(streamDid)
         .query(
@@ -290,14 +256,19 @@ describe("blue-green rematerialization", () => {
       { $type: "space.roomy.space.joinSpace.v0", id: newUlid() },
     ]);
 
-    // getProfiles throws → ensureProfiles path fails mid-rebuild.
-    const getProfiles = mock(async () => {
-      throw new Error("profile fetch failed");
-    });
+    // Undecodable payload: replay throws while decoding the log, so the
+    // rebuild fails mid-pass. reMaterializeFromLocalEvents catches per-stream
+    // errors, so this resolves with the stream counted as failed.
+    await router.run(
+      "insert into stream_events (stream_id, idx, user, payload, signature, created_at, received_at) values (?, 1, ?, ?, x'', ?, ?)",
+      streamDid,
+      ADMIN,
+      new Uint8Array([0xff, 0xff]),
+      Date.now(),
+      Date.now(),
+    );
 
-    // reMaterializeFromLocalEvents catches per-stream errors, so this resolves
-    // with the stream counted as failed.
-    await reMaterializeFromLocalEvents(router, getProfiles as never, null, 1);
+    await reMaterializeFromLocalEvents(router, 1);
 
     // The rebuild was aborted: old data still served, not rebuilding, temp gone.
     const oldRow = await router
@@ -316,7 +287,6 @@ describe("blue-green rematerialization", () => {
 
       const sm = new StreamManager(router, {
         appserverUrl: "https://appserver.example",
-        getProfiles: (async () => []) as never,
       });
 
       // Live write: a room and two messages posted in one batch, so both
@@ -368,7 +338,7 @@ describe("blue-green rematerialization", () => {
       sdb.run("update space_schema_version set version = '0' where id = 1");
       sdb.close();
 
-      await reMaterializeFromLocalEvents(router, (async () => []) as never, null, 1);
+      await reMaterializeFromLocalEvents(router, 1);
 
       // Same keys, from the log alone.
       expect(await readKeys()).toEqual(live);

@@ -97,7 +97,6 @@ async function start(spaceDb: { roomId: string }) {
     quiet: true,
     disableBackgroundWorkers: true,
     ownDid: SPACE,
-    getProfiles: async () => [],
     liveKit: configured ? CONFIG : null,
   });
   baseUrl = `http://localhost:${handle.port}`;
