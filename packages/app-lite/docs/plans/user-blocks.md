@@ -1,10 +1,15 @@
 # User-level blocks — Implementation Plan
 
 **Date:** 2026-09-26 (revised 2026-09-27, 2026-09-28, 2026-10-13)
-**Status:** Phase 1 shipped (#317, `9731537c5`). Phases 2–6 are ready to
-dispatch; §7 is a decision record and every question in it is answered.
+**Status:** Phase 1 shipped (#317, `9731537c5`); Phase 2 (the appserver block
+set) merged to `next` (#427). Phases 3–6 are ready to dispatch; §7 is a
+decision record and every question in it is answered. Phase 2's
+`space.roomy.user.refreshBlocks` scope is deferred (`BLOCK_RPC_SCOPES`,
+`UNREGISTERED_SCOPES`) until it is registered on the HappyView API client,
+alongside `repo:space.roomy.user.block` — a `base`-tier entry breaks sign-in
+for everyone (§1.4, §1.5).
 
-**Revision 2026-10-13 — the reveal is a transient read, not a state.** An
+**Revision 2026-10-13 (a) — the reveal is a transient read, not a state.** An
 admin may *look at* a message from an account they personally blocked, in a
 space they administer. The act changes nothing: it writes no row, is not
 audited, and is not attributable to anyone. Server-side the reveal is
@@ -18,6 +23,13 @@ the reveal is a view rather than an act, so there is nothing to record, and no
 per-space grant for the record to carry. It **adds an exception** to §7.7's
 mutual redaction; it does not reverse it. §3.6 and §7.12–§7.16 state the rule
 in full.
+
+**Revision 2026-10-13 (b) — the block RPC scope is deferred with the repo
+scope.** Phase 2 added the RPC NSID to `APPSERVER_RPCS`, which put it in
+`base`; the deployed HappyView client does not list it and rejected the whole
+granted set at session registration, blocking sign-in. Both block scopes now
+live in the ceiling-only `blocks` tier until the client lists them.
+
 **Packages:** `packages/appserver`, `packages/app-lite`, `packages/design`,
 `packages/sdk`, `packages/docs`
 
@@ -292,8 +304,9 @@ a `QUERY_SCHEMAS`/`PROCEDURE_SCHEMAS` entry in
 `packages/sdk/src/schemas/lexicons/`, a route in `buildRouter`
 (`packages/appserver/src/appserver.ts:188`), prose in
 `packages/docs/src/lib/endpoints/prose.ts` plus a regenerated
-`nsids.generated.json`, and an entry in app-lite's `APPSERVER_RPCS`
-(`packages/app-lite/src/lib/config.ts:3-52`). CI fails without the docs pair
+`nsids.generated.json`, and a `BLOCK_RPC_SCOPES` entry in
+`packages/app-lite/src/lib/scopes.ts` (ceiling-only until registered — §1.5).
+CI fails without the docs pair
 (`packages/docs/scripts/check-registry.ts`).
 
 ### 1.5 OAuth scope
@@ -1313,8 +1326,14 @@ exist for the fetch to have anything to read).
 5. `space.roomy.user.refreshBlocks` procedure (§2.4): SDK arktype schema,
    `PROCEDURE_SCHEMAS` entry, generated lexicon, route in `buildRouter`, prose
    in `packages/docs/.../prose.ts` + regenerated `nsids.generated.json`, and
-   an `APPSERVER_RPCS` entry. It invalidates the memo for the writer *and* for
-   the block's subject (§3.5).
+   an entry in `BLOCK_RPC_SCOPES` — **not** `APPSERVER_RPCS`. The RPC scope is
+   deferred with the block `repo:` scope (declared in the ceiling, listed in
+   `UNREGISTERED_SCOPES`, part of the ceiling-only `blocks` tier) until it is
+   registered on the HappyView API client: an entry in `APPSERVER_RPCS` lands
+   the token in `base`, and HappyView rejects the whole granted set at session
+   registration when any one token is unregistered, which breaks sign-in for
+   every user. It invalidates the memo for the writer *and* for the block's
+   subject (§3.5).
 6. Wire the client: after a successful block/unblock write, fire
    `refreshBlocks` (fire-and-forget).
 7. Unit tests: the union of the two collections; an empty repo; a PDS that
