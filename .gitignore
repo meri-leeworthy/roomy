@@ -61,5 +61,9 @@ dist-staging
 build-staging
 build.old
 
+# Routes directory a target-specific app-lite build generates
+# (packages/app-lite/scripts/build-target.mjs)
+.routes-ios
+
 # Storybook build output
 storybook-static

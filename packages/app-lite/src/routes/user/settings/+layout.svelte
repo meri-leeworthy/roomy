@@ -31,11 +31,14 @@
     const parts = page.url.pathname.split("/");
     const idx = parts.indexOf("settings");
     if (idx === -1 || idx === parts.length - 1) return "General";
+    // The subscription page is not built into the App Store bundle, so it has
+    // no title there either.
+    if (!__IOS_BUILD__ && parts[idx + 1] === "subscription") {
+      return "Subscription";
+    }
     switch (parts[idx + 1]) {
       case "notifications":
         return "Notifications";
-      case "subscription":
-        return "Subscription";
       case "scopes":
         return "Access";
       default:
@@ -118,7 +121,7 @@
       >
         Notifications
       </Button>
-      {#if proEnabled}
+      {#if !__IOS_BUILD__ && proEnabled}
         <Button
           variant="ghost"
           class="w-full justify-start"

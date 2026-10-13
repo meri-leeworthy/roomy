@@ -74,6 +74,9 @@ export default defineConfig({
       // find the bridge REST surface. Nothing listens on the origin: the spec
       // for that page fulfils the requests itself.
       PUBLIC_DISCORD_BRIDGE: BRIDGE_ORIGIN,
+      // The suite runs the full route set, so pin the target rather than
+      // inheriting an exported `VITE_IOS_BUILD` from the developer's shell.
+      VITE_IOS_BUILD: "",
     },
   },
 });

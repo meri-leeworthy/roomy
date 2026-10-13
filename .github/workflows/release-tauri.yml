@@ -232,6 +232,27 @@ jobs:
 
       - name: Build frontend
         run: pnpm --filter app-lite build
+        env:
+          # The App Store bundle must not carry the Roomy Pro subscription page
+          # or its Polar checkout: guideline 3.1.1 puts in-app purchases behind
+          # StoreKit. This flag drops the route and its entry points while the
+          # frontend is built (see packages/app-lite/scripts/build-target.mjs);
+          # the desktop/Android/web builds leave it unset and keep the page.
+          VITE_IOS_BUILD: "1"
+
+      # The exclusion is a property of the built bundle, which no type checker
+      # or unit test can see, so assert it on the artifact the IPA is bundled
+      # from.
+      - name: Verify the subscription page is absent
+        run: |
+          set -euo pipefail
+          BANNED='/user/settings/subscription|polar\.sh|Get Roomy Pro'
+          if grep -rEq "$BANNED" packages/app-lite/build-staging; then
+            echo "::error::App Store bundle contains the Roomy Pro subscription page:"
+            grep -rEn "$BANNED" packages/app-lite/build-staging | head
+            exit 1
+          fi
+          echo "OK: no subscription-page strings in packages/app-lite/build-staging"
 
       # ── Verify the certificate the iOS path will actually use ─────────────
       #

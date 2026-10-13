@@ -1,5 +1,6 @@
 import adapter from "@sveltejs/adapter-static";
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
+import { routesDir } from "./scripts/build-target.mjs";
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
@@ -20,5 +21,14 @@ const config = {
     }),
   },
 };
+
+// The Apple App Store bundle drops the routes that must not ship there (see
+// scripts/build-target.mjs): SvelteKit builds its route manifest by walking
+// the routes directory, so an absent route is absent from the bundle too.
+// SvelteKit marks `kit.files.routes` deprecated and offers no replacement;
+// only the iOS build sets it, so every other build stays on the default
+// `src/routes`.
+const iosRoutes = routesDir();
+if (iosRoutes) config.kit.files = { routes: iosRoutes };
 
 export default config;

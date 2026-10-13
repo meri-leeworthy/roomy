@@ -661,11 +661,13 @@
         that to <strong>1000 members</strong> and lets you use your membership
         here.
       </p>
-      <div class="mt-3">
-        <Button size="sm" variant="primary" href="/user/settings/subscription">
-          Get Roomy Pro
-        </Button>
-      </div>
+      {#if !__IOS_BUILD__}
+        <div class="mt-3">
+          <Button size="sm" variant="primary" href="/user/settings/subscription">
+            Get Roomy Pro
+          </Button>
+        </div>
+      {/if}
     </section>
   {:else}
     <section
