@@ -24,12 +24,13 @@ import { recordJoin } from "../voice/callFacts.ts";
 import {
   FAILURE_THRESHOLD,
   LEASE_TTL_MS,
-  acquireReconcilerLease,
+  VOICE_RECONCILER_LEASE,
   consecutiveFailures,
   reconcileOnce,
   type LiveKitRoomLister,
   type LiveKitRoomState,
 } from "../voice/reconciler.ts";
+import { acquireWorkerLease } from "../workers/lease.ts";
 
 const SPACE = StreamDid.assert("did:web:voice-reconcile-test.example");
 const ALICE = "did:plc:alicealicealicealiceal";
@@ -74,7 +75,6 @@ beforeEach(async () => {
     quiet: true,
     disableBackgroundWorkers: true,
     ownDid: SERVICE,
-    getProfiles: async () => [],
     liveKit: CONFIG,
   });
 });
@@ -269,8 +269,22 @@ describe("list failures", () => {
 describe("the reconciler lease", () => {
   test("one holder at a time, and the loser does no work", async () => {
     const now = Date.now();
-    expect(await acquireReconcilerLease("first", now)).toBe(true);
-    expect(await acquireReconcilerLease("second", now + 1000)).toBe(false);
+    expect(
+      await acquireWorkerLease(
+        VOICE_RECONCILER_LEASE,
+        "first",
+        LEASE_TTL_MS,
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      await acquireWorkerLease(
+        VOICE_RECONCILER_LEASE,
+        "second",
+        LEASE_TTL_MS,
+        now + 1000,
+      ),
+    ).toBe(false);
 
     const lister = fakeLister([]);
     const result = await reconcileOnce(lister, { ...deps(), holder: "second" });
@@ -280,9 +294,21 @@ describe("the reconciler lease", () => {
 
   test("an expired lease is taken over", async () => {
     const now = Date.now();
-    expect(await acquireReconcilerLease("first", now)).toBe(true);
-    expect(await acquireReconcilerLease("second", now + LEASE_TTL_MS + 1)).toBe(
-      true,
-    );
+    expect(
+      await acquireWorkerLease(
+        VOICE_RECONCILER_LEASE,
+        "first",
+        LEASE_TTL_MS,
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      await acquireWorkerLease(
+        VOICE_RECONCILER_LEASE,
+        "second",
+        LEASE_TTL_MS,
+        now + LEASE_TTL_MS + 1,
+      ),
+    ).toBe(true);
   });
 });

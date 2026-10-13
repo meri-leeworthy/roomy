@@ -27,6 +27,7 @@ import { getQdrantClient, upsertMessage, deleteMessage, ensureMessagesCollection
 import { encodeSparse, type SparseVector } from "./bm25.ts";
 import { extractMessageText } from "./text.ts";
 import { log } from "../log.ts";
+import { WorkerLease } from "../workers/lease.ts";
 
 // ─── Configuration ──────────────────────────────────────────────────────
 
@@ -61,7 +62,18 @@ const queue: SearchJob[] = [];
 
 // ─── Singleton state ────────────────────────────────────────────────────
 
+/** The indexer's row in `worker_leases`; one owner across the fleet. */
+export const SEARCH_INDEXER_LEASE = "search_indexer";
+/**
+ * How long the indexer's claim survives without renewal. Long enough that a
+ * busy holder never loses it between renewals, short enough that a replica
+ * that dies is replaced within a minute.
+ */
+const LEASE_TTL_MS = 60_000;
+
 let started = false;
+/** The running loop's claim, released by stopSearchIndexer. */
+let indexerLease: WorkerLease | undefined;
 /** Resolved when the background loop exits. Used by stopSearchIndexer. */
 let loopPromise: Promise<void> | undefined;
 /** Resolved by pokeSearchIndexer to wake an idle loop immediately. */
@@ -72,6 +84,7 @@ let nextErrors = 0;
 let lastBackoffUntil = 0;
 /** Number of drains currently in flight (loop or explicit flush). */
 let activeDrains = 0;
+
 
 // ─── Stats (for /health/search) ─────────────────────────────────────────
 let statsIndexedOk = 0;
@@ -105,11 +118,29 @@ export function enqueueDeleteMessage(messageId: string): void {
 /**
  * Start the background indexer loop. Idempotent — safe to call multiple
  * times. Called once at appserver startup (see `index.ts`).
+ *
+ * The loop works only while this process holds the indexer's lease (see
+ * `workers/lease.ts`). On a replica that does not, queued work waits for the
+ * holder, and is drained here if this process ever takes over.
  */
 export function startSearchIndexer(): void {
   if (started) return;
   started = true;
-  loopPromise = runIndexerLoop().catch((err) => {
+  const lease = new WorkerLease({
+    name: SEARCH_INDEXER_LEASE,
+    ttlMs: LEASE_TTL_MS,
+  });
+  indexerLease = lease;
+  loopPromise = (async () => {
+    await lease.start();
+    try {
+      await runIndexerLoop(lease);
+    } finally {
+      // However the loop ends, the claim goes with it: a crashed owner that
+      // kept renewing would hold every other replica at bay.
+      await lease.stop();
+    }
+  })().catch((err) => {
     log.error("[search-indexer] loop crashed:", err);
   });
 }
@@ -126,7 +157,10 @@ export function pokeSearchIndexer(): void {
   }
 }
 
-/** Wait for the background loop to exit. Idempotent. Used by tests. */
+/**
+ * Wait for the background loop to exit, then hand the lease back.
+ * Idempotent. Used by tests and by the appserver's shutdown path.
+ */
 export async function stopSearchIndexer(): Promise<void> {
   started = false;
   if (wake) {
@@ -137,6 +171,10 @@ export async function stopSearchIndexer(): Promise<void> {
   const p = loopPromise;
   loopPromise = undefined;
   if (p) await p;
+  // Hand the indexer to another replica now, rather than making it wait out
+  // the TTL of a claim this process will never renew.
+  await indexerLease?.stop();
+  indexerLease = undefined;
 }
 
 /** Snapshot of indexer state for the `/health/search` endpoint. */
@@ -165,9 +203,8 @@ export function _resetSearchIndexer(): void {
   statsLastError = null;
 }
 
-// ─── Loop ───────────────────────────────────────────────────────────────
-
-async function runIndexerLoop(): Promise<void> {
+/** The loop body; see `startSearchIndexer` for the lease contract. */
+async function runIndexerLoop(lease: WorkerLease): Promise<void> {
   for (;;) {
     if (!started) return; // allow clean exit via stopSearchIndexer
     try {
@@ -178,11 +215,19 @@ async function runIndexerLoop(): Promise<void> {
         await waitForWake(lastBackoffUntil - now);
         continue;
       }
-      const jobs = queue.splice(0, INDEX_BATCH);
-      if (jobs.length > 0) {
+      const drained = await lease.runIfHeld(async () => {
+        const jobs = queue.splice(0, INDEX_BATCH);
+        if (jobs.length === 0) return false;
         await drainJobs(jobs);
-        continue; // more likely pending — loop without waiting
+        return true; // more likely pending — loop without waiting
+      });
+      // Another replica owns the indexer: keep this process's queued jobs for
+      // whoever holds the lease next (this process included) and poll.
+      if (drained === null) {
+        await waitForWake(IDLE_POLL_MS);
+        continue;
       }
+      if (drained) continue;
       await waitForWake(IDLE_POLL_MS);
     } catch (err) {
       // Outer resilience (mirrors the embed sweeper): an unexpected throw
@@ -367,8 +412,17 @@ async function mapWithConcurrency<T>(
   await Promise.all(workers);
 }
 
-/** Resolve after `ms`, or immediately when {@link pokeSearchIndexer} fires. */
+/**
+ * Resolve after `ms`, or immediately when {@link pokeSearchIndexer} fires or
+ * the loop has been told to stop.
+ *
+ * The stop check is here rather than at the call site because the caller's
+ * check and this registration cannot be atomic across an `await`: a stop that
+ * lands in between would otherwise leave the loop parked for a full idle poll
+ * with nobody to wake it, and `stopSearchIndexer` waiting on it.
+ */
 function waitForWake(ms: number): Promise<void> {
+  if (!started) return Promise.resolve();
   const { promise, resolve } = Promise.withResolvers<void>();
   const timer = setTimeout(() => {
     wake = null;

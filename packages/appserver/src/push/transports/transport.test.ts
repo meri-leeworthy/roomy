@@ -66,8 +66,8 @@ function stubTransport(kind: (typeof STUB_KINDS)[number], reply: PushOutcome): R
   return recorder;
 }
 
-afterEach(() => {
-  _resetPushDispatcher();
+afterEach(async () => {
+  await _resetPushDispatcher();
   for (const kind of STUB_KINDS) {
     PUSH_TRANSPORTS[kind] = DRAFTS[kind];
   }

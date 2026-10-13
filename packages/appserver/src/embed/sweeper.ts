@@ -52,6 +52,7 @@ import type {
   MessageDiffOp,
   QueryNsid,
 } from "../invalidation/types.ts";
+import { WorkerLease } from "../workers/lease.ts";
 
 // ─── Configuration ──────────────────────────────────────────────────────
 
@@ -128,6 +129,16 @@ const NO_OK_YIELD_MS = Number(
 let sweeperGlobalDb: DbLike | undefined;
 let sweeperRouter: InvalidationRouter | undefined;
 let started = false;
+/** The sweeper's row in `worker_leases`; one owner across the fleet. */
+export const EMBED_SWEEPER_LEASE = "embed_sweeper";
+/**
+ * How long the sweeper's claim survives without renewal. Long enough that a
+ * busy holder never loses it between cycles, short enough that a replica that
+ * dies is replaced within a minute.
+ */
+const LEASE_TTL_MS = 60_000;
+/** The running loop's claim, released by stopEmbedSweeper. */
+let sweeperLease: WorkerLease | undefined;
 /** Resolved when the background loop exits. Used by stopEmbedSweeper. */
 let loopPromise: Promise<void> | undefined;
 /**
@@ -597,15 +608,33 @@ export interface EmbedSweeperOpts {
 /**
  * Start the global embed sweeper. Idempotent — safe to call multiple times.
  * Called once at appserver startup (see `index.ts`).
+ *
+ * The loop sweeps only while this process holds the sweeper's lease (see
+ * `workers/lease.ts`). The backlog lives in the global `pending_links` table,
+ * so on a replica without the lease the sweep is the holder's work, not lost.
  */
 export function startEmbedSweeper(opts: EmbedSweeperOpts): void {
   if (started) return;
   started = true;
   sweeperGlobalDb = opts.globalDb;
   sweeperRouter = opts.invalidationRouter;
+  const lease = new WorkerLease({
+    name: EMBED_SWEEPER_LEASE,
+    ttlMs: LEASE_TTL_MS,
+  });
+  sweeperLease = lease;
   // Detached background loop — must never reject the process. Any throw is
   // logged and the loop continues (see inner try/catch per sweep).
-  loopPromise = runSweeperLoop().catch((err) => {
+  loopPromise = (async () => {
+    await lease.start();
+    try {
+      await runSweeperLoop(lease);
+    } finally {
+      // However the loop ends, the claim goes with it: a crashed owner that
+      // kept renewing would hold every other replica at bay.
+      await lease.stop();
+    }
+  })().catch((err) => {
     log.error("[embed-sweeper] loop crashed:", err);
   });
 }
@@ -1356,14 +1385,22 @@ async function runSweepCycle(globalDb: DbLike): Promise<SweepCycleResult> {
   };
 }
 
-async function runSweeperLoop(): Promise<void> {
+/** The loop body; see `startEmbedSweeper` for the lease contract. */
+async function runSweeperLoop(lease: WorkerLease): Promise<void> {
   const globalDb = sweeperGlobalDb;
   if (!globalDb) return;
 
   for (;;) {
     if (!started) return; // allow clean exit via stopEmbedSweeper
     try {
-      const result = await sweepCycle(globalDb);
+      const result = await lease.runIfHeld(() => sweepCycle(globalDb));
+      if (result === null) {
+        // Another replica owns the sweeper. The backlog it would have drained
+        // is the same `pending_links` rows this replica would have selected,
+        // so deferring loses nothing.
+        await sweepWait(IDLE_POLL_MS);
+        continue;
+      }
       if (!result.full) {
         // Wait for a poke (new links) or the idle poll, whichever comes first.
         // This bounds latency for newly posted links while also self-healing
@@ -1654,9 +1691,10 @@ export function _resetEmbedSweeper(): void {
 
 /**
  * Stop the background sweeper loop. Idempotent. Used by tests to prevent the
- * loop from running after the DB is closed. Signals the loop to exit and
- * resolves once the loop has finished AND every sweep cycle already running has
- * returned.
+ * loop from running after the DB is closed, and by the appserver's shutdown
+ * path. Signals the loop to exit, resolves once the loop has finished AND
+ * every sweep cycle already running has returned, and releases the sweeper's
+ * lease so another replica can take over at once.
  *
  * Waiting for the cycles matters because the caller's next step is usually
  * `closeDb()`: a cycle still awaiting a DB reply would have that reply rejected
@@ -1692,6 +1730,12 @@ export function stopEmbedSweeper(): Promise<void> {
   const timeout = Promise.withResolvers<void>();
   setTimeout(timeout.resolve, 50);
   return Promise.race([loopPromise ?? Promise.resolve(), timeout.promise]).then(
-    () => cyclesSettled,
+    async () => {
+      await cyclesSettled;
+      // Hand the sweeper to another replica now, rather than making it wait
+      // out the TTL of a claim this process will never renew.
+      await sweeperLease?.stop();
+      sweeperLease = undefined;
+    },
   );
 }

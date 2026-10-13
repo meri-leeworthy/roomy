@@ -23,8 +23,8 @@ import type { DbLike } from "../db/types.ts";
 const USER = "did:plc:sweep-user";
 
 // Lifetime counters are module state; reset so each case reads its own sweep.
-afterEach(() => {
-  _resetPushDispatcher();
+afterEach(async () => {
+  await _resetPushDispatcher();
 });
 
 /** Minimal read-state DB carrying just what the sweep touches. */

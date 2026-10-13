@@ -74,8 +74,8 @@ Remaining impurities, from the earlier scaling analysis:
 - ~~`setHandle` still writes `comp_space.handle` with no event.~~ Moved to the global `space_handles` store (Step 2).
 - ~~Unread counters are still incremented and decremented.~~ Step 3 made them a recomputation from `last_read`.
 - ~~`comp_embed_link_data` has no log provenance and is read on the message and activity-feed hot paths.~~ Moved to the global `link_embeds` store (Step 4).
-- Profile hydration still runs on the live write path.
-- Search, embed and push are still process-local queues.
+- ~~Profile hydration still runs on the live write path.~~ Step 5 moved it to read time; materialisation makes no outbound call.
+- ~~Search, embed and push are still process-local queues.~~ Step 5 gave each loop a lease, so one replica owns it across the fleet. The search and push work queues stay in-memory per replica and wait for whichever process holds their lease.
 
 The mapping of these items to steps 2 to 5 follows pure-materialisation.md. **Acceptance:** the rebuild-equality harness (`src/streams/rebuildEquality.ts`) passes, meaning the same log prefix and the same schema version give a byte-identical projection.
 

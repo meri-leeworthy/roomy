@@ -24,6 +24,7 @@
 import type { StreamDid } from "@roomy-space/sdk";
 
 import type { DbLike } from "../db/types.ts";
+import { acquireWorkerLease } from "../workers/lease.ts";
 import { openGlobalDb } from "../db/db.ts";
 import { log } from "../log.ts";
 import { liveKitRoomName } from "./tokens.ts";
@@ -61,46 +62,8 @@ export interface LiveKitRoomLister {
 
 // ─── Lease ────────────────────────────────────────────────────────────────
 
-/**
- * Try to take the reconciler lease. Returns true when this caller holds it.
- * The compare-and-set is a single conditional upsert, so two replicas racing
- * produce one winner without a lock: the loser's `where` clause fails and it
- * writes nothing.
- *
- * The current holder always succeeds, which is what renews the lease. Without
- * that, a lone replica would take the lease on one tick, find it unexpired on
- * the next, and skip every other pass — the interval would silently become
- * twice what it claims to be.
- */
-export async function acquireReconcilerLease(
-  holder: string,
-  now = Date.now(),
-): Promise<boolean> {
-  const globalDb = openGlobalDb();
-  const expiresAt = now + LEASE_TTL_MS;
-  try {
-    const result = await globalDb.run(
-      `insert into voice_reconciler_lease (name, holder, expires_at, updated_at)
-       values ('voice_reconciler', ?, ?, ?)
-       on conflict (name) do update set
-         holder = excluded.holder,
-         expires_at = excluded.expires_at,
-         updated_at = excluded.updated_at
-       where voice_reconciler_lease.holder = excluded.holder
-          or voice_reconciler_lease.expires_at <= ?`,
-      holder,
-      expiresAt,
-      now,
-      now,
-    );
-    return result.changes > 0;
-  } catch (err) {
-    log.error(
-      `[voice] lease acquisition failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return false;
-  }
-}
+/** The reconciler's row in `worker_leases`; one owner across the fleet. */
+export const VOICE_RECONCILER_LEASE = "voice_reconciler";
 
 /** Consecutive list failures, from the shared counter. */
 export async function consecutiveFailures(): Promise<number> {
@@ -180,7 +143,14 @@ export async function reconcileOnce(
   deps: ReconcileDeps,
 ): Promise<ReconcileResult> {
   const started = deps.now ?? Date.now();
-  if (!(await acquireReconcilerLease(deps.holder, started))) {
+  if (
+    !(await acquireWorkerLease(
+      VOICE_RECONCILER_LEASE,
+      deps.holder,
+      LEASE_TTL_MS,
+      started,
+    ))
+  ) {
     return { ran: false, endedCalls: 0, joined: 0, left: 0, failures: await consecutiveFailures() };
   }
 

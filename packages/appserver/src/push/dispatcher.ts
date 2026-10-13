@@ -35,6 +35,7 @@ import "./transports/apn.ts";
 import "./transports/fcm.ts";
 import "./transports/sse.ts";
 import { PUSH_TRANSPORTS, type PushTarget } from "./transports/types.ts";
+import { WorkerLease } from "../workers/lease.ts";
 import {
   pruneSubscriptionByEndpoint,
   selectSubscriptions,
@@ -72,6 +73,19 @@ let dispatcherDb: DbLike | undefined;
 let started = false;
 /** Set when the loop should exit (test teardown); checked between cycles. */
 let stopped = false;
+/** Resolved when the background loop exits. Used by stopPushDispatcher. */
+let loopPromise: Promise<void> | undefined;
+
+/** The dispatcher's row in `worker_leases`; one owner across the fleet. */
+export const PUSH_DISPATCHER_LEASE = "push_dispatcher";
+/**
+ * How long the dispatcher's claim survives without renewal. Long enough that
+ * a busy holder never loses it between cycles, short enough that a replica
+ * that dies is replaced within a minute.
+ */
+const LEASE_TTL_MS = 60_000;
+/** The running loop's claim, released by stopPushDispatcher. */
+let dispatcherLease: WorkerLease | undefined;
 
 /** Lifetime counters, exposed via {@link pushDispatcherStats}. */
 let statsDispatched = 0;
@@ -91,15 +105,54 @@ export interface PushDispatcherOpts {
   db: DbLike;
 }
 
-/** Start the global push dispatcher. Idempotent. Called once at startup. */
+/**
+ * Start the global push dispatcher. Idempotent. Called once at startup.
+ *
+ * The loop delivers only while this process holds the dispatcher's lease (see
+ * `workers/lease.ts`). Both kinds of work it owns are the holder's: the queued
+ * live jobs, which every replica enqueues for itself, and the time-based
+ * digests in `notification_state`, which are durable.
+ */
 export function startPushDispatcher(opts: PushDispatcherOpts): void {
   if (started) return;
   dispatcherDb = opts.db;
   started = true;
   stopped = false;
-  void runDispatcherLoop().catch((err) => {
+  const lease = new WorkerLease({
+    name: PUSH_DISPATCHER_LEASE,
+    ttlMs: LEASE_TTL_MS,
+  });
+  dispatcherLease = lease;
+  loopPromise = (async () => {
+    await lease.start();
+    try {
+      await runDispatcherLoop(lease);
+    } finally {
+      // However the loop ends, the claim goes with it: a crashed owner that
+      // kept renewing would hold every other replica at bay.
+      await lease.stop();
+    }
+  })().catch((err) => {
     log.error("[push-dispatcher] loop crashed:", err);
   });
+}
+
+/**
+ * Wait for the background loop to exit, then hand the lease back. Used by
+ * the appserver's shutdown path.
+ */
+export async function stopPushDispatcher(): Promise<void> {
+  stopped = true;
+  const fn = wake;
+  wake = null;
+  fn?.();
+  const p = loopPromise;
+  loopPromise = undefined;
+  if (p) await p;
+  // Hand the dispatcher to another replica now, rather than making it wait
+  // out the TTL of a claim this process will never renew.
+  await dispatcherLease?.stop();
+  dispatcherLease = undefined;
 }
 
 
@@ -137,21 +190,28 @@ export function pokePushDispatcher(jobs: PushJob[]): void {
   if (fn) fn();
 }
 
-async function runDispatcherLoop(): Promise<void> {
+/** The loop body; see `startPushDispatcher` for the lease contract. */
+async function runDispatcherLoop(lease: WorkerLease): Promise<void> {
   const db = dispatcherDb;
   if (!db) return;
 
   while (!stopped) {
     try {
-      const batch = queue.splice(0, queue.length);
-      if (batch.length > 0) {
-        await processBatch(db, batch);
-        continue; // keep draining if more arrived
-      }
-      // Idle: run the Engaged digest sweep (catches 1h-elapsed batches even
-      // with no new pokes), then wait for a poke or the periodic poll.
-      await _runDigestSweep(db);
-      await waitForWake(IDLE_POLL_MS);
+      const drained = await lease.runIfHeld(async () => {
+        const batch = queue.splice(0, queue.length);
+        if (batch.length > 0) {
+          await processBatch(db, batch);
+          return true; // keep draining if more arrived
+        }
+        // Idle: run the Engaged digest sweep (catches 1h-elapsed batches even
+        // with no new pokes), then wait for a poke or the periodic poll.
+        await _runDigestSweep(db);
+        return false;
+      });
+      // Another replica owns the dispatcher: its own queue and the shared
+      // digest rows are its work. Keep this process's queued jobs for whoever
+      // holds the lease next (this process included) and poll.
+      if (!drained) await waitForWake(IDLE_POLL_MS);
     } catch (err) {
       // Outer resilience: an unexpected throw must not permanently kill the
       // process-wide loop. Log, pause, continue.
@@ -411,8 +471,17 @@ async function mapWithConcurrency<T>(
   await Promise.all(workers);
 }
 
-/** Resolve after `ms`, or immediately when {@link pokePushDispatcher} fires. */
+/**
+ * Resolve after `ms`, or immediately when {@link pokePushDispatcher} fires or
+ * the loop has been told to stop.
+ *
+ * The stop check is here rather than at the call site because a caller's check
+ * and this registration cannot be atomic across an `await`: a stop landing in
+ * between would otherwise leave the loop parked for a full idle poll with
+ * nobody to wake it, and `stopPushDispatcher` waiting on it.
+ */
 function waitForWake(ms: number): Promise<void> {
+  if (stopped) return Promise.resolve();
   const { promise, resolve } = Promise.withResolvers<void>();
   const timer = setTimeout(() => {
     wake = null;
@@ -428,15 +497,14 @@ function waitForWake(ms: number): Promise<void> {
 
 /**
  * Reset the dispatcher singleton and stop the running loop. Tests only.
- * The loop checks `stopped` between cycles and exits, so it can't cycle
- * against a closed DB after teardown.
+ * Stopping waits for the loop to leave its current cycle, so it can't cycle
+ * against a closed DB after teardown, and releases the lease.
  */
-export function _resetPushDispatcher(): void {
-  stopped = true;
+export async function _resetPushDispatcher(): Promise<void> {
+  await stopPushDispatcher();
   dispatcherDb = undefined;
   started = false;
   queue.length = 0;
-  wake = null;
   statsDispatched = 0;
   statsDeliveredOk = 0;
   statsSkipped = 0;

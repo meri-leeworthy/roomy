@@ -275,11 +275,11 @@ create table if not exists voice_projected_calls (
 
 create index if not exists idx_voice_projected_calls_space on voice_projected_calls(space_id);
 
--- Single-leader lease for the voice reconciler. One row per lease name; the
--- holder is whoever last acquired it and has not yet passed `expires_at`. The
--- 30 s loop takes this before listing LiveKit, so N appserver replicas produce
--- one listing pass per interval rather than N.
-create table if not exists voice_reconciler_lease (
+-- Single-leader leases for the process-wide background loops. One row per
+-- lease name; the holder is whoever last acquired it and has not yet passed
+-- `expires_at`. A loop takes its lease before doing work, so N appserver
+-- replicas produce one owner per loop rather than N.
+create table if not exists worker_leases (
   name       text primary key,
   holder     text not null,
   expires_at integer not null,

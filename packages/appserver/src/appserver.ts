@@ -102,7 +102,7 @@ import { createLiveKitRoomLister } from "./voice/livekitClient.ts";
 import { startVoiceReconciler } from "./voice/reconciler.ts";
 import { processLiveKitWebhook } from "./voice/webhook.ts";
 import { processTestWebhook } from "./voice/testWebhook.ts";
-import { startPushDispatcher, pushDispatcherStats, _resetPushDispatcher } from "./push/dispatcher.ts";
+import { startPushDispatcher, stopPushDispatcher, pushDispatcherStats } from "./push/dispatcher.ts";
 import { startSearchIndexer, stopSearchIndexer, searchIndexerStats } from "./search/indexer.ts";
 import { startSearchBackfill, stopSearchBackfill, searchBackfillStats } from "./search/backfill.ts";
 import { schemas } from "@roomy-space/sdk";
@@ -1353,6 +1353,7 @@ export async function createAppserver(
       return stopEmbedSweeper()
         .then(() => stopSearchIndexer())
         .then(() => stopSearchBackfill())
+        .then(() => stopPushDispatcher())
         .finally(() => {
         // Graceful stop: wait for in-flight requests to complete so their
         // DB awaits resolve (or reject into the fetch guard's catch) before
@@ -1382,11 +1383,6 @@ export async function createAppserver(
           stopVoiceReconciler?.();
         } catch (e) {
           log.error("appserver close: stopVoiceReconciler failed", e);
-        }
-        try {
-          _resetPushDispatcher();
-        } catch (e) {
-          log.error("appserver close: _resetPushDispatcher failed", e);
         }
         try {
           if (cacheUnsub) cacheUnsub();

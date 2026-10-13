@@ -78,9 +78,29 @@ export const GLOBAL_MIGRATIONS = {
   // migration (which runs over each space before dropping the per-space table
   // it replaces), so there is no global-side task.
   "12": { kind: "structural" },
+  // worker_leases generalises voice_reconciler_lease: the same row shape, one
+  // row per background loop rather than one table for the voice reconciler.
+  // schema-global.sql creates it on every open; the `up` carries any live
+  // claim across and drops the table it replaces.
+  "13": {
+    kind: "structural",
+    up: (db) => {
+      const legacy = db
+        .query(
+          "select name from sqlite_master where type = 'table' and name = 'voice_reconciler_lease'",
+        )
+        .get();
+      if (!legacy) return;
+      db.exec(
+        `insert or ignore into worker_leases (name, holder, expires_at, updated_at)
+         select name, holder, expires_at, updated_at from voice_reconciler_lease;
+         drop table voice_reconciler_lease;`,
+      );
+    },
+  },
   // Next global schema change goes here, e.g.:
-  //   "13": { kind: "structural" },   // table added to schema-global.sql
-  //   "13": { kind: "data" },         // plus a task in GLOBAL_MIGRATION_TASKS
+  //   "14": { kind: "structural" },   // table added to schema-global.sql
+  //   "14": { kind: "data" },         // plus a task in GLOBAL_MIGRATION_TASKS
 } as const satisfies Record<string, GlobalMigrationEntry>;
 
 /**

@@ -1,8 +1,8 @@
 # Pure Materialisation
 
 **Date:** 2026-10-02
-**Status:** Steps 1–4 landed; step 5 not started. Per-space schema changes
-now migrate in place before falling back to a rebuild (§6a).
+**Status:** Steps 1–5 landed. Per-space schema changes now migrate in place
+before falling back to a rebuild (§6a).
 **Owner:** appserver
 
 ## 1. Problem
@@ -145,17 +145,17 @@ byte-for-byte, which hides real divergence in a diff.
 
 ### 3.5 Work that is not projection (C)
 
-- **Network on the materialisation path.** `StreamManager.ts:238` calls
-  `ensureProfilesRoomyFirst`, which fetches from HappyView or the Bluesky
-  appview (`materialization/profiles.ts`, `roomyProfile.ts`). It runs inside the
-  live write path, and its result lands in the **global** `profiles` table — the
-  per-space `comp_user`/`comp_info` writes were already dropped
-  (`profiles.ts:563-567`). It is slow, non-deterministic, and duplicated per
-  replica.
+- **Network on the materialisation path.** — resolved by Step 5.
+  `StreamManager.ts` called `ensureProfilesRoomyFirst`, which fetched from
+  HappyView or the Bluesky appview (`materialization/profiles.ts`,
+  `roomyProfile.ts`) inside the live write path, writing the **global**
+  `profiles` table (the per-space `comp_user`/`comp_info` writes were already
+  dropped). It was slow, non-deterministic, and duplicated per replica.
 - **In-memory enqueues.** Search indexing (`applyBatch.ts:590,641,647,676`),
   embed-sweeper and push pokes (`StreamManager.ts:288,349`). These are
-  process-local work queues; a second process would either duplicate or lose the
-  work.
+  process-local work queues; each loop now takes a lease so one replica owns it
+  (Step 5), and the queue of a replica without the lease waits for it rather
+  than being drained twice.
 - **Global dual-writes.** `entity_space` (`applyBatch.ts:202,619`), `pending_links`
   (`:629`), `space_stats` (`:518`). Content-idempotent via `insert or ignore`,
   but each carries a materialise-time clock and each is a write to a single
@@ -313,22 +313,36 @@ run the sweeper — `reMaterialize.purity.test.ts` enriches a URL through the re
 sweeper, re-derives the space from the log, and asserts both derivations render
 the same card.
 
-### Step 5 — Take network and process-local work off the path
+### Step 5 — Take network and process-local work off the path — **landed**
 
 **Change.**
 
-- Move profile hydration off `StreamManager.sendEvents` (`StreamManager.ts:238`).
-  Reads should resolve profiles from the global store at read time, and
-  materialisation should not block on a network fetch.
-- Make the search indexer, embed sweeper and push dispatcher lease-owned rather
-  than started-per-process, so a second process neither duplicates nor loses
-  their work. The voice reconciler's conditional-upsert lease is the existing
-  pattern.
+- Materialisation makes no outbound call. `StreamManager.sendEvents` and the
+  boot pass apply the batch and nothing else; the profile prefetch entry points
+  (`ensureProfilesForBatch`, `ensureProfilesRoomyFirst`) are gone with their
+  callers. Profiles are resolved at read time from the global `profiles` table,
+  which a missing row self-heals through a detached background fetch
+  (`queries/profileStore.ts`): the reading request serves what the store holds,
+  and the next read sees what the fetch found.
+- The background loops are lease-owned. `workers/lease.ts` holds a lease as one
+  row of the global `worker_leases` table — the conditional upsert the voice
+  reconciler established, generalised to one row per loop — renewed on a timer
+  while the loop runs, so a live holder never loses its claim and a dead one is
+  replaced within the TTL. The embed sweeper (`embed_sweeper`), the search
+  indexer (`search_indexer`), the push dispatcher (`push_dispatcher`) and the
+  voice reconciler (`voice_reconciler`) each own one row. A loop without the
+  lease defers: the sweeper's backlog is the shared `pending_links` table and
+  the dispatcher's digests are the shared `notification_state` rows, so the
+  holder drains both; a replica's own in-memory queue is left for whichever
+  process holds the lease next, this one included. Each loop releases its claim
+  on stop, so a graceful restart hands over instead of waiting out the TTL.
 
-**Acceptance.** Materialisation performs no outbound network calls (assertable by
-failing the test on `fetch`) — that assertion is in place and green today
-(`reMaterialize.purity.test.ts`), so the profile-hydration move has to keep it
-green rather than arrive alongside it. Background loops run on exactly one owner.
+**Acceptance.** `reMaterialize.purity.test.ts` drives a live write with
+`globalThis.fetch` replaced by a recorder that refuses the request, and asserts
+that materialisation made no outbound call. `workers/lease.test.ts` starts two
+claimants against the same DB and asserts that exactly one runs the loop body,
+that an expired claim is taken over, and that each loop claims its own lease and
+releases it on stop.
 
 ## 6. Invariants to pin
 
@@ -336,11 +350,11 @@ green rather than arrive alongside it. Background loops run on exactly one owner
 | --- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
 | P1  | Two derivations of the same log produce identical `sort_idx` for every message | **Step 1** — `reMaterialize.blueGreen.test.ts` (live write vs rebuild), `applyBatch.test.ts` (same log twice) |
 | P2  | Equal-timestamp messages order by log position, not randomly                   | **Step 1** — `applyBatch.test.ts`                                                                             |
-| P3  | For every per-space table, rebuild-from-log equals live state                  | Step 2 — `reMaterialize.purity.test.ts`, via the rebuild-equality oracle                                      |
-| P4  | Applying a batch twice leaves read-state unchanged                             | Step 3                                                                                                        |
-| P5  | Materialisation performs no outbound network I/O                               | `reMaterialize.purity.test.ts` (a `fetch` spy around both derivations)                                        |
-| P6  | A rebuilt space serves enriched links without the sweeper                      | Step 4 — `reMaterialize.purity.test.ts` (enrich, rebuild, render)                                              |
-| P7  | No per-space table has a writer outside materialisation (+ documented caches)  | Steps 2, 4 — the rebuild-equality oracle                                                                       |
+| P3  | For every per-space table, rebuild-from-log equals live state                  | **Step 2** — `reMaterialize.purity.test.ts`, via the rebuild-equality oracle                                  |
+| P4  | Applying a batch twice leaves read-state unchanged                             | **Step 3**                                                                                                     |
+| P5  | Materialisation performs no outbound network I/O                               | **Step 5** — `reMaterialize.purity.test.ts` (a `fetch` spy around both derivations and on a live write); `workers/lease.test.ts` (one loop owner) |
+| P6  | A rebuilt space serves enriched links without the sweeper                      | **Step 4** — `reMaterialize.purity.test.ts` (enrich, rebuild, render)                                         |
+| P7  | No per-space table has a writer outside materialisation (+ documented caches)  | **Steps 2, 4** — the rebuild-equality oracle                                                                   |
 
 The general form of P3/P7 is automated in `src/streams/rebuildEquality.ts`: a
 harness that materialises a log, snapshots every per-space table, rebuilds, and
