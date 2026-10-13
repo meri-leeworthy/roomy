@@ -26,7 +26,7 @@
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { composerCanWrite, refreshWriteRefusal } from "$lib/write-refusal.svelte";
   import SeoMeta from "$lib/components/seo/SeoMeta.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   const spaceId = $derived(page.params.space!);
   const roomId = $derived(page.params.room!);

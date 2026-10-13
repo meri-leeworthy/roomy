@@ -4,7 +4,7 @@
   import { currentRoomState, setCurrentRoom } from "./current-room.svelte";
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import { IconEllipsisHorizontal, IconHashtag, IconHome, IconNeedleThread, IconChevronRight } from "@roomy/design/icons";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { editRoomModal } from "$lib/components/sidebar/edit-room.svelte";
 

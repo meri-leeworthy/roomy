@@ -19,7 +19,7 @@
   const metaQuery = createSpaceMetadataQuery(() => spaceId);
 
   import { base } from "$app/paths";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   const defaultFavicon = `${base}/favicon.png`;
 

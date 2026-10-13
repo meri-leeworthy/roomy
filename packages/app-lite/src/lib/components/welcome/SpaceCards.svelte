@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
 
   let {

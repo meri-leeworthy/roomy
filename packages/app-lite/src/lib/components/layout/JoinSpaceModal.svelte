@@ -13,7 +13,7 @@
   import { setSpacePushLevel } from "$lib/mutations/push-preferences";
   import { getPushSubscriptionEndpoint } from "$lib/push.svelte";
   import { queryClient } from "$lib/client";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   let { spaceId }: { spaceId: string } = $props();
   let pushEnabled = $state(false);

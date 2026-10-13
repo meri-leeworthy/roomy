@@ -5,7 +5,7 @@
   } from "@roomy/design/components/content/thread/message/ReactionBar.svelte";
   import { addReaction, removeReaction } from "$lib/mutations/reaction";
   import { px } from "$lib/auth.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import type { Message } from "$lib/queries/messages";
 
   type Props = {

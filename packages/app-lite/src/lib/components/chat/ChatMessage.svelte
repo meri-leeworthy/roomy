@@ -27,7 +27,7 @@
     retryPendingSend,
   } from "$lib/mutations/pending-sends.svelte";
   import type { Message } from "$lib/queries/messages";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import {
     REMATERIALISING_MESSAGE,
     isRematerialising,

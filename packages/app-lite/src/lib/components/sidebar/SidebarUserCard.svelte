@@ -4,7 +4,7 @@
 
 <script lang="ts">
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import {
     ContextMenu,
     ContextMenuItem,

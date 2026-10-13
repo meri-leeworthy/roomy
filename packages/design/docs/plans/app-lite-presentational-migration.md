@@ -1,7 +1,7 @@
 # Presentational-UI migration: app-lite → @roomy/design
 
-**Date:** 2026-09-25
-**Status:** Phase 1 complete (TASK-208) — phase 2 dispatchable from the triage below
+**Date:** 2026-09-25 (phase 2 outcome added 2026-10-13)
+**Status:** Phase 1 complete (TASK-208); phase 2 keystone seam landed — `MessageContent` + `BlocksRenderer` are next
 **Umbrella:** "refactor presentational UI code from app-lite to `design` and set up
 storybook stories" (Meri, `#coordination`, 2026-09-25T11:52Z)
 
@@ -66,21 +66,50 @@ app-lite coupling. `$lib/utils` counts as coupling.
 | 6 | `welcome/WelcomeActions.svelte` | **moved** → `marketing/WelcomeActions.svelte` | Zero props; design `Button` with `href`. |
 | 7 | `welcome/FeatureDemoCards.svelte` | **moved** → `marketing/FeatureDemoCards.svelte` | Zero props; static scoped CSS. |
 | 8 | `settings/HandleDomainDialog.svelte` | **moved** → `modals/HandleDomainDialog.svelte` | Static dialog: `open` bindable + `did` prop, **copy handler injected by the app**. Renders in isolation. |
-| 9 | `chat/MessageContent.svelte` | **deferred — not presentational in its current form** | Imports sibling *app-lite* modules: `./enrich-internal-links` (which `mount()`s app-coupled `SpaceRoomBadge`, and calls `location.origin`) and `./message-body`. Moving it requires first making internal-link enrichment injectable. |
-| 10 | `chat/BlocksRenderer.svelte` | **deferred — blocked by `MessageContent`** | Imports `enrichInternalLinks` from the same app-coupled module. Largest render-logic prize (262 lines: UTF-8→UTF-16 facet offsets, facet nesting, anchor non-nesting). Blocked on the same injection seam. |
+| 9 | `chat/MessageContent.svelte` | **deferred — unblocked by the phase-2 seam, not yet moved** | Imports sibling *app-lite* modules: `./enrich-internal-links` (which `mount()`s the badge, and calls `location.origin`) and `./message-body`. The badge is now in design with its lookups injected, so the remaining coupling is this file's own; it moves together with #10. |
+| 10 | `chat/BlocksRenderer.svelte` | **deferred — unblocked with #9, not yet moved** | Imports `enrichInternalLinks` from the same module. Largest render-logic prize (262 lines: UTF-8→UTF-16 facet offsets, facet nesting, anchor non-nesting). |
 | 11 | `seo/SeoMeta.svelte` | **rejected — not presentational** | Uses `$app/paths` `base` and `<svelte:head>`. It is route/head metadata, not a component in a design system, and Storybook has no `$app/paths` stub. |
 | 12 | `auth/HandleTypeahead.svelte` | **rejected — data-coupled** | Hardcodes a live `fetch` to `https://api.bsky.app/xrpc/app.bsky.actor.searchActorsTypeahead` plus 200 ms debounce; it is a Bluesky AppView client, not a presentational primitive. design already has `ui/user-typeahead/UserTypeahead{,List}.svelte` — the right end state is app-lite wrapping that shell. |
 
-## Move next (phase 2 candidates, in dependency order)
+## Phase 2 outcome: the keystone seam (settled)
 
-1. **`chat/embeds/SpaceRoomBadge.svelte` is the keystone.** It is coupled via
-   `$lib/client`, `$lib/auth.svelte`, `$lib/components/layout/current-space.svelte`,
-   `$lib/utils`. Proposed seam: give the badge (and `enrichInternalLinks`) an
-   injected XRPC query function + a `resolveBlobUrl`, instead of importing the
-   client. Once that lands, `enrich-internal-links.ts` becomes portable and
-   **`MessageContent` + `BlocksRenderer` unblock together** — do them in one PR.
-   `parseInternalLinkHref` and the `data-roomy-internal-link` contract already
-   match `design/src/utils/markdown.ts`, so the link-marking rules stay in one place.
+`chat/embeds/SpaceRoomBadge.svelte` **moved** → `design/content/thread/message/embeds/SpaceRoomBadge.svelte`,
+and the two decisions the plan parked are settled as follows.
+
+1. **Internal-link enrichment seam — injected async resolver props (option a).**
+   The badge takes `resolveSpace: (spaceId) => Promise<SpaceSummary | undefined>`,
+   optional `resolveRoom`, and `isCurrentSpace: () => boolean`; the contract lives
+   in that directory's `types.ts`. Rejected the context object (b): the badge is
+   mounted **imperatively** by `enrichInternalLinks` (`mount()`, one instance per
+   link), so a context the app provides "at mount" would have to be threaded
+   through the mount call anyway — the props are the same wiring with no
+   `getContext`/`setContext` indirection, and they keep the component readable in
+   isolation (which the stories are). Rejected (c) because the badge is
+   presentational once the lookups are injected.
+   The **request policy stays in app-lite**: `$lib/queries/badge-summaries.ts`
+   exports `resolveSpaceSummary` / `resolveRoomSummary`, both of which resolve
+   `undefined` for a key that has already errored. That is load-bearing — a
+   stale internal link 404s deterministically and its badge is remounted on every
+   row recycle, so the "ask at most once per session" rule must survive the seam.
+   `prefetch-link-summaries.ts` now calls those same two resolvers instead of
+   `ensureQueryData` directly, so the pass and the badges cannot drift apart.
+
+2. **`resolveBlobUrl` ownership — moved to `design/src/utils/blob.ts`.** It is pure
+   string work, so it belongs with the presentational layer that needs it. Its one
+   impure input (the appserver origin behind the `/blob/` proxy) is injected once at
+   boot through `setBlobOrigin`, exactly as `setInternalLinkOrigins` already
+   configures the markdown renderer — the app-lite call site is
+   `setAppserverOrigin`, which already had the value. The app-lite copy is deleted,
+   not aliased, and all 31 import sites point at `@roomy/design/utils`.
+
+**Not in this PR:** `chat/MessageContent.svelte` and `chat/BlocksRenderer.svelte`
+stay put. The seam unblocks them, but they are containers until this lands and is
+reviewed; they move in the next PR as the plan prescribes.
+
+### What moves next (remaining phase 2 candidates)
+
+1. **`MessageContent` + `BlocksRenderer`, together in one PR** — now unblocked, as
+   above.
 2. **Thin wrappers over data accessors** — each imports only a query or mutation
    hook and can take its result as a prop:
    - `chat/MessageContext.svelte` (`$lib/queries/messages`)
@@ -90,9 +119,8 @@ app-lite coupling. `$lib/utils` counts as coupling.
      (`$app/state` + `$lib/queries/*`) — move the `$app/state` room-param read up to the
      calling page, keep the presentational body.
    - `chat/embeds/MediaEmbed.svelte`, `chat/ForwardContext.svelte`, `welcome/SpaceCards.svelte` —
-     these import only `resolveBlobUrl` from `$lib/utils` (a pure URL helper). Moving
-     `resolveBlobUrl` into `design/src/utils` (or accepting it as a prop) unblocks all
-     three at once.
+     their only coupling was `resolveBlobUrl`, which now comes from design, so each
+     moves as soon as its own remaining props are named.
 3. **`auth/LoginModal.svelte` after the `HandleTypeahead` decision** — it owns
    `$env/dynamic/public` + `$lib/auth.svelte` + `$lib/last-login.svelte`; a
    prop-driven shell is feasible, but only once the typeahead question is settled.
@@ -121,14 +149,19 @@ containers: moving them would drag the app's data layer into the design system.
 
 ## Needs a design decision (not just a code move)
 
+> Decisions 1 and 2 were settled by the phase-2 PR — see "Phase 2 outcome"
+> above; the entries below record what was asked, not open questions.
+
 1. **Internal-link enrichment seam** — where does "fetch the space/room summary for
    a badge" live? Options: (a) design takes an injected async resolver prop;
    (b) design ships a context object the client provides at mount; (c) the badge
    stays in app-lite and design ships only the visual shell. Recommend (a)/(c):
    it keeps design free of any XRPC client and still lets `MessageContent` move.
+   **Settled: (a).**
 2. **`resolveBlobUrl` ownership** — it is a pure blob→URL helper used by at least
    three presentational components. Decide whether it becomes `design/src/utils/`
-   (with an origin parameter) or a required prop everywhere.
+   (with an origin parameter) or a required prop everywhere. **Settled:
+   `design/src/utils/blob.ts`, origin injected once via `setBlobOrigin`.**
 3. **`$app/paths` in the design stub set** — `SeoMeta` is the only user today. If the
    answer is "design components may read `base`", add an `app-stubs/paths.ts`;
    if not (recommended), keep `SeoMeta` in app-lite and say so explicitly.
@@ -153,8 +186,13 @@ errors" is checkable rather than assumed:
 
 ## Component counts
 
-| | before (phase 1) | after (phase 1) |
+| | before (phase 1) | after phase 1 |
 |---|---|---|
 | `design` components | 75 | 83 |
 | `design` stories | 76 | 83 |
 | `app-lite` components | 49 | 41 |
+
+The phase-2 seam moved one component in each direction: `design` gains
+`content/thread/message/embeds/SpaceRoomBadge.svelte` plus its story file, and
+app-lite loses its copy. (The absolute counts above are the phase-1 record; the
+tree has gained components from other changes since, so they are not restated.)

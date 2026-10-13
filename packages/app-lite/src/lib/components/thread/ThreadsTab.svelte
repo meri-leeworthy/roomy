@@ -4,7 +4,7 @@
   import BoardViewShell from "@roomy/design/components/content/thread/boardView/BoardView.svelte";
   import type { ThreadInfo } from "@roomy/design/components/content/thread/boardView/types.ts";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   let { spaceId }: { spaceId: string } = $props();
 

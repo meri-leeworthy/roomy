@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { createActivityFeedQuery, type ActivityItem } from "$lib/queries/activity-feed";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import { formatRelativeTime } from "@roomy/design/utils";
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";

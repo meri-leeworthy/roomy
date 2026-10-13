@@ -2,7 +2,7 @@ import type { Editor } from "@tiptap/core";
 import { cache } from "@roomy-space/sdk";
 import { queryClient } from "$lib/client";
 import { auth, px } from "$lib/auth.svelte";
-import { resolveBlobUrl } from "$lib/utils";
+import { resolveBlobUrl } from "@roomy/design/utils";
 import type { TypeaheadUser } from "@roomy/design/components/ui/user-typeahead/UserTypeahead.svelte";
 import type { Message } from "$lib/queries/messages";
 import type { Member, ExternalAdmin } from "$lib/queries/members";

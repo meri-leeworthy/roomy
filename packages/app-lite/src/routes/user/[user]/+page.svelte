@@ -3,7 +3,7 @@
   import { page } from "$app/state";
   import { auth } from "$lib/auth.svelte";
   import { uploadBlob } from "@roomy-space/sdk";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import UserProfile from "@roomy/design/components/user/UserProfile.svelte";
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
   import SpaceSidebar from "$lib/components/sidebar/SpaceSidebar.svelte";

@@ -3,7 +3,7 @@
   import { createRoomThreadsQuery, type RoomThread } from "$lib/queries/threads";
   import BoardViewShell from "@roomy/design/components/content/thread/boardView/BoardView.svelte";
   import type { ThreadInfo } from "@roomy/design/components/content/thread/boardView/types.ts";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   let {
     emptyMessage = "No threads yet",

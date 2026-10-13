@@ -13,7 +13,7 @@
   import HandleTypeahead from "./HandleTypeahead.svelte";
   import { login } from "$lib/auth.svelte";
   import { lastLogin, loadLastLogin } from "$lib/last-login.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   let handle = $state("");
   let email = $state("");

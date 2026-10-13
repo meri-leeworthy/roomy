@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
   import { IconX } from "@roomy/design/icons";

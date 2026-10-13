@@ -7,7 +7,7 @@
     type SearchScope,
   } from "$lib/queries/search";
   import { createSearchRoomsQuery } from "$lib/queries/search-rooms";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import { searchTerm } from "$lib/components/layout/search-term.svelte";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
   import MessageBubble from "@roomy/design/components/content/thread/message/MessageBubble.svelte";

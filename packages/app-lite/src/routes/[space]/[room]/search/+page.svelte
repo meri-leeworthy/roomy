@@ -9,7 +9,7 @@
   import { createRoomMetadataQuery } from "$lib/queries/room-metadata";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import type { SearchMessage } from "$lib/queries/search";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import SeoMeta from "$lib/components/seo/SeoMeta.svelte";
 

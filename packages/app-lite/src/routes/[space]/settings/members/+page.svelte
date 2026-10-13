@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { createMembersQuery } from "$lib/queries/members";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import { auth } from "$lib/auth.svelte";
   import { sendEvents } from "$lib/mutations/send-events";
   import { newUlid, type UserDid } from "@roomy-space/sdk";

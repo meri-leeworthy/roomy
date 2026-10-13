@@ -1,9 +1,11 @@
 import { mount, unmount } from "svelte";
-import SpaceRoomBadge from "./embeds/SpaceRoomBadge.svelte";
+import SpaceRoomBadge from "@roomy/design/components/content/thread/message/embeds/SpaceRoomBadge.svelte";
 import { extractInternalLinkTargets, parseInternalLinkHref } from "@roomy-space/sdk";
 import { setInternalLinkOrigins } from "@roomy/design/utils";
 import { CONFIG } from "$lib/config";
 import { internalOriginsFor } from "$lib/internal-link-origins";
+import { resolveRoomSummary, resolveSpaceSummary } from "$lib/queries/badge-summaries";
+import { currentSpaceState } from "$lib/components/layout/current-space.svelte";
 import type { Block } from "@roomy-space/sdk";
 
 export interface InternalLinkTarget {
@@ -81,6 +83,12 @@ export function enrichInternalLinks(el: HTMLElement) {
         roomId: target.roomId,
         href,
         linkText: explicitText,
+        resolveSpace: resolveSpaceSummary,
+        resolveRoom: resolveRoomSummary,
+        // Read through the accessor on every render rather than captured:
+        // navigating between spaces reuses the mounted badge, and the
+        // suppression of the current space's own name must follow.
+        isCurrentSpace: () => currentSpaceState.value?.id === target.spaceId,
       },
     });
     link.remove();

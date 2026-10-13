@@ -7,7 +7,7 @@
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import { IconSettings } from "@roomy/design/icons";
   import { currentSpaceState } from "$lib/components/layout/current-space.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   let { children } = $props();
 

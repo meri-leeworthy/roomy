@@ -14,7 +14,7 @@
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { createRole, updateRole, deleteRole, addMemberRole, removeMemberRole } from "$lib/mutations/role";
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import {
     IconLoading,
     IconTrash,

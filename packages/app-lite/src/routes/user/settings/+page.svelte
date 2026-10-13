@@ -6,7 +6,7 @@
   import { joinSpace } from "$lib/mutations/space";
   import { queryClient } from "$lib/client";
   import { cache } from "@roomy-space/sdk";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
   import Switch from "@roomy/design/components/ui/toggle/Toggle.svelte";
   import { desktopUpdatesEnabled, getUpdater } from "$lib/nativeUpdate.svelte";

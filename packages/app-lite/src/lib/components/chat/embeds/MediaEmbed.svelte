@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Portal } from "bits-ui";
-  import { resolveBlobUrl, normalizeMimeType } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
+  import { normalizeMimeType } from "$lib/utils";
 
   type MediaItem = { url: string; type: string; alt?: string };
 

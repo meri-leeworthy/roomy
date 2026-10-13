@@ -7,7 +7,7 @@
   import SearchResultsList from "$lib/components/search/SearchResultsList.svelte";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import type { SearchMessage } from "$lib/queries/search";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import SeoMeta from "$lib/components/seo/SeoMeta.svelte";
 

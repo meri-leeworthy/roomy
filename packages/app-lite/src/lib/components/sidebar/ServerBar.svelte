@@ -5,7 +5,7 @@
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import { IconMasonryGrid, IconPlus } from "@roomy/design/icons";
   import Button from "@roomy/design/components/ui/button/Button.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import { createSpacesQuery } from "$lib/queries/spaces";
   import { spaceNavigation } from "$lib/components/layout/last-room.svelte";
   import { serverBar } from "$lib/components/layout/server-bar.svelte";

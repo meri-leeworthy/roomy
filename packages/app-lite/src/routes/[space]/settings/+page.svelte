@@ -11,7 +11,7 @@
     getSpaceHandleDomainsForSpace,
     setSpaceHandleForSpace,
   } from "$lib/mutations/space-handle";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import Button from "@roomy/design/components/ui/button/Button.svelte";
   import Input, {

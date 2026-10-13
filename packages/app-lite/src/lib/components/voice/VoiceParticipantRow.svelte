@@ -11,7 +11,7 @@
   import { createProfileQuery } from "$lib/queries/profile";
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
   import { IconMicrophoneSlash } from "@roomy/design/icons";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   let {
     did,

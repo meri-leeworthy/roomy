@@ -3,7 +3,7 @@
   import { currentSpaceState } from "$lib/components/layout/current-space.svelte";
   import { mobileSidebar } from "$lib/components/layout/mobile-sidebar.svelte";
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   let { onClick, onMobileClick, small = false }: { onClick: () => void, onMobileClick?: () => void, small: boolean } = $props();
 </script>

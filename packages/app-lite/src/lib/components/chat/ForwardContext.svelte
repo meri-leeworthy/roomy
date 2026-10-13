@@ -2,7 +2,7 @@
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
   import { IconForward } from "@roomy/design/icons";
   import { formatMessageTimestamp } from "@roomy/design/utils";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
 
   let {
     name,

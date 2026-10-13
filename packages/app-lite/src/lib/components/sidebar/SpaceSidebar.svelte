@@ -18,7 +18,7 @@
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import SidebarCategoryShell from "@roomy/design/components/sidebars/SidebarCategoryShell.svelte";
   import SidebarItemShell from "@roomy/design/components/sidebars/SidebarItemShell.svelte";
-  import { resolveBlobUrl } from "$lib/utils";
+  import { resolveBlobUrl } from "@roomy/design/utils";
   import { shareUrl } from "$lib/share-links";
   import Button, { buttonVariants } from "@roomy/design/components/ui/button/Button.svelte";
   import { cn } from "@roomy/design/utils";
