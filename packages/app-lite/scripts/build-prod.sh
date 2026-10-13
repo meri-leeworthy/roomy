@@ -35,8 +35,37 @@ fi
 target_url=${OAUTH_HOST:?"OAUTH_HOST must be set (e.g. https://app-lite.roomy.chat)"}
 export VITE_OAUTH_CLIENT_ID="${target_url}/oauth-client-metadata.json"
 
+# ── Apple App Site Association: preflight ─────────────────────────────────
+# Everything the association file needs is knowable before the frontend build
+# (see the generation step below for what the file is): the claim in
+# src-tauri/tauri.conf.json, and APPLE_DEVELOPMENT_TEAM for the appIDs entry.
+# Resolving them here means a deployment that cannot produce the file fails in
+# seconds rather than after `pnpm build`.
+node --experimental-strip-types scripts/gen-aasa.mjs \
+  --mode preflight --out build-staging --origin "$target_url"
+
 pnpm build
 
+# ── Apple App Site Association ────────────────────────────────────────────
+# The served half of the `associated-domains` entitlement the iOS build carries
+# (src-tauri/tauri.conf.json declares `applinks:roomy.space`; the deep-link
+# plugin's build script writes it into the app's entitlements). Without the file
+# Apple fetches from the domain, that entitlement is a signed claim nothing can
+# verify — Apple's CDN answers 404 and every shared link opens the browser.
+#
+# Generated, not committed: the `appIDs` entry is `<Team ID>.<Bundle ID>`, and
+# the Team ID is an Apple account property. gen-aasa.mjs reads the team id from
+# APPLE_DEVELOPMENT_TEAM and fails the build when it is unset or malformed,
+# rather than shipping a file whose appIDs cannot match the app (same contract
+# as the OAuth-metadata and build-identity verifications below).
+#
+# $target_url is the origin this build is served from — the same value that
+# decides the OAuth client_id. It also decides whether this deployment is the
+# host the app claims: a build for any other origin, staging included, is left
+# without an association file, which the verification below asserts.
+echo "Generating Apple App Site Association..."
+node --experimental-strip-types scripts/gen-aasa.mjs \
+  --out build-staging --origin "$target_url"
 
 echo "Generating OAuth client configuration..."
 echo "OAuth Host URL: $target_url"
@@ -195,6 +224,17 @@ else
   echo "Build identity: commit ${built_commit} (served as /build.json)"
 fi
 
+# ── App Site Association verification ────────────────────────────────────
+# Read the file that ships rather than trusting the generation above: a
+# deployment served from the app's claimed host must carry an association file
+# naming `<Team ID>.<Bundle ID>` over every declared path prefix, and one served
+# from any other origin must carry none. Covers the whole chain from
+# `src-tauri/tauri.conf.json` (the claim, and the source of the Android intent
+# filter) to the bytes on disk, so a renamed host, a dropped pathPrefix, or a
+# build with no APPLE_DEVELOPMENT_TEAM cannot ship silently.
+node --experimental-strip-types scripts/gen-aasa.mjs \
+  --verify --out build-staging --origin "$target_url"
+
 # ── Social-unfurl verification ──────────────────────────────────────────
 # Every route is `ssr = false`, so the served HTML is `app.html` and the
 # per-page `<svelte:head>` output (SeoMeta) is only produced once the client
@@ -228,6 +268,7 @@ for tag in \
 done
 echo "Social unfurl verified: static og/* + twitter:* present in index.html"
 echo "Done! OAuth metadata written to build-staging/oauth-client-metadata.json"
+echo "Done! App Site Association verified at build-staging/.well-known/apple-app-site-association"
 
 # ── Publish atomically ──────────────────────────────────────────────────
 # The static server serves `build/` live, so never let a partial build leak

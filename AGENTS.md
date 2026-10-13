@@ -103,6 +103,8 @@ Server pushes row-level diffs → Tanstack Query cache updates → Svelte 5 rune
 
 The production build (`scripts/build-prod.sh`) runs `vite build` then generates `build/oauth-client-metadata.json` with the OAuth scope string, verifying at build time that every scope in `src/lib/config.ts` (`APPSERVER_RPCS` + `OAUTH_SCOPE`) is present in the generated metadata.
 
+It also generates `.well-known/apple-app-site-association` — the Apple App Site Association (AASA) that makes the iOS app's `associated-domains` entitlement (`applinks:roomy.space`, declared in `src-tauri/tauri.conf.json`) a claim the system can verify. `scripts/gen-aasa.mjs` writes it from `<Team ID>.<Bundle ID>`, where the team id comes from `APPLE_DEVELOPMENT_TEAM` at build time and is never committed; a build without it fails, and the deployed file is verified before publish. `Caddyfile` serves it as `application/json` (the file is extensionless, so the MIME lookup finds nothing).
+
 ## Package: design (@roomy/design)
 
 Shared design system used by app-lite. Contains reusable Svelte 5 components, icons, and utility functions.

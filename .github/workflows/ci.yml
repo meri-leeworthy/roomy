@@ -285,7 +285,40 @@ jobs:
       - name: Check App-lite
         run: pnpm --filter app-lite check
       - name: Check OAuth scope drift (config.ts vs build-prod.sh)
-        run: node packages/app-lite/scripts/check-oauth-scopes.mjs
+        run: node --experimental-strip-types packages/app-lite/scripts/check-oauth-scopes.mjs
+      # The association file is generated at build time from the Apple team id,
+      # so nothing committed can go stale — but the generator itself must still
+      # run, and it must refuse an absent or malformed team id instead of
+      # writing an appID no app can claim. Checks both.
+      - name: Check the App Site Association generator
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          # A stand-in team id: this asserts the generator runs and what shape
+          # it writes, not which team the deployment belongs to — that value
+          # reaches the real build through APPLE_DEVELOPMENT_TEAM.
+          APPLE_DEVELOPMENT_TEAM=ABCDE12345 \
+            node --experimental-strip-types packages/app-lite/scripts/gen-aasa.mjs \
+              --out "$tmp" --origin https://roomy.space
+          node -e '
+            const { readFileSync } = require("node:fs");
+            const doc = JSON.parse(readFileSync(process.argv[1], "utf-8"));
+            const [detail] = doc.applinks.details;
+            if (detail.appIDs[0] !== "ABCDE12345.space.roomy") {
+              throw new Error(`appID is ${detail.appIDs[0]}`);
+            }
+            if (detail.components.length === 0) {
+              throw new Error("components is empty: the file claims no URL");
+            }
+          ' "$tmp/.well-known/apple-app-site-association"
+          if APPLE_DEVELOPMENT_TEAM= \
+               node --experimental-strip-types packages/app-lite/scripts/gen-aasa.mjs \
+                 --out "$tmp/unset" --origin https://roomy.space 2>/dev/null; then
+            echo "::error::gen-aasa.mjs accepted an unset APPLE_DEVELOPMENT_TEAM"
+            exit 1
+          fi
+          echo "AASA generator writes $(tr -d '\n' < "$tmp/.well-known/apple-app-site-association")"
+          echo "and refuses a build with no team id."
 
   check-sdk:
     name: Check SDK Lexicons

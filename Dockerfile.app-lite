@@ -45,6 +45,15 @@ ENV PUBLIC_FARO_API_KEY=$PUBLIC_FARO_API_KEY
 ARG PUBLIC_ANALYTICS_SALT
 ENV PUBLIC_ANALYTICS_SALT=$PUBLIC_ANALYTICS_SALT
 
+# Apple Developer Team ID, for the App Site Association that
+# `scripts/gen-aasa.mjs` writes into the build (`.well-known/apple-app-site-association`).
+# Its `appIDs` entry is `<Team ID>.<Bundle ID>`, the value Apple matches against
+# the app's `associated-domains` entitlement, and the one field that cannot be
+# committed. The build fails when it is unset, so the roomy.space image cannot
+# publish without it. Public, not a secret: it names the team in the served file.
+ARG APPLE_DEVELOPMENT_TEAM
+ENV APPLE_DEVELOPMENT_TEAM=$APPLE_DEVELOPMENT_TEAM
+
 ARG OAUTH_HOST
 ENV OAUTH_HOST=$OAUTH_HOST
 

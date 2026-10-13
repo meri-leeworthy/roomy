@@ -32,6 +32,19 @@
 # must serve the app shell with a 200, so deep links such as invite links
 # resolve. Files that exist win over these rules — the rules only decide what
 # happens when nothing is on disk at the requested path.
+#
+# The Apple App Site Association comes FIRST because Netlify applies the first
+# matching rule: this path is the file Apple fetches before it lets a shared
+# `https://` link open the iOS app, and the catch-all below would answer it with
+# the HTML shell. A deployment that is the host the app claims serves the file
+# from disk; one that is not carries no file at all, and a miss is a 404, which
+# is what Apple should see. (Caddy holds the same line; see its `handle` for
+# this path.)
+[[redirects]]
+  from = "/.well-known/apple-app-site-association"
+  to = "/index.html"
+  status = 404
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

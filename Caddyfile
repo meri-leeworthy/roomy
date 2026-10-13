@@ -16,6 +16,19 @@
 		file_server
 	}
 
+	# The Apple App Site Association, which decides whether a shared
+	# `https://roomy.space/…` link opens the iOS app or the web app. It is
+	# extensionless, so Caddy's extension-based MIME lookup (see
+	# `file_server`) resolves nothing and the response would carry no
+	# Content-Type: Apple requires `application/json` and reports the file as
+	# bad content without it. Served straight from disk, and a miss is a 404
+	# rather than the app shell — for a host the app does not claim, the build
+	# writes no file at all and 404 is the honest answer.
+	handle /.well-known/apple-app-site-association {
+		header Content-Type "application/json"
+		file_server
+	}
+
 	# The rest of /_app/ (env.js, version.json). version.json is how the
 	# client detects a new deploy, so it must always revalidate.
 	handle /_app/* {

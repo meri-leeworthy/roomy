@@ -75,6 +75,14 @@ jobs:
       VITE_APPSERVER_WS_ORIGIN: wss://api-staging.roomy.space
       VITE_APPSERVER_DID: did:web:api-staging.roomy.space
 
+      # Apple Developer Team ID. A deploy builds the App Site Association only
+      # when its own DEPLOY_URL is the host the app claims (`applinks:roomy.space`
+      # in tauri.conf.json), so an empty value here is the normal case: the
+      # deploy is a Netlify origin, not that host, and the build says so and
+      # writes no association file. It must be set on the deployment that does
+      # serve the claimed host, or that build fails.
+      APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+
     steps:
       # A dispatch that cannot authenticate should say so before it installs
       # and builds. NETLIFY_SITE_ID carries the site to deploy to: without it
