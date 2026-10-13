@@ -5,21 +5,21 @@
 Roomy. `docs/plans/web-tiles-roomy-feasibility.md` is the earlier feasibility
 read, kept as a historical record; §0 below states which of its conclusions
 still hold.
-**Next:** Milestone A (§11.1) — render a standalone tile in app-lite through a
-tile loading server. That needs a `TileMothership` and a loading domain, and can
-be exercised against the loader's default domain before Roomy deploys its own
-(§11.3).
+**Next:** Milestone A (§11.1) — render a standalone tile in app-lite. That needs
+a `TileMothership` and an `ATTileLoader`, and no loading domain of Roomy's own:
+the mothership falls back to the DASL project's shared loading server (§8.1,
+§11.3).
 **Scope of the funded stint:** two weeks, two features (§5, §6), plus a
 30-day engagement write-up (§10).
 **Verified against:** `origin/next` @ `4276631e`.
 **Packages:** `packages/app-lite`, `packages/design`, `packages/appserver`,
-`packages/sdk`, plus a new tile-loading service (see §8).
+`packages/sdk`, and no new service of Roomy's own (see §8.1).
 
 **Path choice.** This document lives at `docs/plans/web-tiles-integration.md`.
 The root `docs/plans/` directory holds cross-package plan documents
 (`richtext-migration-plan.md`, `voice-chat-plan.md`, `bluesky-publishing.md`);
-this work touches four packages plus a new deployment target, so the root
-directory is correct.
+this work spans four packages and a deployment question, so the root directory is
+correct.
 
 ---
 
@@ -57,8 +57,8 @@ have since changed:
 | Old claim | Now |
 |---|---|
 | "The spec does not yet define the room-context / query-capability channel… that's presently a stub." | **Partly resolved.** Tiles Protocols is now specified and the **Data Passing** protocol (`data.js`) is written, with a concrete `postMessage` contract (§2.4). The self-editing-tiles protocol (`store.js`) is still an `XXX` stub. The old document's "you'd be designing this yourselves" is now "you'd be implementing a published protocol, and only the store half is unclaimed". |
-| "You need to run a tile-loading server." | **Unchanged and still the largest new operational surface.** No tile-loading server, wildcard DNS or wildcard TLS exists anywhere in this repo (§8.1). |
-| "The main trust decision is administrative: which tiles a space may load, with what capabilities." | **Unchanged**, but the mechanism is now clearer: a per-space allowlist is a materialised space setting, on the `sidebar_config` precedent (§6.4), and is *not* an OAuth scope (§9). |
+| "You need to run a tile-loading server." | **Resolved the other way: Roomy runs none.** The loader defaults to the DASL project's own shared loading server, which serves the mandated header set and redirects per load; `loadDomain` is left unset (§8.1). Running Roomy's own is a later, one-value change that needs a wildcard certificate. |
+| "The main trust decision is administrative: which tiles a space may load, with what capabilities." | **Unchanged**, and the mechanism is the deployment's hardcoded OAuth scope ceiling plus manual review of public writes (§6.4, §9.3) — *not* a per-space setting, and *not* an OAuth scope a space administers (§9). |
 
 **What has not changed:** nothing in this repo depends on DASL, and no code for
 tiles exists. `grep` for `dasl|masl|atile|tile-loader` across
@@ -425,6 +425,9 @@ Link previews are a **server-produced read projection**, not a client fetch:
    and enriches with OpenGraph + oEmbed discovery
    (`packages/appserver/src/embed/metadata.ts:372`, 8s timeout), retrying on a
    1m/5m/30m/2h → 6h schedule with an attempt ceiling.
+   The plan replaces the drain with demand-driven re-enrichment at write and
+   read time (§11.2); the sweeper itself, its retry schedule and its ceiling
+   stay.
 3. Results land in `comp_embed_link_data.embed_json`
    (`packages/appserver/src/db/schema-space.sql:248-256`) as a JSON-serialised
    `EmbedV1`; `embed_json = NULL` means definitive no-data or abandoned.
@@ -712,38 +715,37 @@ embed when the resolver lands, with no event rewritten and nothing asked of the
 author. Two conditions: the resolved tile is cached against the link URL, so one
 post's tile serves every message that links it, and there is a way to re-enqueue
 rows that have already been enriched, since `pending_links` only ever holds work
-not yet done (§11.2, open question 14).
+not yet done (§11.2, §13 item 14).
 
 ### 5.4 The content-type → tile mapping
 
 **By convention.** Roomy publishes a default set of content-type → tile pairs —
-the Bluesky-post renderer first — and a space may override an entry. The mapping
-is data, not code: it turns a recognised AT-URI into the AT-URI of the tile that
-renders it, and nothing else in the pipeline depends on where the default came
-from.
+the Bluesky-post renderer first — and every space uses it. The mapping is data,
+not code: it turns a recognised AT-URI into the AT-URI of the tile that renders
+it, and nothing else in the pipeline depends on where the default came from.
 
 Two alternatives were considered and are not chosen:
 
 - **By publisher allowlist.** A per-space list of publishers or handles whose
-  tiles may render. It answers a different question — which tiles may load at
-  all (§6.4) — and as a *mapping* it makes the common case into configuration:
-  a space that has named nothing renders no link richly.
-- **By explicit AT-URI.** The space pins specific tiles. Maximum control,
-  minimum flexibility, and the same failure at the limit — a space that has
-  configured nothing renders nothing.
+  tiles may render. As a *mapping* it makes the common case into configuration —
+  a space that has named nothing renders no link richly — and the question it
+  actually answers, which tiles a deployment may load at all, is not a space
+  setting in this plan (§6.4).
+- **By explicit AT-URI.** The space pins specific tiles. Maximum control, minimum
+  flexibility, and the same failure at the limit — a space that has configured
+  nothing renders nothing.
 
 The thread's framing is that a first cut can be less of an open extension point
 and more a proof of the system: inject the tile ref we want to load, resolve it,
 render it, and learn what the pipeline needs. By convention is how that injected
 ref becomes a product default without an extension point to design first. It is
 also what a marketplace (§12) eventually replaces: the default set becomes a
-catalog, and the override becomes an install.
+catalog, and installing a tile becomes a choice made somewhere.
 
-**The first cut needs only the default set.** The per-space override is data,
-and where it is stored is §6.4's question rather than this one — whatever holds
-"which tiles may this space load" is the natural home for "and which tile renders
-this content type". The two do not conflict: the allowlist governs what may
-load, the convention governs what loads *by default*.
+**No per-space configuration, for now.** A space does not choose its tile
+mapping, and per-space tile configuration is out of scope for this plan (§6.4).
+That is also what keeps the feature cheap: a space that has configured nothing
+still renders a Bluesky link richly.
 
 ### 5.5 Where resolution happens
 
@@ -812,50 +814,72 @@ The resolution reached: **a top-level key-value store per room, keyed by NSID**.
 A tile application owns a key namespace; the value is arbitrary JSON and it is
 the tile's job to manage it. This maps cleanly onto three things:
 
-- **`space.roomy.room.updateRoom` cannot carry it.** `UpdateRoomSchema`
-  (`packages/sdk/src/schema/events/room.ts:91-100`) has no `extensions` field at
-  all; only `CreateRoomSchema` does (`:47-56`), with a single-variant
-  `RoomExtensionMap` (`extensions/room.ts:31-37`). So a room's metadata cannot
-  be extended after creation with the current schema — this is a real, specific
-  change the feature needs.
+- **`space.roomy.room.updateRoom` gains an optional `extensions` field.**
+  `UpdateRoomSchema` (`packages/sdk/src/schema/events/room.ts:91-100`) has no
+  `extensions` field today; only `CreateRoomSchema` does (`:47-56`), carrying
+  the single-variant `RoomExtensionMap` (`extensions/room.ts:31-37`). The change
+  mirrors the message path exactly: `editMessage` takes
+  `MessageExtensionUpdateMap` (`extensions/message.ts:152-159`), which is the
+  same map built with `unionToMap(…, { makeAllNullable: true })`, so a key set to
+  `null` removes that extension and an absent key leaves it alone. No new event
+  type is involved.
 - **The `extensions` map is the existing mechanism.** `unionToMap`
   (`primitives.ts:111-140`) derives a `$type`-keyed optional map from an
   extension union, so a new extension type is added to the union and the map
   field picks it up with no change to any event schema. Extensions exist only as
   ArkType schemas — no lexicon JSON — so the whole change is one file plus its
   union membership.
-- **Room metadata is SQL columns, not a record.** `comp_room` (label,
-  default_access, deleted) and `comp_info` (name, avatar, description, banner,
-  pronouns, website) are typed columns; there is **no generic JSON column on a
-  room**. The nearest precedent is `comp_space.sidebar_config text not null
-  default '{"categories": []}'` (`packages/appserver/src/db/schema-space.sql:113`),
-  written by `space.roomy.space.updateSidebar.v0/v1` and parsed in
-  `handlers/space.roomy.space.getMetadata.ts:137-165`. A `room_context` JSON
-  column plus a room-context event mirrors that 1:1.
+- **Storage: a JSON column on `comp_room`.** Room metadata is SQL columns, not a
+  record — `comp_room` (label, default_access, deleted) and `comp_info` (name,
+  avatar, description, banner, pronouns, website) — and there is no generic JSON
+  column on a room. The nearest precedent is
+  `comp_space.sidebar_config text not null default '{"categories": []}'`
+  (`packages/appserver/src/db/schema-space.sql:113`), written by
+  `space.roomy.space.updateSidebar.v0/v1` and parsed in
+  `handlers/space.roomy.space.getMetadata.ts:137-165`. A nullable text column
+  holding the extension map, keyed by NSID, mirrors that 1:1.
 
-### 6.4 Governance, and where an allowlist lives
+**What the change costs.** The column is one structural per-space schema version:
+an entry in `SPACE_MIGRATIONS` (`db/spaceVersions.ts`) of the form
+`{ kind: "structural", up(db) { alter table … } }`, plus the column in
+`schema-space.sql` for freshly created DBs. Per-space DBs upgrade in place — the
+blue-green rebuild is the fallback for a migration that fails, not the default.
+On the read side, `space.roomy.room.getMetadata` grows the field, and
+`updateRoom` already invalidates `space.roomy.space.getMetadata` and the room
+(`invalidation/inferSignals.ts:851-865`), so connected clients refetch with no
+new signal. On the write side, `updateRoom` is already space-admin
+(`auth/writeAuth.ts` `ROOM_MANAGE_TYPES`), so the new field inherits that gate,
+and `operations/room.ts` gains the option beside the ones it already takes.
+There is no obstacle on the schema, auth or invalidation side.
+
+### 6.4 Governance: the ceiling, not a config surface
 
 Tiles are content-addressed and network-dead, so the trust decision is
-administrative: which tiles may this space load, and with what capabilities.
-The default mapping from content type to tile is not this section's question —
-it is settled as by convention (§5.4). What lives here is a space's allowlist and
-its overrides of that convention.
-Three precedent-backed homes:
+administrative — but in this plan it is not a per-space setting. Nothing here
+adds a space-level or user-level configuration surface for what tiles may
+access. A space's members do not administer tile permissions, and per-space tile
+configuration is out of scope.
 
-1. **A space-level JSON config column**, materialised by a new event — the
-   `sidebar_config` pattern.
-2. **A component table** (`comp_tile`), like `comp_discord_origin`
-   (`schema-space.sql:138-143`), when entries need querying or ordering.
-3. **A read-state table** when the setting is per-user and must survive
-   materialisation resets — the `bridge_token_grants` precedent.
+What governs instead is the deployment's **OAuth scope ceiling** —
+`FULL_SCOPE_CEILING` in `packages/app-lite/src/lib/scopes.ts`, the hardcoded set a
+tile's requested scopes are checked against, plus the matching registration on
+the HappyView API client. A capability a tile cannot be granted is one the
+ceiling does not list, and changing that list is a code change with a deploy,
+not a space setting. The second gate is human: the whitelisted public writes of
+§9.3 are manually reviewed before their scopes are added.
 
-Admin gating for the write follows `space.roomy.space.updatePolicy.ts:52-60`
-(`requireSpaceAccess` + `access.isAdmin` → 403).
+Two things worth recording alongside that:
 
-The thread's additional wrinkle: the default permission is "a tile may write to
-its own namespaced store", which is unobjectionable because the host enforces
-the namespace. The contested case is a tile that must write to *public* records
-— RSVPs, votes, board-game moves — which is a capability grant, and is §9.
+- **The default permission is "a tile may write to its own namespaced store"**,
+  which is unobjectionable because the host enforces the namespace. The contested
+  case is a tile that must write to *public* records — RSVPs, votes, board-game
+  moves — which is the capability grant of §9.
+- **Where an admin-gated write does exist, it follows the existing pattern**:
+  `space.roomy.space.updatePolicy.ts:52-60` (`requireSpaceAccess` +
+  `access.isAdmin` → 403).
+
+The per-room data a tile manages is a different thing entirely, and is §6.3:
+that is the tile's own namespaced state, not a permission.
 
 ### 6.5 The calendar case, concretely
 
@@ -995,19 +1019,46 @@ implementation options:
   assets, so this is not large — but it is a security-relevant re-implementation
   of someone else's header policy, and any drift is a silent hole.
 
-The recommendation is to run the published service first and consider folding it
-in only if deploying a second process proves painful.
+**Decision: a centralised service, and for now it is the DASL project's own.**
+Self-hosting is not a goal — a second deployment target, a wildcard certificate
+and a second process in the estate buy nothing a shared service does not — so
+Roomy uses `load.webtil.es` and leaves `loadDomain` unset.
 
-**Open decisions.**
+That is the loader's hardcoded fallback, not a convenience:
+`TileMothership.getLoadSource()` returns
+`https://${this.#conf?.loadDomain || 'load.webtil.es'}/.well-known/web-tiles/`
+(`@dasl/tile-loader@2.0.0`). Verified against the live service:
 
-- **Central vs per-instance.** One Roomy-operated tile-loading server that all
-  instances use by default (simpler for self-hosters, less infra each, one
-  wildcard cert) versus every instance running its own (consistent with
-  credible-exit posture, more setup burden). A sane default with an easy
-  override is the obvious middle.
-- **Which domain.** `load.roomy.space` is not available for free: the wildcard
-  certificate is a deploy-time change to however `roomy.space` TLS is currently
-  issued.
+```
+GET https://load.webtil.es/.well-known/web-tiles/
+  => 303, location: https://<random>.webtil.es/.well-known/web-tiles/
+  => 200 with the mandated header set, service-worker-allowed: /,
+     HSTS preload, referrer-policy: no-referrer, Caddy
+```
+
+The random subdomain is per request, and the headers are the spec's own set —
+including `sandbox … allow-popups-to-escape-sandbox`, the part disputed in
+`darobin/dasl.ing#98` (§3.2). **The limits, stated plainly:**
+
+- **It is someone else's deployment.** No SLA, no published quota, no
+  versioning contract, and one shared dependency for every Roomy instance that
+  leaves `loadDomain` unset. If it is down, tile *content* does not load anywhere
+  (cards still render — they need no network).
+- **The header policy is theirs and can change without notice.** Roomy cannot
+  pin it, and the containment a tile gets is exactly what that server sends,
+  including the disputed sandbox flag. Anywhere Roomy needs a different policy,
+  it needs its own server.
+- **It sees loads, not tiles.** The shuttle's own assets come from the load
+  origin; the tile's resources are fetched by the mothership from the tile's
+  PDS. So it learns timing, volume and the requesting IP, not which tile was
+  loaded — which matches the spec's "a server that cannot learn more than what
+  the embedding context already knows".
+- **It does not host tiles.** Publishing stays on AT (`atile`, §8.2); the
+  loading server is a redirect, a header set and the shuttle runtime.
+- **Leaving is one config value.** `loadDomain` points at Roomy's own
+  `load.roomy.space` when there is one; the wildcard certificate that needs is a
+  deploy-time change to however `roomy.space` TLS is issued today, and is the
+  only part of §8.1 that has an outside-the-repo dependency.
 
 ### 8.2 Publishing tiles
 
@@ -1188,8 +1239,8 @@ attachments before a tile can be one of them (§4.6).
 and which takes no data from the host: a static web page, an interactive WebGL
 scene. The whole shape is:
 
-1. `TileMothership` in app-lite, `loadDomain` pointed at a loading server (§11.3
-   covers which one for a checkpoint), `addLoader(new ATTileLoader())`.
+1. `TileMothership` in app-lite with `loadDomain` left unset, so it uses the
+   shared loading server (§11.3), and `addLoader(new ATTileLoader())`.
 2. A component that takes a tile AT-URI, calls `tl.loadTile(uri)`, appends
    `renderContent()`, and shows the manifest's card via `renderCard()` while
    loading.
@@ -1198,12 +1249,11 @@ Nothing else is needed: `ATTileLoader` fetches the manifest from the PDS and its
 `ATPathLoader` (`@dasl/tile-loader/at`) serves each manifest path from that same
 PDS. There is no host data channel in the path at all.
 
-This is worth doing first because it isolates the two variables most likely to
-waste a fortnight: whether the loading domain is configured correctly
-(wildcard DNS, wildcard TLS, `service-worker-allowed: /`, the CSP header set),
-and whether the sandbox behaves as the spec claims. It is also the first test of
-the upstream concern in §3.2 — if iframe/worker wiring misbehaves, that is
-evidence for `darobin/dasl.ing#98`, not a Roomy bug.
+This is worth doing first because it isolates the variables most likely to waste
+a fortnight: whether the sandbox behaves as the spec claims, and whether the
+mothership/shuttle/worker wiring works from inside a Svelte app. It is also the
+first test of the upstream concern in §3.2 — if the iframe or worker wiring
+misbehaves, that is evidence for `darobin/dasl.ing#98`, not a Roomy bug.
 
 **Step B0 — the unified attachment read path.** Before a tile attachment has
 anywhere to land, the DTO becomes `Message.attachments: AttachmentDto[]`: one
@@ -1314,12 +1364,13 @@ truth and is replicated in full** (`litestream.yml` replicates
 backup, for the life of the space. A megabyte per message is a megabyte per
 message forever.
 
-The guidance worth writing down now: **the tile payload is small structured
-data, and any large asset belongs in a blob the tile fetches from its own
-manifest** — which milestone A already proves works, and which costs the event
-log nothing. Worth an explicit bound in the new variant's `.describe()`, and an
-appserver-side rejection, rather than discovering the problem at scale. This is
-open question 12.
+The guidance worth writing down now: **what travels in the event is a reference,
+not content.** The tile's AT-URI (and CID) plus a small structured payload; the
+tile itself is an `ing.dasl.masl` record on a PDS, with its resources as ATProto
+blobs the tile fetches through its own manifest — which milestone A already
+proves works, and which costs the event log nothing. Worth an explicit bound in
+the new variant's `.describe()` plus an appserver-side rejection, rather than
+discovering the problem at scale. This is item 12 in §13.
 
 **What this does not change.** The tile still receives its payload over
 `tp-data` (§7.1): the attachment is the *transport* into Roomy's own data model,
@@ -1384,16 +1435,43 @@ does not carry (§5.3), and the record-vs-blob reference question (§3.2,
 
 Because the resolution is a projection over the link row, it applies
 retroactively: once the resolver runs, every post link already in a space
-renders richly, with no event rewritten and nothing asked of the author. The two
-things that make that true are worth stating as requirements rather than
-consequences — the resolved tile is cached against the link URL, so one post's
-tile serves every message linking it, and there is a way to re-enqueue links that
-were already enriched before the resolver existed, because `pending_links` only
-holds work not yet done (open question 14).
+renders richly, with no event rewritten and nothing asked of the author. That
+falls out of two things, both of which are decisions rather than consequences.
 
-**Phase 2 — room context metadata.** A room-context event and a JSON column,
-plus the `updateRoom` extensions gap (§6.3) if the context has to be editable
-after creation. Renders a tile in a navbar slot from room state.
+**One: the resolver's cache is per instance.** One map in the appserver process,
+keyed by link URL, shared across the spaces that instance serves, so a post
+resolved for one space answers every message that links it. The existing embed
+metadata cache is per space (`comp_embed_link_data`, in each space's own DB);
+this one deliberately is not, because the expensive part — a PDS round-trip for
+the tile manifest — is a property of the URL and not of the space. The cost is
+that the process holds one entry for a link that several spaces contain: cache
+state is shared where the rest of the read path is per space. Nothing renders
+differently, because the resolver's output reaches a message only through that
+message's own link row. The cache carries a resolver version, so rows enriched
+by an older resolver are recognisable as stale.
+
+**Two: enrichment is demand-driven, not a backfill.** Write time and read time
+are the only two points that enqueue work. A write already scans the body and
+inserts link rows (`applyBatch.ts:589-632`); a read finds rows whose embed data
+is missing, null, or stamped with an older resolver version, and re-enqueues
+them. There is no separate pass over the log and nothing to run at deploy time —
+the first read of an old message is what triggers its resolution. The requeue is
+`insert or ignore` into `pending_links`, so a page of 50 messages with the same
+link asks once, and the sweeper's existing retry schedule and attempt ceiling
+still bound the work.
+
+That reuses a shape the read path already has: `selectMessages` hydrates author
+profiles on demand for the rows it is about to return, with
+`skipProfileHydration` for internal readers
+(`queries/selectMessages.ts`). The difference is that profile hydration blocks
+the read and resolution does not — a card renders from whatever the resolver
+cache holds and fills in on a later read, which is what the `#messageDiff`
+update path is for.
+
+**Phase 2 — room context metadata.** A room-context extension added to the room
+extension union, stored in `comp_room`'s new JSON column and written through the
+`extensions` field `updateRoom` gains (§6.3) — set at room creation or changed
+after it. Renders a tile in a navbar slot from room state.
 
 **Phase 3 — the calendar context tile.** The first context type end to end:
 calendar event → context metadata → tile → RSVP. The RSVP is where §9.3's
@@ -1402,8 +1480,8 @@ turn out to be the point at which the feature stops and an upstream conversation
 starts.
 
 **Stretch, only if feature 1 has landed:** additional context types; a richtext
-tile block (§5.3c); a `store.js` implementation (§7.4); the per-space
-content-type override landing on real storage (§5.4, §6.4).
+tile block (§5.3c); a `store.js` implementation (§7.4); more than one entry in the
+conventional content-type → tile mapping (§5.4).
 
 **Deliverables at the end:** the working Bluesky-post tile, the first room
 context tile, the spec-and-tooling write-up, and links to the upstream issues
@@ -1411,21 +1489,27 @@ and PRs that came out of it.
 
 **Thirty days after:** the engagement write-up (§10).
 
-### 11.3 Which loading server a checkpoint can use
+### 11.3 The loading server the stint uses
 
-Worth stating explicitly, because it changes what can be started now. A
-`loadDomain` must be reachable over HTTPS on a wildcard origin — that is not
-negotiable — but it does **not** have to be a deployed service on a Roomy-owned
-domain. `load.webtil.es` is the loader's own default, so milestone A can be
-exercised against the DASL project's server with `loadDomain` left unset, using a
-tile already published on AT. That decouples "does the render pipeline work"
-from "do we have wildcard DNS", and only the latter has an outside-the-repo
-dependency.
+There is nothing to deploy and nothing to decide here: `loadDomain` is left
+unset, so the mothership uses `load.webtil.es` (§8.1), and a tile already
+published on AT is enough to exercise the whole path. That decouples "does the
+render pipeline work" from "do we have wildcard DNS", and it removes the second
+of the two variables milestone A was meant to isolate — the loading domain's
+configuration is now proven by the server being up, not by Roomy configuring it.
 
-Two consequences to accept deliberately: every tile load in a dev/test run then
-touches a third-party server, and any tile rendered that way is served under
-someone else's header policy rather than the one Roomy would ship. Neither
-matters for a checkpoint; both matter before a release.
+What remains for milestone A to isolate is the sandbox itself and the
+mothership/shuttle/worker wiring in app-lite: whether a tile's content loads
+under those headers, whether the service worker registers on a foreign origin,
+and whether `renderCard()`/`renderContent()` behave as documented. If iframe or
+worker wiring misbehaves there, that is evidence for `darobin/dasl.ing#98`, not a
+Roomy bug.
+
+The consequence to accept deliberately is that every tile load in a dev run
+touches a third-party server under someone else's header policy. That is the
+same trade §8.1 already makes for production; the difference is that a
+production replacement is one config value away and needs only the wildcard
+certificate.
 
 
 ---
@@ -1451,12 +1535,16 @@ Carried forward into the write-up and the issue list:
 
 ---
 
-## 13. Open questions
+## 13. Decisions and open questions
+
+Where the plan stands, item by item: several are decisions, recorded in full in
+the section each points at, and the rest are open. Nothing here is a blocker for
+milestone A.
 
 1. **Content-type → tile mapping** (§5.4): settled as by convention — a
-   Roomy-published default set of content-type → tile pairs, overridable per
-   space, with the first cut shipping only the default set. What remains inside
-   it is where a space's override is stored (§6.4) and who curates the default.
+   Roomy-published default set of content-type → tile pairs, used by every space,
+   with no per-space configuration in this plan. Who curates the default set is a
+   product question for whenever there is more than one entry in it.
 2. **Embed shape** (§5.3): the tile attachment is settled as the carrier for an
    attached tile, and the unified `Message.attachments` list is settled as the
    read shape both it and a resolved link land in (§4.6, §11.1 B0). What is not
@@ -1464,18 +1552,20 @@ Carried forward into the write-up and the issue list:
    extending the existing embed projection (the recommendation for the first
    cut) or by auto-attaching a tile attachment on send.
 3. **Resolution site** (§5.5): settled as appserver-side resolution with
-   client-side tile loading. What remains inside it is the cache's scope and
-   invalidation: one cache for the whole instance, or one per space? A shared
-   cache makes "this link was resolved" observable across spaces that should not
-   see each other's links, and a per-space cache pays the PDS round-trip again
-   for every space that links the same post.
-4. **Central vs per-instance tile-loading server** (§8.1), and which domain.
-5. **Room-context storage** (§6.3): one JSON column, or a component table? The
-   former mirrors `sidebar_config`; the latter is better if entries need
-   ordering or partial querying.
-6. **Whether the context is editable after room creation** — today
-   `updateRoom` cannot carry extensions at all, so this is a schema change
-   either way (§6.3).
+   client-side tile loading, and a resolver cache that is per instance, not per
+   space (§11.2). What that costs is recorded there: cache state is shared across
+   the spaces one appserver serves, where the rest of the read path is per space.
+4. **Which loading server** (§8.1): settled — the shared `load.webtil.es`, with
+   `loadDomain` left unset. The open part is only Roomy's own replacement, which
+   needs a wildcard certificate and is a config change away.
+5. **Room-context storage** (§6.3): settled as a JSON column on `comp_room`,
+   written through the `extensions` field `updateRoom` gains. What is open inside
+   it is the extension's own shape — one extension per application namespace,
+   keyed by NSID, with the tile managing its value.
+6. **Whether the context is editable after room creation** (§6.3): yes, and that
+   is what the `updateRoom` extensions field exists for. `createRoom` already
+   takes the same map, so context can be set at creation and changed after it,
+   with `null` removing a namespace.
 7. **Room-read capabilities** (§7.2): none in the first cut, or a small
    read-only verb set? The thread's conclusion that the compute belongs mostly
    on the client argues for handing the tile data the client already has.
@@ -1490,18 +1580,21 @@ Carried forward into the write-up and the issue list:
    on the Roomy side?
 10. **What the 30-day instrumentation measures** (§10), and what it is forbidden
     from measuring.
-11. **Whether tile use is behind a feature flag.** Every comparable feature here
-    has shipped behind one (`voice-chat`, `semble-integration`, `links-view`,
-    `user-blocks` — `packages/appserver/src/featureFlags.ts:20-60`, defaulting
-    off and served by `space.roomy.getFlags`). Given the sandbox is untested in
-    production, a flag is the consistent choice and should be assumed.
-12. **Whether the tile payload needs a declared size bound** (§11.1). The only
-    ceiling today is Bun's 128 MiB request-body default, which is far too coarse
-    to matter; the real constraint is that the event log is the source of truth
-    and is replicated in full, so payload bytes are a permanent backup cost. The
-    recommendation is a bound stated in the new variant's `.describe()` plus an
-    appserver-side rejection, and a documented rule that large assets belong in a
-    blob the tile fetches from its manifest.
+11. **Whether tile use is behind a feature flag**: no. A flag here would be
+    redundant friction — a tile is either in the message or it is not, which is
+    not discoverable UI in the sense a flag protects against, and the sandbox
+    being new is not something a flag mitigates. The comparable flags
+    (`voice-chat`, `semble-integration`, `links-view`, `user-blocks` —
+    `packages/appserver/src/featureFlags.ts:20-60`) all gate UI that changes the
+    shape of a room or a message; a tile attachment is content, like an image.
+12. **Whether the tile payload needs a declared size bound**: yes, and the point
+    is what travels at all. Only *references* belong in the event log — a tile's
+    AT-URI (and CID) plus a small structured payload; the tile's own content lives
+    in an `ing.dasl.masl` record on a PDS, with its resources as ATProto blobs
+    (§2.1, §8.2). The log is the source of truth and is replicated in full, so a
+    bound in the new variant's `.describe()` plus an appserver-side rejection is
+    cheap insurance against the one case where someone attaches the content
+    itself.
 13. **Explicit embed intent at create** (§5.3): the create path is implied today
     — the body is scanned and every URL gets `show_preview = 1`, and
     `showPreview` is only ever seen on the edit path. Attaching link attachments
@@ -1509,12 +1602,11 @@ Carried forward into the write-up and the issue list:
     the row key settled first: an explicit link attachment and a body-scanned URL
     for the same link currently produce two rows (§4.6). Out of scope for this
     stint; it is the natural follow-up to B0.
-14. **Re-enriching links that have already been enriched** (§11.2). AT-URI
-    resolution lands as a projection over rows that already exist, so history
-    renders richly with no event rewritten — but the sweeper only ever drains
-    work not yet done (`pending_links`), and an enriched row is not re-queued.
-    Something has to re-enqueue by an enrichment-version marker, or the
-    resolution is only retroactive for links posted after it ships.
+14. **Re-enriching links that have already been enriched** (§11.2): solved by
+    demand, not by a backfill. Reads re-enqueue rows whose embed data is missing
+    or stamped with an older resolver version, so the first read of an old message
+    is what resolves it. The wider rule this settles: enrichment happens at write
+    time and read time only, and nothing sweeps the log looking for work.
 
 ---
 
