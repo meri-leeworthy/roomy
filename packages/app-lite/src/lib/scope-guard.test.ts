@@ -7,12 +7,14 @@
  * Pins two contracts:
  *
  *   - `isInsufficientScopeError` — the narrow predicate that matches *only* the
- *     resource-server scope-miss this PDS surfaces
- *     (`error === "ScopeMissingError"`, `status === 403`). It must NOT match a
+ *     resource-server scope-misses a session can hit: the PDS's
+ *     `error === "ScopeMissingError"` / `Missing required scope "…"` shapes at
+ *     `status === 403`, and the sentence HappyView's forward-time check puts in
+ *     a 403's `error` field on the deployed web path. It must NOT match a
  *     request-time `invalid_scope`, a server 500, a plain Error, a 403 with an
- *     unrelated name, or the message-only shape without a 403 — a predicate
- *     that matches everything is precisely the failure Phase 5 exists to
- *     prevent.
+ *     unrelated name or sentence, or any of those shapes without a 403 — a
+ *     predicate that matches everything is precisely the failure Phase 5
+ *     exists to prevent.
  *   - `guardedXrpc` — runs the call, and only on a recognised scope-miss with a
  *     `requiredTier` + prompt invokes the prompt; never retries, so even a
  *     no-op `requestScopeExpansion` (app-password/test mode) cannot loop.
@@ -34,6 +36,22 @@ function measuredShape(error = SCOPE_MISSING_ERROR_NAME, status = 403) {
     status,
     message: `Missing required scope "rpc:space.roomy.authComplete.arbiter.proxy?aud=..."`,
   };
+}
+
+/**
+ * The shape the deployed web client meets: HappyView's forward-time scope check
+ * refuses with `status === 403` and the human sentence as the whole `error`
+ * field — no error name, no separate `message`.
+ */
+function happyViewShape(
+  sentence =
+    `this session is not authorized for com.atproto.repo.createRecord: it ` +
+    `needs repo:network.cosmik.card?action=create. Scopes are fixed when a ` +
+    `session is created, so this needs a new authorization with the scope ` +
+    `included.`,
+  status = 403,
+) {
+  return { error: sentence, status };
 }
 
 describe("isInsufficientScopeError", () => {
@@ -62,6 +80,25 @@ describe("isInsufficientScopeError", () => {
     for (const name of ["insufficient_scope", "insufficient_scope_required"]) {
       assert.equal(isInsufficientScopeError(measuredShape(name)), true);
     }
+  });
+
+  test("matches HappyView's 403 shape — the whole sentence in the error field, no name", () => {
+    // The deployed web client's calls run through HappyView, whose forward-time
+    // scope check writes its refusal as the `error` value itself
+    // (`src/xrpc/scope_check.rs`); there is no error name and no `message`
+    // field, so a name-keyed predicate never opens the dialogue in production.
+    assert.equal(isInsufficientScopeError(happyViewShape()), true);
+  });
+
+  test("does NOT match a 403 whose sentence is unrelated", () => {
+    assert.equal(
+      isInsufficientScopeError(happyViewShape("this session cannot delete that record")),
+      false,
+    );
+  });
+
+  test("does NOT match HappyView's sentence without a 403", () => {
+    assert.equal(isInsufficientScopeError(happyViewShape(undefined, 500)), false);
   });
 
   test("does NOT match invalid_scope — that is the AUTHORIZATION-server shape, not a mid-request scope miss", () => {
@@ -154,6 +191,20 @@ describe("guardedXrpc", () => {
       }),
     );
     assert.equal(prompted, false);
+  });
+
+  test("invokes the prompt on HappyView's refusal — the path a deployed web write takes", async () => {
+    let prompted: RequestableScopeSetName | undefined;
+    await assert.rejects(
+      guardedXrpc(() => Promise.reject(happyViewShape()), {
+        requiredTier: "semble",
+        prompt: (tier) => {
+          prompted = tier;
+          return Promise.resolve(false);
+        },
+      }),
+    );
+    assert.equal(prompted, "semble");
   });
 
   test("does NOT invoke the prompt when no requiredTier is given", async () => {

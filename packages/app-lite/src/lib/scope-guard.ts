@@ -8,13 +8,14 @@
  * `node --test --experimental-strip-types` runner.
  *
  *   - **`isInsufficientScopeError`** — the narrow predicate that recognises a
- *     resource-server *scope-miss* (the shape a stale session hits mid-request:
- *     `error === "ScopeMissingError"`, `status === 403`). It is intentionally
- *     narrow: the defect Phase 5 exists to prevent is a predicate that matches
- *     everything (a 500, a plain Error, `invalid_scope` at request-time, or a
- *     403 with an unrelated error name would all falsely trigger the consent
- *     dialogue). The shape is source-verified against the atproto version that
- *     ships this app's resource server (see plan Open Question 3).
+ *     resource-server *scope-miss* (the shape a stale session hits mid-request).
+ *     It is intentionally narrow: the defect Phase 5 exists to prevent is a
+ *     predicate that matches everything (a 500, a plain Error, `invalid_scope`
+ *     at request-time, or a 403 with an unrelated error name would all falsely
+ *     trigger the consent dialogue). The shapes are source-verified against the
+ *     atproto version that ships this app's resource server, and against
+ *     HappyView's forward-time check, which is what the deployed web client
+ *     actually meets (see plan Open Question 3).
  *
  *   - **`guardedXrpc`** — runs an XRPC call; on a recognisable scope-miss with a
  *     `requiredTier`, prompts the user to consent (via an injected
@@ -41,19 +42,35 @@ const SCOPE_MISSING_ERROR_NAMES: Record<string, true> = {
 const SCOPE_MISSING_STATUS = 403;
 
 /**
+ * The opening of the sentence HappyView's forward-time scope check puts in a
+ * 403's `error` field (`src/xrpc/scope_check.rs` → `AppError::Forbidden`).
+ *
+ * It is the whole body: the refusal carries no error *name*, so a predicate
+ * keyed on names alone misses the shape every deployed web user meets and the
+ * consent dialogue never opens.
+ */
+const HAPPYVIEW_REFUSAL_PREFIX = "this session is not authorized for ";
+
+/**
  * True when `err` is a resource-server scope-miss the reactive dialogue should
  * offer to fix — not a request-time `invalid_scope`, not a server 500, not a
  * 403 with a different error name, not a plain Error.
  *
- * Matches both shapes this PDS surfaces for the same failure:
- *   - full: `error === "ScopeMissingError"` with `status === 403`
- *   - message-only: no `error` field, but the message starts with
+ * Three shapes reach the client for the same failure, one per topology:
+ *   - PDS, named: `error === "ScopeMissingError"` (or the OAuth spec's
+ *     resource-server names) with `status === 403`.
+ *   - PDS, message-only: no `error` field, but the message starts with
  *     `Missing required scope` and the status is 403 (some transports drop the
  *     error name).
+ *   - HappyView: `status === 403` and `error` (or, if absent, `message`) starts
+ *     with {@link HAPPYVIEW_REFUSAL_PREFIX}. HappyView sits in front of the
+ *     user's PDS on the deployed web client, so this is the shape production
+ *     sends — its forward-time scope check writes the human sentence into the
+ *     `error` field rather than a name.
  *
- * The 403 requirement is load-bearing: a bare `error === "ScopeMissingError"`
- * with a 500 (or any non-403) is NOT a scope-miss and must not trigger the
- * dialogue.
+ * The 403 requirement is load-bearing in every arm: a bare
+ * `error === "ScopeMissingError"` (or the HappyView sentence) with a 500, or
+ * any non-403, is NOT a scope-miss and must not trigger the dialogue.
  */
 export function isInsufficientScopeError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
@@ -64,13 +81,20 @@ export function isInsufficientScopeError(err: unknown): boolean {
 
   const errorName = typeof e.error === "string" ? e.error : undefined;
   if (errorName !== undefined) {
-    return SCOPE_MISSING_ERROR_NAMES[errorName] === true;
+    return (
+      SCOPE_MISSING_ERROR_NAMES[errorName] === true ||
+      errorName.startsWith(HAPPYVIEW_REFUSAL_PREFIX)
+    );
   }
 
   // No `error` field: fall back to the message signature. Only meaningful for
   // a 403 (already required above).
   const message = typeof e.message === "string" ? e.message : undefined;
-  return message !== undefined && /^Missing required scope/.test(message);
+  return (
+    message !== undefined &&
+    (message.startsWith("Missing required scope") ||
+      message.startsWith(HAPPYVIEW_REFUSAL_PREFIX))
+  );
 }
 
 /** The user's accept/reject decision for a proposed tier expansion. */

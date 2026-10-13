@@ -13,9 +13,13 @@
  *      granted scope is the base tier, which does not cover
  *      `repo:network.cosmik.card?action=create`; the write to the viewer's own
  *      PDS is refused for it, and the refusal is what `guardedXrpc` turns into
- *      the consent dialogue. The dialogue is exercised to its accept button,
- *      and the write is attempted exactly once — never retried — so accepting
- *      cannot loop the action.
+ *      the consent dialogue. The refusal is emitted in the shape the deployed
+ *      server sends — HappyView's forward-time check, which puts its sentence
+ *      in the 403's `error` field and names no error at all; the direct-PDS
+ *      `ScopeMissingError` shape is covered beside it, because desktop and the
+ *      legacy client reach a PDS without HappyView in front. The dialogue is
+ *      exercised to its accept button, and the write is attempted exactly
+ *      once — never retried — so accepting cannot loop the action.
  *   3. **With the tier granted, the same action writes the card to the
  *      viewer's own repo.** The card lands in the viewer's repo on the PDS,
  *      asserted by reading it back over the PDS's own `listRecords` — proof of
@@ -95,6 +99,19 @@ async function setGrantedScope(page: Page, scope: string): Promise<void> {
   expect(res.ok()).toBe(true);
 }
 
+/**
+ * Set the shape the stub writes a scope refusal in: the HappyView sentence the
+ * deployed web client meets, or the direct-PDS `ScopeMissingError`. A test that
+ * provokes a refusal states which topology it stands for rather than inheriting
+ * the previous test's choice.
+ */
+async function setRefusalShape(page: Page, shape: "happyview" | "pds"): Promise<void> {
+  const res = await page.request.post(`${PDS_ORIGIN}/__e2e/refusal-shape`, {
+    data: { shape },
+  });
+  expect(res.ok()).toBe(true);
+}
+
 test.describe("saving a link to the viewer's own Semble collection", () => {
   test("the action is offered only for a message carrying one link", async ({
     page,
@@ -118,52 +135,61 @@ test.describe("saving a link to the viewer's own Semble collection", () => {
     ).toHaveCount(0);
   });
 
-  test("the first attempt meets the scope gate exactly once, and never loops", async ({
-    page,
-  }) => {
-    await setGrantedScope(page, SCOPE_SETS.base);
+  /**
+   * The gate, once per topology that can answer a write: the deployed web
+   * client's calls run through HappyView, a desktop/legacy session reaches a
+   * PDS directly, and the two name the refusal differently. Both must reach the
+   * dialogue — that divergence is what a suite can lose silently.
+   */
+  for (const shape of ["happyview", "pds"] as const) {
+    test(`the first attempt meets the scope gate exactly once, and never loops (${shape} refusal)`, async ({
+      page,
+    }) => {
+      await setGrantedScope(page, SCOPE_SETS.base);
+      await setRefusalShape(page, shape);
 
-    // Counted at the edge so the bound is measured rather than read off the
-    // UI: the write must be attempted once, and accepting the dialogue must
-    // not start another.
-    let attempts = 0;
-    await page.route(`${PDS_ORIGIN}${CREATE_RECORD_PATH}`, async (route) => {
-      attempts++;
-      await route.continue();
+      // Counted at the edge so the bound is measured rather than read off the
+      // UI: the write must be attempted once, and accepting the dialogue must
+      // not start another.
+      let attempts = 0;
+      await page.route(`${PDS_ORIGIN}${CREATE_RECORD_PATH}`, async (route) => {
+        attempts++;
+        await route.continue();
+      });
+
+      const before = (await storedCardRecords(page)).length;
+
+      await page.goto(SEED_ROOM_PATH);
+      await waitForAuthenticated(page);
+      await openActionsMenu(page, LINK_MESSAGE_TEXT);
+      await page
+        .getByRole("menuitem", { name: "Save to my Semble collection" })
+        .click();
+
+      // The scope gate: base does not cover this write, so the PDS refuses it
+      // and the refusal surfaces as the dialogue naming the capability, not as
+      // an opaque error.
+      await expect(page.getByText(CONSENT_TITLE)).toBeVisible();
+      // The refusal was the gate's, so nothing was written.
+      expect((await storedCardRecords(page)).length).toBe(before);
+      expect(attempts).toBe(1);
+
+      await page.getByRole("button", { name: "Grant permission" }).click();
+      await expect(page.getByText(CONSENT_TITLE)).toHaveCount(0);
+
+      // Accepting in this mode is a no-op expansion (no OAuth token exists), so
+      // the guarded call is not retried: still one attempt, still no card.
+      expect(attempts).toBe(1);
+      expect((await storedCardRecords(page)).length).toBe(before);
+
+      // The page stays usable after the refusal: the message is still rendered
+      // and the action is still offered, rather than the UI being left wedged.
+      await openActionsMenu(page, LINK_MESSAGE_TEXT);
+      await expect(
+        page.getByRole("menuitem", { name: "Save to my Semble collection" }),
+      ).toBeVisible();
     });
-
-    const before = (await storedCardRecords(page)).length;
-
-    await page.goto(SEED_ROOM_PATH);
-    await waitForAuthenticated(page);
-    await openActionsMenu(page, LINK_MESSAGE_TEXT);
-    await page
-      .getByRole("menuitem", { name: "Save to my Semble collection" })
-      .click();
-
-    // The scope gate: base does not cover this write, so the PDS refuses it
-    // and the refusal surfaces as the dialogue naming the capability, not as
-    // an opaque error.
-    await expect(page.getByText(CONSENT_TITLE)).toBeVisible();
-    // The refusal was the gate's, so nothing was written.
-    expect((await storedCardRecords(page)).length).toBe(before);
-    expect(attempts).toBe(1);
-
-    await page.getByRole("button", { name: "Grant permission" }).click();
-    await expect(page.getByText(CONSENT_TITLE)).toHaveCount(0);
-
-    // Accepting in this mode is a no-op expansion (no OAuth token exists), so
-    // the guarded call is not retried: still one attempt, still no card.
-    expect(attempts).toBe(1);
-    expect((await storedCardRecords(page)).length).toBe(before);
-
-    // The page stays usable after the refusal: the message is still rendered
-    // and the action is still offered, rather than the UI being left wedged.
-    await openActionsMenu(page, LINK_MESSAGE_TEXT);
-    await expect(
-      page.getByRole("menuitem", { name: "Save to my Semble collection" }),
-    ).toBeVisible();
-  });
+  }
   test("with the tier granted, the card lands in the viewer's own repo", async ({
     page,
   }) => {

@@ -1306,19 +1306,22 @@ so the flag alone opens it to every member.
 
 **The gate.** The action runs through `guardedXrpc` with
 `requiredTier: "semble"`, so the first attempt a user ever makes is the one that
-meets `ScopeConsentDialogue`: the PDS refuses the write for want of
+meets `ScopeConsentDialogue`: the write is refused for want of
 `repo:network.cosmik.card?action=create`, `isInsufficientScopeError` recognises
-the 403 `ScopeMissingError`, and the dialogue names the capability before the
-OAuth round-trip. This is the first tier actually reached through the dialogue,
-which is the point of the phase.
+the 403, and the dialogue names the capability before the OAuth round-trip. This
+is the first tier actually reached through the dialogue, which is the point of
+the phase.
 
-**End-to-end evidence** (`e2e/semble-personal.spec.ts`, 3 tests, all passing):
+**End-to-end evidence** (`e2e/semble-personal.spec.ts`, 4 tests, all passing):
 the action appears for a link message and not for a linkless one; the first
 attempt is refused by the session's base grant, the dialogue appears, accepting
 does not retry the call (measured at the network edge: exactly one attempt, no
-loop, no record written), and the page stays usable; with the tier granted the
-same action writes the card, read back over the PDS's own `listRecords` in the
-**user's** repo — asserted against the record, not the toast.
+loop, no record written), and the page stays usable — exercised once per refusal
+shape, the deployed HappyView sentence and the direct-PDS `ScopeMissingError`,
+because the two can differ and the suite silently lost the deployed one before;
+with the tier granted the same action writes the card, read back over the PDS's
+own `listRecords` in the **user's** repo — asserted against the record, not the
+toast.
 
 The PDS stub now enforces the session's granted scope and stores records
 (`pds-stub.ts`), because neither the refusal nor a write to the user's own repo
@@ -1373,12 +1376,36 @@ source-verified against the atproto code that ships this PDS rather than
 captured off the wire. That is why the shipped predicate stays narrow instead of
 tolerant.
 
+**Correction (2026-10-13): the answer above describes only the direct-PDS
+path.** A deployed web session does not talk to a PDS — its XRPC calls run
+through HappyView, whose forward-time scope check (`src/xrpc/scope_check.rs` →
+`AppError::Forbidden`) refuses a write the session's grant does not cover with
+`status === 403` and the human sentence as the whole `error` field:
+
+```
+this session is not authorized for <method>: it needs <token>. Scopes are
+fixed when a session is created, so this needs a new authorization with the
+scope included.
+```
+
+No error *name* is present and there is no separate `message`, so a predicate
+keyed on `ScopeMissingError` misses the shape every deployed web user meets:
+the refusal rethrows raw and the user gets an error toast instead of the
+dialogue. That is a production defect the E2E suite could not see, because the
+PDS stub emitted the `ScopeMissingError` shape — the shape its own comment
+claimed the predicate recognises — rather than the one the deployed server
+sends. The stub now emits the deployed shape by default and the direct-PDS
+shape on request (both are covered), and the predicate carries arms for both.
+The 403 requirement still gates every arm.
+
 **Strategy B predicate: REPLACED by the shipped one.** The placeholder in
 §Scope Detection Strategies B gave way to the `isInsufficientScopeError` export
 in `packages/app-lite/src/lib/scope-guard.ts`. Its 403 requirement is
-load-bearing, and `scope-guard.test.ts` pins both directions: the measured shape
-matches, while a 500 carrying the same error name, a plain `Error`, and a
-request-time `invalid_scope` do not.
+load-bearing, and `scope-guard.test.ts` pins both directions: the measured
+shapes match, while a 500 carrying the same error name or sentence, a plain
+`Error`, and a request-time `invalid_scope` do not. The HappyView sentence is
+matched as a prefix on the 403's `error` field (or its `message`, for a
+transport that moved it).
 
 ```ts
 export function isInsufficientScopeError(err: unknown): boolean {
@@ -1390,12 +1417,19 @@ export function isInsufficientScopeError(err: unknown): boolean {
 
   const errorName = typeof e.error === "string" ? e.error : undefined;
   if (errorName !== undefined) {
-    return SCOPE_MISSING_ERROR_NAMES[errorName] === true;
+    return (
+      SCOPE_MISSING_ERROR_NAMES[errorName] === true ||
+      errorName.startsWith(HAPPYVIEW_REFUSAL_PREFIX) // deployed web path
+    );
   }
 
   // No `error` field (some transports drop it): fall back to the message.
   const message = typeof e.message === "string" ? e.message : undefined;
-  return message !== undefined && /^Missing required scope/.test(message);
+  return (
+    message !== undefined &&
+    (message.startsWith("Missing required scope") ||
+      message.startsWith(HAPPYVIEW_REFUSAL_PREFIX))
+  );
 }
 ```
 

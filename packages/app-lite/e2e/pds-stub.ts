@@ -18,10 +18,19 @@
  *   - `com.atproto.repo.listRecords` / `getRecord` → reads of that repo
  *
  * Writes are authorized against the session's granted scope, the way a real
- * PDS does: a write the grant does not cover is refused with a 403
- * `ScopeMissingError` — the shape `isInsufficientScopeError` recognises and the
- * reason the consent dialogue exists. The grant starts at the base tier, and a
- * spec widens it over the control endpoint below.
+ * PDS does: a write the grant does not cover is refused with a 403 — the
+ * refusal the consent dialogue exists to catch. The grant starts at the base
+ * tier, and a spec widens it over the control endpoint below.
+ *
+ * The refusal is emitted in the shape the deployed server sends, which is
+ * **not** the PDS's own: the web client's XRPC calls run through HappyView, and
+ * HappyView's forward-time scope check (`src/xrpc/scope_check.rs`) answers a
+ * miss with the human sentence in the `error` field and no error name at all.
+ * Modelling the PDS's `ScopeMissingError` — a shape that topology cannot
+ * produce — is what let a suite stay green while the deployed app showed a raw
+ * error toast. The PDS's own shape is still real on the direct-PDS path
+ * (desktop, legacy client), so the stub can emit either; a spec selects over
+ * `/__e2e/refusal-shape` and the default is the deployed one.
  *
  * The appserver never verifies these tokens: it boots with
  * `APPSERVER_TEST_MODE=true`, whose `testAuthVerifier` reads the caller's DID
@@ -141,12 +150,11 @@ export function startPdsStub(): PdsStub {
   }
 
   // ── Resource-server scope enforcement ────────────────────────────────
-  // A real PDS authorizes a repo write against the scope the session was
-  // granted, and refuses a write the grant does not cover with a 403
-  // `ScopeMissingError` — the shape `isInsufficientScopeError` recognises and
-  // the reason the consent dialogue exists. Without this the stub would accept
-  // every write, the refusal that triggers the dialogue could never occur, and
-  // the tier's whole contract would be untestable.
+  // A real resource server authorizes a repo write against the scope the
+  // session was granted, and refuses a write the grant does not cover with a
+  // 403 — the refusal the consent dialogue exists to catch. Without this the
+  // stub would accept every write, the refusal that triggers the dialogue could
+  // never occur, and the tier's whole contract would be untestable.
   //
   // The grant starts as the base tier (test-mode sessions have no OAuth token,
   // and the client treats them as holding the tier it requested), so
@@ -154,6 +162,38 @@ export function startPdsStub(): PdsStub {
   // A spec widens it over the control endpoint below once it is testing the
   // write rather than the gate.
   let grantedScope = new Set(SCOPE_SETS.base.split(" ").filter(Boolean));
+
+  /**
+   * How a refusal is written onto the wire. Two topologies, two shapes:
+   *
+   *   - `happyview` — the deployed web client's calls run through HappyView,
+   *     whose forward-time scope check (`src/xrpc/scope_check.rs`) answers a
+   *     miss with `error` set to the human sentence and no error name.
+   *   - `pds` — a direct-PDS session (desktop, legacy client) gets
+   *     `@atproto/oauth-scopes`'s `ScopeMissingError` carried through
+   *     `@atproto/xrpc-server`.
+   *
+   * Defaults to the deployed one: it is what real users meet, so the suite must
+   * exercise it unless a spec deliberately selects the other.
+   */
+  let refusalShape: "happyview" | "pds" = "happyview";
+
+  /** The 403 body for a write the session's grant does not cover. */
+  function scopeRefusal(method: string, collection: string): Record<string, unknown> {
+    const token = `repo:${collection}?action=create`;
+    if (refusalShape === "pds") {
+      return {
+        error: "ScopeMissingError",
+        message: `Missing required scope "${token}"`,
+      };
+    }
+    return {
+      error:
+        `this session is not authorized for ${method}: ` +
+        `it needs ${token}. Scopes are fixed when a session is created, so ` +
+        `this needs a new authorization with the scope included.`,
+    };
+  }
   /** The `repo:` grant for a collection, as the OAuth scope grammar writes it. */
   const repoScopeAllowsWrite = (collection: string): boolean =>
     grantedScope.has(`repo:${collection}`) ||
@@ -180,18 +220,11 @@ export function startPdsStub(): PdsStub {
         record: Record<string, unknown>;
       };
       // The scope gate: the grant this session holds decides whether the write
-      // is authorized, exactly as a real PDS enforces it. A miss is a 403
-      // `ScopeMissingError` — the shape the client turns into the consent
-      // dialogue.
+      // is authorized, exactly as a real resource server enforces it. A miss is
+      // a 403 in the shape the running topology would send — the refusal the
+      // client turns into the consent dialogue.
       if (!repoScopeAllowsWrite(body.collection)) {
-        return json(
-          {
-            error: "ScopeMissingError",
-            message:
-              `Missing required scope "repo:${body.collection}?action=create"`,
-          },
-          403,
-        );
+        return json(scopeRefusal(method, body.collection), 403);
       }
       const rkey = body.rkey ?? mintRkey();
       // A real CID literal, not a stand-in string: the client validates the
@@ -286,6 +319,21 @@ export function startPdsStub(): PdsStub {
 
       if (pathname === "/__e2e/records") {
         return json({ records: [...repo.values()] });
+      }
+
+      // Which shape a scope refusal is written in. The two write paths differ
+      // — deployed web calls run through HappyView, a direct-PDS session talks
+      // to the PDS — so the suite proves the predicate against both. Only the
+      // specs reach this; the app never does.
+      if (pathname === "/__e2e/refusal-shape") {
+        if (req.method === "POST") {
+          const { shape } = (await req.json()) as { shape?: string };
+          if (shape !== "happyview" && shape !== "pds") {
+            return json({ error: "InvalidRequest", message: `no shape ${shape}` }, 400);
+          }
+          refusalShape = shape;
+        }
+        return json({ shape: refusalShape });
       }
 
       if (!pathname.startsWith("/xrpc/")) {
