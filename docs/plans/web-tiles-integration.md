@@ -716,40 +716,59 @@ not yet done (§11.2, open question 14).
 
 ### 5.4 The content-type → tile mapping
 
-Options, none settled:
+**By convention.** Roomy publishes a default set of content-type → tile pairs —
+the Bluesky-post renderer first — and a space may override an entry. The mapping
+is data, not code: it turns a recognised AT-URI into the AT-URI of the tile that
+renders it, and nothing else in the pipeline depends on where the default came
+from.
 
-- **By publisher allowlist.** A per-space (or per-org) list of tile publishers
-  or handles whose tiles may render. Simple, and matches §6.4's governance
-  shape.
-- **By explicit AT-URI.** The space pins specific tiles: "this is our Bluesky
-  post renderer". Maximum control, minimum flexibility.
-- **By convention.** A Roomy-published set of default tiles, overridable per
-  space. This is the version that makes the feature feel like a product rather
-  than a configuration exercise — and it is what a marketplace (§12) would
-  eventually replace.
+Two alternatives were considered and are not chosen:
+
+- **By publisher allowlist.** A per-space list of publishers or handles whose
+  tiles may render. It answers a different question — which tiles may load at
+  all (§6.4) — and as a *mapping* it makes the common case into configuration:
+  a space that has named nothing renders no link richly.
+- **By explicit AT-URI.** The space pins specific tiles. Maximum control,
+  minimum flexibility, and the same failure at the limit — a space that has
+  configured nothing renders nothing.
 
 The thread's framing is that a first cut can be less of an open extension point
 and more a proof of the system: inject the tile ref we want to load, resolve it,
-render it, and learn what the pipeline needs. That is the right posture for two
-weeks.
+render it, and learn what the pipeline needs. By convention is how that injected
+ref becomes a product default without an extension point to design first. It is
+also what a marketplace (§12) eventually replaces: the default set becomes a
+catalog, and the override becomes an install.
+
+**The first cut needs only the default set.** The per-space override is data,
+and where it is stored is §6.4's question rather than this one — whatever holds
+"which tiles may this space load" is the natural home for "and which tile renders
+this content type". The two do not conflict: the allowlist governs what may
+load, the convention governs what loads *by default*.
 
 ### 5.5 Where resolution happens
 
-Two candidate sites, and the old document's answer is still right:
+**The appserver resolves; the client renders.** Recognition of an AT-proto
+resolvable URL, the content-type → tile lookup (§5.4), and the manifest fetch all
+happen server-side, against a cache keyed by link URL, and land in the message
+projection next to the embed metadata that is already there. The client receives
+a tile reference and loads it; it resolves nothing itself.
 
-- **Client-side** — the mothership holds the fetch capability anyway, and the
-  loader is client code.
-- **Appserver-side** — "probably preferable" per the design thread, and
-  consistent with the thin-client architecture: app-lite holds no third-party
-  credentials and makes no unsanctioned external calls, and the server already
-  has DID→PDS resolution, HTTP caching and timeouts.
+- **Appserver-side, and that is the decision.** The card then renders with
+  everything else the read path already returns, survives `#messageDiff`
+  delivery, and is shared by every message that links the same URL. The server
+  already has DID→PDS resolution, HTTP caching and timeouts, and the cost this
+  avoids is a PDS round-trip per viewer.
+- **Client-side, rejected.** The mothership holds the fetch capability and the
+  loader is client code, so this is the smaller-looking option — but it needs the
+  same PDS round-trips with no shared cache, it leaks each viewer's
+  link-following to the PDS from the browser, and a card that exists only after a
+  client fetch cannot ride the diff-driven updates the read path already
+  delivers.
 
-The split that fits the codebase: **the appserver resolves and caches the
-manifest metadata** (so the card renders server-side with everything else, and
-survives `#messageDiff` delivery), and **the client holds the mothership** (so
-the sandboxed content loads where the DOM is, with the loader's own fetch path
-for resources). That is also how the existing embed pipeline divides: the server
-enriches, the client renders.
+The client still holds the mothership: the sandboxed content has to load where
+the DOM is, with the loader's own fetch path for the tile's resources. That is
+also how the existing embed pipeline divides — the server enriches, the client
+renders.
 
 ---
 
@@ -818,6 +837,9 @@ the tile's job to manage it. This maps cleanly onto three things:
 
 Tiles are content-addressed and network-dead, so the trust decision is
 administrative: which tiles may this space load, and with what capabilities.
+The default mapping from content type to tile is not this section's question —
+it is settled as by convention (§5.4). What lives here is a space's allowlist and
+its overrides of that convention.
 Three precedent-backed homes:
 
 1. **A space-level JSON config column**, materialised by a new event — the
@@ -1380,8 +1402,8 @@ turn out to be the point at which the feature stops and an upstream conversation
 starts.
 
 **Stretch, only if feature 1 has landed:** additional context types; a richtext
-tile block (§5.3c); a `store.js` implementation (§7.4); the content-type → tile
-mapping becoming a space setting rather than a pinned AT-URI (§5.4).
+tile block (§5.3c); a `store.js` implementation (§7.4); the per-space
+content-type override landing on real storage (§5.4, §6.4).
 
 **Deliverables at the end:** the working Bluesky-post tile, the first room
 context tile, the spec-and-tooling write-up, and links to the upstream issues
@@ -1431,18 +1453,22 @@ Carried forward into the write-up and the issue list:
 
 ## 13. Open questions
 
-1. **Content-type → tile mapping** (§5.4): publisher allowlist, pinned AT-URI,
-   or a Roomy default set? A default set is what makes the feature feel like a
-   product, but it presumes a curation process.
+1. **Content-type → tile mapping** (§5.4): settled as by convention — a
+   Roomy-published default set of content-type → tile pairs, overridable per
+   space, with the first cut shipping only the default set. What remains inside
+   it is where a space's override is stored (§6.4) and who curates the default.
 2. **Embed shape** (§5.3): the tile attachment is settled as the carrier for an
    attached tile, and the unified `Message.attachments` list is settled as the
    read shape both it and a resolved link land in (§4.6, §11.1 B0). What is not
    settled is whether a resolvable link becomes an entry in that list by
    extending the existing embed projection (the recommendation for the first
    cut) or by auto-attaching a tile attachment on send.
-3. **Resolution site** (§5.5): appserver-side manifest metadata + client-side
-   mothership is the recommendation; the alternative (all client-side) is less
-   code and leaks the user's link-following to the PDS from the browser.
+3. **Resolution site** (§5.5): settled as appserver-side resolution with
+   client-side tile loading. What remains inside it is the cache's scope and
+   invalidation: one cache for the whole instance, or one per space? A shared
+   cache makes "this link was resolved" observable across spaces that should not
+   see each other's links, and a per-space cache pays the PDS round-trip again
+   for every space that links the same post.
 4. **Central vs per-instance tile-loading server** (§8.1), and which domain.
 5. **Room-context storage** (§6.3): one JSON column, or a component table? The
    former mirrors `sidebar_config`; the latter is better if entries need
