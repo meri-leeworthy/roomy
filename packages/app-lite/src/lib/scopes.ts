@@ -42,6 +42,15 @@
  * That check is the whole point: the HappyView list cannot be derived from this
  * repo, so the only safe failure is a build that refuses to ship.
  *
+ * ## Reading a grant
+ *
+ * A scope the PDS *returns* is not written the way this module writes one. The
+ * PDS expands `include:` umbrellas into the permissions they name, and stores
+ * an rpc permission at the widest `aud` it was granted rather than the audience
+ * the request asked for. {@link scopeCovers} is the one comparison that accounts
+ * for that; every "does the session hold this tier?" question goes through it
+ * ({@link hasScopeSet}, {@link coveredCapabilities}).
+ *
  * This module is deliberately free of `config.ts` and `$env` imports:
  * `config.ts` pulls in SvelteKit's `$env/dynamic` and Vite's `import.meta.env`,
  * neither of which the Node unit-test runner (`node --test
@@ -181,6 +190,28 @@ export const UNREGISTERED_SCOPES: readonly string[] = [
 ];
 
 /**
+ * The arbiter-proxy RPC that the `space.roomy.authComplete` permission set
+ * grants. The PDS resolves `include:space.roomy.authComplete` to this
+ * permission before the grant is stored, so a real grant carries this token
+ * and never the `include:` one. Named once so the metadata ceiling and the
+ * expansion coverage resolves against cannot disagree.
+ */
+const AUTH_COMPLETE_ARBITER_PROXY_SCOPE =
+  "rpc:space.roomy.authComplete.arbiter.proxy?aud=*";
+
+/** The `include:` umbrella token the client requests in its place. */
+const AUTH_COMPLETE_INCLUDE_SCOPE = "include:space.roomy.authComplete";
+
+/**
+ * Every `include:<nsid>` this app uses, mapped to the permissions it expands
+ * to. A request names the `include:` token; the PDS grants the expansion. See
+ * {@link expandIncludedScopes}.
+ */
+const INCLUDE_EXPANSIONS: Readonly<Record<string, readonly string[]>> = {
+  "space.roomy.authComplete": [AUTH_COMPLETE_ARBITER_PROXY_SCOPE],
+};
+
+/**
  * Scopes required by all Roomy core functionality. Reproduces, byte for byte,
  * the historical `OAUTH_SCOPE` from config.ts — the per-login request.
  */
@@ -195,7 +226,7 @@ const BASE_SCOPES = [
   "blob:*/*",
   "repo:space.roomy.upload.v0", // Grant all actions (create, update, delete)
   "repo:space.roomy.user.profile",
-  "include:space.roomy.authComplete",
+  AUTH_COMPLETE_INCLUDE_SCOPE,
   `repo:${profileSpaceNsid}`,
   // Allow calling getServiceAuth on the appserver's PDS to obtain
   // service auth tokens for direct (non-proxied) XRPC calls.
@@ -348,8 +379,8 @@ export const FULL_SCOPE_CEILING = [
   "repo:space.roomy.user.block",
   `rpc:com.atproto.server.getServiceAuth?aud=${appserverDid}`,
   "rpc:com.atproto.server.getServiceAuth?aud=*",
-  "rpc:space.roomy.authComplete.arbiter.proxy?aud=*",
-  "include:space.roomy.authComplete",
+  AUTH_COMPLETE_ARBITER_PROXY_SCOPE,
+  AUTH_COMPLETE_INCLUDE_SCOPE,
   ...APPSERVER_RPCS.map((nsid) => `rpc:${nsid}?aud=*`),
   ...VOICE_SCOPES,
   "repo:network.cosmik.card?action=create",
@@ -397,12 +428,172 @@ export function parseScopes(scope: string): Set<string> {
   return new Set(scope.split(" ").filter(Boolean));
 }
 
-/** True if every scope in the named tier is present in `grantedScope`. */
-export function hasScopeSet(grantedScope: string, tier: ScopeSetName): boolean {
-  const required = parseScopes(SCOPE_SETS[tier]);
-  const granted = parseScopes(grantedScope);
-  for (const s of required) if (!granted.has(s)) return false;
+/**
+ * Resolve every `include:<nsid>` token in `scope` to the permissions it
+ * includes, as a scope string.
+ *
+ * A request-side scope names an `include:` umbrella; a grant-side scope
+ * carries what that umbrella expands to, because the PDS substitutes the
+ * expansion before the grant is stored. Both sides are put through this
+ * function so coverage compares like with like.
+ *
+ * An unknown `include:` is left alone, so it matches nothing but a literal
+ * copy of itself: a grant missing the expansion never satisfies the request.
+ */
+export function expandIncludedScopes(scope: string): string {
+  const out = new Set<string>();
+  for (const token of parseScopes(scope)) {
+    const expansion = includeExpansion(token);
+    if (expansion) for (const s of expansion) out.add(s);
+    else out.add(token);
+  }
+  return [...out].join(" ");
+}
+
+/** The permissions a known `include:<nsid>` token expands to, else null. */
+function includeExpansion(token: string): readonly string[] | null {
+  if (!token.startsWith("include:")) return null;
+  const nsid = token.slice("include:".length).split("?")[0]!;
+  return INCLUDE_EXPANSIONS[nsid] ?? null;
+}
+
+/** The resource kinds whose values carry a permission. Every other token
+ * (`atproto`, `account:`, `identity:`, a malformed one) is matched literally. */
+type PermissionKind = "repo" | "rpc" | "blob";
+
+interface Permission {
+  kind: PermissionKind;
+  /** The positional value, comma-split: collections, lxms, or MIME accepts. */
+  values: string[];
+  /** Query parameters, e.g. `action=create`, `aud=*`. */
+  params: URLSearchParams;
+}
+
+/** Parse a resource-permission token, or null for a literal-only token. */
+function parsePermission(token: string): Permission | null {
+  const colon = token.indexOf(":");
+  if (colon <= 0) return null;
+  const kind = token.slice(0, colon);
+  if (kind !== "repo" && kind !== "rpc" && kind !== "blob") return null;
+  const rest = token.slice(colon + 1);
+  const query = rest.indexOf("?");
+  const values = (query === -1 ? rest : rest.slice(0, query))
+    .split(",")
+    .filter(Boolean);
+  if (values.length === 0) return null;
+  return {
+    kind,
+    values,
+    params: new URLSearchParams(query === -1 ? "" : rest.slice(query + 1)),
+  };
+}
+
+/** Every `repo:` action; a token with no `action` parameter grants all of
+ * them (the parser's default in `oauth-scopes/src/scopes/repo-permission.ts`). */
+const REPO_ACTIONS: readonly string[] = ["create", "update", "delete"];
+
+/** The actions a `repo:` permission grants. */
+function repoActions(permission: Permission): readonly string[] {
+  const action = permission.params.get("action");
+  return action === null ? REPO_ACTIONS : action.split(",").filter(Boolean);
+}
+
+/**
+ * True when the MIME accept `granted` covers `required`. Mirrors atproto's
+ * `matchesAccept` (`oauth-scopes/src/lib/mime.ts`): the universal accept takes
+ * anything, a `type`-scoped accept takes that whole type, and otherwise the
+ * two must be equal.
+ */
+function acceptCovers(granted: string, required: string): boolean {
+  if (granted === "*/*" || granted === required) return true;
+  return granted.endsWith("/*") && required.startsWith(granted.slice(0, -1));
+}
+
+/**
+ * True when `granted` covers every value `required` names. The values are a
+ * `repo:` token's collections or an `rpc:` token's lxms; a `*` on the granted
+ * side covers any value of the same kind.
+ */
+function valuesCover(
+  granted: readonly string[],
+  required: readonly string[],
+): boolean {
+  return required.every((v) => granted.includes(v) || granted.includes("*"));
+}
+
+/**
+ * True when the grant-side token `granted` implies the request-side token
+ * `required`, following atproto's permission grammar rather than string
+ * equality (`oauth-scopes/src/scopes/`):
+ *
+ *   - an `rpc:` grant at `aud=*` covers the same `lxm` at any specific `aud`
+ *     (`RpcPermission.matches`: `aud === '*' || aud === options.aud`);
+ *   - `repo:<collection>` with no `action` grants every action, so it covers
+ *     `repo:<collection>?action=create`;
+ *   - the universal `blob` accept covers every MIME type.
+ *
+ * Different kinds never cover each other, and a `required` value that is not
+ * implied stays uncovered.
+ */
+function permissionCovers(granted: string, required: string): boolean {
+  if (granted === required) return true;
+  const have = parsePermission(granted);
+  const need = parsePermission(required);
+  if (!have || !need || have.kind !== need.kind) return false;
+
+  switch (have.kind) {
+    case "repo":
+      return (
+        valuesCover(have.values, need.values) &&
+        repoActions(need).every((a) => repoActions(have).includes(a))
+      );
+    case "rpc": {
+      const grantedAud = have.params.get("aud") ?? "";
+      const requiredAud = need.params.get("aud") ?? "";
+      return (
+        valuesCover(have.values, need.values) &&
+        (grantedAud === "*" || grantedAud === requiredAud)
+      );
+    }
+    case "blob":
+      return need.values.every((mime) =>
+        have.values.some((accept) => acceptCovers(accept, mime)),
+      );
+  }
+}
+
+/**
+ * True when `grantedScope` — a scope as the PDS actually returns it — covers
+ * every permission `requiredScope` asks for.
+ *
+ * The two strings are written in different forms, so equality is the wrong
+ * question. A grant never carries the `include:` umbrella the request names,
+ * and the PDS stores an rpc permission at the widest `aud` it was granted
+ * rather than the audience the request named. Both sides are therefore
+ * include-expanded, and each required permission is satisfied by any single
+ * granted permission that implies it.
+ */
+export function scopeCovers(
+  grantedScope: string,
+  requiredScope: string,
+): boolean {
+  const granted = parseScopes(expandIncludedScopes(grantedScope));
+  for (const need of parseScopes(expandIncludedScopes(requiredScope))) {
+    let covered = false;
+    for (const have of granted) {
+      if (permissionCovers(have, need)) {
+        covered = true;
+        break;
+      }
+    }
+    if (!covered) return false;
+  }
   return true;
+}
+
+/** True if `grantedScope` covers every permission the named tier requests. */
+export function hasScopeSet(grantedScope: string, tier: ScopeSetName): boolean {
+  return scopeCovers(grantedScope, SCOPE_SETS[tier]);
 }
 
 /**
@@ -476,14 +667,15 @@ export function capabilityScope(
 
 /**
  * The capabilities a raw scope string covers — every {@link CAPABILITY_SCOPES}
- * entry whose extras are all present in `scope`. The inverse of
- * {@link capabilityScope}, for callers that must reason about a stored grant
- * (e.g. narrowing it when one capability is turned off).
+ * entry whose extras the scope implies. The inverse of {@link capabilityScope},
+ * for callers that must reason about a stored grant (e.g. narrowing it when one
+ * capability is turned off). Coverage follows {@link scopeCovers}, so a grant
+ * written in the PDS's expanded form reads the same as the request that asked
+ * for it.
  */
 export function coveredCapabilities(scope: string | null): CapabilityName[] {
   if (!scope) return [];
-  const tokens = parseScopes(scope);
   return (Object.keys(CAPABILITY_SCOPES) as CapabilityName[]).filter((name) =>
-    CAPABILITY_SCOPES[name].every((s) => tokens.has(s)),
+    scopeCovers(scope, CAPABILITY_SCOPES[name].join(" ")),
   );
 }

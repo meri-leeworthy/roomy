@@ -5,7 +5,10 @@
  * app produces. These tests pin the semantics of the pure helpers:
  *
  *   - `parseScopes` — splitting/trimming, order-independence
- *   - `hasScopeSet` — membership vs partial sets, unknown scopes, order
+ *   - `hasScopeSet` / `scopeCovers` — coverage under atproto's permission
+ *     grammar: a grant in the expanded form a PDS returns still covers the
+ *     request that asked for it, and one that genuinely lacks a permission
+ *     still does not
  *   - `reconcileScope` — base always retained, unknown/out-of-ceiling scopes
  *     dropped, partial stored sets, dedupe
  *   - tier/ceiling invariants — every tier ⊂ ceiling (the PDS will reject any
@@ -27,8 +30,10 @@ import {
   CLIENT_ID_SCOPE,
   capabilityScope,
   coveredCapabilities,
+  expandIncludedScopes,
   parseScopes,
   hasScopeSet,
+  scopeCovers,
   scopeWithinCeiling,
   reconcileScope,
 } from "./scopes.ts";
@@ -365,5 +370,143 @@ describe("tier/ceiling invariants", () => {
       urlLength <= 4096,
       `loopback authorize URL too long for the Referer cap: ${urlLength}`,
     );
+  });
+});
+
+/**
+ * A tier scope as the PDS returns it, which is not the string the client asked
+ * for. Two rewrites are observed on live grants and modelled here:
+ *
+ *   - `include:` umbrellas arrive expanded into the permissions they name;
+ *   - base asks for `getServiceAuth` both at the appserver DID and at `aud=*`,
+ *     and the grant keeps only the `aud=*` form.
+ *
+ * Grants built from `SCOPE_SETS[tier]` itself — the request-side string, both
+ * constructs intact — are round-trippable by construction and hid the defect
+ * this suite exists to pin: coverage has to hold for the string a grant
+ * actually is.
+ */
+function asGranted(requested: string): string {
+  return expandIncludedScopes(requested)
+    .split(" ")
+    .filter(
+      (s) => !/^rpc:com\.atproto\.server\.getServiceAuth\?aud=(?!\*)/.test(s),
+    )
+    .join(" ");
+}
+
+describe("scopeCovers", () => {
+  test("a grant in the PDS's expanded form covers the base tier", () => {
+    // The shape every live account's stored grant has: no `include:` token,
+    // `getServiceAuth` at `aud=*` only. Membership said this covered nothing,
+    // which is why no capability switch ever rendered on.
+    const grant = asGranted(SCOPE_SETS.base);
+    assert.equal(grant.includes("include:"), false);
+    assert.equal(hasScopeSet(grant, "base"), true);
+  });
+
+  test("an rpc grant at aud=* implies the same lxm at a specific audience", () => {
+    const wide = "rpc:com.atproto.server.getServiceAuth?aud=*";
+    const narrow =
+      "rpc:com.atproto.server.getServiceAuth?aud=did:web:api.roomy.space";
+    assert.equal(scopeCovers(wide, narrow), true);
+    // The converse is not coverage (`RpcPermission.matches` requires the grant
+    // to name `*` or the exact audience), so a grant narrowed to one audience
+    // must not read as a blanket one.
+    assert.equal(scopeCovers(narrow, wide), false);
+    assert.equal(
+      scopeCovers(narrow.replace("api.roomy.space", "other.example"), narrow),
+      false,
+    );
+  });
+
+  test("an include: request is covered by the permissions it expands to", () => {
+    const expansion = "rpc:space.roomy.authComplete.arbiter.proxy?aud=*";
+    assert.equal(
+      scopeCovers(expansion, "include:space.roomy.authComplete"),
+      true,
+    );
+    // A grant without the expansion does not cover the umbrella, and an
+    // include: with no known expansion satisfies nothing but itself.
+    assert.equal(
+      scopeCovers("atproto", "include:space.roomy.authComplete"),
+      false,
+    );
+    assert.equal(scopeCovers("atproto", "include:space.roomy.mystery"), false);
+  });
+
+  test("repo: grants every action unless it names one", () => {
+    assert.equal(
+      scopeCovers(
+        "repo:network.cosmik.card",
+        "repo:network.cosmik.card?action=create",
+      ),
+      true,
+    );
+    assert.equal(
+      scopeCovers(
+        "repo:network.cosmik.card?action=create,update",
+        "repo:network.cosmik.card?action=update",
+      ),
+      true,
+    );
+    // Part of the actions is not the whole collection, and another
+    // collection's grant does not reach this one.
+    assert.equal(
+      scopeCovers(
+        "repo:network.cosmik.card?action=create",
+        "repo:network.cosmik.card",
+      ),
+      false,
+    );
+    assert.equal(
+      scopeCovers(
+        "repo:network.cosmik.card?action=create",
+        "repo:network.cosmik.card?action=create,delete",
+      ),
+      false,
+    );
+    assert.equal(
+      scopeCovers(
+        "repo:space.roomy.user.profile",
+        "repo:network.cosmik.card?action=create",
+      ),
+      false,
+    );
+  });
+
+  test("the universal blob accept covers any MIME type", () => {
+    assert.equal(scopeCovers("blob:*/*", "blob:image/png"), true);
+    assert.equal(scopeCovers("blob:image/*", "blob:image/png"), true);
+    assert.equal(scopeCovers("blob:image/png", "blob:image/jpeg"), false);
+  });
+
+  test("nothing covers an empty grant", () => {
+    assert.equal(scopeCovers("", "atproto"), false);
+  });
+});
+
+describe("capability coverage of a stored grant", () => {
+  test("an expanded grant lights the capability it carries and no other", () => {
+    // The two switches must disagree: only reading the real grant can put the
+    // Semble row on while the DM row stays off.
+    const grant = asGranted(SCOPE_SETS.semble);
+    assert.equal(hasScopeSet(grant, "semble"), true);
+    assert.equal(hasScopeSet(grant, "withDms"), false);
+    assert.deepEqual(coveredCapabilities(grant), ["semble"]);
+  });
+
+  test("a grant that genuinely lacks a capability still reads false", () => {
+    // base is covered, so this is not a predicate that fails everything: the
+    // cosmik extra is what is absent, and only that.
+    const grant = asGranted(SCOPE_SETS.base);
+    assert.equal(hasScopeSet(grant, "base"), true);
+    assert.equal(hasScopeSet(grant, "semble"), false);
+    assert.deepEqual(coveredCapabilities(grant), []);
+  });
+
+  test("a union grant covers every capability it names", () => {
+    const grant = asGranted(capabilityScope(["semble", "withDms"]));
+    assert.deepEqual(coveredCapabilities(grant), ["semble", "withDms"]);
   });
 });

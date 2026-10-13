@@ -15,9 +15,10 @@
  *     Every token in the ceiling is a `kind:value` string, so a `:` is the
  *     signal that one leaked.
  *   - the switch reads the user's saved grant rather than a constant: the spec
- *     serves three different `getScopeSettings` responses and the switches
- *     follow — including a saved UNION of every capability, which must light
- *     both switches rather than trade one for the other.
+ *     serves four different `getScopeSettings` responses, each in the shape a
+ *     PDS returns a grant in (see `asGranted`), and the switches follow —
+ *     including a saved UNION of every capability, which must light both
+ *     switches rather than trade one for the other.
  *   - turning a switch on asks for consent first: the dialogue names the
  *     capability, and a refusal never leaves the page.
  *
@@ -30,28 +31,47 @@
 import { expect, test, waitForAuthenticated } from "./spec-helpers.ts";
 import type { Page } from "@playwright/test";
 import { APPSERVER_DID, APPSERVER_HTTP_ORIGIN, TEST_USER_DID } from "./fixtures.ts";
-import { SCOPE_SETS, capabilityScope } from "../src/lib/scopes.ts";
+import {
+  SCOPE_SETS,
+  capabilityScope,
+  expandIncludedScopes,
+} from "../src/lib/scopes.ts";
 
 /**
- * The tier scopes as the *browser* computes them — the comparison the page
- * actually makes.
+ * The tier scopes as the *browser* computes them, rewritten into the shape a
+ * PDS actually returns. Both halves matter — the comparison the page makes is
+ * grant-against-request, and the two are not the same string.
  *
  * `scopes.ts` embeds `VITE_APPSERVER_DID`, which the stack launcher sets to the
  * hermetic appserver's DID. This spec process never gets that var and so builds
  * each tier against the production default instead. Substituting keeps a served
- * grant equal to the browser's, so a tier actually covers: without it the tier
- * silently misses its appserver-audience token and no switch ever reads on.
+ * grant equal to the browser's, so a tier actually covers.
+ *
+ * The rewrite itself models what a grant is: `include:space.roomy.authComplete`
+ * arrives expanded into the permission it names (a grant never carries the
+ * umbrella), and `getServiceAuth` — requested at both the appserver DID and
+ * `aud=*` — is stored only at the wider audience. Serving the request string
+ * instead would make every "switch follows the grant" assertion below trivially
+ * true, which is precisely the shape that hid the defect.
  */
+function asGranted(requested: string): string {
+  return expandIncludedScopes(
+    requested.replaceAll("did:web:api.roomy.space", APPSERVER_DID),
+  )
+    .split(" ")
+    .filter(
+      (s) => s !== `rpc:com.atproto.server.getServiceAuth?aud=${APPSERVER_DID}`,
+    )
+    .join(" ");
+}
+
 const BROWSER_TIERS = {
   /** The foundation every session carries — covers neither capability. */
-  base: SCOPE_SETS.base.replaceAll("did:web:api.roomy.space", APPSERVER_DID),
-  semble: SCOPE_SETS.semble.replaceAll("did:web:api.roomy.space", APPSERVER_DID),
-  withDms: SCOPE_SETS.withDms.replaceAll("did:web:api.roomy.space", APPSERVER_DID),
+  base: asGranted(SCOPE_SETS.base),
+  semble: asGranted(SCOPE_SETS.semble),
+  withDms: asGranted(SCOPE_SETS.withDms),
   /** `base` ∪ Semble ∪ DMs — the union both capability switches produce. */
-  union: capabilityScope(["semble", "withDms"]).replaceAll(
-    "did:web:api.roomy.space",
-    APPSERVER_DID,
-  ),
+  union: asGranted(capabilityScope(["semble", "withDms"])),
 } as const;
 
 /** Serve `getFlags` with `flag` removed, before navigation. */
@@ -98,6 +118,21 @@ const SEMBLE_SWITCH = 'button[role="switch"][aria-labelledby="access-semble-name
 const DMS_SWITCH = 'button[role="switch"][aria-labelledby="access-withDms-name"]';
 
 test.describe("access-settings flag", () => {
+  test("the served grants have the shape a PDS returns, not the request", () => {
+    // Guards the fixture itself. A grant built from the request string is
+    // round-trippable by construction, so the switch assertions below would pass
+    // whatever the coverage predicate did — the assumption under test, restated.
+    for (const grant of Object.values(BROWSER_TIERS)) {
+      expect(grant).not.toContain("include:");
+      expect(grant).toContain(
+        "rpc:space.roomy.authComplete.arbiter.proxy?aud=*",
+      );
+      expect(grant).not.toContain(
+        `rpc:com.atproto.server.getServiceAuth?aud=${APPSERVER_DID}`,
+      );
+    }
+  });
+
   test("flag on: the Access entry and page render", async ({ page }) => {
     await page.goto("/user/settings");
     await waitForAuthenticated(page);

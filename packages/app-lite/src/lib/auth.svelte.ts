@@ -103,11 +103,12 @@ export const auth = {
     return grantedScope;
   },
   /**
-   * True when the current session's granted scope covers every token in the
-   * named tier. A `null` granted scope (signed out / not yet introspected)
-   * is treated as lacking the tier. In app-password (test-mode) mode the
-   * granted scope is set to the requested tier, so `hasScope` reports true
-   * for it.
+   * True when the current session's granted scope covers every permission the
+   * named tier asks for. Coverage follows the grant's grammar, not string
+   * equality — the PDS returns the expanded form (see `scopes.scopeCovers`). A
+   * `null` granted scope (signed out / not yet introspected) is treated as
+   * lacking the tier. In app-password (test-mode) mode the granted scope is set
+   * to the requested tier, so `hasScope` reports true for it.
    */
   hasScope(tier: Parameters<typeof hasScopeSet>[1]) {
     return grantedScope !== null && hasScopeSet(grantedScope, tier);

@@ -2,8 +2,9 @@
   ScopeGate — reusable "does the current session have this tier?" gate.
 
   Renders its default slot only when the current session's granted OAuth scope
-  covers every token in the named `tier` (see `auth.hasScope` and
-  `scopes.SCOPE_SETS`). When the tier is not granted, renders the `denied`
+  covers every permission the named `tier` asks for (see `auth.hasScope` and
+  `scopes.SCOPE_SETS`) — under atproto's grammar, so the expanded form a PDS
+  returns counts. When the tier is not granted, renders the `denied`
   slot, or — if none is provided — a "Grant permission" panel that drives the
   OAuth consent round-trip via `requestScopeExpansion(tier)`.
 
