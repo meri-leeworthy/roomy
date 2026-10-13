@@ -326,6 +326,27 @@ describe("tier/ceiling invariants", () => {
     }
   });
 
+  test("the block feature's scopes are all deferred from the per-login request", () => {
+    // The block write path needs two scopes — the `repo:` for the record and
+    // the RPC the client fires afterwards (`refresh-blocks.ts`). Both are
+    // registered on the HappyView API client at the same time, so both are
+    // ceiling-only until then. A regression here is a sign-in outage: adding
+    // the RPC to APPSERVER_RPCS put it in `base`, and HappyView rejected the
+    // whole granted set at session registration for every user
+    // ("scope 'rpc:space.roomy.user.refreshBlocks?aud=*' is not allowed").
+    const deferred: Record<string, true> = {};
+    for (const s of UNREGISTERED_SCOPES) deferred[s] = true;
+    const baseSet = parseScopes(SCOPE_SETS.base);
+    const blockScopes = [
+      "repo:space.roomy.user.block",
+      "rpc:space.roomy.user.refreshBlocks?aud=*",
+    ];
+    for (const s of blockScopes) {
+      assert.equal(deferred[s], true, `block scope must be deferred: ${s}`);
+      assert.equal(baseSet.has(s), false, `block scope leaked into base: ${s}`);
+    }
+  });
+
   test("CLIENT_ID_SCOPE covers the requestable tiers a loopback login can request", () => {
     // The dev loopback client id embeds this scope; the PDS records the client
     // id with the authorization request and rejects a differing one at token

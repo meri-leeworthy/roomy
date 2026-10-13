@@ -118,7 +118,6 @@ const APPSERVER_RPCS = [
   "space.roomy.search.messages",
   "space.roomy.search.rooms",
   "space.roomy.user.getProfile",
-  "space.roomy.user.refreshBlocks",
   "space.roomy.user.getMembershipStatus",
   "space.roomy.embed.getLinkMetadata",
   "space.roomy.space.getLinks",
@@ -161,6 +160,16 @@ const VOICE_SCOPES = VOICE_NSIDS.map((nsid) => `rpc:${nsid}?aud=*`);
 const BLOCK_SCOPES = ["repo:space.roomy.user.block"] as const;
 
 /**
+ * The `space.roomy.user.refreshBlocks` RPC the client fires after a block
+ * write, so the appserver drops its cached block set
+ * (`mutations/refresh-blocks.ts`). It ships with the block write path and is
+ * registered on the HappyView API client together with {@link BLOCK_SCOPES} —
+ * ceiling-only until then, like the `repo:` half.
+ */
+const BLOCK_RPC_NSIDS = ["space.roomy.user.refreshBlocks"] as const;
+const BLOCK_RPC_SCOPES = BLOCK_RPC_NSIDS.map((nsid) => `rpc:${nsid}?aud=*`);
+
+/**
  * Scopes that are declared in the ceiling but NOT yet registered on the
  * deployed HappyView API client — requesting one of these fails.
  *
@@ -178,6 +187,7 @@ const BLOCK_SCOPES = ["repo:space.roomy.user.block"] as const;
  */
 export const UNREGISTERED_SCOPES: readonly string[] = [
   ...BLOCK_SCOPES,
+  ...BLOCK_RPC_SCOPES,
   ...VOICE_SCOPES,
 ];
 
@@ -271,7 +281,7 @@ export const REQUESTABLE_SCOPE_SETS = {
 
 /** Ceiling-only tiers: declared, but not yet registered on the client. */
 const DEFERRED_SCOPE_SETS = {
-  blocks: [...BASE_SCOPES, ...BLOCK_SCOPES].join(" "),
+  blocks: [...BASE_SCOPES, ...BLOCK_SCOPES, ...BLOCK_RPC_SCOPES].join(" "),
   voice: [...BASE_SCOPES, ...VOICE_SCOPES].join(" "),
 } as const;
 
@@ -347,6 +357,7 @@ export const FULL_SCOPE_CEILING = [
   `repo:${profileSpaceNsid}`,
   "repo:space.roomy.user.profile",
   "repo:space.roomy.user.block",
+  ...BLOCK_RPC_SCOPES,
   `rpc:com.atproto.server.getServiceAuth?aud=${appserverDid}`,
   "rpc:com.atproto.server.getServiceAuth?aud=*",
   "rpc:space.roomy.authComplete.arbiter.proxy?aud=*",
