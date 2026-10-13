@@ -45,7 +45,9 @@ Three sources are collated here:
    entirely in the manifest and which need no host data, then tiles that accept
    only data attached to the message. §11.1 is that plan; it sits ahead of
    feature 1 and does not depend on it. The message-attached data is carried as
-   a new `Attachment` variant, not as an extension key (§5.3).
+   a new `Attachment` variant, not as an extension key (§5.3), and the second
+   checkpoint opens with the read-path change that lets a tile be an attachment
+   at all: one `attachments` list on the message DTO, step B0 (§4.6).
 
 The old document's headline conclusion survives: Web Tiles are a good
 conceptual fit for Roomy, and the hard parts are infrastructural and
@@ -96,7 +98,10 @@ arbitrary JSON attached to the message as a new `Attachment` variant carrying th
 tile's AT-URI. Both are self-contained checkpoints — the first isolates the
 loading domain and the sandbox, the second isolates the message-payload path —
 and both render a tile from an AT-URI that is already known, so neither depends
-on feature 1's link-to-tile resolution work.
+on feature 1's link-to-tile resolution work. B opens with **B0**, a read-path
+change with nothing rendered by it on its own: the message DTO becomes a single
+`attachments` list, which is also what makes a link embed and a tile the same
+kind of thing from the client's side (§4.6).
 
 **Deliverables.** A working Bluesky-post tile in Roomy; a first version of the
 room-context tile; a short write-up of the experience with the spec and the
@@ -449,6 +454,8 @@ in-place editor: `space.roomy.embed.getLinkMetadata` (registered at
 on top of the same endpoint without changing the interface". That is precisely
 what feature 1 is: the current enrich path learns only what a URL's HTML says.
 Neither path knows the URL is an AT-URI.
+The DTO fields this pipeline feeds, and what the rest of the attachment union
+does on the way to the client, are §4.6.
 
 ### 4.3 UI slots a tile can occupy
 
@@ -528,6 +535,70 @@ survives tab switches.
   it is a small, direct use of `com.atproto.repo.getRecord` plus the existing
   DID→PDS resolution and timeout helpers (`fetchTimeout.ts:38-46`).
 
+### 4.6 The attachment read path — one list on the write side, four fields on the DTO
+
+The write side already treats an attachment as one thing. A message carries
+`extensions["space.roomy.extension.attachments.v0"].attachments: Attachment[]`,
+a closed union of seven variants (`extensions/message.ts:105-113`), and the
+composer already builds a single list, merging uploaded media with the reply
+attachment (`mutations/message.ts:65-91`). The SDK's `createMessage` option is
+generic over that union (`operations/message.ts:24`), so anything the union
+admits can be attached without a new operation.
+
+The read side splits it by kind. `selectMessages` projects each variant into its
+own DTO field:
+
+| Variant | `Message` field | Shape |
+|---|---|---|
+| reply | `replyTo` | the target message id, as a bare string |
+| forward | `forwardedFrom` | `{ messageId, roomId, name, message? }`, the original denormalised |
+| image / video / file | `media` | one flat `Media[]`, per-kind UNION, no `$type` |
+| link | `media` **and** `linkEmbeds` | `{ url, embed? }` carrying the enriched metadata |
+| comment | nothing | `comp_comment` is written by the materialiser and read by no query in the tree |
+
+Three properties follow, and each is what a tile would collide with:
+
+1. **No `$type` on the wire.** `Media` is `{ url, type, alt?, width?, height?, … }`
+   (`queries/_message.ts:21-31`) where `type` is the MIME type, overloaded as the
+   kind: a link row is `text/uri-list` (`selectMessages.ts:366-374`), and the
+   client drops `type.startsWith("text/")` from the media renderer so the same
+   link is not drawn twice (`ChatMessage.svelte:640`). A renderer cannot
+   dispatch on kind.
+2. **No order and no identity.** `media` is assembled from a four-branch UNION
+   in kind order (`selectMessages.ts:333-374`), so the order the author attached
+   things in is lost; an attachment has no id of its own — the row is keyed by
+   its URL, synthesised as `uri?message=<msgId>` on the explicit path
+   (`events/message.ts:149-160`) and left bare on the detected path
+   (`enricher.ts:586-603`). A link is addressable by URL; nothing else is
+   addressable at all.
+3. **No general edit protocol.** `MessageExtensionUpdateMap` replaces the whole
+   attachment set, and `MessageExtensionDeleteMap` admits only
+   `DiscordMessageOrigin` (`extensions/message.ts:152-163`) — the one attachment
+   the protocol can delete is the Discord origin. The edit materialiser's
+   link-only fast path (`events/message.ts:236-286`) is the sole per-attachment
+   update, and it is keyed on the URL.
+
+**Two producers write one row per link, and they do not agree on the key.** An
+explicit `LinkAttachment` writes `uri?message=<msgId>`; the body scan
+(`applyBatch.ts:589-632` → `detectAndStoreLinks`, `enricher.ts:578`) writes the
+bare URL with `show_preview = 1`. Both are entities scoped to the message, so a
+message that attaches a link *and* mentions that URL in its text produces two
+rows and two `linkEmbeds` entries for one card — verified against the
+materialiser. The enricher's own doc comment ("Skips URLs that already exist in
+`comp_embed_link` (via explicit LinkAttachment or a previous scan…)",
+`enricher.ts:569`) does not hold across the two encodings. It is unreachable
+from the composer today, because the composer attaches no links on create
+(`ChatInputArea.svelte:103-109`); it is the first thing a composer that *does*
+express embed intent will hit.
+
+**The target shape.** `Message.attachments: AttachmentDto[]` — one entry per
+attachment, each carrying its `$type` and whatever its renderer needs — with
+`media`, `linkEmbeds`, `replyTo` and `forwardedFrom` kept as derived views over
+it while consumers migrate. The per-kind component tables already hold the data;
+the change is the projection and its consumers, not the materialiser. §5.3
+decides the tile's place in that list, and §11.1 makes the change a step of its
+own.
+
 ---
 
 ## 5. Feature 1 — rich ATProto embeds via Web Tiles
@@ -590,8 +661,8 @@ composer ("you drop an 'input tile', and by interacting with it you produce
 metadata attached to the message, which a renderer tile then renders").
 `Attachment` is also the more natural carrier for *data*: a block is part of the
 message body and is edited as text, whereas an attachment is a structured
-sidecar with its own materialised row, its own DTO field and its own renderer —
-which is what a tile with a payload needs.
+sidecar with its own materialised row, its own entry in the message's attachment
+list and its own renderer — which is what a tile with a payload needs.
 
 So the division of labour is: **(b) is how a tile is attached to a message**,
 **(a) is how a resolvable link is turned into a card** without the author
@@ -605,6 +676,43 @@ union is **closed**, so an unknown `$type` is rejected at `parseEvent` — a til
 attachment is a real schema change, not a passthrough; and `updateRoom`'s sibling
 gap does not apply here, because the message edit path *does* carry attachments
 but must be given an explicit branch for the new variant.
+**What (b) needs first: one read path.** A tile attachment has to reach the
+client, and today "reaching the client" means a per-kind projection (§4.6):
+seven variants in, four differently-shaped fields out and one that never
+surfaces, with no `$type` to dispatch on. A tile added as a fifth special case
+would be the fifth shape; added to a unified `Message.attachments` list it is
+one variant with one arm in one renderer switch. The plan therefore makes the
+unified list milestone B's step 0 (§11.1) and places the tile in it, rather than
+giving the tile a parallel `Message.tiles` field. That also settles what
+`linkEmbeds` is for: it is the per-kind field that made "where does the tile go"
+a question in the first place.
+
+**Intent, and what the plan needs from it.** Embed intent is not expressible at
+create today. `LinkAttachment.showPreview` is the only intent carrier in the
+union, and the create path never sees one — the appserver scans the body and
+writes `show_preview = 1` (`applyBatch.ts:589-632`). The composer's dismiss
+button is deliberately client-only (`ChatInputArea.svelte:103-109`); dismissal
+round-trips as an `editMessage` carrying link attachments, through the
+non-destructive fast path (§4.6). So the write path has *implied* intent on
+create and *explicit* intent on edit.
+
+Making create-time intent explicit is compatible with history, because the read
+rule is "no row ⇒ shown" — which is also the only rule every message ever sent
+has been read under. An old message with no link row keeps the implied default;
+a new message that carries one is read by the same projection. What makes it a
+change rather than a flag flip is the two-encoding problem above: the moment the
+composer attaches a link whose URL is also in the body, the create path writes
+two rows for one card. Settle the row key first, then let the composer attach.
+
+**Neither is on feature 1's critical path**, and the plan does not take them on.
+The part of the current design worth keeping is the other direction: because the
+rich embed is a read projection computed from the link row, AT-URI resolution
+applies **retroactively** — every historical post link in a space becomes a rich
+embed when the resolver lands, with no event rewritten and nothing asked of the
+author. Two conditions: the resolved tile is cached against the link URL, so one
+post's tile serves every message that links it, and there is a way to re-enqueue
+rows that have already been enriched, since `pending_links` only ever holds work
+not yet done (§11.2, open question 14).
 
 ### 5.4 The content-type → tile mapping
 
@@ -1050,7 +1158,9 @@ These are small, standalone checkpoints that prove the render pipeline before an
 of the resolution machinery in §5 exists. Both render a tile from an AT-URI that
 Roomy already has — a hand-placed one for A, the tile attachment's own field for
 B. Neither needs the *link*-to-tile resolution of feature 1, the content-type
-mapping, or the embed projection.
+mapping, or the embed projection. B does carry one prerequisite that is not a
+rendering step at all, called out as B0 below: the message DTO becomes a list of
+attachments before a tile can be one of them (§4.6).
 
 **Milestone A — standalone tiles.** A tile whose assets are all in its manifest
 and which takes no data from the host: a static web page, an interactive WebGL
@@ -1072,6 +1182,22 @@ waste a fortnight: whether the loading domain is configured correctly
 and whether the sandbox behaves as the spec claims. It is also the first test of
 the upstream concern in §3.2 — if iframe/worker wiring misbehaves, that is
 evidence for `darobin/dasl.ing#98`, not a Roomy bug.
+
+**Step B0 — the unified attachment read path.** Before a tile attachment has
+anywhere to land, the DTO becomes `Message.attachments: AttachmentDto[]`: one
+entry per attachment, each carrying its `$type`, with `media`, `linkEmbeds`,
+`replyTo` and `forwardedFrom` derived from the list while consumers migrate
+(§4.6). No materialiser change — the per-kind component tables already hold every
+row and `selectMessages` already reads them all
+(`selectMessages.ts:333-374`); what changes is that the projection emits one list
+instead of four shapes. It is a step rather than a milestone because nothing
+renders differently on its own; it is the shape the tile is added to.
+
+Consumers to migrate with it: the `media` and `linkEmbeds` snippets in
+`ChatMessage` (`MessageBubble.svelte:47-56`, `ChatMessage.svelte:619-645`),
+`ActivityFeed.svelte:229-235`, `SearchResultsList.svelte:434-443`, the Links view,
+and the optimistic placeholder that hand-builds `media` and `linkEmbeds: []` in
+`mutations/message.ts:110-132`.
 
 **Milestone B — the tile attachment.** A tile receives arbitrary JSON attached
 to the message alongside the tile's AT-URI. The motivating case is a Mermaid
@@ -1108,10 +1234,10 @@ different layer:
 | 1 | `extensions/message.ts:105-113` | Add `TileAttachment` to the `Attachment` union |
 | 2 | `events/message.ts:76-77` (create) | A branch writing the attachment to storage |
 | 3 | `events/message.ts:305-386` (edit) | The same branch, or edits drop the tile |
-| 4 | `queries/selectMessages.ts:333-374` + DTO | The UNION branch, and the field the client reads |
+| 4 | `queries/selectMessages.ts:333-374` + DTO | The projection branch, and the entry it adds to `Message.attachments` |
 | 5 | `app-lite` / `design` | The component that loads and renders the tile |
 
-`createMessage`'s `attachments` option (`operations/message.ts:35`, `:78-83`) is
+`createMessage`'s `attachments` option (`operations/message.ts:24`, `:78-83`) is
 already generic over the union, so the SDK operation needs no change — an agent
 passing a tile attachment writes it with no new operation and no composer work.
 
@@ -1136,13 +1262,12 @@ flat media list (`queries/selectMessages.ts:333-374`), surfaced as
 the client through `getMessages`, `getThreads`, the activity feed and search with
 **no new endpoint, no admin-gated query, and no duplication of the projection**.
 
-The DTO is the one place to be careful. `Media` is flat and renderer-agnostic
-(one URL, an optional mime type, dimensions) and carries no `$type`, so the
-client cannot currently tell a tile row from an image row. Two options:
-give the tile its own DTO field (`Message.tiles`, which needs a new component
-anyway), or generalise the media union. The narrower first option is the
-recommendation — `linkEmbeds` is already a separate field for exactly this
-reason, and a tile is not a medium.
+The DTO is where this lands, and it is why B0 comes first. `Media` is flat and
+renderer-agnostic (one URL, an optional mime type, dimensions) and carries no
+`$type`, so a tile row would be indistinguishable from an image row; giving the
+tile a second parallel field (`Message.tiles`, the narrower move) would
+reproduce for the tile exactly the split that makes today's read path hard to
+extend (§4.6). One list, one variant, one arm in the renderer.
 
 **Payload size.** The tile payload rides inside the event, so its cost is the
 event log's cost. There is no per-event or per-message byte check anywhere on
@@ -1229,10 +1354,20 @@ works. It is not the right shape for a *tile*, which is a modelled thing.
 ### 11.2 The resolution path (feature 1, then feature 2)
 
 **Phase 1 — a Bluesky-post tile end to end.** AT-URI recognition → manifest
-resolution (appserver-side, cached) → embed-projection extension → sandboxed
-card. Lands the first funded feature, on top of milestones A and B. Expected
-upstream friction: what the embed shape does and does not carry (§5.3), and the
-record-vs-blob reference question (§3.2, `darobin/dasl.ing#43`).
+resolution (appserver-side, cached) → a tile entry in the unified attachment
+projection → sandboxed card. Lands the first funded feature, on top of
+milestones A and B. Expected upstream friction: what the embed shape does and
+does not carry (§5.3), and the record-vs-blob reference question (§3.2,
+`darobin/dasl.ing#43`).
+
+Because the resolution is a projection over the link row, it applies
+retroactively: once the resolver runs, every post link already in a space
+renders richly, with no event rewritten and nothing asked of the author. The two
+things that make that true are worth stating as requirements rather than
+consequences — the resolved tile is cached against the link URL, so one post's
+tile serves every message linking it, and there is a way to re-enqueue links that
+were already enriched before the resolver existed, because `pending_links` only
+holds work not yet done (open question 14).
 
 **Phase 2 — room context metadata.** A room-context event and a JSON column,
 plus the `updateRoom` extensions gap (§6.3) if the context has to be editable
@@ -1300,9 +1435,11 @@ Carried forward into the write-up and the issue list:
    or a Roomy default set? A default set is what makes the feature feel like a
    product, but it presumes a curation process.
 2. **Embed shape** (§5.3): the tile attachment is settled as the carrier for an
-   attached tile, but *how a resolvable link becomes a card* is not — extend
-   `LinkEmbedData` (the recommendation, for the first cut), add a separate
-   `Message.tiles`, or auto-attach a tile attachment on send?
+   attached tile, and the unified `Message.attachments` list is settled as the
+   read shape both it and a resolved link land in (§4.6, §11.1 B0). What is not
+   settled is whether a resolvable link becomes an entry in that list by
+   extending the existing embed projection (the recommendation for the first
+   cut) or by auto-attaching a tile attachment on send.
 3. **Resolution site** (§5.5): appserver-side manifest metadata + client-side
    mothership is the recommendation; the alternative (all client-side) is less
    code and leaks the user's link-following to the PDS from the browser.
@@ -1316,11 +1453,12 @@ Carried forward into the write-up and the issue list:
 7. **Room-read capabilities** (§7.2): none in the first cut, or a small
    read-only verb set? The thread's conclusion that the compute belongs mostly
    on the client argues for handing the tile data the client already has.
-8. **The tile attachment's DTO field** (§11.1, milestone B): a separate
-   `Message.tiles` alongside `linkEmbeds`, or a generalised media union that
-   carries the attachment `$type`? The former is narrower and matches how
-   `linkEmbeds` was separated; the latter subsumes four existing renderers and
-   is the better long-run model.
+8. **The unified list's own protocol gaps** (§4.6): an entry carries no `$type`
+   today, has no id or order, and only a link is updatable or removable after
+   the fact. A tile lands in that list either way; how much of ordering,
+   identity and per-attachment editing comes with it is not settled. Ordering
+   and identity are DTO-only changes; per-attachment editing is not, because
+   `MessageExtensionUpdateMap` replaces the whole set.
 9. **The first public-write capability** (§9.3): is the calendar RSVP the right
    forcing function, and what does the manual-review process actually look like
    on the Roomy side?
@@ -1338,6 +1476,19 @@ Carried forward into the write-up and the issue list:
     recommendation is a bound stated in the new variant's `.describe()` plus an
     appserver-side rejection, and a documented rule that large assets belong in a
     blob the tile fetches from its manifest.
+13. **Explicit embed intent at create** (§5.3): the create path is implied today
+    — the body is scanned and every URL gets `show_preview = 1`, and
+    `showPreview` is only ever seen on the edit path. Attaching link attachments
+    on send is compatible with history (no row still means "shown"), but it needs
+    the row key settled first: an explicit link attachment and a body-scanned URL
+    for the same link currently produce two rows (§4.6). Out of scope for this
+    stint; it is the natural follow-up to B0.
+14. **Re-enriching links that have already been enriched** (§11.2). AT-URI
+    resolution lands as a projection over rows that already exist, so history
+    renders richly with no event rewritten — but the sweeper only ever drains
+    work not yet done (`pending_links`), and an enriched row is not re-queued.
+    Something has to re-enqueue by an enrichment-version marker, or the
+    resolution is only retroactive for links posted after it ships.
 
 ---
 
