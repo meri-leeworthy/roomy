@@ -1,5 +1,5 @@
 /**
- * The two storage adaptors, against the four rules of the seam (§3.2).
+ * The storage adaptors, against the four rules of the seam (§3.2).
  *
  * Rule 1 (never throws) is asserted against a store that actively fails — a
  * throwing `localStorage`, a database that cannot open — because the failure
@@ -8,17 +8,27 @@
  * rules (versioned, account-scoped, bounded) are core's, but an adaptor must
  * not *undo* them: it persists the version it was given, refuses a snapshot
  * written by another, and applies the count budget before writing.
+ *
+ * `TauriStorePersister` splits rule 1 by direction, and the split is the
+ * contract: a failed *read* rejects out of `load` so that `withFallback` can
+ * demote the session off a dead store, while a failed *write* is a diagnostic
+ * like any other. Both are asserted below.
  */
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, it } from "vitest";
 import { persistedShapeVersion } from "../cache/persister";
 import type { PersistedEntry, SnapshotPolicy } from "../cache/persister";
+import { withFallback } from "../cache/fallback";
 import { IndexedDbPersister } from "./indexeddb-persister";
 import {
   LocalStoragePersister,
   type StorageLike,
 } from "./localstorage-persister";
+import {
+  TauriStorePersister,
+  type TauriStoreLike,
+} from "./tauri-store-persister";
 
 const ACCOUNT = "did:plc:alice";
 const VERSION = persistedShapeVersion("build-test");
@@ -68,6 +78,45 @@ function throwingStorage(error: Error): StorageLike {
   };
 }
 
+/**
+ * A stand-in for the shell's store, with the whole surface exposed for
+ * assertions.
+ *
+ * `failing` makes every call reject, which is the "the store went away"
+ * case the persister's read path is shaped around; `saves` counts the
+ * explicit `save()` calls, which are what make a write durable before the
+ * process exits.
+ */
+function nativeStore(initial: Record<string, unknown> = {}): TauriStoreLike & {
+  data: Map<string, unknown>;
+  saves: number;
+  failing: boolean;
+} {
+  const data = new Map(Object.entries(initial));
+  const store = {
+    data,
+    saves: 0,
+    failing: false,
+    async get<T>(key: string): Promise<T | undefined> {
+      if (store.failing) throw new Error("store unavailable");
+      return data.get(key) as T | undefined;
+    },
+    async set(key: string, value: unknown): Promise<void> {
+      if (store.failing) throw new Error("store unavailable");
+      data.set(key, value);
+    },
+    async delete(key: string): Promise<boolean> {
+      if (store.failing) throw new Error("store unavailable");
+      return data.delete(key);
+    },
+    async save(): Promise<void> {
+      if (store.failing) throw new Error("store unavailable");
+      store.saves += 1;
+    },
+  };
+  return store;
+}
+
 // Each test gets a clean IndexedDB universe.
 beforeEach(() => {
   globalThis.indexedDB = new IDBFactory();
@@ -93,6 +142,16 @@ const adaptors = [
       }),
     absent: (): LocalStoragePersister =>
       new LocalStoragePersister({ policy: policy(), storage: null }),
+  },
+  {
+    name: "TauriStorePersister",
+    make: (seen: string[] = []): TauriStorePersister =>
+      new TauriStorePersister({
+        policy: policy({ onDiagnostic: (m) => seen.push(m) }),
+        store: nativeStore(),
+      }),
+    absent: (): TauriStorePersister =>
+      new TauriStorePersister({ policy: policy(), store: null }),
   },
 ];
 
@@ -187,6 +246,100 @@ describe("rule 1 — a storage failure is a diagnostic, never an application err
       storage: throwingStorage(new Error("nope")),
     });
     await expect(persister.clear()).resolves.toBeUndefined();
+  });
+});
+
+describe("TauriStorePersister — the shell's store splits rule 1 by direction", () => {
+  it("rejects a failed read so withFallback can demote the session", async () => {
+    const seen: string[] = [];
+    const store = nativeStore();
+    const persister = new TauriStorePersister({
+      policy: policy({ onDiagnostic: (m) => seen.push(m) }),
+      store,
+    });
+
+    store.failing = true;
+
+    await expect(persister.load()).rejects.toThrow("store unavailable");
+    expect(seen.some((m) => m.includes("read failed"))).toBe(true);
+  });
+
+  it("a read failure moves the session onto the fallback store, not into an empty cache", async () => {
+    const store = nativeStore();
+    const dead = new TauriStorePersister({ policy: policy(), store });
+    const fallback = new LocalStoragePersister({
+      policy: policy(),
+      storage: memoryStorage(),
+    });
+    await fallback.save([entry("space.roomy.space.getSpaces", "kept")]);
+
+    store.failing = true;
+    const wrapped = withFallback(dead, fallback, () => {});
+
+    // The demotion costs one load (the rejection that triggers it), and the
+    // next read comes from the store the session is now on.
+    await expect(wrapped.load()).resolves.toEqual([]);
+    const restored = await wrapped.load();
+    expect(restored.map((e) => e.key[0])).toEqual([
+      "space.roomy.space.getSpaces",
+    ]);
+    expect(restored[0]?.state).toBe("kept");
+  });
+
+  it("a failed write resolves and reports, so a dead store cannot fail a flush", async () => {
+    const seen: string[] = [];
+    const store = nativeStore();
+    const persister = new TauriStorePersister({
+      policy: policy({ onDiagnostic: (m) => seen.push(m) }),
+      store,
+    });
+
+    store.failing = true;
+
+    await expect(persister.save([entry("a")])).resolves.toBeUndefined();
+    expect(seen.some((m) => m.includes("write failed"))).toBe(true);
+  });
+
+  it("saves the store explicitly, so a write is on disk before the app exits", async () => {
+    const store = nativeStore();
+    const persister = new TauriStorePersister({ policy: policy(), store });
+
+    await persister.save([entry("a")]);
+    expect(store.saves).toBe(1);
+
+    await persister.clear();
+    expect(store.saves).toBe(2);
+  });
+
+  it("routes the read through the core rules: a foreign snapshot is refused whole", async () => {
+    const store = nativeStore();
+    const other = new TauriStorePersister({
+      policy: policy({
+        version: persistedShapeVersion("build-old"),
+        account: "did:plc:bob",
+      }),
+      store,
+    });
+    await other.save([entry("a")]);
+
+    // The stored snapshot is another build's and another account's. Both are
+    // refused by the same reader the other adaptors use.
+    const current = new TauriStorePersister({ policy: policy(), store });
+    await expect(current.load()).resolves.toEqual([]);
+  });
+
+  it("drops a malformed entry, keeping the rest of the snapshot", async () => {
+    const store = nativeStore();
+    const writer = new TauriStorePersister({ policy: policy(), store });
+    await writer.save([entry("good"), entry("also-good")]);
+
+    // Corrupt one entry in place, the way a truncated or half-written file
+    // would arrive: a partial restore is acceptable, a partial entry is not.
+    const snapshot = store.data.get(KEY) as { entries: unknown[] };
+    snapshot.entries[0] = { key: "not-an-array", state: "x", at: 1 };
+
+    const restored = await writer.load();
+    expect(restored.map((e) => e.key[0])).toEqual(["also-good"]);
   });
 });
 

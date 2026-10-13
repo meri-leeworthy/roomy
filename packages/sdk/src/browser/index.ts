@@ -42,8 +42,16 @@ export type {
 } from "../cache/persister";
 export { IndexedDbPersister } from "./indexeddb-persister";
 export type { IndexedDbPersisterOptions } from "./indexeddb-persister";
+// The demotion rule the browser composition applies when it wraps a
+// platform's own store — IndexedDB or the shell's — against `localStorage`.
+export { withFallback } from "../cache/fallback";
 export { LocalStoragePersister } from "./localstorage-persister";
 export type {
   LocalStoragePersisterOptions,
   StorageLike,
 } from "./localstorage-persister";
+export { TauriStorePersister, TAURI_STORE_DEFAULT_KEY } from "./tauri-store-persister";
+export type {
+  TauriStoreLike,
+  TauriStorePersisterOptions,
+} from "./tauri-store-persister";

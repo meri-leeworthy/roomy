@@ -22,43 +22,11 @@ import {
   TEST_USER_DID,
 } from "./fixtures.ts";
 import { ageSnapshot, readSnapshot } from "./cache-snapshot.ts";
+import { installGate } from "./held-requests.ts";
 import type { Page } from "@playwright/test";
 
 /** Older than the app's previous 24-hour restore window. */
 const SNAPSHOT_AGE_MS = 25 * 60 * 60 * 1000;
-
-/**
- * A route handler that authenticates (the appserver is in test mode) and can
- * hold `room.getMessages` requests open, so what renders is the snapshot rather
- * than a response that would have repaired it first.
- */
-function installGate(page: Page) {
-  let stall = false;
-  const held: Array<{ release: () => void }> = [];
-
-  const install = page.route(`${APPSERVER_HTTP_ORIGIN}/**`, async (route) => {
-    const url = route.request().url();
-    if (stall && url.includes("room.getMessages")) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      held.push({ release: resolve });
-      await promise;
-    }
-    return route.continue({
-      headers: { ...route.request().headers(), "X-Test-Did": TEST_USER_DID },
-    });
-  });
-
-  return {
-    install,
-    stall: (value: boolean) => {
-      stall = value;
-    },
-    heldCount: () => held.length,
-    releaseAll: () => {
-      for (const entry of held.splice(0)) entry.release();
-    },
-  };
-}
 
 /** Visit the seeded room and wait for the snapshot to be written to disk. */
 async function warmSnapshot(page: Page): Promise<void> {

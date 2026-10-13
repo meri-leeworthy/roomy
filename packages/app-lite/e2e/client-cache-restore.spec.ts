@@ -18,47 +18,9 @@
  * `staleTime: Infinity`, so the restore's `invalidateQueries` is load-bearing).
  */
 import { expect, test, waitForAuthenticated } from "./spec-helpers.ts";
-import {
-  APPSERVER_HTTP_ORIGIN,
-  SEED_MESSAGE_TEXT,
-  SEED_ROOM_PATH,
-  TEST_USER_DID,
-} from "./fixtures.ts";
+import { SEED_MESSAGE_TEXT, SEED_ROOM_PATH } from "./fixtures.ts";
 import { readSnapshot } from "./cache-snapshot.ts";
-import type { Page } from "@playwright/test";
-
-/**
- * A route handler that authenticates (the appserver is in test mode) and can
- * hold `room.getMessages` requests open, so what renders is the snapshot
- * rather than a response that would have repaired it first.
- */
-function installGate(page: Page) {
-  let stall = false;
-  const held: Array<{ release: () => void }> = [];
-
-  const install = page.route(`${APPSERVER_HTTP_ORIGIN}/**`, async (route) => {
-    const url = route.request().url();
-    if (stall && url.includes("room.getMessages")) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      held.push({ release: resolve });
-      await promise;
-    }
-    return route.continue({
-      headers: { ...route.request().headers(), "X-Test-Did": TEST_USER_DID },
-    });
-  });
-
-  return {
-    install,
-    stall: (value: boolean) => {
-      stall = value;
-    },
-    heldCount: () => held.length,
-    releaseAll: () => {
-      for (const entry of held.splice(0)) entry.release();
-    },
-  };
-}
+import { installGate } from "./held-requests.ts";
 
 test.describe("a reload renders the room from the persisted cache", () => {
   test("the last page survives the reload, then reconciles on refetch", async ({

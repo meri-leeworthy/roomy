@@ -7,19 +7,21 @@ import {
 import { cache as cacheNs } from "@roomy-space/sdk";
 import {
   createCachePersistence,
-  IndexedDbPersister,
-  LocalStoragePersister,
   type CachePersistence,
-  type CachePersister,
   type SnapshotPolicy,
 } from "@roomy-space/sdk/browser";
 import { scheduleAutoReload } from "$lib/error-recovery";
 import { transport } from "@roomy-space/sdk";
 import { CONFIG } from "./config";
+import {
+  cacheStorePreference,
+  choosePersister,
+  openNativeStore,
+  type CacheStoreBudget,
+} from "./cache-store";
 import { getAppserverOrigin, setAppserverOrigin } from "./appserver-origin";
-
 const { DirectXrpcClient, resolveAppserverHttpOrigin } = transport;
-const { persistedShapeVersion, withFallback } = cacheNs;
+const { persistedShapeVersion } = cacheNs;
 
 /**
  * Cached unauthenticated XRPC client. Lazily created on first use, re-used
@@ -133,27 +135,6 @@ function report(message: string, detail?: unknown): void {
 }
 
 /**
- * Build the persister for one account.
- *
- * IndexedDB is the web default; `localStorage` is the fallback for a platform
- * where it is absent or has failed (the plan's iOS/Tauri note), and
- * `withFallback` demotes a working IndexedDB to it the first time a read
- * throws — e.g. a corrupted or quota-evicted database. The demotion is the
- * SDK's rule, not this module's.
- */
-function choosePersister(policy: SnapshotPolicy): CachePersister {
-  const budget = { maxEntries: MAX_PERSISTED_ENTRIES };
-  const indexedDb = new IndexedDbPersister({ policy, budget });
-  const localStorage = new LocalStoragePersister({ policy, budget });
-
-  if (!indexedDb.available) {
-    report("cache: IndexedDB unavailable; using localStorage");
-    return localStorage;
-  }
-  return withFallback(indexedDb, localStorage, report);
-}
-
-/**
  * Restore the persisted cache for `accountDid`, then begin writing it.
  *
  * Called on the unauthenticated → authenticated transition, before `startSync`
@@ -172,12 +153,30 @@ export async function restoreCache(accountDid: string): Promise<void> {
     account: accountDid,
     onDiagnostic: report,
   };
+  const budget: CacheStoreBudget = { maxEntries: MAX_PERSISTED_ENTRIES };
+  // The build's store pin (`VITE_CACHE_STORE`), read once and handed to both
+  // the opener and the chooser so the two cannot disagree about which branch
+  // this build is on.
+  const preference = cacheStorePreference();
+
+  // The shell's store is opened before the persister that wraps it, so the
+  // choice between the native store and the web's is made on a store that is
+  // actually there. `openNativeStore` resolves `null` on the web and on a shell
+  // whose store cannot be opened, which is the `localStorage` case either way.
+  const nativeStore = await openNativeStore(preference);
 
   const persistence = createCachePersistence({
     queryClient,
-    persister: choosePersister(policy),
+    persister: choosePersister({
+      policy,
+      budget,
+      nativeStore,
+      preference,
+      onDiagnostic: report,
+    }),
     onDiagnostic: report,
   });
+
 
   // `restore()` never rejects, but a store that never answers would hang
   // startup; race it and proceed cold on timeout.

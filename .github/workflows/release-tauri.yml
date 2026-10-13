@@ -82,8 +82,13 @@ jobs:
           pnpm -w add @tauri-apps/cli@2.11
           pnpm turbo run build-lib
           cd ./packages/app-lite
-          pnpm tauri icon ./src-tauri/icons.manifest.json 
-          pnpm build
+          pnpm tauri icon ./src-tauri/icons.manifest.json
+          # The shell's cache lives in the shell's store, not the webview's
+          # IndexedDB — the reason the desktop/mobile builds treat storage
+          # differently from the web build. Stating it here rather than probing
+          # `__TAURI__` at load keeps the choice independent of when that global
+          # becomes visible (see src/lib/cache-store.ts).
+          VITE_CACHE_STORE=native pnpm build
 
       - name: Init android
         if: ${{ matrix.android }}
@@ -231,7 +236,9 @@ jobs:
         run: pnpm turbo run build-lib
 
       - name: Build frontend
-        run: pnpm --filter app-lite build
+        # Same statement the desktop/android job makes: this shell's cache lives
+        # in the shell's store (see src/lib/cache-store.ts).
+        run: VITE_CACHE_STORE=native pnpm --filter app-lite build
         env:
           # The App Store bundle must not carry the Roomy Pro subscription page
           # or its Polar checkout: guideline 3.1.1 puts in-app purchases behind

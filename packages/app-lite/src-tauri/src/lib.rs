@@ -83,6 +83,9 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
+        // The query cache's native store. Its file is named by the client
+        // (`src/lib/cache-store.ts`), which opens it with this plugin's JS API.
+        .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
             #[cfg(desktop)]
             let _ = app
