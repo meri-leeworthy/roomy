@@ -3,19 +3,30 @@
   import Switch from "@roomy/design/components/ui/toggle/Toggle.svelte";
   import { IconChevronRight } from "@roomy/design/icons";
   import { toast } from "@foxui/core";
-  import { auth, requestScopeExpansion, revokeCapability } from "$lib/auth.svelte";
+  import { auth, revokeCapability } from "$lib/auth.svelte";
   import { createScopeSettingsQuery } from "$lib/queries/scope-settings";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
-  import { hasScopeSet, type RequestableScopeSetName } from "$lib/scopes";
+  import {
+    hasScopeSet,
+    type CapabilityName,
+    type RequestableScopeSetName,
+  } from "$lib/scopes";
+  import {
+    showScopeConsentDialogue,
+    type ScopeConsentOptions,
+  } from "$lib/scope-consent-dialogue";
   import { queryClient } from "$lib/client";
 
   // The Access settings page is gated behind the access-settings flag while
   // progressive scope expansion is being iterated on. Direct navigation still
-  // lands here (the sidebar entry is hidden), so gate the body too. All flags
-  // default false.
+  // lands here (the sidebar entry is hidden), so gate the body too. The DM row
+  // carries its own flag on top of that gate. All flags default false.
   const flagsQuery = createFeatureFlagsQuery();
   const accessSettingsEnabled = $derived(
     flagsQuery.data?.flags.includes("access-settings") ?? false,
+  );
+  const dmsEnabled = $derived(
+    flagsQuery.data?.flags.includes("bluesky-dms") ?? false,
   );
 
   const settingsQuery = createScopeSettingsQuery(() => accessSettingsEnabled);
@@ -30,7 +41,7 @@
    * independent, and what is saved is the union of every one that is on.
    */
   const CAPABILITIES: readonly {
-    tier: RequestableScopeSetName;
+    tier: CapabilityName;
     name: string;
     description: string;
   }[] = [
@@ -47,6 +58,39 @@
         "Read and send Bluesky chats as you. No Roomy feature uses this yet.",
     },
   ];
+
+  /**
+   * The capability rows to render. The Bluesky DMs row ships behind its own
+   * flag, so it is dropped from the list while that flag is off; the Semble row
+   * is not gated on it. Dropping a row only removes what this page offers —
+   * each row still adds its own scopes to the union, independently of the other.
+   */
+  const rows = $derived(
+    CAPABILITIES.filter((c) => c.tier !== "withDms" || dmsEnabled),
+  );
+
+  /**
+   * What the consent dialogue says per capability: the capability's own name,
+   * and what granting it lets Roomy do. The consequence, not the scope token —
+   * the wording a row already uses, extended with the permission the provider
+   * is about to ask for.
+   */
+  const CONSENT_COPY: Record<CapabilityName, ScopeConsentOptions> = {
+    semble: {
+      title: "Save to your Semble collection",
+      description:
+        "Roomy will be able to save links from messages into a Semble " +
+        "collection in your own account. The consent screen will show the " +
+        "exact access it requests.",
+    },
+    withDms: {
+      title: "Read and send your Bluesky direct messages",
+      description:
+        "Roomy will be able to read and send Bluesky chats as you. No Roomy " +
+        "feature uses it yet, so turn it on only if you want the access " +
+        "ready. The consent screen will show the exact access it requests.",
+    },
+  };
 
   /**
    * What the server holds as the saved grant — the scope the next sign-in will
@@ -84,16 +128,26 @@
    * Ask for a capability, or stop asking for one.
    *
    * Enabling is not a local toggle: it records the request and drives a sign-in
-   * with the provider, so the browser leaves this page and comes back. Removing
-   * only narrows the saved grant; the session in hand keeps its access until the
-   * next sign-in, and the copy beside the switches says so.
+   * with the provider, so the browser leaves this page and comes back. The
+   * switch alone is a bare ask, though, so the round-trip is preceded by the
+   * same consent dialogue the reactive flow uses — one that names the
+   * capability and what granting it lets Roomy do. Only an accepted dialogue
+   * starts the redirect; a refusal settles the attempt and the re-key puts the
+   * switch back in step with the saved grant.
+   *
+   * Removing only narrows the saved grant; the session in hand keeps its access
+   * until the next sign-in, and the copy beside the switches says so.
    */
-  async function toggle(tier: RequestableScopeSetName, enabled: boolean): Promise<void> {
+  async function toggle(tier: CapabilityName, enabled: boolean): Promise<void> {
     busy = tier;
     try {
       if (enabled) {
-        await requestScopeExpansion(tier);
-        return; // browser navigates to the provider's consent screen
+        // The dialogue drives the round-trip itself on accept — its documented
+        // contract, the same seam `guardedXrpc` consumes. Resolving `false` is
+        // the refusal: nothing was requested, and the re-key below settles the
+        // switch back to the saved grant it reads from.
+        await showScopeConsentDialogue(tier, CONSENT_COPY[tier]);
+        return;
       }
       await revokeCapability(tier);
       await refresh();
@@ -168,7 +222,7 @@
         </p>
       </li>
 
-      {#each CAPABILITIES as { tier, name, description } (tier)}
+      {#each rows as { tier, name, description } (tier)}
         {@const isSaved = saved(tier)}
         {@const waiting = awaitingConfirmation(tier)}
         <li class="flex items-start justify-between gap-6 px-4 py-4 sm:px-5">

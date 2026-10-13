@@ -59,6 +59,11 @@ export const FEATURE_FLAGS: readonly FeatureFlagDef[] = [
     description:
       "Voice rooms: the sidebar's call list and the room's call panel",
   },
+  {
+    key: "bluesky-dms",
+    description:
+      "Bluesky direct messages: the capability switch on the access settings page, which requests chat.bsky.* rpc scopes",
+  },
 ];
 export const FEATURE_FLAG_KEYS: ReadonlySet<string> = new Set(
   FEATURE_FLAGS.map((f) => f.key),
