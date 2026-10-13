@@ -413,6 +413,52 @@ describe("hiddenBy", () => {
     expect([...(await hiddenBy(ALICE))]).toEqual([BOB]);
   });
 
+  /**
+   * The reverse set is built from ATProto repos, so a bridged author holds no
+   * repo to block from and can never be the *blocker*. They can be the blocked
+   * party, though, and their DID does not resolve — so a sweep that includes
+   * them has to record the failure and carry on with the candidates that can
+   * answer.
+   */
+  test("an unresolvable bridged candidate does not stop the sweep", async () => {
+    const BRIDGED = "did:discord:123456789012345678" as UserDid;
+    await setUserSpaceMembership(
+      openReadStateDb(),
+      CAROL,
+      SPACE,
+      "joined",
+      "test",
+      "01TEST0000000000000000000000",
+    );
+    const spaceDb = openSpaceDb(SPACE);
+    for (const id of [SPACE, ALICE, BRIDGED]) {
+      await spaceDb.run("insert into entities (id, stream_id) values (?, ?)", [id, SPACE]);
+    }
+    for (const member of [ALICE, BRIDGED]) {
+      await spaceDb.run(
+        "insert into edges (head, tail, label) values (?, ?, 'member')",
+        [SPACE, member],
+      );
+    }
+
+    _setTestFetchBlockRecords(async (did) => {
+      if (did === BRIDGED) throw new Error("no DID document for a bridged author");
+      return did === ALICE
+        ? [{ subject: CAROL, source: "roomy", createdAt: null }]
+        : [];
+    });
+
+    await hiddenBy(CAROL);
+    await Promise.all(_blockSweepsInFlight());
+    await Promise.all(_blockFetchesInFlight());
+
+    // The unresolvable candidate is recorded as a failure — backed off, not
+    // retried per read — and the readable candidate still answered.
+    expect((await fetchStamp(BRIDGED))?.status).toBe("error");
+    expect((await fetchStamp(ALICE))?.status).toBe("ok");
+    expect([...(await hiddenBy(CAROL))]).toEqual([ALICE]);
+  });
+
   test("the reverse set is read from the same table the forward set is written to", async () => {
     _setTestFetchBlockRecords(async () => [
       { subject: BOB, source: "roomy", createdAt: null },
