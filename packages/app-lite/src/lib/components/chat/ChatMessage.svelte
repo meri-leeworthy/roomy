@@ -49,6 +49,23 @@
     currentUserDid: string | undefined;
     /** Whether the current user is an admin of the space (moderation). */
     isAdmin: boolean;
+    /**
+     * DIDs the viewer has blocked, from their own repo. The server sends a
+     * tombstone for a hidden author; this set is what lets the client redact a
+     * body it cached *before* the block, and what decides whether the reveal
+     * affordance applies to a row at all.
+     */
+    blockedAuthors: ReadonlySet<string>;
+    /** Message ids fetched as a reveal this session (never persisted). */
+    revealedIds: ReadonlySet<string>;
+    /** Message id whose reveal fetch is in flight, or null. */
+    revealingId: string | null;
+    /**
+     * Fetch a tombstoned message in full through `message.getMessage`. The
+     * server is the arbiter: it decides whether the caller may see the body,
+     * and the container row adopts whatever DTO it returns.
+     */
+    onReveal: (containerId: string, targetId: string) => void;
     /** Space admin + "semble-integration" feature flag — enables the
      *  space-card toolbar action. */
     canCreateSpaceCard?: boolean;
@@ -77,6 +94,10 @@
     message,
     currentUserDid,
     isAdmin,
+    blockedAuthors,
+    revealedIds,
+    revealingId,
+    onReveal,
     canCreateSpaceCard = false,
     canSaveToCollection = false,
     editingMessageId,
@@ -280,6 +301,39 @@
   let canEdit = $derived(isAuthor && !isForward);
   let canDelete = $derived(isAuthor || isAdmin);
 
+  // ── Blocked authors ────────────────────────────────────────────────────
+  // The row that actually renders is the embedded original on a forward, and
+  // the forwarder's own message otherwise. Both the indicator and the reveal
+  // are about *that* message, not about the container: a forward whose
+  // original is hidden renders the indicator for the original's author, and
+  // the reveal fetches the original's id.
+  const rendered = $derived(original ?? message);
+  /** The server redacted this row (or the client's pass did, §4.4). */
+  const isBlockedRow = $derived(rendered.blocked === true);
+  /** This row was fetched in full as a reveal, so it renders ordinary. */
+  const isRevealedRow = $derived(
+    isBlockedRow && revealedIds.has(rendered.id),
+  );
+  /**
+   * A tombstoned row: hidden, and not fetched as a reveal. It renders the
+   * indicator and nothing else, so it carries no toolbar, no reactions and no
+   * actions — there is nothing on it to act on.
+   */
+  const isSuppressedRow = $derived(isBlockedRow && !isRevealedRow);
+  /**
+   * Whether to offer the reveal. Both clauses the server gates on, evaluated
+   * client-side: the viewer is an admin of this space, and the hidden author
+   * is one the viewer blocked themselves. Offering an affordance the server
+   * would refuse is a bug, not just a UX wart.
+   */
+  const canRevealRow = $derived(
+    isBlockedRow &&
+      !isRevealedRow &&
+      isAdmin &&
+      blockedAuthors.has(rendered.authorDid),
+  );
+  const isRevealing = $derived(revealingId === rendered.id);
+
   /**
    * Space-card eligibility: the message contains exactly one link — the
    * appserver's extracted `linkEmbeds`, the same source that renders link
@@ -453,7 +507,7 @@
       // On touch devices, tapping a message toggles its inline toolbar.
       // Skip when the tap lands on a link (the user is navigating, not
       // summoning the toolbar).
-      if (isMobile.current && !isThreading && !isSelecting && !isEditing && !(e.target as Element)?.closest?.("a")) {
+      if (isMobile.current && !isThreading && !isSelecting && !isEditing && !isSuppressedRow && !(e.target as Element)?.closest?.("a")) {
         toggleToolbar(message.id);
       }
     }}
@@ -473,10 +527,15 @@
       mergeWithPrevious={isSystem ? false : mergeWithPrevious}
       {isSelected}
       {isEditing}
-      {showToolbar}
+      showToolbar={showToolbar && !isSuppressedRow}
       {deliveryState}
       queuedLabel="Waiting"
       selectionIndicator={isSelecting ? selectionTick : undefined}
+      blocked={isBlockedRow}
+      revealed={isRevealedRow}
+      canReveal={canRevealRow}
+      revealing={isRevealing}
+      onReveal={() => onReveal(message.id, rendered.id)}
     >
       {#snippet replyContext()}
         {#if message.forwardedFrom}
@@ -645,6 +704,9 @@
       {/snippet}
 
       {#snippet toolbar()}
+        <!-- A tombstoned row carries no toolbar: every action on it would
+             address a message whose body the viewer cannot see. -->
+        {#if !isSuppressedRow}
         <MessageToolbar
           {spaceId}
           {roomId}
@@ -667,10 +729,14 @@
               : undefined
           }
         />
+        {/if}
       {/snippet}
 
       {#snippet reactions()}
-        {#if message.reactions.length > 0}
+        {#if !isSuppressedRow && message.reactions.length > 0}
+          <!-- A tombstone carries none: the server returns an empty array
+               for a hidden author, and the slot stays closed here so nothing
+               reintroduces reaction chrome onto an indicator row. -->
           <MessageReactions
             {spaceId}
             {roomId}

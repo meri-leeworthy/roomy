@@ -39,13 +39,63 @@ import {
   APPSERVER_DID,
   APPSERVER_PORT,
   APPSERVER_WS_ORIGIN,
+  OTHER_USER_DID,
   PDS_ORIGIN,
+  TEST_ADMIN_DID,
+  TEST_NON_MEMBER_DID,
   TEST_USER_DID,
   TEST_USER_HANDLE,
 } from "./fixtures.ts";
 
 const APP_LITE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const REPO_ROOT = dirname(dirname(APP_LITE_DIR));
+
+/** The real directory the appserver resolves `did:plc:` accounts through. */
+const PLC_ORIGIN = "https://plc.directory";
+
+/**
+ * Answer the appserver's PLC lookups for the fixture DIDs, in-process.
+ *
+ * The fixture DIDs are fake, so the real directory has no document for them
+ * and every DID a handler resolves fails before it reaches the PDS. That is
+ * invisible for most reads — their data is seeded straight into the DBs — but
+ * a block is read from the *viewer's own repo*, which means the appserver has
+ * to resolve the viewer's DID and call the PDS it names. Without a document the
+ * block set always looks empty and the feature cannot be exercised in the
+ * browser at all.
+ *
+ * Every fixture DID therefore resolves to the stub PDS. Anything else, and any
+ * other URL, passes through untouched: this exists to close the loop for the
+ * seeded world, not to stand in for the directory.
+ */
+function stubFixtureDidDocuments(): void {
+  const fixtureDids = new Set([
+    TEST_USER_DID,
+    OTHER_USER_DID,
+    TEST_ADMIN_DID,
+    TEST_NON_MEMBER_DID,
+  ]);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith(`${PLC_ORIGIN}/`)) {
+      const did = decodeURIComponent(url.slice(PLC_ORIGIN.length + 1).split("/")[0] ?? "");
+      if (fixtureDids.has(did)) {
+        return Response.json({
+          id: did,
+          service: [
+            {
+              id: "#atproto_pds",
+              type: "AtprotoPersonalDataServer",
+              serviceEndpoint: PDS_ORIGIN,
+            },
+          ],
+        });
+      }
+    }
+    return realFetch(input as never, init);
+  }) as typeof globalThis.fetch;
+}
 
 /** Wait for an HTTP endpoint to answer, or throw after `timeoutMs`. */
 async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
@@ -98,6 +148,7 @@ async function main(): Promise<void> {
 
   const pds = startPdsStub();
 
+  stubFixtureDidDocuments();
   // Keep every profile lookup in-process, the same way the appserver's own
   // e2e helpers do (`src/e2e/helpers.ts`). Without these the `getProfile`
   // handler's PDS-first branch resolves the DID through https://plc.directory

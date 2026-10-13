@@ -110,6 +110,23 @@ const Schemas = scope({
      * meaningful for these; clients should hide the author identity.
      */
     "system?": "boolean",
+    /**
+     * True when the message's author is hidden from the viewer by a block,
+     * in either direction: the viewer blocked the author, or the author
+     * blocked the viewer. The server redacts such a row to a tombstone —
+     * `content: ""`, `authorName: ""`, empty reaction/media/link arrays, and
+     * no reply/forward/edit/mimeType/system fields — and this flag is what
+     * distinguishes that tombstone from a genuinely empty message.
+     *
+     * Deliberately direction-blind: it never says *which* of the two
+     * directions produced the hiding.
+     *
+     * Also present on a row fetched as a reveal through
+     * `space.roomy.message.getMessage`, which returns the full message (body,
+     * author, reactions, media, link embeds) *and* this flag, so a viewer
+     * reading one hidden message can tell it apart from an ordinary one.
+     */
+    "blocked?": "boolean",
     timestamp: "string",
     /**
      * Present only when the message has been edited: the ULID of the most

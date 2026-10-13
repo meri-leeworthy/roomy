@@ -238,7 +238,7 @@ export const searchMessagesHandler: QueryHandler<
   for (const [space, ids] of bySpace) {
     const db = openSpaceDb(space);
     try {
-      const { messages } = await selectMessages(db, { kind: "ids", ids }, userDid ?? "");
+      const { messages } = await selectMessages(db, { kind: "ids", ids }, userDid);
       hydratedBySpace.set(space, new Map(messages.map((m) => [m.id, m])));
     } catch (err) {
       log.warn(`[search] selectMessages failed for space ${space}:`, err);
@@ -345,7 +345,7 @@ export const searchMessagesHandler: QueryHandler<
               const { messages: targets } = await selectMessages(
                 targetDb,
                 { kind: "ids", ids: [message.replyTo] },
-                userDid ?? "",
+                userDid,
               );
               const target = targets[0];
               if (target) result.reply = { messageId: message.replyTo, message: target };

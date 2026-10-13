@@ -37,6 +37,10 @@ export { default as IconLink } from "~icons/ph/link-simple-bold";
 export { default as IconArrowUpRight } from "~icons/ph/arrow-up-right-bold";
 export { default as IconCheckSquare } from "~icons/ph/check-square-bold";
 export { default as IconProhibit } from "~icons/ph/prohibit-bold";
+/** A hidden author's message: the blocked-circle-X indicator. Shares a
+    glyph with IconCloseCircle but names a different thing — a viewer-relative
+    block, not a dismiss control. */
+export { default as IconBlocked } from "~icons/ph/x-circle-bold";
 
 // Close / Remove
 export { default as IconCloseCircle } from "~icons/ph/x-circle-bold";

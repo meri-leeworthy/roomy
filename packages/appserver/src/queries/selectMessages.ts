@@ -10,11 +10,18 @@
  * and its own `forwardedFrom` chain for nested forwards) and nested under
  * `forwardedFrom.message` so clients render forwards with no extra fetches.
  *
+ * A message whose author is hidden from the viewer by a block — in either
+ * direction — comes back as a **tombstone**: id, `sort_idx`, timestamp,
+ * `authorDid` and `blocked: true`, with an empty body and no attachments. The
+ * row keeps its place in the page, so the page stays full, `nextCursor` stays
+ * correct and the client has somewhere to draw the indicator. See
+ * `roomPageSql` for why this is a column rather than a `where` clause.
+ *
  * Strategy: 1 query for the message rows + singleton-edge joins (author,
  * reply, forward), then 3 small batch queries (reactions, image+video+
- * file+link embeds, link embed data) keyed on the page's IDs, plus one
- * recursive `selectMessages` batch for the forwarded originals. Constant
- * query count, regardless of page size.
+ * file+link embeds, link embed data) keyed on the page's non-tombstoned IDs,
+ * plus one recursive `selectMessages` batch for the forwarded originals.
+ * Constant query count, regardless of page size.
  *
  * The caller is responsible for authorisation — this helper does not check
  * read access.
@@ -25,6 +32,8 @@ import { selectEmbedJsonByUrl } from "../embed/store.ts";
 import { decodeContent } from "../db/content.ts";
 import { stripNulls } from "../xrpc/strip-nulls.ts";
 import { hydrateProfiles, resolveProfiles } from "./profileStore.ts";
+import type { UserDid as UserDidT } from "@roomy-space/sdk";
+import { hiddenBy } from "./userBlocks.ts";
 import { decodeTime } from "ulidx";
 
 export interface ReactionDto {
@@ -99,6 +108,17 @@ export interface MessageDto {
   media: Array<MediaDto>;
   /** Link embeds with enriched metadata from the embed service. */
   linkEmbeds: Array<LinkEmbedDto>;
+  /**
+   * The message's author is hidden from the viewer by a block, in either
+   * direction (§ user blocks). A hidden author's row is redacted to a
+   * tombstone — identity and ordering kept, body and attachments gone — and
+   * this flag is what tells that row apart from a genuinely empty message.
+   *
+   * `message.getMessage` also sets it on the one row a space admin who placed
+   * the block themselves fetches in full (§3.6): the body is present, and the
+   * viewer still needs to see that the author is hidden.
+   */
+  blocked?: boolean;
 }
 
 export type SelectScope =
@@ -141,6 +161,8 @@ interface BaseRow {
   forward_target: string | null;
   forward_target_room: string | null;
   forward_target_room_name: string | null;
+  /** 1 when the row's author is hidden from the viewer (§ user blocks). */
+  blocked: number;
 }
 
 /**
@@ -182,11 +204,26 @@ async function resolveCursorKey(db: DbLike, cursorId: string): Promise<string> {
  * entity in the room, which is catastrophic on a large bridged channel.
  * Exported so `selectMessages.test.ts` can assert the plan on the SQL the
  * read path actually runs, in both the first-page and cursor forms.
+ *
+ * The hidden-author flag is a column, never a `where` clause. Filtering the
+ * page would shrink it after the `limit` while `nextCursor` is still derived
+ * from `baseRows.length`, so a page with hidden rows would come back short
+ * and a fully hidden page would set no cursor at all — the scrollback below a
+ * blocked author would silently truncate. Redaction keeps the row and its
+ * position; only its body goes.
+ *
+ * It is bound as one JSON array (`?2`), not one parameter per DID, so the
+ * statement text is stable across viewers and the keyset still walks the
+ * index. The index is explicit because the parameter sits in the select list
+ * while `?1` is in the `where`: SQLite binds by index, not by position in the
+ * text, so a cursor page binds `roomId, hidden, cursorKey, cursor`.
  */
 export function roomPageSql(hasCursor: boolean, limit: number): string {
   return `
       select
         e.id as id,
+        (case when author_e.tail in (select value from json_each(?2))
+              then 1 else 0 end) as blocked,
         e.stream_id as stream_id,
         e.sort_idx as sort_idx,
         e.room as room,
@@ -219,8 +256,8 @@ export function roomPageSql(hasCursor: boolean, limit: number): string {
       where e.room = ?1
         and (cc.entity is not null or forward_e.tail is not null)
         ${hasCursor
-          ? `and (coalesce(e.sort_idx, e.id) < ?2
-                  or (coalesce(e.sort_idx, e.id) = ?2 and e.id < ?3))`
+          ? `and (coalesce(e.sort_idx, e.id) < ?3
+                  or (coalesce(e.sort_idx, e.id) = ?3 and e.id < ?4))`
           : ""}
       order by coalesce(e.sort_idx, e.id) desc, e.id desc
       limit ${Math.max(1, Math.min(limit, 100))}
@@ -230,7 +267,7 @@ export function roomPageSql(hasCursor: boolean, limit: number): string {
 export async function selectMessages(
   db: DbLike,
   scope: SelectScope,
-  viewerDid?: string,
+  viewerDid?: UserDidT | null,
   /**
    * The global `link_embeds` store to hydrate link cards from. Optional
    * because a per-space handle cannot reach it — the per-space DB and the
@@ -239,25 +276,45 @@ export async function selectMessages(
    * adapter) renders bare links.
    */
   globalDb?: DbLike | null,
+  /**
+   * The authors hidden from `viewerDid`, already resolved by the caller
+   * (§ user blocks). Omitted, it is resolved here from `viewerDid`. An empty
+   * array is how `message.getMessage`'s reveal branch asks for one id in full
+   * while still resolving the viewer's own reaction (§3.6).
+   *
+   * Passed down the forward-original recursion so an embedded original is
+   * redacted on the same terms as the row that embedded it.
+   */
+  hidden?: readonly string[],
 ): Promise<{ messages: MessageDto[]; nextCursor: string | null }> {
+  const hiddenAuthors = hidden ?? (viewerDid ? [...(await hiddenBy(viewerDid))] : []);
+  // One JSON array bound as one parameter, so the statement text stays stable
+  // and every row's flag is computed by the same query.
+  const hiddenParam = JSON.stringify(hiddenAuthors);
+
   // ── Step 1: pull the base rows ────────────────────────────────────────
   let baseRows: BaseRow[];
   if (scope.kind === "room") {
     const cursorKey = scope.cursor ? await resolveCursorKey(db, scope.cursor) : null;
     const stmt = db.query(roomPageSql(cursorKey !== null, scope.limit));
     baseRows = cursorKey !== null
-      ? await stmt.all([scope.roomId, cursorKey, scope.cursor])
-      : await stmt.all([scope.roomId]);
+      ? await stmt.all([scope.roomId, hiddenParam, cursorKey, scope.cursor])
+      : await stmt.all([scope.roomId, hiddenParam]);
   } else {
     if (scope.ids.length === 0) {
       return { messages: [], nextCursor: null };
     }
-    const placeholders = scope.ids.map(() => "?").join(",");
+    // Explicit indices: the hidden set is `?1` in the select list and the ids
+    // follow it, so the bind array is `hidden, ...ids` whatever the text
+    // order.
+    const placeholders = scope.ids.map((_, i) => `?${i + 2}`).join(",");
     baseRows = await db
       .query(
         `
         select
           e.id as id,
+          (case when author_e.tail in (select value from json_each(?1))
+                then 1 else 0 end) as blocked,
           e.stream_id as stream_id,
           e.sort_idx as sort_idx,
           e.room as room,
@@ -290,12 +347,12 @@ export async function selectMessages(
         where e.id in (${placeholders})
         `,
       )
-      .all([...scope.ids]);
+      .all([hiddenParam, ...scope.ids]);
   }
 
   if (baseRows.length === 0) return { messages: [], nextCursor: null };
-
-  const ids = baseRows.map((r) => r.id);
+  // Ordering is kept for every row, tombstones included: the page's length
+  // and the cursor derived from it must not move when an author is hidden.
 
   // ── Step 2: forwarded-original resolution ─────────────────────────────
   // Every forward row (forward-as-embed with own content, or a legacy
@@ -314,9 +371,18 @@ export async function selectMessages(
   // Constant query count: one `selectMessages` batch call per chain level.
   // The chain set bounds pathological cycles (A forwards B, B forwards A):
   // a forward never re-resolves an id already on its chain.
+  //
+  // The hidden set travels with the recursion: an embedded original is
+  // redacted when the ORIGINAL's author is hidden, so a blocked author's words
+  // do not survive by being forwarded by somebody else. A blocked row is
+  // skipped outright — its tombstone carries no `forwardedFrom` for the
+  // original to fill.
   const chain = new Set(scope.kind === "ids" ? (scope.forwardChain ?? []) : []);
   const forwardTargets = baseRows
-    .filter((r) => r.forward_target && !chain.has(r.forward_target))
+    .filter(
+      (r) =>
+        r.blocked !== 1 && r.forward_target && !chain.has(r.forward_target),
+    )
     .map((r) => r.forward_target!) as string[];
 
   const forwardOriginalDto = new Map<string, MessageDto>();
@@ -326,22 +392,34 @@ export async function selectMessages(
       { kind: "ids", ids: [...new Set(forwardTargets)], forwardChain: [...chain, ...forwardTargets] },
       viewerDid,
       globalDb,
+      hiddenAuthors,
     );
     for (const orig of originals) forwardOriginalDto.set(orig.id, orig);
   }
 
   // ── Step 3: batch-fetch reactions / embeds / link embed data keyed by id ──
-  const idPh = ids.map(() => "?").join(",");
+  //
+  // Tombstoned rows are excluded. The batches are keyed on the page's ids, so
+  // a hidden author's reactions, media URLs, alt text and enriched link cards
+  // would otherwise be pulled into the process for a row that renders none of
+  // them — and into a response that must not carry them. A page whose every
+  // row is hidden therefore runs no batch query at all.
+  const liveIds = baseRows.filter((r) => r.blocked !== 1).map((r) => r.id);
+  const idPh = liveIds.map(() => "?").join(",");
 
-  const reactionRows = await db
-    .query(
-      `select entity, reaction, user, reaction_id from comp_reaction
-        where entity in (${idPh})`,
-    )
-    .all<{ entity: string; reaction: string; user: string; reaction_id: string }>([...ids]);
+  const reactionRows = liveIds.length === 0
+    ? []
+    : await db
+        .query(
+          `select entity, reaction, user, reaction_id from comp_reaction
+            where entity in (${idPh})`,
+        )
+        .all<{ entity: string; reaction: string; user: string; reaction_id: string }>([...liveIds]);
 
-  const embedRows = await db
-    .query(
+  const embedRows = liveIds.length === 0
+    ? []
+    : await db
+        .query(
       // entities.room = messageId for embed entities; UNION across the four
       // embed component tables. comp_embed_link has no media metadata — fall
       // back to nulls and "text/uri-list" mime type. Image/video share
@@ -380,23 +458,23 @@ export async function selectMessages(
               null as length, null as name
          from comp_embed_link el
          join entities e on e.id = el.entity
-        where e.room in (${idPh})
-          and el.show_preview = 1`,
-    )
-    // Each UNION branch has its own `where ... in (${idPh})` — bind ids
-    // once per branch (4× total). bun:sqlite has no positional reuse here.
-    .all<{
-      message_id: string;
-      url: string;
-      mime_type: string;
-      alt: string | null;
-      width: number | null;
-      height: number | null;
-      blurhash: string | null;
-      size: number | null;
-      length: number | null;
-      name: string | null;
-    }>([...ids, ...ids, ...ids, ...ids]);
+          where e.room in (${idPh})
+            and el.show_preview = 1`,
+      )
+      // Each UNION branch has its own `where ... in (${idPh})` — bind ids
+      // once per branch (4× total). bun:sqlite has no positional reuse here.
+      .all<{
+        message_id: string;
+        url: string;
+        mime_type: string;
+        alt: string | null;
+        width: number | null;
+        height: number | null;
+        blurhash: string | null;
+        size: number | null;
+        length: number | null;
+        name: string | null;
+      }>([...liveIds, ...liveIds, ...liveIds, ...liveIds]);
 
   // ── Step 4: assemble ──────────────────────────────────────────────────
   const reactionMap = new Map<string, Map<string, Set<string>>>();
@@ -501,6 +579,35 @@ export async function selectMessages(
     const authorHandle = r.author_handle;
     const authorAvatar = r.author_avatar;
 
+    // A hidden author's row is a tombstone: identity and ordering kept — they
+    // are what the indicator, the deep link and the page's position rest on —
+    // and everything else gone. It short-circuits here, before content
+    // decoding, before the reaction / media / link maps are consulted, and
+    // before `hydrateProfiles` could attach a name and avatar, so a blocked
+    // body is never even built.
+    if (r.blocked === 1) {
+      return stripNulls({
+        id: r.id,
+        sort_idx: r.sort_idx,
+        content: "",
+        authorDid: authorDid ?? "",
+        authorName: "",
+        blocked: true,
+        // Legacy forward-reference rows carry no comp_content, so
+        // `cc.timestamp` is NULL; fall back to the forward event's own ULID
+        // time, exactly as the ordinary path does.
+        timestamp:
+          ts != null
+            ? new Date(ts).toISOString()
+            : r.forward_target != null
+              ? new Date(decodeTime(r.id)).toISOString()
+              : "",
+        reactions: [],
+        media: [],
+        linkEmbeds: [],
+      }) as MessageDto;
+    }
+
     const content = decodeContent(mime, data);
 
     const reactions: Array<ReactionDto> = [];
@@ -581,8 +688,12 @@ export async function selectMessages(
   // fetch is a third-party HTTP round-trip inside `sendEvents`, and the
   // client resolves the author's profile from the same global store when it
   // applies the diff.
+  // Tombstones are left out: a hidden author's name and avatar must not be
+  // attached to the indicator row, and `hydrateProfiles` would overwrite the
+  // empty `authorName` the tombstone carries. Nothing is lost by skipping
+  // them — the row renders no identity at all.
   await hydrateProfiles(
-    messages,
+    messages.filter((m) => m.blocked !== true),
     (m) => m.authorDid,
     (m, p) => {
       if (p.name != null) m.authorName = p.name;

@@ -206,6 +206,9 @@
         "authorHandle": {
           "type": "string"
         },
+        "blocked": {
+          "type": "boolean"
+        },
         "forwardedFrom": {
           "type": "ref",
           "ref": "#forwardedFrom"
@@ -327,6 +330,9 @@
         },
         "authorHandle": {
           "type": "string"
+        },
+        "blocked": {
+          "type": "boolean"
         },
         "forwardedFrom": {
           "type": "ref",

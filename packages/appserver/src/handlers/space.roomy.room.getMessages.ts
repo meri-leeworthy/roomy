@@ -64,7 +64,7 @@ export const getMessagesHandler: QueryHandler<
             roomId,
             limit,
             cursor,
-          }, userDid ?? "", tryOpenGlobalDb());
+          }, userDid, tryOpenGlobalDb());
           s.setAttribute("roomy.message_count", result.messages.length);
           return result;
         },

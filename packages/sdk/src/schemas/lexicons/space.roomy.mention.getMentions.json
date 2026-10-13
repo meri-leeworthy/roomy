@@ -229,6 +229,9 @@
         "authorHandle": {
           "type": "string"
         },
+        "blocked": {
+          "type": "boolean"
+        },
         "forwardedFrom": {
           "type": "ref",
           "ref": "#forwardedFrom"

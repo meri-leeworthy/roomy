@@ -19,6 +19,12 @@
     prefetchInternalLinkSummariesFromBlocks,
   } from "./prefetch-link-summaries";
   import { parseRichTextContent } from "./message-body";
+  import { isBlockedTombstone, redactBlockedAuthors } from "./redact";
+  import {
+    blockState,
+    ensureOwnBlocks,
+    markRevealed,
+  } from "$lib/blocks-state.svelte";
   import { mergeTimeline, type TimelineMessage } from "./timeline";
   import { RICHTEXT_MIME } from "@roomy-space/sdk";
   import type { Block } from "@roomy-space/sdk";
@@ -82,12 +88,74 @@
   // Lifted state for editing messages
   let editingMessageId = $state<string | undefined>(undefined);
 
+  // ── Blocked authors ────────────────────────────────────────────────────
+  // The viewer's own written blocks, read from their repo, and the ids this
+  // session has fetched as a reveal. Nothing here is enforcement: the server
+  // redacts every read. The set closes the window `staleTime: Infinity` opens
+  // (a row cached before the block keeps its body until the next diff), and
+  // answers the one question the server cannot answer for the client — whether
+  // to *offer* a reveal.
+  $effect(() => {
+    // Reading the DID makes this re-run on sign-in and account switch.
+    currentUserDid;
+    ensureOwnBlocks();
+  });
+  const blockedAuthors = $derived(blockState.ownBlockedDids);
+  const revealedIds = $derived(blockState.revealedMessageIds);
+  let revealingId = $state<string | null>(null);
+
   // Chronological order + mergeWithPrevious from the query data. The rule
   // (and its forward handling) lives in `timeline.ts` — see there for why a
   // forward is a hard merge boundary.
+  //
+  // The redaction pass runs first, over the cached array, so the cache keeps
+  // the server's answer and only the render becomes the viewer's: a hidden
+  // author's body must not be painted even for the beat between a local block
+  // and the server's own set catching up.
   let timeline = $derived(
-    messagesQuery.data ? mergeTimeline(messagesQuery.data) : [],
+    mergeTimeline(
+      messagesQuery.data
+        ? redactBlockedAuthors(messagesQuery.data, blockedAuthors, revealedIds)
+        : [],
+    ),
   );
+
+  /**
+   * Open one tombstone: fetch that message in full through the single route
+   * the server widens for it, and adopt whatever comes back.
+   *
+   * The server is the arbiter. A tombstone response — a stale admin edge, a
+   * space the admin has since left — leaves the indicator exactly where it
+   * was; the client holds no optimistic copy of a body it never had. On a full
+   * DTO the row is replaced in place: the row itself when the fetched id is
+   * the row, or the embedded original when the affordance was on a forward.
+   */
+  async function revealMessage(containerId: string, targetId: string): Promise<void> {
+    if (revealingId !== null) return;
+    revealingId = targetId;
+    try {
+      const dto = (await px().query("space.roomy.message.getMessage", {
+        messageId: targetId,
+      })) as Message;
+      if (isBlockedTombstone(dto)) return;
+      markRevealed(dto.id);
+      queryClient.setQueryData<Message[]>(messagesKey(roomId), (existing) => {
+        if (!existing) return existing;
+        return existing.map((m) => {
+          if (m.id !== containerId) return m;
+          if (m.id === dto.id) return dto;
+          const forward = m.forwardedFrom;
+          return forward
+            ? { ...m, forwardedFrom: { ...forward, message: dto } }
+            : m;
+        });
+      });
+    } catch (e) {
+      console.error("Failed to reveal a blocked message:", e);
+    } finally {
+      revealingId = null;
+    }
+  }
 
   // Warm the badge-summary cache for every internal link in the loaded
   // message set so badges mount with a cache hit instead of each issuing a
@@ -528,6 +596,10 @@
                       message={message}
                       currentUserDid={currentUserDid}
                       {isAdmin}
+                      {blockedAuthors}
+                      {revealedIds}
+                      {revealingId}
+                      onReveal={revealMessage}
                       canCreateSpaceCard={canCreateSpaceCard}
                       {canSaveToCollection}
                       editingMessageId={editingMessageId}

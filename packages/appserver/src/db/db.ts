@@ -144,6 +144,24 @@ export function openSpaceDb(spaceDid: string): AsyncDatabase {
 }
 
 /**
+ * The space DID that owns `entityId` (a room or message entity), from the
+ * global `entity_space` index. `null` when no such entity was materialised.
+ *
+ * Room/message-scoped handlers need the owning space for per-space checks
+ * that are not DB routing (the admin edge a reveal is gated on, for one)
+ * without opening the DB to ask.
+ */
+export async function resolveSpaceForEntity(
+  entityId: string,
+): Promise<string | null> {
+  const global = openGlobalDb();
+  const row = await global
+    .query("select space_did from entity_space where entity_id = ?")
+    .get<{ space_did: string }>(entityId);
+  return row?.space_did ?? null;
+}
+
+/**
  * Resolve the space DID that owns `entityId` (a room or message entity) by
  * reading the global `entity_space` index, then return a handle that routes
  * requests to that space's per-space DB.
@@ -157,12 +175,9 @@ export function openSpaceDb(spaceDid: string): AsyncDatabase {
 export async function openSpaceDbForEntity(
   entityId: string,
 ): Promise<AsyncDatabase | null> {
-  const global = openGlobalDb();
-  const row = await global
-    .query("select space_did from entity_space where entity_id = ?")
-    .get<{ space_did: string }>(entityId);
-  if (!row) return null;
-  return openSpaceDb(row.space_did);
+  const spaceDid = await resolveSpaceForEntity(entityId);
+  if (!spaceDid) return null;
+  return openSpaceDb(spaceDid);
 }
 
 /**

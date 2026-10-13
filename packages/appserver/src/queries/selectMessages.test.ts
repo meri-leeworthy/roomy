@@ -7,6 +7,7 @@ import { StreamDid, UserDid, newUlid } from "@roomy-space/sdk";
 import type { DbLike } from "../db/types.ts";
 import { toAsyncDb } from "../db/syncAdapter.ts";
 import { closeDb, openDb, openGlobalDb } from "../db/db.ts";
+import { writeSettledLinkEmbed } from "../embed/store.ts";
 import { selectMessages, roomPageSql } from "./selectMessages.ts";
 import { _profileHydrationInFlight, _resetProfileStoreCache, _setTestGetProfiles } from "./profileStore.ts";
 import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
@@ -662,5 +663,405 @@ describe("selectMessages room page plan", () => {
       expect(plan).not.toMatch(/TEMP B-TREE/);
       expect(plan).toContain("idx_entities_room_sort_key");
     }
+  });
+});
+
+describe("selectMessages blocked authors", () => {
+  const VIEWER = UserDid.assert("did:plc:viewer");
+  /** An author the viewer blocked: their rows are hidden from the viewer. */
+  const HIDDEN = "did:plc:hidden-author";
+  /** An author nothing hides. */
+  const OPEN = "did:plc:open-author";
+
+  /** The hidden set `selectMessages` would have resolved for the viewer. */
+  const hiding = (...dids: string[]) => dids;
+
+  /**
+   * Seed a message by `author` carrying every attachment a tombstone has to
+   * drop: a reaction, an image embed, a link embed and its enriched data.
+   * Seeding them is the point — the row must come back with none of them even
+   * though the batch queries, keyed on the page's ids, would have found them.
+   */
+  async function seedRichMessage(
+    db: DbLike,
+    roomId: string,
+    author: string,
+    sortIdx: string,
+    body: string,
+  ): Promise<string> {
+    const id = newUlid();
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+      author,
+      STREAM,
+    ]);
+    await db.run(
+      "insert into entities (id, stream_id, room, sort_idx) values (?, ?, ?, ?)",
+      [id, STREAM, roomId, sortIdx],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      id,
+      author,
+    ]);
+    // `comp_reaction.user` is an entity reference: the reacting user needs a
+    // row.
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+      OPEN,
+      STREAM,
+    ]);
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit, timestamp) values (?, 'text/markdown', ?, ?, ?)",
+      [id, Buffer.from(body), id, 1_700_000_000_000],
+    );
+    await db.run(
+      "insert into comp_reaction (entity, user, reaction_id, reaction) values (?, ?, ?, ?)",
+      [id, OPEN, newUlid(), "👍"],
+    );
+    // Embed entities carry the MESSAGE id in their own `room` column — that is
+    // what the batch query joins on.
+    const imageUrl = newUlid();
+    await db.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
+      imageUrl,
+      STREAM,
+      id,
+    ]);
+    await db.run(
+      "insert into comp_embed_image (entity, mime_type, width, height, alt) values (?, 'image/png', 10, 10, 'a picture')",
+      [imageUrl],
+    );
+    // A link embed's entity id IS its URL: the store is keyed by that value,
+    // and `linkEmbeds[].url` comes from the same column.
+    const linkUrl = `https://example.com/${id}`;
+    await db.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
+      linkUrl,
+      STREAM,
+      id,
+    ]);
+    await db.run(
+      "insert into comp_embed_link (entity, show_preview) values (?, 1)",
+      [linkUrl],
+    );
+    // Enrichment lives in the global store, keyed by the link's URL; the
+    // per-space row records only that the message holds a link.
+    await writeSettledLinkEmbed(
+      await openGlobalDb(),
+      linkUrl,
+      JSON.stringify({ t: "A title" }),
+      1,
+    );
+    return id;
+  }
+
+  test("a hidden author's row is a tombstone and the page stays the same shape", async () => {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    const openId = await seedRichMessage(db, roomId, OPEN, "03", "visible body");
+    const hiddenId = await seedRichMessage(db, roomId, HIDDEN, "02", "hidden body");
+    const olderId = await seedRichMessage(db, roomId, OPEN, "01", "oldest body");
+
+    await seedGlobalProfile(HIDDEN, "hidden.bsky.social", "Hidden Author");
+    await seedGlobalProfile(OPEN, "open.bsky.social", "Open Author");
+
+    const page = await selectMessages(
+      db,
+      { kind: "room", roomId, limit: 2, cursor: null },
+      VIEWER,
+      await openGlobalDb(),
+      hiding(HIDDEN),
+    );
+    const unredacted = await selectMessages(
+      db,
+      { kind: "room", roomId, limit: 2, cursor: null },
+      VIEWER,
+      await openGlobalDb(),
+      hiding(),
+    );
+
+    // Redaction keeps the row, so the page is the same length in the same
+    // order and the cursor — derived from `baseRows.length === limit` — names
+    // the same id. A `where`-clause filter would return one row here and,
+    // when a whole page is hidden, no cursor at all: the scrollback below a
+    // blocked author would silently truncate.
+    expect(page.messages.map((m) => m.id)).toEqual(unredacted.messages.map((m) => m.id));
+    expect(page.nextCursor).toBe(unredacted.nextCursor);
+    expect(page.messages).toHaveLength(2);
+    expect(page.nextCursor).toBe(hiddenId);
+    expect(olderId).toBeTruthy();
+
+    const tombstone = page.messages[0]!;
+    expect(tombstone.id).toBe(hiddenId);
+    expect(tombstone.blocked).toBe(true);
+    expect(tombstone.content).toBe("");
+    expect(tombstone.authorName).toBe("");
+    expect(tombstone.authorDid).toBe(HIDDEN);
+    expect(tombstone.timestamp).toBeTruthy();
+    expect(tombstone.sort_idx).toBe("02");
+    expect(tombstone.authorHandle).toBeUndefined();
+    expect(tombstone.authorAvatar).toBeUndefined();
+    expect(tombstone.mimeType).toBeUndefined();
+    expect(tombstone.replyTo).toBeUndefined();
+    expect(tombstone.forwardedFrom).toBeUndefined();
+    expect(tombstone.lastEdit).toBeUndefined();
+    expect(tombstone.system).toBeUndefined();
+    expect(tombstone.reactions).toEqual([]);
+    expect(tombstone.media).toEqual([]);
+    expect(tombstone.linkEmbeds).toEqual([]);
+    // The profile hydration pass skipped it: the row would otherwise have
+    // picked up "Hidden Author" from the global store.
+    expect(tombstone.authorName).not.toBe("Hidden Author");
+
+    // Not over-broad: the rows that are not hidden keep their attachments, so
+    // the emptiness above is the redaction and not a query that returned
+    // nothing.
+    const visible = page.messages[1]!;
+    expect(visible.id).toBe(openId);
+    expect(visible.blocked).toBeUndefined();
+    expect(visible.content).toBe("visible body");
+    expect(visible.authorName).toBe("Open Author");
+    expect(visible.reactions).toHaveLength(1);
+    // The image, plus the link embed — the read path carries `text/uri-list`
+    // entries in `media` too, and the client filters them out when rendering.
+    expect(visible.media.filter((m) => !m.type.startsWith("text/"))).toHaveLength(1);
+    expect(visible.linkEmbeds).toHaveLength(1);
+    expect(visible.linkEmbeds[0]!.embed).toEqual({ t: "A title" });
+  });
+
+  test("a forward of a hidden author's message redacts the embedded original", async () => {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    const channelId = newUlid();
+    const originalId = newUlid();
+    const forwardId = newUlid();
+
+    // `seedForward` builds the entities; the original is authored by HIDDEN
+    // and the forwarder by OPEN, so only the embedded original is redacted.
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+      OPEN,
+      STREAM,
+    ]);
+    await db.run(
+      "insert into entities (id, stream_id, room) values (?, ?, ?)",
+      [forwardId, STREAM, roomId],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      forwardId,
+      OPEN,
+    ]);
+    await db.run(
+      "insert or ignore into entities (id, stream_id, room) values (?, ?, ?)",
+      [originalId, STREAM, channelId],
+    );
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+      channelId,
+      STREAM,
+    ]);
+    await db.run("insert or replace into comp_info (entity, name) values (?, ?)", [
+      channelId,
+      "General",
+    ]);
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'forward')", [
+      forwardId,
+      originalId,
+    ]);
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+      HIDDEN,
+      STREAM,
+    ]);
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit) values (?, 'text/markdown', ?, ?)",
+      [originalId, Buffer.from("the original words"), originalId],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      originalId,
+      HIDDEN,
+    ]);
+
+    const { messages } = await selectMessages(
+      db,
+      { kind: "room", roomId, limit: 50, cursor: null },
+      VIEWER,
+      null,
+      hiding(HIDDEN),
+    );
+
+    expect(messages).toHaveLength(1);
+    const forward = messages[0]!;
+    // The forwarder's own row survives — they are not blocked.
+    expect(forward.id).toBe(forwardId);
+    expect(forward.blocked).toBeUndefined();
+    expect(forward.authorDid).toBe(OPEN);
+    expect(forward.forwardedFrom?.messageId).toBe(originalId);
+
+    // Only the embedded original is redacted: the original is authored by
+    // HIDDEN and the forwarder by OPEN, and the forward row keeps the
+    // forwarder's own identity.
+    const embedded = forward.forwardedFrom?.message;
+    expect(embedded?.id).toBe(originalId);
+    expect(embedded?.blocked).toBe(true);
+    expect(embedded?.content).toBe("");
+    expect(embedded?.authorName).toBe("");
+  });
+
+  test("a forward by a hidden author is redacted wholesale", async () => {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    const originalId = newUlid();
+    const forwardId = newUlid();
+
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+      OPEN,
+      STREAM,
+    ]);
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+      HIDDEN,
+      STREAM,
+    ]);
+    await db.run(
+      "insert into entities (id, stream_id, room) values (?, ?, ?)",
+      [forwardId, STREAM, roomId],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      forwardId,
+      HIDDEN,
+    ]);
+    // The original lives in another room, so the forward row is the only row
+    // this page carries and nothing about it can be confused with a row of
+    // the page itself.
+    const originalRoomId = newUlid();
+    await db.run(
+      "insert or ignore into entities (id, stream_id, room) values (?, ?, ?)",
+      [originalId, STREAM, originalRoomId],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'forward')", [
+      forwardId,
+      originalId,
+    ]);
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit) values (?, 'text/markdown', ?, ?)",
+      [originalId, Buffer.from("someone else's words"), originalId],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      originalId,
+      OPEN,
+    ]);
+
+    const { messages } = await selectMessages(
+      db,
+      { kind: "room", roomId, limit: 50, cursor: null },
+      VIEWER,
+      null,
+      hiding(HIDDEN),
+    );
+
+    expect(messages).toHaveLength(1);
+    const forward = messages[0]!;
+    expect(forward.id).toBe(forwardId);
+    expect(forward.blocked).toBe(true);
+    expect(forward.content).toBe("");
+    expect(forward.authorName).toBe("");
+    // The tombstone carries no forward attachment for the original to fill.
+    expect(forward.forwardedFrom).toBeUndefined();
+  });
+
+  test("a cursor page binds against the renumbered room-scope parameters", async () => {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    const ids: string[] = [];
+    for (let i = 1; i <= 5; i++) {
+      ids.push(
+        await seedRichMessage(
+          db,
+          roomId,
+          i % 2 === 1 ? HIDDEN : OPEN,
+          `0${i}`,
+          `body ${i}`,
+        ),
+      );
+    }
+
+    // Newest-first paging, two rows at a time, with the hidden set in play.
+    // The room scope binds `roomId, hidden, cursorKey, cursor` — the hidden
+    // parameter sits *before* the cursor parameters — so a mis-numbered
+    // statement shifts the keyset and drops or repeats rows here.
+    // `selectMessages` re-sorts each page ascending (oldest → newest), the
+    // reverse of the SQL page order.
+    const first = await selectMessages(
+      db,
+      { kind: "room", roomId, limit: 2, cursor: null },
+      VIEWER,
+      null,
+      hiding(HIDDEN),
+    );
+    expect(first.messages.map((m) => m.id)).toEqual([ids[3]!, ids[4]!]);
+    expect(first.nextCursor).toBe(ids[3]!);
+
+    const second = await selectMessages(
+      db,
+      { kind: "room", roomId, limit: 2, cursor: first.nextCursor },
+      VIEWER,
+      null,
+      hiding(HIDDEN),
+    );
+    expect(second.messages.map((m) => m.id)).toEqual([ids[1]!, ids[2]!]);
+    expect(second.nextCursor).toBe(ids[1]!);
+
+    const third = await selectMessages(
+      db,
+      { kind: "room", roomId, limit: 2, cursor: second.nextCursor },
+      VIEWER,
+      null,
+      hiding(HIDDEN),
+    );
+    expect(third.messages.map((m) => m.id)).toEqual([ids[0]!]);
+    // A short page derives no cursor: the scrollback ends here.
+    expect(third.nextCursor).toBeNull();
+
+    // Every row came back exactly once, whether tombstoned or not. (Each page
+    // is ascending, so the union — not the concatenation — is what has to
+    // cover the room exactly.)
+    const seen = [...first.messages, ...second.messages, ...third.messages];
+    expect(new Set(seen.map((m) => m.id))).toEqual(new Set(ids));
+    expect(seen.filter((m) => m.blocked === true)).toHaveLength(3);
+  });
+
+  test("paging continues past a fully hidden block of history", async () => {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    const ids: string[] = [];
+    // The three oldest rows all belong to the hidden author: a page of them
+    // renders nothing but indicators, which is exactly the page a `where`
+    // clause would have shortened to nothing and ended the scrollback on.
+    for (let i = 1; i <= 6; i++) {
+      ids.push(
+        await seedRichMessage(
+          db,
+          roomId,
+          i <= 3 ? HIDDEN : OPEN,
+          `0${i}`,
+          `body ${i}`,
+        ),
+      );
+    }
+
+    const newest = await selectMessages(
+      db,
+      { kind: "room", roomId, limit: 3, cursor: null },
+      VIEWER,
+      null,
+      hiding(HIDDEN),
+    );
+    expect(newest.messages.map((m) => m.id)).toEqual([ids[3]!, ids[4]!, ids[5]!]);
+    expect(newest.nextCursor).toBe(ids[3]!);
+
+    const rest = await selectMessages(
+      db,
+      { kind: "room", roomId, limit: 3, cursor: newest.nextCursor },
+      VIEWER,
+      null,
+      hiding(HIDDEN),
+    );
+    expect(rest.messages.map((m) => m.id)).toEqual([ids[0]!, ids[1]!, ids[2]!]);
+    expect(rest.messages.every((m) => m.blocked === true)).toBe(true);
+    expect(rest.messages.every((m) => m.content === "")).toBe(true);
+    expect(rest.nextCursor).toBe(ids[0]!);
   });
 });

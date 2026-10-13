@@ -5,6 +5,7 @@
   import Badge from "../../../ui/badge/Badge.svelte";
   import {
     IconAlertCircle,
+    IconBlocked,
     IconHourglassMedium,
     IconLoading,
   } from "../../../../icons/index";
@@ -39,6 +40,12 @@
     showToolbar = false,
     compact = false,
     deliveryState,
+    // Blocked-author rendering
+    blocked = false,
+    revealed = false,
+    canReveal = false,
+    revealing = false,
+    onReveal,
     // Avatar fallback handling: wrappers may want a CDN-resolved URL
     avatarSrc,
     // Behaviour hooks
@@ -86,6 +93,32 @@
      * server leave this unset.
      */
     deliveryState?: "pending" | "failed" | "queued";
+    /**
+     * The message's author is hidden from the viewer by a block (§ user
+     * blocks). The avatar slot carries the blocked indicator instead of an
+     * avatar and the row renders no body, no reply context, no media, no link
+     * embeds, no reactions and no actions — unless `revealed` is also set.
+     */
+    blocked?: boolean;
+    /**
+     * This particular row was fetched as a reveal (the viewer is an admin of
+     * the space and placed the block themselves), so its full body arrived
+     * from the server. It renders as an ordinary row plus the "blocked"
+     * marker, so an admin reading it still sees the author is hidden.
+     */
+    revealed?: boolean;
+    /**
+     * The viewer may open this row's tombstone: the wrapper has established
+     * both clauses the server gates the reveal on (the viewer is an admin of
+     * the space, and the author is in the viewer's own block set). When set,
+     * the blocked indicator becomes the reveal control. Must never be set
+     * where the server would refuse the fetch.
+     */
+    canReveal?: boolean;
+    /** A reveal fetch for this row is in flight; the indicator spins. */
+    revealing?: boolean;
+    /** Requests the reveal fetch. The wrapper owns the request and adoption. */
+    onReveal?: (e: MouseEvent) => void;
     /** Pre-resolved avatar URL (e.g. after CDN rewriting). Falls back to authorAvatarUrl. */
     avatarSrc?: string;
     onAvatarClick?: (e: MouseEvent) => void;
@@ -129,6 +162,15 @@
       mergeWithPrevious ? "" : compact ? "-mt-0.5 mb-0.5" : "-mt-1 mb-1"
     }`,
   );
+
+  /**
+   * A hidden author's row whose full body did NOT arrive: the tombstone the
+   * timeline serves for every viewer. It renders the indicator in the avatar
+   * slot and nothing else — no author line, no body, no media, no reactions,
+   * no actions. A row fetched as a reveal sets `blocked` and `revealed`
+   * together and is an ordinary row carrying the marker instead.
+   */
+  let suppressed = $derived(blocked && !revealed);
 </script>
 
 {#snippet timestampLabel(date: Date)}
@@ -150,6 +192,20 @@
     class="text-[11px] font-medium align-middle text-base-400 dark:text-base-500"
   >
     edited
+  </span>
+{/snippet}
+
+<!-- The marker a revealed row carries: this author is blocked, so the body
+     the viewer is reading arrived only because the server widened this one
+     fetch for an admin who placed the block themselves. Never shown together
+     with the indicator — a revealed row is an ordinary row plus this. -->
+{#snippet blockedLabel()}
+  <span
+    class="inline-flex items-center gap-1 align-middle text-[11px] font-medium text-base-400 dark:text-base-500"
+    data-testid="blocked-marker"
+  >
+    <IconBlocked class="size-3 shrink-0" />
+    blocked
   </span>
 {/snippet}
 
@@ -217,8 +273,11 @@
     </div>
   {/if}
 
+  <!-- A tombstone carries no reply context: the server omits `replyTo` and
+       `forwardedFrom` from a redacted row, and a preview of another message
+       would be a second leak of the same author. -->
   <div class={mergeWithPrevious ? "pl-12" : ""}>
-    {#if replyContext}
+    {#if replyContext && !suppressed}
       {@render replyContext()}
     {/if}
   </div>
@@ -243,6 +302,42 @@
              never moves the message body. -->
         <div class="size-8 shrink-0 sm:size-10">
           {@render selectionIndicator()}
+        </div>
+      {:else if blocked}
+        <!-- A hidden author's row. The indicator takes the avatar's box
+             exactly, so the timeline's alignment is unchanged, and it is the
+             only interactive thing on the row when the viewer may reveal
+             (an admin of the space who placed the block themselves). -->
+        <div
+          class="flex size-8 shrink-0 items-center justify-center sm:size-10"
+          data-testid="blocked-indicator"
+        >
+          {#if canReveal}
+            <button
+              type="button"
+              class="flex size-8 shrink-0 items-center justify-center rounded-full text-base-400 transition-colors hover:bg-base-200 hover:text-base-700 dark:text-base-500 dark:hover:bg-base-800 dark:hover:text-base-200 sm:size-10"
+              aria-label="Show blocked message"
+              title="Show blocked message"
+              aria-busy={revealing}
+              disabled={revealing}
+              data-testid="reveal-blocked"
+              onclick={(e) => {
+                e.stopPropagation();
+                onReveal?.(e);
+              }}
+            >
+              {#if revealing}
+                <IconLoading class="size-4 shrink-0 animate-spin" />
+              {:else}
+                <IconBlocked class="size-4 shrink-0" />
+              {/if}
+            </button>
+          {:else}
+            <IconBlocked
+              class="size-4 shrink-0 text-base-400 dark:text-base-500"
+              aria-label="Blocked user"
+            />
+          {/if}
         </div>
       {:else if deliveryState === "pending"}
         <!-- Sized and top-aligned like the avatar it replaces, so the swap
@@ -298,103 +393,128 @@
         </span>
       {:else if !mergeWithPrevious}
         <div class="text-sm w-full text-start">
-          <span class="gap-2">
-          {#if profileUrl}
-            <a
-              href={profileUrl}
-              class="font-medium text-accent-700 dark:text-accent-400 hover:underline"
-              >{authorName || (authorHandle ? `@${authorHandle}` : "")}</a
-            >
+          {#if suppressed}
+            <!-- A hidden author has no identity to show: the indicator in
+                 the avatar slot is the whole row, and only the timestamp
+                 keeps its place in the timeline legible. -->
+            <span class="opacity-70">
+              {@render timestampLabel(timestamp)}
+            </span>
           {:else}
-            <span class="font-medium text-accent-700 dark:text-accent-400"
-              >{authorName || (authorHandle ? `@${authorHandle}` : "")}</span
-            >
-          {/if}
-            {#if authorHandle}
-              {#if profileUrl}
-                <a
-                  href={profileUrl}
-                  class="opacity-75 font-normal hover:underline"
-                  >@{authorHandle}</a
-                >
-              {:else}
-                <span class="opacity-75 font-normal">@{authorHandle}</span>
-              {/if}
-            {/if}
-            {#if isBridged}
-              <Badge
-                variant="secondary"
-                title="This message was bridged from Discord."
-                class="text-[10px] -my-0.5 px-1.5 font-bold opacity-75"
+            <span class="gap-2">
+            {#if profileUrl}
+              <a
+                href={profileUrl}
+                class="font-medium text-accent-700 dark:text-accent-400 hover:underline"
+                >{authorName || (authorHandle ? `@${authorHandle}` : "")}</a
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
-                  fill="currentColor"
-                  class="bi bi-discord"
-                  viewBox="0 0 16 16"
-                  ><path
-                    d="M13.545 2.907a13.2 13.2 0 0 0-3.257-1.011.05.05 0 0 0-.052.025c-.141.25-.297.577-.406.833a12.2 12.2 0 0 0-3.658 0 8 8 0 0 0-.412-.833.05.05 0 0 0-.052-.025c-1.125.194-2.22.534-3.257 1.011a.04.04 0 0 0-.021.018C.356 6.024-.213 9.047.066 12.032q.003.022.021.037a13.3 13.3 0 0 0 3.995 2.02.05.05 0 0 0 .056-.019q.463-.63.818-1.329a.05.05 0 0 0-.01-.059l-.018-.011a9 9 0 0 1-1.248-.595.05.05 0 0 1-.02-.066l.015-.019q.127-.095.248-.195a.05.05 0 0 1 .051-.007c2.619 1.196 5.454 1.196 8.041 0a.05.05 0 0 1 .053.007q.121.1.248.195a.05.05 0 0 1-.004.085 8 8 0 0 1-1.249.594.05.05 0 0 0-.03.03.05.05 0 0 0 .003.041c.24.465.515.909.817 1.329a.05.05 0 0 0 .056.019 13.2 13.2 0 0 0 4.001-2.02.05.05 0 0 0 .021-.037c.334-3.451-.559-6.449-2.366-9.106a.03.03 0 0 0-.02-.019m-8.198 7.307c-.789 0-1.438-.724-1.438-1.612s.637-1.613 1.438-1.613c.807 0 1.45.73 1.438 1.613 0 .888-.637 1.612-1.438 1.612m5.316 0c-.788 0-1.438-.724-1.438-1.612s.637-1.613 1.438-1.613c.807 0 1.451.73 1.438 1.613 0 .888-.631 1.612-1.438 1.612"
-                  /></svg
-                >
-                BRIDGE
-              </Badge>
+            {:else}
+              <span class="font-medium text-accent-700 dark:text-accent-400"
+                >{authorName || (authorHandle ? `@${authorHandle}` : "")}</span
+              >
             {/if}
-          </span>
-          <span class="opacity-70">
-            {@render timestampLabel(timestamp)}
-          </span>
+              {#if authorHandle}
+                {#if profileUrl}
+                  <a
+                    href={profileUrl}
+                    class="opacity-75 font-normal hover:underline"
+                    >@{authorHandle}</a
+                  >
+                {:else}
+                  <span class="opacity-75 font-normal">@{authorHandle}</span>
+                {/if}
+              {/if}
+              {#if isBridged}
+                <Badge
+                  variant="secondary"
+                  title="This message was bridged from Discord."
+                  class="text-[10px] -my-0.5 px-1.5 font-bold opacity-75"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="16"
+                    height="16"
+                    fill="currentColor"
+                    class="bi bi-discord"
+                    viewBox="0 0 16 16"
+                    ><path
+                      d="M13.545 2.907a13.2 13.2 0 0 0-3.257-1.011.05.05 0 0 0-.052.025c-.141.25-.297.577-.406.833a12.2 12.2 0 0 0-3.658 0 8 8 0 0 0-.412-.833.05.05 0 0 0-.052-.025c-1.125.194-2.22.534-3.257 1.011a.04.04 0 0 0-.021.018C.356 6.024-.213 9.047.066 12.032q.003.022.021.037a13.3 13.3 0 0 0 3.995 2.02.05.05 0 0 0 .056-.019q.463-.63.818-1.329a.05.05 0 0 0-.01-.059l-.018-.011a9 9 0 0 1-1.248-.595.05.05 0 0 1-.02-.066l.015-.019q.127-.095.248-.195a.05.05 0 0 1 .051-.007c2.619 1.196 5.454 1.196 8.041 0a.05.05 0 0 1 .053.007q.121.1.248.195a.05.05 0 0 1-.004.085 8 8 0 0 1-1.249.594.05.05 0 0 0-.03.03.05.05 0 0 0 .003.041c.24.465.515.909.817 1.329a.05.05 0 0 0 .056.019 13.2 13.2 0 0 0 4.001-2.02.05.05 0 0 0 .021-.037c.334-3.451-.559-6.449-2.366-9.106a.03.03 0 0 0-.02-.019m-8.198 7.307c-.789 0-1.438-.724-1.438-1.612s.637-1.613 1.438-1.613c.807 0 1.45.73 1.438 1.613 0 .888-.637 1.612-1.438 1.612m5.316 0c-.788 0-1.438-.724-1.438-1.612s.637-1.613 1.438-1.613c.807 0 1.451.73 1.438 1.613 0 .888-.631 1.612-1.438 1.612"
+                    /></svg
+                  >
+                  BRIDGE
+                </Badge>
+              {/if}
+            </span>
+            <span class="opacity-70">
+              {@render timestampLabel(timestamp)}
+            </span>
+            {#if isEdited}
+              {@render editedLabel()}
+            {/if}
+            {#if revealed}
+              <!-- A revealed row: the ordinary content plus this marker, so a
+                   viewer reading a blocked author's words can see that the
+                   author is blocked and act on it. -->
+              {@render blockedLabel()}
+            {/if}
+          {/if}
+        </div>
+      {:else if isEdited || revealed}
+        <!-- Header suppressed (merged with the previous message by the same
+             author): the timestamp is not rendered, so the edit notice — and
+             the marker a revealed row carries — get their own line rather
+             than disappearing with the header. A tombstone merges into
+             nothing here: it renders the indicator alone. -->
+        <span class="text-sm w-full text-start">
           {#if isEdited}
             {@render editedLabel()}
           {/if}
-        </div>
-      {:else if isEdited}
-        <!-- Header suppressed (merged with the previous message by the same
-             author): the timestamp is not rendered, so the edit notice gets
-             its own line rather than disappearing with the header. -->
-        <span class="text-sm w-full text-start">
-          {@render editedLabel()}
+          {#if revealed}
+            {@render blockedLabel()}
+          {/if}
         </span>
       {/if}
 
-      <!-- Message text.
-           `roomy-prose` opts this element into the shared block typography in
-           app-lite's `lib/message-typography.css` — the same rules the
-           composer's `.tiptap` uses, so the two stay a WYSIWYG pair. It is
-           deliberately not applied to other `.prose` users (ActivityFeed,
-           UserProfile), which render inline/compact and keep `.prose` as-is. -->
-      <div
-        class="roomy-prose prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline text-sm font-normal max-w-full overflow-auto hide-scrollbar"
-        class:text-left={!isSystem}
-        class:text-center={isSystem}
-        class:opacity-75={isSystem}
-      >
-        {#if content}
-          {@render content()}
-        {/if}
-        {#if forwardEmbed}
-          {@render forwardEmbed()}
-        {/if}
-        {#if linkEmbeds}
-          {@render linkEmbeds()}
-        {/if}
-      </div>
+      <!-- Message text. A tombstone renders none of it: the server sends
+           empty content and no embeds for a hidden author, and rendering the
+           prose box regardless would leave a stray block of layout on a row
+           that is meant to be an indicator and nothing else. -->
+      {#if !suppressed}
+        <div
+          class="roomy-prose prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline text-sm font-normal max-w-full overflow-auto hide-scrollbar"
+          class:text-left={!isSystem}
+          class:text-center={isSystem}
+          class:opacity-75={isSystem}
+        >
+          {#if content}
+            {@render content()}
+          {/if}
+          {#if forwardEmbed}
+            {@render forwardEmbed()}
+          {/if}
+          {#if linkEmbeds}
+            {@render linkEmbeds()}
+          {/if}
+        </div>
 
-      <!-- Media -->
-      {#if media}
-        {@render media()}
+        <!-- Media -->
+        {#if media}
+          {@render media()}
+        {/if}
       {/if}
     </div>
 
-    {#if isEditing && actions}
+    {#if !suppressed && isEditing && actions}
       <div class="flex shrink-0 items-center self-center gap-1 not-prose">
         {@render actions()}
       </div>
     {/if}
   </div>
 
-  {#if reactions}
+  <!-- Reactions. A tombstone carries none: the server returns an empty array
+       for a hidden author, but the slot is suppressed here too so a wrapper
+       that renders its own reaction chrome cannot reintroduce one. -->
+  {#if reactions && !suppressed}
     {@render reactions()}
   {/if}
 </div>
