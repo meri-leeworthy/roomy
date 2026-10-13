@@ -6,12 +6,17 @@
 
 The goal of this work is horizontal scale-out of the read and connection plane. The measured pain is on the read path, not write throughput:
 
-| Measure | Baseline |
-| --- | --- |
-| `space.getActivityFeed` | p95 3.1s |
-| `space.getThreads` | p95 3.4s |
-| `room.getMetadata` | p50 7ms, p95 349ms |
-| Fan-out per live message, per client | 7 WebSocket frames, 5 of them invalidations, about 137 DB round-trips |
+| Measure | At drafting (2026-10-09) | Now (7d, production) |
+| --- | --- | --- |
+| `space.getActivityFeed` | p95 3.1s | p50 24ms, p95 955ms |
+| `space.getThreads` | p95 3.4s | p50 9ms, p95 786ms |
+| `room.getMetadata` | p50 7ms, p95 349ms | p50 6ms, p95 69ms |
+| Fan-out per live message, per client | 7 WebSocket frames, 5 of them invalidations, about 137 DB round-trips | 7 frames, 4 invalidations (`#roomActivityDiff` replaced the boards') |
+
+The read-path work of the last two weeks is what moved the first three rows, and the
+projections work is what will move them further. The fan-out column moved partway: the three
+activity-ordered boards now receive a diff frame instead of an invalidation, so the four that
+remain are the link-index pair, the activity feed and the author-scoped space metadata.
 
 **Not goals of this plan:** protocol-native ingestion (see the migration plan), durability and ops simplification (these fall out of moving the log off the volume), and a Rust rewrite as an end in itself.
 
@@ -29,6 +34,7 @@ The goal of this work is horizontal scale-out of the read and connection plane. 
 | The Rust rewrite happens while the total-ordering guarantee still holds | Decided |
 | Events are remodelled as change records | Decided |
 | Unread is recomputed from `last_read` by the worker, never incremented | Decided |
+| Cross-space views are refreshed by pull, not push. The gateway serves them with a short TTL and the client decides when to refresh | Decided |
 | Bus before log. No bus until a second process consumes it | Decided, mechanics pending research |
 | Split ownership and causal broadcast to several replicas of one space | Deferred until measured need |
 
@@ -51,7 +57,13 @@ These keep the Rust worker from being written twice:
 
 **Read replication.** Replicas follow the owner for the read plane only. Ownership is not split. Causal broadcast of events to several replicas of one space is deferred until a measured hot subset needs it.
 
-**Invalidation.** Worker-to-gateway signals replace process-local invalidation, which is what blocks multi-process today. The signal should be coarse and coalescable so that one live message no longer causes five separate invalidations per client.
+**Invalidation.** Worker-to-gateway signals replace process-local invalidation, which is what blocks multi-process today. Signals exist for two consumers, and they need different transports: the gateway's response cache, which must be told when a space's data moved so it can evict, and the connections, which are told so a mounted query refetches. The signal should be coarse and coalescable, so that one live message no longer causes five separate invalidations per client.
+
+**Freshness of cross-space views is pulled, not pushed.** `getActivityFeed` and `getSpaces` answer for one caller by merging what several spaces hold, and those spaces may be leased to different workers. Pushing their freshness would mean a fan-out no worker can serve alone: a gateway-side aggregation point, cross-process dedupe, frame ordering that today is a single connection counter, and the delivery-time access check moved into whichever process holds the socket. None of that is needed if the reader asks instead. The gateway answers these two on demand, caches the response for a short TTL, and refetches when the client remounts or the user refreshes — so the only thing crossing a worker boundary is the answer to a request someone made. Space-scoped views keep their push path: they are answered by one worker, which already knows which of its connections are watching.
+
+This is what retires §9 Q1. A gateway-side rollup projection exists to keep a pushed cross-space view fresh across leases; with the view pulled on demand, fan-out over workers plus a short-TTL cache is the whole mechanism. The same TTL covers the case the invalidation channel would otherwise have to reach: a reader whose page includes a space they cannot see changing still gets a fresh answer on their next mount.
+
+What push remains is `getSpaces`' and the feed's per-user cases — joining or leaving a space, and marking a room read — which change one caller's own view rather than the shape of a shared one. They stay signals and become rarer, since the client no longer needs them to stay current while a page sits open.
 
 ## 5. Workstreams
 
@@ -93,6 +105,20 @@ The projections work already planned targets `getActivityFeed`, `getThreads`, `r
 - Cross-space fan-out and caching in the gateway.
 - Read replicas following the lease owner.
 
+### WS5b. Pull freshness for the cross-space views
+
+Split out of WS5 because it is client- and gateway-local, needs no lease, and is the one piece
+here that can land before Rust exists.
+
+- The client fetches `getActivityFeed` on mount and on an explicit refresh, rather than waiting
+  for a frame, and shows its last answer while a refetch is in flight.
+- The gateway caches these two responses against the signal channel it already has, so a mount
+  is served from cache unless the space it covers moved.
+- The push signals for the message-driven cases become cache evictions with no client frame. The
+  per-user cases (join, leave, mark-read) keep their frames.
+- The `getSpaces` broadcast on every message is the same question asked of a different view and
+  is decided with it.
+
 ### WS6. Bus
 
 Deploy JetStream as a bus only when a second process needs to consume it, which in practice means when replicas or the worker-to-gateway signals need a shared transport. Log-as-authority is not planned, because under the protocol model any log is a cache. Research on JetStream as a durable log is pending.
@@ -106,14 +132,22 @@ Deploy JetStream as a bus only when a second process needs to consume it, which 
 | WS3 Change records | WS1 started | WS2 |
 | WS4 Rust worker | WS1 and WS3 complete | WS2 |
 | WS5 Gateway, leases, replicas | WS4 per-space serving | WS6 design |
+| WS5b Pull freshness | Nothing | WS1, WS2, WS5's routing |
 | WS6 Bus | A second consumer from WS5 |  |
 
-WS1 to WS3 are the near-term commitments. WS4 to WS6 are staged without dates.
+WS1 to WS3 are the near-term commitments, and WS5b is the one part of the gateway work that does
+not wait for Rust: it needs a short-lived response cache and a client that refetches on mount,
+neither of which involves a lease. It ships ahead of the rest because the push path it replaces
+is what makes WS5 expensive to build.
 
 ## 7. Verification
 
 - **Rebuild-equality harness** at the end of WS1, WS3 and WS4, including TS against Rust.
 - **Performance:** p95 per endpoint and DB round-trips per message, before and after WS2 and again after WS5.
+- **Pull freshness (WS5b):** the feed and the space list answer correctly with the frames suppressed — a
+  remount after a write returns the new row, and a mount inside the TTL that covers no change is served
+  from cache. The counter-check the same test holds is that suppressing the frames without the client
+  change leaves a mounted feed frozen, which is what makes the two halves one change.
 - **Replication:** a test that unread counts do not inflate across replicas.
 - **Failover:** a lease expiry test with an in-flight write, confirming a single writer is preserved.
 
@@ -122,14 +156,18 @@ WS1 to WS3 are the near-term commitments. WS4 to WS6 are staged without dates.
 - **Impurity relocated by an early port.** Mitigation: purity first, with the harness gating the port.
 - **Protocol ingestion landing mid-rewrite.** Mitigation: the change-record interface in WS3 before WS4 begins.
 - **A re-sort at the source swap** invalidates the golden files. This is expected and planned in the migration plan.
-- **Cross-space endpoints as scatter-gather** may be too slow, in which case a gateway-side rollup projection is needed.
+- **Pull freshness shows a stale feed for as long as the TTL.** Accepted: a feed is a view a
+  reader opens, not a stream they sit in. The mitigation is the TTL being short and the mount
+  and refresh paths both refetching — not a push frame.
+- **Cache invalidation correctness** in the gateway, for the two pushed per-user cases and for
+  the space-scoped views, which are unaffected.
 - **Lease edge cases:** split brain, and lease expiry during a write.
 - **Replication cost:** N times the storage and materialisation volume, and per-space databases are deliberately outside Litestream.
 - **Cache invalidation correctness** in the gateway.
 
 ## 9. Open questions
 
-1. Do `getSpaces` and `getActivityFeed` need a gateway-side rollup projection, or is fan-out with caching fast enough?
+1. ~~Do `getSpaces` and `getActivityFeed` need a gateway-side rollup projection, or is fan-out with caching fast enough?~~ Answered: neither needs one, because both are pulled rather than pushed (§4). Fan-out over workers with a short-TTL cache is the whole mechanism, and `getSpaces`' remaining question is only whether its unread badge needs a push frame while a page sits open.
 2. What are the p95 targets for each endpoint?
 3. What is the invalidation signal contract and transport before a bus exists?
 4. How does `last_read` reach the worker, as a query parameter or by ingestion?
