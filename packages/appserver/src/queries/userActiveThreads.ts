@@ -5,8 +5,9 @@
  * reaction) and provides query support for the sidebar `activeThreads` in
  * `space.getMetadata`.
  *
- * All data lives in the read-state database (`user_thread_activity`),
- * which is appserver-owned and cannot be reconstructed from the event log.
+ * All data lives in the read-state database (`user_thread_activity`), which is
+ * appserver-owned and cannot be reconstructed from the event log. The lazy
+ * backfill's empty answer is recorded there too (`user_thread_backfill`).
  */
 
 import type { DbLike } from "../db/types.ts";
@@ -295,8 +296,9 @@ async function latestAndParticipantsFromScan(
  * Step 2: Resolve metadata via `resolveThreadsByIds`.
  * Step 3 (caller): Filter by read access and distribute into channel objects.
  *
- * If the user has no rows for this space, runs a lazy backfill from messages
- * the user authored in threads within the activity window.
+ * If the user has no rows for this space and its lazy backfill has not already
+ * recorded an empty answer, runs that backfill from the threads the user
+ * authored in within the activity window.
  */
 export async function queryActiveThreads(
   readStateDb: DbLike,
@@ -313,6 +315,10 @@ export async function queryActiveThreads(
   // Lazy backfill: if no `user_thread_activity` rows exist for this user in
   // THIS space, seed from authored messages. `user_thread_activity` lives in
   // the read-state DB; the entity/room checks live in the per-space DB.
+  //
+  // Both the scan and (since it is cheap) the projection read are skipped once
+  // the backfill has recorded that there is nothing to seed for this
+  // (user, space) — see `user_thread_backfill`.
   const myThreads = await readStateDb
     .query("select thread_id from user_thread_activity where user_did = ? and space_did = ?")
     .all<{ thread_id: string }>([userDid, spaceId]);
@@ -325,8 +331,15 @@ export async function queryActiveThreads(
       .get<{ count: number }>([...ids, spaceId]);
     existingCount = row?.count ?? 0;
   }
-  if (existingCount === 0) {
-    await backfillUserThreadActivity(readStateDb, spaceDb, userDid, spaceId, windowStart);
+  if (
+    existingCount === 0 &&
+    !(await hasThreadBackfillMarker(readStateDb, userDid, spaceId))
+  ) {
+    const seeded = await backfillUserThreadActivity(readStateDb, spaceDb, userDid, spaceId, windowStart);
+    // Remember an empty answer so this runs once per (user, space), not once
+    // per board read. A non-empty answer needs no marker: its rows make
+    // `existingCount` non-zero from here on.
+    if (!seeded) await recordThreadBackfill(readStateDb, userDid, spaceId, now);
   }
 
   // Query active threads within the activity window. Two-step: fetch candidate
@@ -374,12 +387,59 @@ export async function queryActiveThreads(
   }));
 }
 
+/** A thread the user has authored in, with their newest message time there. */
+interface AuthoredThread {
+  room: string;
+  ts: number;
+}
+
 /**
- * Backfill `user_thread_activity` from messages the user authored in threads
- * within the given window. This gives the user an immediate populated sidebar
- * without needing to write a new message first. Reads candidate threads from
- * the per-space DB (`spaceDb`), writes rows to the read-state DB
+ * Whether the lazy backfill for this (user, space) already ran and found
+ * nothing to seed. This is the common answer for a member whose authored
+ * threads in the space are all older than the window, and re-deriving it is
+ * what made every board read pay for a `comp_content` scan.
+ *
+ * Consulted only when the user has no `user_thread_activity` rows for the space,
+ * which is what makes a later message in a thread self-invalidating: authoring
+ * one leaves exactly such a row (see `refreshThreadActivityOnMessage`), and
+ * `purgeStaleThreadActivity` only drops a row once its message has left the
+ * window — when the backfill would no longer seed it anyway.
+ */
+async function hasThreadBackfillMarker(
+  readStateDb: DbLike,
+  userDid: string,
+  spaceId: string,
+): Promise<boolean> {
+  const row = await readStateDb
+    .query("select 1 as present from user_thread_backfill where user_did = ? and space_did = ?")
+    .get<{ present: number }>([userDid, spaceId]);
+  return row !== null;
+}
+
+/** Record that the lazy backfill for this (user, space) found nothing to seed. */
+async function recordThreadBackfill(
+  readStateDb: DbLike,
+  userDid: string,
+  spaceId: string,
+  at: number,
+): Promise<void> {
+  await readStateDb.run(
+    `insert into user_thread_backfill (user_did, space_did, completed_at)
+     values (?, ?, ?)
+     on conflict(user_did, space_did) do update set completed_at = excluded.completed_at`,
+    userDid, spaceId, at,
+  );
+}
+
+/**
+ * Backfill `user_thread_activity` from the threads the user authored messages
+ * in, within the activity window. This gives the user an immediate populated
+ * sidebar without needing to write a new message first. Reads candidate threads
+ * from the per-space DB (`spaceDb`), writes rows to the read-state DB
  * (`readStateDb`) — entities/content/edges are per-space.
+ *
+ * Returns whether any thread was found, which is what the caller records as the
+ * backfill's answer.
  */
 async function backfillUserThreadActivity(
   readStateDb: DbLike,
@@ -387,8 +447,82 @@ async function backfillUserThreadActivity(
   userDid: string,
   spaceId: string,
   windowStart: number,
-): Promise<void> {
-  const candidates = await spaceDb
+): Promise<boolean> {
+  const projected = await authoredThreadsFromProjection(spaceDb, spaceId, userDid, windowStart);
+  const candidates = projected ?? (await authoredThreadsFromScan(spaceDb, userDid, spaceId, windowStart));
+  for (const c of candidates) {
+    await readStateDb.run(
+      `insert or ignore into user_thread_activity (user_did, thread_id, space_did, last_active_at, updated_at)
+       values (?, ?, ?, ?, ?)`,
+      userDid, c.room, spaceId, c.ts, Date.now(),
+    );
+  }
+  return candidates.length > 0;
+}
+
+/**
+ * The threads the user authored in, and their newest message time in each,
+ * from the `room_activity` projection.
+ *
+ * `room_activity` holds one entry per author of a room carrying that author's
+ * newest message, so the answer per thread room is its `recent_authors` entry
+ * for this user — no `comp_content` join, which is what makes this O(thread
+ * rooms in the space) rather than O(the user's messages).
+ *
+ * `null` when the projection cannot answer — a DB whose schema predates the
+ * table, or one whose missing rows cannot be rebuilt — which is the caller's
+ * cue to scan, as `resolveThreadsByIds` does for the board columns. Rooms it
+ * cannot answer for after the warm are rooms with no messages, and so no
+ * candidates.
+ *
+ * An author whose newest entry in a room is a forward of someone else's message
+ * — an entity with no content of its own — is credited here and not by the scan.
+ * The board's own activity columns read this same projection, so the sidebar and
+ * the board agree either way.
+ */
+async function authoredThreadsFromProjection(
+  spaceDb: DbLike,
+  spaceId: string,
+  userDid: string,
+  windowStart: number,
+): Promise<AuthoredThread[] | null> {
+  const rooms = await spaceDb
+    .query(
+      `select e.id as id
+         from entities e
+         join comp_room cr on cr.entity = e.id
+        where e.stream_id = ?
+          and cr.label = 'space.roomy.thread'`,
+    )
+    .all<{ id: string }>([spaceId]);
+  if (rooms.length === 0) return [];
+
+  const projected = await readRoomActivityProjectionFor(spaceDb, rooms.map((r) => r.id));
+  if (projected === null) return null;
+
+  const out: AuthoredThread[] = [];
+  for (const { id } of rooms) {
+    const entry = projected.get(id)?.authors.find((a) => a.did === userDid);
+    if (entry?.ts != null && entry.ts > windowStart) out.push({ room: id, ts: entry.ts });
+  }
+  return out;
+}
+
+/**
+ * The live scan: the user's newest content timestamp per thread room.
+ *
+ * The fallback for a DB the projection cannot answer (see
+ * `authoredThreadsFromProjection`). O(the user's authored messages), which is
+ * why it is no longer the read path — on a large space it measured seconds and
+ * blocked every request pinned to the same DB worker behind it.
+ */
+async function authoredThreadsFromScan(
+  spaceDb: DbLike,
+  userDid: string,
+  spaceId: string,
+  windowStart: number,
+): Promise<AuthoredThread[]> {
+  return await spaceDb
     .query(
       `select e.room as room, max(cc.timestamp) as ts
          from entities e
@@ -400,14 +534,7 @@ async function backfillUserThreadActivity(
           and cc.timestamp > ?
         group by e.room`,
     )
-    .all<{ room: string; ts: number | null }>([userDid, spaceId, windowStart]);
-  for (const c of candidates) {
-    await readStateDb.run(
-      `insert or ignore into user_thread_activity (user_did, thread_id, space_did, last_active_at, updated_at)
-       values (?, ?, ?, ?, ?)`,
-      userDid, c.room, spaceId, c.ts ?? windowStart, Date.now(),
-    );
-  }
+    .all<AuthoredThread>([userDid, spaceId, windowStart]);
 }
 
 /**
@@ -436,6 +563,28 @@ export async function purgeStaleThreadActivity(
   const result = await db.run(
     `delete from user_thread_activity
      where last_active_at < ?`,
+    olderThan,
+  );
+  return result.changes;
+}
+
+/**
+ * Purge thread-backfill markers older than the given timestamp. Called from the
+ * same hourly maintenance timer as `purgeStaleThreadActivity`, with the same
+ * cutoff.
+ *
+ * A marker records an answer derived from the materialised space, and a replay
+ * materialises events without writing activity rows — so a message the user
+ * authored in a thread can appear after the marker that recorded "nothing to
+ * seed". Expiring markers on the window the backfill itself uses bounds that at
+ * one window, after which the read re-derives the answer from the projection.
+ */
+export async function purgeStaleThreadBackfill(
+  db: DbLike,
+  olderThan: number,
+): Promise<number> {
+  const result = await db.run(
+    `delete from user_thread_backfill where completed_at < ?`,
     olderThan,
   );
   return result.changes;

@@ -102,6 +102,30 @@ create index if not exists idx_user_thread_activity_user
 -- migration (existing DBs) and by the fresh-DB path in
 -- initializeReadStateSchema (worker.ts).
 
+-- ── Lazy thread-activity backfill (additive) ─────────────────────────────
+-- One row per (user, space) whose lazy backfill (`queries/userActiveThreads.ts`)
+-- ran and found no thread to seed. Its presence lets later board reads skip the
+-- backfill outright: without it, a member whose authored threads in the space
+-- are all older than the activity window re-derived that empty answer on every
+-- `space.getMetadata`, and the derivation is a `comp_content` scan.
+--
+-- The marker does not have to be invalidated by a live message in a thread in
+-- this space: that write leaves a `user_thread_activity` row behind, and the
+-- read consults the marker only when the user has none. It does have to expire:
+-- a replay materialises events without those rows, so a message can appear
+-- after the marker that recorded "nothing to seed". `purgeStaleThreadBackfill`
+-- drops markers at the same age the backfill's own window uses, which bounds
+-- that at one window instead of forever.
+--
+-- Purely additive: the schema file is exec'd on every open, so every existing
+-- read-state DB gains the table at next open.
+create table if not exists user_thread_backfill (
+  user_did     text not null,
+  space_did    text not null,
+  completed_at integer not null,   -- unix epoch milliseconds
+  primary key (user_did, space_did)
+) strict;
+
 -- ── Web push (schema v3) ────────────────────────────────────────────────
 -- A delivery destination for a user. A user may have many (one per browser or
 -- device). Idempotent on endpoint — re-registering updates its keys/expiry.

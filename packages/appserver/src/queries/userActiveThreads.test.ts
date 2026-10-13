@@ -4,17 +4,18 @@
  * Covers:
  *   - upsertUserThreadActivity
  *   - isThread
- *   - queryActiveThreads (including lazy backfill)
+ *   - queryActiveThreads (including the lazy backfill and its marker)
  *   - resolveThreadsByIds
  *   - purgeStaleThreadActivity
+ *   - purgeStaleThreadBackfill
  *
  * `queryActiveThreads` takes `(readStateDb, spaceDb, userDid, spaceId)`.
  * Read-state rows (`user_thread_activity`) go into the read-state DB via
  * `openReadStateDb`; per-space rows (entities, comp_room, comp_content, edges,
  * comp_info) go into the per-space DB via `openSpaceDb`. Other helpers
  * (`upsertUserThreadActivity`, `isThread`, `resolveThreadsByIds`,
- * `purgeStaleThreadActivity`) take a single handle, which the test points at
- * the appropriate DB for the tables they touch.
+ * `purgeStaleThreadActivity`, `purgeStaleThreadBackfill`) take a single handle,
+ * which the test points at the appropriate DB for the tables they touch.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -27,6 +28,7 @@ import {
   resolveThreadsByIds,
   isThread,
   purgeStaleThreadActivity,
+  purgeStaleThreadBackfill,
 } from "./userActiveThreads.ts";
 import { readRoomActivityProjection } from "./roomActivityProjection.ts";
 
@@ -270,6 +272,166 @@ describe("queryActiveThreads", () => {
     const result = await queryActiveThreads(readState, spaceDb, USER, SPACE);
     expect(result.length).toBeGreaterThanOrEqual(1);
     expect(result.some((r) => r.id === THREAD_A)).toBe(true);
+    // The backfill found a thread, so nothing is recorded as empty.
+    expect(
+      await readState.query("select count(*) as c from user_thread_backfill").get<{ c: number }>(),
+    ).toEqual({ c: 0 });
+  });
+});
+
+/**
+ * The lazy backfill. It answers from the `room_activity` projection (with the
+ * live scan as the fallback for a DB the projection cannot answer), and records
+ * an empty answer so the next board read does not derive it again.
+ */
+describe("queryActiveThreads lazy backfill", () => {
+  const HOUR = 60 * 60 * 1000;
+
+  /** Post a message authored by `did` in `room`, as the materialiser leaves it. */
+  async function post(
+    spaceDb: DbLike,
+    id: string,
+    room: string,
+    did: string,
+    ts: number,
+  ): Promise<void> {
+    await spaceDb.run("insert into entities (id, stream_id, room) values (?, ?, ?)", [
+      id,
+      SPACE,
+      room,
+    ]);
+    await spaceDb.run(
+      "insert into comp_content (entity, mime_type, data, last_edit, timestamp) values (?, 'text/plain', ?, ?, ?)",
+      [id, Buffer.from("hello"), id, ts],
+    );
+    await spaceDb.run("insert into edges (head, tail, label) values (?, ?, 'author')", [id, did]);
+  }
+
+  /** The per-space DB with every statement asked of it recorded, in order. */
+  function recordingDb(spaceDb: DbLike): { db: DbLike; sql: string[] } {
+    const sql: string[] = [];
+    const db: DbLike = {
+      ...spaceDb,
+      query(query: string) {
+        sql.push(query);
+        return spaceDb.query(query);
+      },
+      run(query: string, ...params: unknown[]) {
+        sql.push(query);
+        return spaceDb.run(query, ...params);
+      },
+    };
+    return { db, sql };
+  }
+
+  /**
+   * Run the backfill over two identical fixtures — one read through the
+   * projection, one through the scan it replaces — and return the
+   * `user_thread_activity` rows each wrote. Each `freshDb()` wipes the previous
+   * one, so the two halves cannot interleave.
+   */
+  async function rowsWrittenByBothPaths(seed: (spaceDb: DbLike) => Promise<void>) {
+    const readRows = async (readState: DbLike) =>
+      await readState
+        .query("select thread_id, last_active_at from user_thread_activity order by thread_id")
+        .all();
+
+    const projectedEnv = freshDb();
+    await seed(projectedEnv.spaceDb);
+    await queryActiveThreads(projectedEnv.readState, projectedEnv.spaceDb, USER, SPACE);
+    const projected = await readRows(projectedEnv.readState);
+
+    const scannedEnv = freshDb();
+    await seed(scannedEnv.spaceDb);
+    await queryActiveThreads(scannedEnv.readState, noProjectionDb(scannedEnv.spaceDb), USER, SPACE);
+    const scanned = await readRows(scannedEnv.readState);
+
+    return { projected, scanned };
+  }
+
+  test("the projection backfill writes what the live scan writes", async () => {
+    const now = Date.now();
+    const { projected, scanned } = await rowsWrittenByBothPaths(async (spaceDb) => {
+      await seedBasic(spaceDb);
+      await post(spaceDb, "01MSGBF000000000000000001", THREAD_A, USER, now - HOUR);
+      // In the window, and the user's newest message in the thread.
+      await post(spaceDb, "01MSGBF000000000000000002", THREAD_A, USER, now - 2 * HOUR);
+      // In the window, but authored by someone else.
+      await post(spaceDb, "01MSGBF000000000000000003", THREAD_B, OTHER_USER, now - HOUR);
+    });
+
+    expect(projected).toEqual([{ thread_id: THREAD_A, last_active_at: now - HOUR }]);
+    expect(scanned).toEqual(projected);
+  });
+
+  test("neither path seeds a thread whose messages are all out of window", async () => {
+    const now = Date.now();
+    const { projected, scanned } = await rowsWrittenByBothPaths(async (spaceDb) => {
+      await seedBasic(spaceDb);
+      await post(spaceDb, "01MSGBF000000000000000004", THREAD_A, USER, now - 121 * HOUR);
+      await post(spaceDb, "01MSGBF000000000000000005", THREAD_B, OTHER_USER, now - HOUR);
+    });
+
+    expect(projected).toEqual([]);
+    expect(scanned).toEqual(projected);
+  });
+
+  test("an empty backfill is recorded, so a second read does no per-space work", async () => {
+    const { readState, spaceDb } = freshDb();
+    await seedBasic(spaceDb);
+    // Authored in a thread, but outside the window — nothing to seed, which is
+    // the answer that used to be re-derived by a scan on every board read.
+    await post(spaceDb, "01MSGBF000000000000000010", THREAD_A, USER, Date.now() - 121 * HOUR);
+    const { db, sql } = recordingDb(spaceDb);
+
+    expect(await queryActiveThreads(readState, db, USER, SPACE)).toHaveLength(0);
+    const afterColdRead = sql.length;
+    expect(afterColdRead).toBeGreaterThan(0);
+
+    expect(await queryActiveThreads(readState, db, USER, SPACE)).toHaveLength(0);
+    expect(sql.length).toBe(afterColdRead);
+  });
+
+  test("without the projection the scan runs once, not per read", async () => {
+    const { readState, spaceDb } = freshDb();
+    await seedBasic(spaceDb);
+    await post(spaceDb, "01MSGBF000000000000000020", THREAD_A, USER, Date.now() - 121 * HOUR);
+    const { db, sql } = recordingDb(noProjectionDb(spaceDb));
+    await queryActiveThreads(readState, db, USER, SPACE);
+    expect(sql).toHaveLength(3); // thread rooms, the projection read, the scan
+    expect(sql[2]).toContain("comp_content");
+
+    await queryActiveThreads(readState, db, USER, SPACE);
+    expect(sql).toHaveLength(3);
+  });
+
+  test("activity after an empty backfill still surfaces the thread", async () => {
+    const { readState, spaceDb } = freshDb();
+    await seedBasic(spaceDb);
+    await post(spaceDb, "01MSGBF000000000000000030", THREAD_A, USER, Date.now() - 121 * HOUR);
+
+    expect(await queryActiveThreads(readState, spaceDb, USER, SPACE)).toHaveLength(0);
+
+    // The live path: the user authors a message in the thread (applyBundle
+    // refreshes the author's row), or opens it (updateSeen).
+    const now = Date.now();
+    await upsertUserThreadActivity(readState, USER, THREAD_A, SPACE, now);
+
+    const result = await queryActiveThreads(readState, spaceDb, USER, SPACE);
+    expect(result).toEqual([{ id: THREAD_A, last_active_at: now }]);
+  });
+
+  test("a marker older than the window is purged, and the backfill runs again", async () => {
+    const { readState, spaceDb } = freshDb();
+    await seedBasic(spaceDb);
+    await post(spaceDb, "01MSGBF000000000000000040", THREAD_A, USER, Date.now() - 121 * HOUR);
+    await queryActiveThreads(readState, spaceDb, USER, SPACE);
+
+    expect(await purgeStaleThreadBackfill(readState, Date.now())).toBe(1);
+
+    const { db, sql } = recordingDb(spaceDb);
+    await queryActiveThreads(readState, db, USER, SPACE);
+    expect(sql.length).toBeGreaterThan(0);
   });
 });
 
