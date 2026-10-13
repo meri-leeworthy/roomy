@@ -1,0 +1,20 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.user.refreshBlocks",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

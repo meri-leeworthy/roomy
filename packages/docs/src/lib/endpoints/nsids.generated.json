@@ -285,6 +285,11 @@
     "group": "Users"
   },
   {
+    "nsid": "space.roomy.user.refreshBlocks",
+    "kind": "procedure",
+    "group": "Users"
+  },
+  {
     "nsid": "space.roomy.mention.getMentions",
     "kind": "query",
     "group": "Mentions"

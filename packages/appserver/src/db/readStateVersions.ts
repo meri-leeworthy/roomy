@@ -153,6 +153,10 @@ export const READSTATE_MIGRATIONS = {
       }
     },
   },
+  // Resolved per-user block sets — user_blocks + user_block_fetches in
+  // readStateSchema.sql. A cache of what each user's own repos hold, read back
+  // from their PDS (`materialization/blocks.ts`).
+  "15": { kind: "structural" },
 } as const satisfies Record<string, ReadStateMigrationEntry>;
 
 /**

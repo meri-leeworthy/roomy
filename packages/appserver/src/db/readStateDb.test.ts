@@ -24,7 +24,7 @@ afterEach(() => {
 
 describe("read-state schema", () => {
   test("READSTATE_SCHEMA_VERSION is exported", () => {
-    expect(READSTATE_SCHEMA_VERSION).toBe("14");
+    expect(READSTATE_SCHEMA_VERSION).toBe("15");
   });
 
   test("schema applies cleanly on a fresh database", () => {

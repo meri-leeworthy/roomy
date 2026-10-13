@@ -719,6 +719,28 @@ export const prose: Record<string, EndpointProse> = {
       "After a Polar checkout redirect (?checkout={CHECKOUT_ID}) the page passes the checkout ID back as the `checkout` param, which forces a non-cached refresh so the new membership is visible immediately instead of up to 300s of cached 'not a member'.",
     ],
   },
+  "space.roomy.user.refreshBlocks": {
+    description:
+      "Re-reads the caller's block records from their own repos (`space.roomy.user.block` and `app.bsky.graph.block`) and stores the resolved set, so a block or unblock takes effect on the next read instead of at the next cache expiry. The client calls it after a block write succeeds.",
+    auth:
+      "Authenticated. Returns 401 (`AuthRequired`) when `auth.did` is null; 400 when `subject` is present but not a valid DID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        subject: {
+          type: "string",
+          description:
+            "DID of the account whose cached block set also has to be dropped. A block hides in both directions, so writing or removing one changes what that account's own set resolves to. Omitted to refresh the caller alone.",
+          optional: true,
+        },
+      },
+    },
+    notes: [
+      "Fire-and-forget on the client — the write to the PDS has already succeeded, and a failure here self-heals at the next cache expiry (60s).",
+      "The writer's own refresh is awaited, so the very next request already sees the new set; the subject's entry is only dropped, and re-resolves on that user's next read.",
+      "Blocks are read from the PDS on demand and cached in the read-state DB (`user_blocks`, schema v15). The appserver does not materialise the collection — same arrangement as `space.roomy.user.profile`.",
+    ],
+  },
 
   // ── Sync ────────────────────────────────────────────────────────────────
   "space.roomy.sync.subscribe": {

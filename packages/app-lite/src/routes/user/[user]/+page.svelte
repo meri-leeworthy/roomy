@@ -18,6 +18,7 @@
   import { createBlockQuery } from "$lib/queries/blocks";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { blockErrorMessage, blockUser, unblockUser, type BlockRecord } from "$lib/mutations/blocks";
+  import { refreshBlocksDetached } from "$lib/mutations/refresh-blocks";
   import { guardedXrpc } from "$lib/scope-guard";
   import { showScopeConsentDialogue } from "$lib/scope-consent-dialogue";
   import type { RequestableScopeSetName } from "$lib/scopes";
@@ -89,6 +90,7 @@
       await guardedXrpc(() => blockUser(subject), {
         prompt: consentPrompt,
       });
+      refreshBlocksDetached(subject);
       await refreshBlock();
     } catch (e) {
       blockError = blockErrorMessage(e, "block this user");
@@ -107,6 +109,7 @@
       await guardedXrpc(() => unblockUser(block.rkey), {
         prompt: consentPrompt,
       });
+      refreshBlocksDetached(block.subject);
       await refreshBlock();
     } catch (e) {
       blockError = blockErrorMessage(e, "unblock this user");

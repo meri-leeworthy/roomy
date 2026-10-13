@@ -271,3 +271,35 @@ create table if not exists voice_call_keys (
   key        text not null,
   created_at integer not null default (unixepoch() * 1000)
 ) strict;
+
+-- ── User blocks (schema v15) ─────────────────────────────────────────────
+-- The resolved block set for a user: the union of the blocks in their own
+-- repo (space.roomy.user.block) and their Bluesky blocks
+-- (app.bsky.graph.block). A cache of the user's repos, not a source of
+-- truth — a row deleted in another client disappears on the next refresh.
+--
+-- The table serves both directions of a block. Rows written for a user are
+-- their own written set; the reverse direction — everyone who blocks this
+-- user — is the same rows read the other way round, `blocked_did = ?`, which
+-- is why `blocked_did` is indexed. Nothing in a block record says who the
+-- blocker is, so the reverse set is only knowable by reading other people's
+-- repos; a row here is that answer, cached under the DID that wrote it.
+create table if not exists user_blocks (
+  user_did    text not null,
+  blocked_did text not null,
+  source      text not null check(source in ('roomy', 'bluesky')),
+  created_at  integer,
+  fetched_at  integer not null default (unixepoch() * 1000),
+  primary key (user_did, blocked_did)
+) strict;
+create index if not exists idx_user_blocks_blocked on user_blocks(blocked_did);
+
+-- Last refresh attempt per user. Distinct from the rows above because a user
+-- with zero blocks has no rows to carry a timestamp — the same distinction
+-- `profiles.ts` draws between a profile row and its negative cache
+-- (isProfileFetchBackedOff / recordUnresolvedProfiles).
+create table if not exists user_block_fetches (
+  user_did   text primary key,
+  fetched_at integer not null,
+  status     text not null check(status in ('ok', 'error'))
+) strict;
