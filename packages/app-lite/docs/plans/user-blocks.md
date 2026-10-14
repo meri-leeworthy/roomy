@@ -1,13 +1,19 @@
 # User-level blocks — Implementation Plan
 
 **Date:** 2026-09-26 (revised 2026-09-27, 2026-09-28, 2026-10-13, 2026-10-15)
-**Status:** Phase 1 shipped (#317, `9731537c5`); Phase 2 (the appserver block
-set) merged to `next` (#427). Phases 3–6 are ready to dispatch; §7 is a
-decision record and every question in it is answered. Phase 2's
-`space.roomy.user.refreshBlocks` scope is deferred (`BLOCK_RPC_SCOPES`,
-`UNREGISTERED_SCOPES`) until it is registered on the HappyView API client,
-alongside `repo:space.roomy.user.block` — a `base`-tier entry breaks sign-in
-for everyone (§1.4, §1.5).
+**Status:** Phases 1–4 shipped to `next` (P1 #317 `9731537c5`; P2 the appserver
+block set #427; P3 timeline redaction, the indicator and the reveal gate #428;
+P4 every other read surface #445). Phase 5 (live path, counters, push) is open
+as #448; its branch predates #465 and needs a rebase before it can merge.
+**Phase 6 (block management UX, flag on) is the one phase left and is
+dispatchable once P5 merges** — it depends on Phase 3 and must not ship before
+Phases 4 and 5. §2.5 revises Phase 2's fetch direction: a read never fetches,
+and `warmBlockSet(userDid)` refreshes an account's own repos on that account's
+authenticated request. `space.roomy.user.refreshBlocks` remains deferred
+(`BLOCK_RPC_SCOPES`, `UNREGISTERED_SCOPES`) until it is registered on the
+HappyView API client, alongside `repo:space.roomy.user.block` — a `base`-tier
+entry breaks sign-in for everyone (§1.4, §1.5). §7 is a decision record and
+every question in it is answered.
 
 **Revision 2026-10-13 (a) — the reveal is a transient read, not a state.** An
 admin may *look at* a message from an account they personally blocked, in a
