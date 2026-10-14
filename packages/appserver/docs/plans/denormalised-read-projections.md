@@ -638,7 +638,8 @@ number:
 ```
 
 (Quoted as measured on this round. `space.getActivityFeed` was one of the four
-there; it has since left the push path entirely — see the R2 note above.)
+there; it has since left the push path entirely — see the R2 note above this
+section.)
 
 The three remaining invalidations are the link-index pair and the author-scoped
 `space.getMetadata`.

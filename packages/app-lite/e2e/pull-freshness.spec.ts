@@ -9,6 +9,18 @@
  * message-driven change, and the client refetches on mount and on an explicit
  * refresh instead.
  *
+ * Every row this spec asserts on is one it wrote itself, immediately before
+ * asserting — including the witness `openHomeFeed` waits for. A seed fixture
+ * would not do: a feed item carries only its room's newest few messages, the
+ * seeded world is shared by the whole suite and runs serially, and a channel
+ * another spec writes to can push a seeded body out of that window between one
+ * spec and the next.
+ *
+ * For the same reason the spec writes into a channel it creates, rather than a
+ * seeded one: a room timeline is likewise only its newest rows, so spending a
+ * seeded channel's would take a row from whichever spec pins that channel's
+ * seed.
+ *
  * Both halves are load-bearing, and this spec holds both at once:
  *
  *   1. a feed that is already mounted does NOT pick up a write (no frame
@@ -30,25 +42,12 @@ import type { Page } from "@playwright/test";
 import { newUlid } from "@roomy-space/sdk";
 import {
   APPSERVER_HTTP_ORIGIN,
-  SEED_ROOM_2_MESSAGE_TEXT,
-  SEED_ROOM_ID,
   SEED_SPACE_ID,
   SEED_SPACE_NAME,
   TEST_USER_DID,
 } from "./fixtures.ts";
 
 const FEED_PATH = "/xrpc/space.roomy.space.getActivityFeed";
-
-/**
- * The text every assertion here uses to mean "the feed has resolved".
- *
- * A feed item carries only the room's newest few messages, and these tests post
- * into `#lobby` — so the seeded message in *that* room scrolls out of the window
- * as the tests run, and a probe on it would fail on the third test for reasons
- * that have nothing to do with freshness. `#general` is seeded once and never
- * written to here, so its row is a stable witness that the feed rendered.
- */
-const FEED_ANCHOR_TEXT = SEED_ROOM_2_MESSAGE_TEXT;
 
 /**
  * How long to let a frame that WOULD have been pushed arrive before asserting
@@ -75,17 +74,40 @@ async function sendEvents(events: Record<string, unknown>[]): Promise<void> {
   }
 }
 
-/** A createMessage event carrying `text`, with a fresh id. */
-function createMessage(text: string): Record<string, unknown> {
+/** A createMessage event carrying `text` in `room`, with a fresh id. */
+function createMessage(room: string, text: string): Record<string, unknown> {
   const body = Buffer.from(new TextEncoder().encode(text)).toString("base64");
   return {
     id: newUlid(),
-    room: SEED_ROOM_ID,
+    room,
     $type: "space.roomy.message.createMessage.v0",
     body: { mimeType: "text/plain", data: { $bytes: body } },
     extensions: {},
   };
 }
+
+/**
+ * The channel this spec writes into: its own, not a seeded one.
+ *
+ * The suite shares one seeded world and runs serially, and a room timeline is
+ * only the newest 50 rows. Writing into a seeded channel therefore spends a
+ * resource another spec pins — `room-kinds` asserts the seeded message is
+ * still on screen in `#lobby` — so this spec creates the channel it needs and
+ * leaves the shared ones alone.
+ */
+let room: string;
+
+test.beforeAll(async () => {
+  room = newUlid();
+  await sendEvents([
+    {
+      id: room,
+      $type: "space.roomy.room.createRoom.v0",
+      kind: "space.roomy.channel",
+      name: "pull-freshness",
+    },
+  ]);
+});
 
 /** Unique body fragment, so an assertion cannot match an earlier run's row. */
 function uniqueText(prefix: string): string {
@@ -107,13 +129,14 @@ function watchFeedRequests(page: Page): string[] {
 }
 
 /**
- * Load the home page and wait for its activity feed to render a seeded row —
- * proving the feed's own query resolved, not merely that the page painted.
+ * Load the home page and wait for the feed to render `witness` — a row this
+ * spec wrote moments earlier, so the wait proves the feed's own query resolved
+ * rather than merely that the page painted.
  */
-async function openHomeFeed(page: Page): Promise<void> {
+async function openHomeFeed(page: Page, witness: string): Promise<void> {
   await page.goto("/");
   await waitForAuthenticated(page);
-  await expect(page.getByText(FEED_ANCHOR_TEXT).first()).toBeVisible();
+  await expect(page.getByText(witness).first()).toBeVisible();
 }
 
 /**
@@ -173,10 +196,12 @@ test.describe("the activity feed is pulled, not pushed", () => {
     page,
   }) => {
     const feedRequests = watchFeedRequests(page);
-    await openHomeFeed(page);
+    const witness = uniqueText("feed-anchor mount");
+    await sendEvents([createMessage(room, witness)]);
+    await openHomeFeed(page, witness);
 
     const text = uniqueText("pull-freshness remount");
-    await sendEvents([createMessage(text)]);
+    await sendEvents([createMessage(room, text)]);
 
     // The server evicted the feed's cached page but pushed no frame, so the
     // mounted view is unchanged. If a frame were still sent, the client would
@@ -196,10 +221,12 @@ test.describe("the activity feed is pulled, not pushed", () => {
   test("the refresh control returns a write made while the feed sat open", async ({
     page,
   }) => {
-    await openHomeFeed(page);
+    const witness = uniqueText("feed-anchor refresh");
+    await sendEvents([createMessage(room, witness)]);
+    await openHomeFeed(page, witness);
 
     const text = uniqueText("pull-freshness refresh");
-    await sendEvents([createMessage(text)]);
+    await sendEvents([createMessage(room, text)]);
 
     await page.waitForTimeout(NO_FRAME_SETTLE_MS);
     await expect(page.getByText(text)).toHaveCount(0);
@@ -210,10 +237,12 @@ test.describe("the activity feed is pulled, not pushed", () => {
 
   test("a refetch in flight keeps the last answer on screen", async ({ page }) => {
     const gate = installFeedGate(page);
-    await openHomeFeed(page);
+    const witness = uniqueText("feed-anchor in-flight");
+    await sendEvents([createMessage(room, witness)]);
+    await openHomeFeed(page, witness);
 
     const text = uniqueText("pull-freshness in-flight");
-    await sendEvents([createMessage(text)]);
+    await sendEvents([createMessage(room, text)]);
 
     // The remount's fetch is held open, so what renders is whatever the cache
     // already held — the last answer, not a skeleton and not an error.
@@ -221,7 +250,7 @@ test.describe("the activity feed is pulled, not pushed", () => {
     await remountHomeFeed(page);
     await expect.poll(() => gate.heldCount()).toBeGreaterThan(0);
 
-    await expect(page.getByText(FEED_ANCHOR_TEXT).first()).toBeVisible();
+    await expect(page.getByText(witness).first()).toBeVisible();
     await expect(page.getByText(text)).toHaveCount(0);
 
     gate.releaseAll();

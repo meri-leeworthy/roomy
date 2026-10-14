@@ -109,16 +109,24 @@ The projections work already planned targets `getActivityFeed`, `getThreads`, `r
 ### WS5b. Pull freshness for the cross-space views
 
 **Shipped.** Split out of WS5 because it is client- and gateway-local, needs no
-lease, and was the one piece here that could land before Rust exists.
+lease, and was the one piece here that could land before Rust exists. Both halves
+are in: `cacheEvictionOnly` on the appserver, and `staleTime: 0` on the two
+queries plus a refresh control on the feed, on the client.
 
-- The client fetches `getActivityFeed` on mount and on an explicit refresh, rather than waiting
-  for a frame, and shows its last answer while a refetch is in flight.
-- The gateway caches these two responses against the signal channel it already has, so a mount
-  is served from cache unless the space it covers moved.
-- The push signals for the message-driven cases become cache evictions with no client frame. The
-  per-user cases (join, leave, mark-read) keep their frames.
-- The `getSpaces` broadcast on every message is the same question asked of a different view and
-  is decided with it.
+- The client fetches `getActivityFeed` and `getSpaces` on mount and on an
+  explicit refresh — `staleTime: 0` on both queries, plus a refresh control on
+  the feed — rather than waiting for a frame, and shows its last answer while a
+  refetch is in flight. `staleTime` and not `refetchOnMount`, so a mount refetch
+  cannot restart the feed's in-flight fetch through `cancelRefetch`.
+- The response cache holds both against the signal channel it already has, so a
+  mount is served from cache unless the space it covers moved. Today that cache
+  is the appserver's own (`CACHEABLE_NSIDS`); it moves to the gateway, unchanged,
+  when the gateway exists.
+- The push signals for the message-driven cases become cache evictions with no
+  client frame (`cacheEvictionOnly`). The per-user cases (join, leave, mark-read,
+  a reorder) keep their frames.
+- The `getSpaces` broadcast on every message is the same question asked of a
+  different view and is decided with it.
 
 ### WS6. Bus
 
