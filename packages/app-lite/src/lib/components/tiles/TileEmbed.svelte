@@ -28,7 +28,23 @@
   let { uri }: Props = $props();
 
   let container: HTMLDivElement | undefined = $state();
+  let box: HTMLDivElement | undefined = $state();
   let error: string | null = $state(null);
+  /** The card is in place (the loader swaps it for the content frame itself). */
+  let placed = $state(false);
+
+  // Attached directly rather than declared in the markup: this is a container,
+  // not a control, and the handler exists only to keep a click inside it from
+  // reaching a row that is a link (see the markup's note). Svelte reads a
+  // `role`-less `<div onclick={…}>` as a misuse; a bare stopPropagation on a
+  // wrapper it cannot know is a wrapper is not one.
+  $effect(() => {
+    const el = box;
+    if (!el) return;
+    const stop = (e: Event) => e.stopPropagation();
+    el.addEventListener("click", stop);
+    return () => el.removeEventListener("click", stop);
+  });
 
   // The address is checked before anything loads, so a string that is not a
   // tile record gets a reason rather than the loader's blanket "no loader
@@ -58,6 +74,7 @@
         const card = await tile.renderCard();
         if (cancelled) return;
         container?.replaceChildren(card);
+        placed = true;
       } catch (err) {
         if (!cancelled) error = err instanceof Error ? err.message : String(err);
       }
@@ -68,8 +85,15 @@
   });
 </script>
 
+<!-- The box around a tile. A click inside it belongs to the tile, so it does
+     not continue to whatever row encloses the message: two surfaces render a
+     message inside a row that is itself a `role="link"` control (the search
+     results, whose rows navigate to the room), where an unstopped click would
+     mount the tile and navigate away in the same gesture. The loader's own card
+     handler sits on a child of this node and has already run by then. -->
 <div
-  class="my-1 max-w-full overflow-hidden rounded-lg border border-base-300 dark:border-base-700"
+  bind:this={box}
+  class="not-prose my-1 max-w-full overflow-hidden rounded-lg border border-base-300 dark:border-base-700"
 >
   <!-- The container stays mounted whatever the load did: a card, a message, or
        nothing at all until one arrives. -->
@@ -79,6 +103,14 @@
   {:else if error}
     <p class="px-4 py-3 text-sm text-base-500 dark:text-base-400">
       This tile could not be loaded: {error}
+    </p>
+  {:else if !placed}
+    <!-- The first fetch is a `plc.directory` lookup plus a record read from
+         the tile's PDS, so the box is not empty for a moment — it says what it
+         is waiting for. The line is replaced by the card in place, so the
+         message does not shift when it arrives. -->
+    <p class="px-4 py-3 text-sm text-base-500 dark:text-base-400">
+      Loading tile…
     </p>
   {/if}
 </div>

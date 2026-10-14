@@ -165,7 +165,7 @@
                         </button>
                       {/if}
                       <span class="prose dark:prose-invert prose-a:text-accent-600 dark:prose-a:text-accent-400 prose-a:no-underline text-base-600 dark:text-base-400 break-words [&_p]:inline [&_p]:m-0">
-                        <MessageContent content={msg.content} mimeType={msg.mimeType} />
+                        <MessageContent content={msg.content} mimeType={msg.mimeType} tiles={false} />
                       </span>
                     </div>
                   </div>

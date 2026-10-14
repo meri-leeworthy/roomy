@@ -1255,6 +1255,41 @@ mothership/shuttle/worker wiring works from inside a Svelte app. It is also the
 first test of the upstream concern in §3.2 — if the iframe or worker wiring
 misbehaves, that is evidence for `darobin/dasl.ing#98`, not a Roomy bug.
 
+**A tile reaches a message as its AT-URI in the body.** Written into the
+composer, the address is ordinary text in an ordinary message: there is nothing
+to attach, no schema change, and no extension key. `MessageContent` resolves the
+addresses it finds and renders a tile beside the text for each, so a message
+carries a tile the way it carries a link — the renderer is where the resolution
+happens, and the message stays a message.
+
+Two properties of a body decide how that scan reads it, and both are load
+bearing:
+
+- **The address may be in a link facet rather than in the text.** A typed or
+  pasted bare address stays plain text — the composer's autolink is `linkifyjs`
+  and matches `scheme://host`, which `at://` is not — but a markdown link
+  (`[label](at://…)`) puts its target only in the facet. Both sources are read.
+- **Code is skipped.** A `#code` block, or a fenced block in a legacy markdown
+  body, renders its text verbatim; an address quoted inside one is a sample, not
+  a tile.
+
+The render is capped (`MAX_TILES_PER_MESSAGE`) and deduplicated per message,
+because each tile costs every reader of the room a `plc.directory` lookup plus a
+record and blob fetches against a PDS the message chose. Nothing is loaded while
+the address is being typed: half an address is a well-formed address, so a live
+preview would settle on an error card for each keystroke of the last one.
+
+The tile's box stops its clicks from propagating. Two surfaces render a message
+inside a row that is itself a `role="link"` control, where an unstopped click
+would mount the tile and navigate away in the same gesture.
+
+This is not milestone B and does not pre-empt it: an attachment carries a tile
+*plus structured data* (§5.3), which is what the Mermaid renderer and the room
+context need, and which a body string cannot express. What the body form buys
+first is the demo and test path — any published tile can be exercised by typing
+its address — and the retroactive case the resolution work also wants: a message
+that already spells an address renders a tile with nothing rewritten.
+
 **Step B0 — the unified attachment read path.** Before a tile attachment has
 anywhere to land, the DTO becomes `Message.attachments: AttachmentDto[]`: one
 entry per attachment, each carrying its `$type`, with `media`, `linkEmbeds`,

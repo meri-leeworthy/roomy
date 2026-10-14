@@ -3,17 +3,27 @@
   import { enrichInternalLinks } from "./enrich-internal-links";
   import { parseRichTextContent } from "./message-body";
   import BlocksRenderer from "./BlocksRenderer.svelte";
+  import MessageTiles from "../tiles/MessageTiles.svelte";
   import { RICHTEXT_MIME } from "@roomy-space/sdk";
 
   let {
     content,
     mimeType,
+    tiles = true,
   }: {
     /** Message content to render. Markdown for legacy messages, base64-encoded
      *  richtext JSON for `application/vnd.roomy.richtext+json` messages. */
     content: string;
     /** MIME type of the content blob. Absent → legacy markdown path. */
     mimeType?: string;
+    /**
+     * Whether to resolve the tile addresses in the body. Off for surfaces that
+     * render a message as a *preview* of itself — the activity feed's capped,
+     * masked context strip — where a tile would be a card wedged into a
+     * one-line-high window. Those surfaces already render the body as plain
+     * text for the same reason.
+     */
+    tiles?: boolean;
   } = $props();
 
   // New format: content is base64-encoded JSON of the blocks document
@@ -31,6 +41,14 @@
   <div use:enrichInternalLinks class="roomy-message-content">
     {@html renderMarkdownSanitized(content)}
   </div>
+{/if}
+
+<!-- Tiles the body addresses. Outside the block/markdown branch above because
+     an address is read the same way in either: from the text the body shows.
+     Inside `.prose` (both branches render there), so `not-prose` on the tile's
+     own wrapper is what keeps the typography plugin off it. -->
+{#if tiles}
+  <MessageTiles {content} {mimeType} />
 {/if}
 
 <style>
