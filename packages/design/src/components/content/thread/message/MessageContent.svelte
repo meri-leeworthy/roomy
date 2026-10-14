@@ -1,9 +1,8 @@
 <script lang="ts">
   import { renderMarkdownSanitized } from "@roomy/design/utils";
-  import { enrichInternalLinks } from "./enrich-internal-links";
-  import { parseRichTextContent } from "./message-body";
+  import { parseRichTextContent } from "../../../../utils/message-body.js";
   import BlocksRenderer from "./BlocksRenderer.svelte";
-  import MessageTiles from "../tiles/MessageTiles.svelte";
+  import MessageTiles from "./tiles/MessageTiles.svelte";
   import { RICHTEXT_MIME } from "@roomy-space/sdk";
 
   let {
