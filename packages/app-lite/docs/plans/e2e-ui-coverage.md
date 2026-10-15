@@ -1,7 +1,9 @@
 # app-lite E2E UI coverage — plan
 
-**Status:** phase 1 landed (harness + first coverage); phase 2 in progress.
-**Updated:** 2026-09-28
+**Status:** phase 2 in progress — areas A (`#442`) and B (`#446`) merged;
+C (`#455`), E (`#463`) and F (`#464`) open for review; D (search depth) is
+blocked on a Qdrant stub in the harness (§3 D, §4).
+**Updated:** 2026-10-15
 **Suite:** `packages/app-lite/e2e/` · run with `pnpm --filter app-lite test:e2e`
 
 Meri's goal: "set up playwright and begin testing of app-lite behaviours, with a
