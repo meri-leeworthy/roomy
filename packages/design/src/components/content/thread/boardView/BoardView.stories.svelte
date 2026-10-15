@@ -78,13 +78,23 @@
   }}
 />
 
-{#snippet template(args: { threads: ThreadInfo[]; emptyMessage: string; hasMore: boolean })}
+{#snippet template(args: {
+  threads: ThreadInfo[];
+  emptyMessage?: string;
+  hasMore?: boolean;
+  loading?: boolean;
+  loadingMessage?: string;
+  error?: string;
+})}
   <div class="h-96 w-full">
     <BoardView
       threads={args.threads}
       emptyMessage={args.emptyMessage}
       hrefFor={(t) => `#/${t.id}`}
       hasMore={args.hasMore}
+      loading={args.loading}
+      loadingMessage={args.loadingMessage}
+      error={args.error}
       loadMore={() => {}}
     />
   </div>
@@ -95,3 +105,7 @@
   args={{ threads: [], emptyMessage: "No threads yet", hasMore: false }}
   {template}
 />
+
+<Story name="Loading" args={{ threads: [], loading: true, loadingMessage: "Loading threads…" }} {template} />
+
+<Story name="Error" args={{ threads: [], error: "Failed to load threads" }} {template} />

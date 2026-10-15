@@ -7,7 +7,7 @@
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
   import ActivityFeedSkeleton from "@roomy/design/components/content/feed/ActivityFeedSkeleton.svelte";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
-  import MediaEmbed from "../chat/embeds/MediaEmbed.svelte";
+  import MediaEmbed from "@roomy/design/components/content/thread/message/embeds/MediaEmbed.svelte";
   import LinkCard from "@roomy/design/components/content/thread/message/embeds/LinkCard.svelte";
   import MessageContent from "../chat/MessageContent.svelte";
   import MessageReactions from "../chat/MessageReactions.svelte";
