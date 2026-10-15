@@ -45,9 +45,7 @@ import {
 import { installGate } from "./held-requests.ts";
 import {
   APPSERVER_HTTP_ORIGIN,
-  SEED_MESSAGE_TEXT,
   SEED_ROOM_ID,
-  SEED_ROOM_NAME,
   SEED_ROOM_PATH,
   SEED_SPACE_ID,
   TEST_USER_DID,
@@ -104,6 +102,26 @@ async function createChannel(name: string): Promise<string> {
     },
   ]);
   return roomId;
+}
+
+/**
+ * A channel of this test's own, with one message in it.
+ *
+ * The seeded channels are shared by the whole suite, and the timeline is
+ * virtualized and paged at 50 — so by the time a later spec runs, the lobby's
+ * oldest row is no longer the row the room opens on, and an assertion naming
+ * it fails for a reason that has nothing to do with the behaviour under test.
+ * A room this test just created has exactly one message, which is therefore
+ * both the newest and the row the room parks on.
+ */
+async function roomWithMessage(
+  prefix: string,
+  text: string,
+): Promise<{ roomId: string; messageId: string; name: string }> {
+  const name = `${prefix}-${newUlid().slice(-6)}`;
+  const roomId = await createChannel(name);
+  const messageId = await postMessage(roomId, text);
+  return { roomId, messageId, name };
 }
 
 /** Post one message into an existing channel, returning its id. */
@@ -174,6 +192,9 @@ test.describe("the shell at a phone breakpoint", () => {
   }) => {
     test.skip(!isMobile, "the drawer layout only exists below the 640px breakpoint");
 
+    // The sidebar's own contents are irrelevant here — only the drawer's
+    // geometry is asserted — so the room is the seeded channel rather than one
+    // this test creates.
     await page.goto(SEED_ROOM_PATH);
     await waitForAuthenticated(page);
 
@@ -262,6 +283,13 @@ test.describe("a frame from a second client reaches the open room", () => {
     // documents rather than the default budget.
     test.slow();
 
+    // A room of this test's own: the reader must be parked on a row that
+    // exists when the test opens it, and the shared channels grow past one
+    // virtualized page as the suite runs.
+    const openerText = uniqueText("the room the reader has open");
+    const room = await roomWithMessage("live-frame", openerText);
+    const path = `/${SEED_SPACE_ID}/${room.roomId}`;
+
     // Hold this reader's own room reads shut for the length of the test. The
     // gate is installed before the first navigation so it also owns the
     // request the initial load makes — it continues them with the same
@@ -269,9 +297,9 @@ test.describe("a frame from a second client reaches the open room", () => {
     const gate = installGate(page);
     await gate.install;
 
-    await page.goto(SEED_ROOM_PATH);
+    await page.goto(path);
     await waitForAuthenticated(page);
-    await expect(page.locator("ol")).toContainText(SEED_MESSAGE_TEXT);
+    await expect(page.locator("ol")).toContainText(openerText);
 
     // From here on, a `room.getMessages` refetch is parked. That is what makes
     // the assertion below mean "the frame did it": with the read path frozen,
@@ -287,7 +315,7 @@ test.describe("a frame from a second client reaches the open room", () => {
 
     const sender = await openSecondClient(browser);
     const text = uniqueText("live from the second client");
-    await sender.page.goto(SEED_ROOM_PATH);
+    await sender.page.goto(path);
     await waitForAuthenticated(sender.page, 60_000);
     await sendViaComposer(sender.page, text);
 
@@ -311,47 +339,52 @@ test.describe("deep links", () => {
   test("a cold room link lands in that room, with the shell agreeing", async ({
     page,
   }) => {
+    const targetText = uniqueText("the room a share link names");
+    const room = await roomWithMessage("share-link", targetText);
+    const path = `/${SEED_SPACE_ID}/${room.roomId}`;
+
     // Nothing before this navigates: the room is reached from a bare URL, the
     // way a share link is.
-    await page.goto(SEED_ROOM_PATH);
+    await page.goto(path);
     await waitForAuthenticated(page);
 
-    // The room's own content — the seeded message came through the real write
-    // path and the materialiser, so reading it back is the route having
-    // resolved to this room rather than to an empty shell.
-    await expect(page.locator("ol")).toContainText(SEED_MESSAGE_TEXT);
+    // The room's own content — the message came through the real write path
+    // and the materialiser, so reading it back is the route having resolved to
+    // this room rather than to an empty shell.
+    await expect(page.locator("ol")).toContainText(targetText);
     await expect(composer(page)).toBeVisible();
 
     // And the shell describes the same room: exactly one sidebar row is
-    // active, and it is this channel. Asserted while the drawer may be off
-    // screen, which is why this is text and not visibility.
+    // active, and it is this channel rather than the one the reader was in
+    // before (there is no before — the URL is the only input). Asserted as
+    // text, not visibility, because the row is correctly off screen at a phone
+    // viewport and this test also runs there.
     const activeRow = page.locator('.sidebar-body-wrap [data-current="true"]');
     await expect(activeRow).toHaveCount(1);
-    await expect(activeRow).toContainText(SEED_ROOM_NAME);
-    expect(page.url()).toContain(SEED_ROOM_PATH);
+    await expect(activeRow).toContainText(room.name);
+    expect(page.url()).toContain(path);
   });
 
   test("a ?message= link lands on that message and marks it", async ({ page }) => {
     // A room of this test's own: the target has to be old enough that opening
     // the room at the newest end leaves it off screen, and the shared channels
-    // are read by other specs at a fixed depth.
-    const roomId = await createChannel(`deep-link-${newUlid().slice(-6)}`);
+    // grow past one page as the suite runs.
     const targetText = uniqueText("the message the link names");
-    const targetId = await postMessage(roomId, targetText);
+    const room = await roomWithMessage("deep-link", targetText);
     // A second batch, so these are strictly later than the target and it is the
     // oldest row in the room rather than one of a same-millisecond burst.
     for (let i = 0; i < 30; i++) {
-      await postMessage(roomId, `filler ${i} ${uniqueText("")}`);
+      await postMessage(room.roomId, `filler ${i} ${uniqueText("")}`);
     }
 
-    await page.goto(`/${SEED_SPACE_ID}/${roomId}?message=${targetId}`);
+    await page.goto(`/${SEED_SPACE_ID}/${room.roomId}?message=${room.messageId}`);
     await waitForAuthenticated(page);
 
     // The row carries the mark only while the deep link names it, and it can
     // only be rendered at all once the effect has scrolled the virtualizer to
     // it — a room opened normally parks at the newest row and leaves this one
     // unmounted.
-    const row = messageRow(page, targetId);
+    const row = messageRow(page, room.messageId);
     await expect(row).toHaveClass(/message-highlight/, { timeout: 15_000 });
     await expect(row).toContainText(targetText);
 

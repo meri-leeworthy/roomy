@@ -206,6 +206,15 @@ sync socket — still runs through the real appserver.
 | a cold room link lands in that room, with the shell agreeing | desktop | A share link works from a bare URL: the room's content renders and exactly one sidebar row is active, naming that channel. |
 | a `?message=` link lands on that message and marks it | desktop | The link searches back to a message that is off the newest page, scrolls it into the chat viewport, and marks it — the route a search result, a push notification and a forwarded message's back-link all take. |
 
+The three desktop tests each run against a channel they create themselves,
+rather than the seeded ones. The seeded channels are shared by the whole suite
+and the timeline is virtualized and paged at 50, so by the time a later spec
+runs, the lobby's oldest row is no longer the row the room opens on — an
+assertion naming it would fail for a reason with nothing to do with the
+behaviour under test. A room a test just created has one message, which is
+both the newest and the row the room parks on. (`room-kinds.spec.ts` and
+`message-lifecycle.spec.ts` reached the same conclusion for the same reason.)
+
 ### Deliberate-break evidence (acceptance criterion 2)
 
 Demonstrated, not asserted, on 2026-09-25:
