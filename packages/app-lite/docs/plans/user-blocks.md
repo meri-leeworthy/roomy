@@ -2,7 +2,9 @@
 
 **Date:** 2026-09-26 (revised 2026-09-27, 2026-09-28, 2026-10-13, 2026-10-15)
 **Status:** Phase 1 shipped (#317, `9731537c5`); Phase 2 (the appserver block
-set) merged to `next` (#427). Phases 3–6 are ready to dispatch; §7 is a
+set) merged to `next` (#427). Phases 3–6 are ready to dispatch, and Phase 7
+adds the two mechanisms that recover the reverse set (§2.6) on top of revision
+(a)'s per-account refresh; §7 is a
 decision record and every question in it is answered. Phase 2's
 `space.roomy.user.refreshBlocks` scope is deferred (`BLOCK_RPC_SCOPES`,
 `UNREGISTERED_SCOPES`) until it is registered on the HappyView API client,
@@ -42,6 +44,21 @@ now, and a refresh is triggered only by the account it describes — when that
 account makes an authenticated request. §2.5 states the freshness that trades
 away, why it is the safe direction, and why a Jetstream consumer is still not
 the answer.
+
+**Revision 2026-10-15 (b) — the reverse set is recovered from the event stream,
+not only from each account's own request.** Revision (a) removed the member
+sweep and left the reverse direction to the blocker's own authenticated refresh
+(§2.5). That trigger is kept, and two mechanisms are added for the facts it
+cannot reach: one unfiltered Jetstream subscription on `space.roomy.user.block`,
+which carries the in-app direction and is the only thing that learns a Roomy
+block written by an account this appserver has never served, and a lazy,
+metered Jetstream **replay** pass over a bounded DID set, which carries imported
+Bluesky blocks. Neither builds an index. §2.6 states their triggers, freshness
+bounds, failure modes, cold-start and stream-silent behaviour, and the schema
+the cursors need; it also rewrites the paragraph of §2.5 that concluded a
+Jetstream consumer was not the answer. The same revision corrects §3.5's stated
+reason for rejecting HappyView — §2.1 rejected it on *index size*, not on lag,
+and §2.1's decision is about the *forward* direction only.
 
 **Packages:** `packages/appserver`, `packages/app-lite`, `packages/design`,
 `packages/sdk`, `packages/docs`
@@ -349,10 +366,13 @@ rather than assume a consent dialogue exists.
 
 ## 2. Bluesky bootstrap
 
-### 2.1 Decision: reject HappyView; read the viewer's own PDS
+### 2.1 Decision: reject HappyView for the forward direction; read the viewer's own PDS
 
-**HappyView is rejected.** The task asked for the mechanism to be justified
-rather than assumed, so here is the measurement that decides it.
+**HappyView is rejected for the forward question.** The task asked for the
+mechanism to be justified rather than assumed, so here is the measurement that
+decides it. What is decided here is where *the caller's own block set* comes
+from; the reverse question — "who blocked this DID" — is a different question
+with a different answer, and §2.6 recovers it without a HappyView index.
 
 `app.bsky.graph.block` is a *globally enormous* collection:
 
@@ -393,18 +413,24 @@ calls** — one per collection — with:
   bound, because it depends on HappyView's ingest lag, not on the appserver.
 - **Cost proportional to the one user's own list**, not to a 20M-row global
   index.
-- **No backfill job, no index-retention policy, no Jetstream collection filter
-  to maintain.**
+- **No backfill job and no index-retention policy.** Nothing has to be indexed
+  for the appserver to read the caller's own repo, and nothing has to be
+  retained. (The *reverse* direction does have to consume events; §2.6 does that
+  with one unfiltered subscription and a metered replay pass — not with an index
+  of the collection this section is about.)
 
-Jetstream was measured as a non-argument too: subscribing with
-`wantedCollections=app.bsky.graph.block` yielded ~2.6 events/s (172 creates in
-90 s), which is survivable in itself — the size of the *initial* index is what
-kills it.
+Jetstream was measured as a non-argument *for this direction* too: subscribing
+with `wantedCollections=app.bsky.graph.block` yielded ~2.6 events/s (172 creates
+in 90 s; re-measured 2026-10-15 at ~3.1/s), which is survivable in itself — the
+size of the *initial* index is what kills it. That measurement is what makes the
+stream usable as a source of *events*; it does not make an index of the
+collection affordable, which is the point of this section.
 
 **What HappyView is still right for:** network-wide lookups keyed by *someone
 else's* DID, like profiles (`space.roomy.user.getProfiles`, one HTTP call per
-25 DIDs). Blocks are never that — the appserver only ever asks about the
-caller's own repo. HappyView stays exactly as it is.
+25 DIDs). The forward block question is never that — it is always about one
+repo, the caller's own. HappyView stays exactly as it is, and §2.6 answers the
+reverse question without it.
 
 The appendix records the Lua script and the `target_collection` registration
 that this decision would require, so that the choice is reversible on evidence
@@ -463,7 +489,7 @@ and it already holds every other `(user_did, …)` table. Add two tables and bum
 the manifest:
 
 ```sql
--- ── User blocks (schema v11) ────────────────────────────────────────────
+-- ── User blocks (schema v15) ────────────────────────────────────────────
 -- The resolved block set for a user: the union of the blocks in their own
 -- repo (space.roomy.user.block) and their Bluesky blocks
 -- (app.bsky.graph.block). A cache of the user's repos, not a source of
@@ -476,6 +502,7 @@ create table if not exists user_blocks (
   fetched_at  integer not null default (unixepoch() * 1000),
   primary key (user_did, blocked_did)
 ) strict;
+create index if not exists idx_user_blocks_blocked on user_blocks(blocked_did);
 
 -- Last refresh attempt per user. Distinct from the rows above because a
 -- user with zero blocks has no rows to carry a timestamp — the same
@@ -488,11 +515,13 @@ create table if not exists user_block_fetches (
 ) strict;
 ```
 
-`readStateVersions.ts` gains `"11": { kind: "structural" }` after the existing
-`"10"` (`packages/appserver/src/db/readStateVersions.ts:53`, `:112`). No `up`
-function is needed — the schema file is exec'd idempotently on every open, so
-`create table if not exists` is already present on both fresh and existing DBs
-(the manifest's own documented rule, `readStateVersions.ts:1-25`).
+`readStateVersions.ts` declares `"15": { kind: "structural" }` for these two
+tables (`packages/appserver/src/db/readStateVersions.ts:53`, `:112`). The
+manifest numbers by migration rather than by table, so the block set did not
+land as `"11"`. No `up` function is needed — the schema file is exec'd
+idempotently on every open, so `create table if not exists` is already present
+on both fresh and existing DBs (the manifest's own documented rule,
+`readStateVersions.ts:1-25`).
 
 **Why a cached copy and not a per-request PDS call:** every read path in §3
 needs the set, including the WebSocket delivery path and the push evaluator.
@@ -505,8 +534,10 @@ gives all consumers one synchronous, indexed lookup.
 - In-memory memo with a 60 s TTL, keyed by DID, mirroring the profile store's
   `CACHE_TTL_MS = 60_000` (`packages/appserver/src/queries/profileStore.ts:63`)
   and the negative cache in `profiles.ts:87-132`.
-- Backed by one indexed read of `user_blocks` (`primary key (user_did,
-  blocked_did)` gives a prefix scan on `user_did`).
+- Backed by one indexed read of `user_blocks` — `idx_user_blocks_blocked`
+  answers the reverse lookup, and the primary key's `user_did` prefix scan
+  answers the forward one. §2.6 rekeys the table to the block *record* and gives
+  the forward direction an index of its own.
 - Background refresh, started by the account's own authenticated request rather
   than by a read (§2.5), so a read never blocks on the PDS — the same
   detach-and-hydrate shape as `hydrateMissingProfiles`
@@ -516,10 +547,13 @@ gives all consumers one synchronous, indexed lookup.
 - **Anonymous callers have no block set.** `parseUserDid(auth) === null` → empty
   set, no DB read, no redaction. An account-less viewer hides nobody and is
   hidden from nobody.
-- **The reverse rows share the same table.** A row written for a *blocker* —
-  the set that answers `blockedBy(did)` — is keyed by that user's own `user_did`
-  and is exactly the same shape, so one table serves both directions and the
-  primary key's `user_did` prefix scan still answers the common lookup (§3.5).
+- **The reverse rows share the same table, written by whoever learns the fact.**
+  A row answering `blockedBy(did)` is keyed by the *blocker's* own `user_did`
+  and has exactly the shape of that blocker's forward set, because the appserver
+  stores one fact — "this account blocked that account" — and never records
+  which mechanism learned it. That is what lets the account's own refresh
+  (§2.5), §2.6's subscription and §2.6's replay pass write the same rows without
+  a reconciliation step.
 
 ### 2.4 Immediate invalidation after an in-app block
 
@@ -542,7 +576,9 @@ So Phase 2 adds one authenticated procedure:
   per-user invalidation signals).
 
 The client calls it immediately after `putRecord`/`deleteRecord` succeeds. The
-TTL remains the convergence path for a block written by *another* client.
+TTL remains the convergence path for a block written by *another* client, and
+§2.6's subscription is a second writer of these same rows: it is what covers a
+Roomy block placed by an account this appserver has not served.
 
 There is nothing else for the procedure to invalidate: the reveal is not
 recorded in the block set or anywhere else (§3.6), so a block's only effect on
@@ -555,7 +591,9 @@ predicate the appserver cannot answer from the viewer's own repo. Three shapes
 were on the table: enumerate the viewer's space-members' repos (the original
 revision's choice), index the record type in HappyView/Jetstream (§2.1's
 rejected mechanism; the Appendix records the registrations it would need), or
-read a repo when *its owner* is present. The third is what ships:
+read a repo when *its owner* is present. The third is what ships — as the
+trigger for the forward set and as what a silent reverse stream degrades to;
+§2.6 adds the two mechanisms that recover what it cannot reach.
 
 - **A read never fetches.** `hiddenBy(viewerDid)` answers from `user_blocks`
   alone: one indexed query for the viewer's own set, one for the reverse set. No
@@ -589,37 +627,315 @@ direction with the security consequence. What a stale reverse set costs is that
 a target keeps seeing the blocker until the blocker next uses the appserver —
 the failure is "not yet hidden", never "a message the viewer was told was
 hidden is served anyway", and never a case where a viewer's own block stops
-being enforced.
+being enforced. The one answer that is not merely stale is the cold cache, and
+that one is fail-open rather than safe: an account whose rows have never been
+read is served the empty set, so it sees an author it has blocked. §2.6 states
+what bounds that window and why the write path is exact regardless.
 
-**Why not a Jetstream consumer (answering the question against the code).**
-Subscribing to one firehose over `space.roomy.user.block` and/or
-`app.bsky.graph.block` and writing `user_blocks` from it would remove the PDS
-page loops entirely, and it is the only shape that answers the reverse question
-without reading a repo at all. It is rejected on two measurements and one
-property:
-
-- **Size, unchanged for the Bluesky half.** `app.bsky.graph.block` is globally
-  enormous — ≥300k repos, mean 73 records each, ~20M records extrapolated
-  (§2.1) — so indexing it means a multi-hour backfill and a permanent
-  multi-million-row local index.
-- **The Roomy collection alone is small, but it is not the half that needs
-  help.** `space.roomy.user.block` is ours and small, so a consumer over it is
-  cheap in bytes. It is not cheaper in *freshness*: Jetstream delivery lags the
-  repo write by an unbounded amount — the objection §2.1 already records — while
-  the PDS read that ships is exact at the moment it runs. A permanent subscriber
-  and a second writer into `user_blocks` buy nothing the trigger does not
-  already have for a read that is deliberately stale-tolerant.
-- **The current code already satisfies the freshness that matters, more
-  cheaply.** The writer's own `refreshBlocks` is synchronous and in-request
-  (§2.4), so the direction with a security consequence needs no index and no
-  subscriber at all. Only the *reverse* direction is allowed to be stale, and a
-  target has nothing to act on.
+**A Jetstream consumer is adopted for the reverse direction, and only there.**
+The revision above rejected a subscriber outright: on the size of the Bluesky
+collection, and on the argument that a subscriber "buys nothing the trigger
+does not already have". The size argument stands, and it is why nothing in
+§2.6 indexes `app.bsky.graph.block`. The second argument does not. The consumer
+buys something the per-account trigger cannot: it is the only way to learn a
+Roomy block written by an account this appserver has never served — a second
+Roomy client, a future second appserver, or a write whose client never called
+`refreshBlocks` — and it learns it without reading anyone's repo. What it does
+not buy, and what this section already established, is the forward direction:
+that stays the account's own PDS read, because it is exact at the moment it
+runs and no subscriber can be.
 
 **If it is revisited:** the decision to re-open is the one §2.1 records, and the
 trigger does not change it. The appendix's `subject`-filtered HappyView query
-would answer `blockedBy` in one call, but only at an ingest lag this plan still
-cannot bound, and it would not make the *forward* direction fresher than the PDS
-read it replaces.
+would answer `blockedBy` in one call, but only at an ingest lag this plan cannot
+bound, and it would not make the *forward* direction fresher than the PDS read
+it replaces. §2.6 answers the reverse question with the archive's *events*
+instead, which is why the appendix stays closed.
+
+### 2.6 Decision: the reverse set is recovered from an event stream and a replay pass
+
+The reverse question — "who blocked this DID?" — is the one part of §3.5's
+predicate that cannot be answered from the viewer's own repo: the record naming
+a blocked account lives in the *blocker's* repo, and the blocked account has no
+record of its own (§1.2). It is also the only part with no cheap authoritative
+source, so it is answered by three mechanisms, each with one job:
+
+| Direction | Question | Source | Mechanism | Freshness | Failure mode |
+|---|---|---|---|---|---|
+| Forward | what did *I* block | my own repo | `listRecords` on my PDS, triggered by my own authenticated request (§2.2, §2.3, §2.5) | exact for a Roomy write (§2.4); otherwise ≤ one 60 s window of my own activity | PDS unreachable → the rows are kept, `status='error'` backs off 60 s, a read serves the last known set |
+| Reverse, Roomy | who blocked *me*, in-app | someone else's repo | one unfiltered Jetstream subscription on `space.roomy.user.block`, folded into `user_blocks` | seconds (relay lag); exact for an in-app write, which §2.4 already covers | socket down or silent → no rows added; the forward path and §2.4 cover the same fact |
+| Reverse, Bluesky | who blocked *me*, imported | someone else's repo, enormous | a metered Jetstream **replay** pass over a bounded DID set, applied as a delta | ≤ the pass interval + relay lag; the forward path is usually sooner | no key, `401` or `429` → the pass is skipped and the rows are unchanged |
+
+**§3.5's stated reason for rejecting HappyView was wrong, and this is the
+correction.** §3.5 said a reverse lookup whose "enforcement window depends on
+HappyView's ingest lag, not on the appserver" is "the same defect §2.1 rejected
+for the forward direction". §2.1 did not reject HappyView on lag. It rejected it
+on **index size**: ≥300k repos, ~20M records, a multi-hour backfill and a
+permanent local index, to answer a question that is always "what are the N
+blocks in this one viewer's own repo" (§2.1). The two directions differ in
+exactly the way that matters here: for the forward question there is a cheap
+authoritative alternative — the account's own PDS — and for the reverse question
+there is none, because the fact lives in somebody else's repo. That asymmetry,
+not the lag, is why a sweep existed at all. §2.1's decision is therefore scoped
+to the forward direction in this revision, and §3.5 no longer borrows it.
+
+**The forward path is §2.5's, and so is what "serve stale" means there.** The
+two mechanisms below add writers to `user_blocks`; they do not change the read
+path, which stays two indexed queries with nothing awaited, and they do not
+change the trigger for an account's own set — `warmBlockSet(did)` on that
+account's authenticated request, and `refreshBlocks` (§2.4) inside the request
+that placed a block. A cold cache answers with the empty set, and that is the
+**fail-open** direction, not the safe one: an account whose own rows have never
+been read sees an author it has blocked. It is accepted, and bounded, because
+the window that matters is closed by a stronger guarantee than a TTL — a block
+placed *in* Roomy is exact before the client's next read, since `refreshBlocks`
+awaits the fetch inside the write's own request (§2.4). What is left is the gap
+between an account's first authenticated request and the completion of the fetch
+that request starts: one `listRecords` loop, bounded by the 3 s per-request
+deadline (§2.2), after which every read of that account has the set. Failing
+closed instead would hide the whole product from every account whose set is
+unknown, and "unknown" is indistinguishable from "blocks nobody" until the fetch
+completes — the fetch already in flight.
+
+**Reverse, Roomy: one live subscription on `space.roomy.user.block`.**
+
+*Where it runs.* The appserver has no outbound WebSocket client in production
+code today — every `new WebSocket` in the package is in a test
+(`packages/appserver/src/e2e/*.test.ts`). The connection is a new module,
+`packages/appserver/src/materialization/blockStream.ts`, started beside the embed
+sweeper in `createAppserver`'s background-worker block and stopped from the
+server handle's `close()` — the `startEmbedSweeper`/`stopEmbedSweeper` lifecycle,
+so a test that builds an appserver without background workers opens no socket.
+Only the replica holding the block worker's lease (`workers/lease.ts`) connects;
+the fold is idempotent, so a second replica connecting by accident is waste
+rather than corruption.
+
+*The subscription.* Bun's global `WebSocket` opens:
+
+```text
+wss://jetstream.us-east.bsky.network/xrpc/network.bsky.jetstream.subscribeEvents
+  ?collections=space.roomy.user.block
+  &collections=app.bsky.graph.block
+  &kinds=commit
+  &cursor=<seq>
+```
+
+Three properties of that URL are deliberate:
+
+- **No `dids` filter.** The docs advertise 10,000 DIDs for the live tail, but the
+  filter travels in the query string and the URL ceiling binds long before that:
+  measured against the live relay, 100 DIDs (4.4 KB) upgrades and 200 DIDs
+  (~8.5 KB) is refused before the upgrade. The subscription is unfiltered for
+  that reason, and it can afford to be — the collection is ours and small.
+- **A second collection is subscribed and never consumed.**
+  `app.bsky.graph.block` is the connection's heartbeat: measured 2026-10-15 it
+  delivers ~3.2 commits/s network-wide, so a socket that has delivered nothing
+  for a minute is broken, while silence on our own collection proves nothing
+  (nobody has ever written a `space.roomy.user.block` record). Its frames are
+  counted and dropped; no row is ever written from them.
+- **`kinds=commit`**, because a collection filter constrains commit events only —
+  identity, account and sync events carry no block.
+
+*The fold.* Each frame is an envelope — `{"$type":"message","payload":{…}}` —
+whose commit payload carries `did`, `collection`, `rkey`, `operation`, `record`,
+`seq` and `time`. The record's URI is `at://<did>/<collection>/<rkey>`: a
+`create` or `update` upserts one `user_blocks` row keyed by that URI, and a
+`delete` removes the row with that URI. Nothing else in the frame is trusted, and
+the stream is never asked whether the block "is for a space" — a block is a fact
+about two accounts, which is why one row shape serves every reader.
+
+*Cursor and idempotence.* Every frame carries `seq`. The consumer persists the
+highest applied `seq` and reconnects with `?cursor=<seq>`. The cursor is
+**inclusive** — measured 2026-10-15, reconnecting with `cursor=S` redelivers the
+event at `S` — and delivery is at-least-once, so the fold must be idempotent,
+which URI-keying makes it: a redelivered create is an upsert of an identical row,
+and a redelivered delete removes a row that is already gone. Reconnect is
+exponential backoff with jitter, capped; the cursor survives a restart, so a
+restart resumes rather than gaps. If a stored cursor has aged out of the relay's
+lookback window, the consumer takes the position the relay offers, logs the gap,
+and leaves those facts to the forward path.
+
+*Cold start.* With no stored cursor the consumer subscribes live from the tip and
+stores the first `seq` it sees; it does not replay the collection's history,
+because there is none to replay and the forward path recovers what exists. Until
+the first event arrives the reverse-Roomy set is whatever `user_blocks` already
+holds, and it grows from two directions: this stream, and each account's own
+refresh (§2.4), which writes the same rows for the writer.
+
+*Detecting that it is not delivering.* Two signals, both cheap and neither a
+correctness dependency:
+
+- `jetstream_blocks_last_commit_at_ms` (`metrics.ts`) — the time of the last
+  commit delivered on the socket, from any collection. With the heartbeat
+  collection on the subscription, an age of minutes means the delivery path is
+  broken rather than that the network is quiet, and that is the alert.
+- `jetstream_blocks_reconnects_total`, the socket's own `close`/`error` events,
+  and a WebSocket ping with a pong deadline (`WebSocket.ping()` exists in Bun) to
+  catch a half-open socket that never fires `close`.
+
+**Reverse, Bluesky: a lazy, metered replay pass.** `app.bsky.graph.block` is the
+collection §2.1 measured as unindexable — ≥300k repos, ~20M records — and the
+reverse question needs the *events*, not an index of the collection. Jetstream v2
+replay serves exactly that: `POST /xrpc/network.bsky.jetstream.planSnapshot` with
+`dids`, `collections` and an `afterSeq`/`beforeSeq` window returns a plan
+(`sealedTipSeq`, `plannedThroughSeq`, and per-segment ranges with
+`mode: "blocks"`), and `getBlock`/`getSegment` download only the bytes the filter
+matched, immutably and `Range`-resumably. The `dids` filter travels in the POST
+**body**, not the query string: measured 2026-10-15 a 900-DID body (31 KB)
+reaches the auth check (`401 {"error":"invalid bearer credential"}`), so the URL
+ceiling that binds the live tail's `dids` filter does not apply here. That is
+what makes this N periodic HTTP calls rather than N sockets. (The documented
+`@bsky/jetstream` SDK implements plan-download-decode-cutover; using it is an
+implementation choice, and the live tail above needs no SDK.)
+
+*Trigger.* A pass runs when both hold: the appserver has served at least one
+authenticated request since the last pass — the same router observer
+`warmBlockSet` uses — and the last pass is older than `BLOCK_REPLAY_INTERVAL_MS`
+(default 10 minutes). An idle appserver therefore makes no metered call at all.
+That is the "lazily" of the mechanism: the pass exists to keep the reverse index
+warm for accounts that are actually using the appserver.
+
+*Candidate set.* The DIDs whose outgoing blocks are worth importing, because
+they hold a Roomy presence here and a block by one of them can hide content from
+another. That set is one query —
+`select distinct user_did from user_space_membership where state = 'joined'` —
+served by `idx_user_space_membership_user_state`
+(`readStateSchema.sql:31-46`) and cached in memory on the pass's own cadence.
+**The gap this leaves, stated rather than implied:** a member of a served space
+who has never used this appserver is not in the set. Their *Roomy* blocks are
+still covered, because that subscription is unfiltered and network-wide, so the
+gap is confined to their *Bluesky* blocks: it closes the moment they use the
+appserver, and until then the forward path covers them for every account that is
+present. Widening the set to the member edges of every served space is a
+per-space fan-out this revision does not take on, and nothing else in the design
+changes if it is taken later.
+
+*Byte cost.* Usage is metered in **response** bytes, not requests, so a pass
+costs the bytes of the blocks containing matching events. With ~3.07 commits/s of
+`app.bsky.graph.block` network-wide (§2.1) and a candidate set that is a small
+slice of the network's writers, a ten-minute pass matches a handful of events —
+kilobytes, not megabytes. Two guards hold when those assumptions break: the plan
+reports `sizeBytes` per segment, so a plan exceeding `BLOCK_REPLAY_MAX_BYTES` is
+abandoned with the cursor left where it is (nothing is lost and nothing is
+charged twice); and `beforeSeq` is pinned to the `sealedTipSeq` of the first
+page, so the range cannot float as new events arrive.
+
+*Cold start.* The first pass pins its window at the archive tip and consumes the
+delta from there; it does not replay the archive from the beginning. A historical
+pass is not needed for the forward direction — the account's own PDS is
+authoritative and cheap (§2.1) — and it would download the network's block
+history for accounts the appserver can already read directly. Where a historical
+reverse set is wanted — an account that has not used Roomy for months has no
+forward refresh to rely on — the operator sets `BLOCK_REPLAY_LOOKBACK_SEQ`,
+bounded by the same byte guard.
+
+*Degradation, all four named.* **No API key** — the pass loop is disabled at
+startup with one log line, and reverse-Bluesky is answered only by the forward
+path; nothing else changes. **`401`** — the same as no key: the credential is
+missing, malformed or revoked, so retrying is pointless until an operator fixes
+it. **`429` with `Retry-After`** — the cursor does not move and the next attempt
+waits at least that long; the quota refills continuously and a partial download
+resumes with `Range`, so a throttled pass costs a delay rather than a
+re-download. **Anything else** — exponential backoff, cursor unchanged, the last
+known rows still served.
+
+*Convergence bound, honestly.* An imported Bluesky block `B → V` is enforced for
+`V` within `BLOCK_REPLAY_INTERVAL_MS` plus relay lag of the commit, or sooner if
+`B` next makes an authenticated request here (§2.4's forward refresh writes the
+same row) or blocks `V` in Roomy at all (§2.4). This is the one direction where
+eventual consistency is the right answer rather than a compromise: an imported
+block is a *prior assertion* about a relationship, not an interaction that just
+happened, and the alternative that would make it exact — reading every
+candidate's PDS — is the sweep §2.5 removed.
+
+**The stream has never been observed delivering a real event, and nothing
+depends on it doing so.** Measured 2026-10-15: nobody has ever written a
+`space.roomy.user.block` record —
+`com.atproto.sync.listReposByCollection?collection=space.roomy.user.block`
+returns `{"repos":[]}` on both `relay1.us-west` and `relay1.us-east`; a scan of
+all 753 member DIDs of one viewer's spaces against their real PDSs found 0 Roomy
+block records against 467 `app.bsky.graph.block` records; and a 120 s
+subscription on the collection delivered 0 commits. The mechanism that would
+carry reverse-Roomy facts has therefore never been proven end-to-end in
+production, and the design assumes it may stay silent.
+
+What makes that safe is that the three mechanisms write *the same rows*.
+`user_blocks` is keyed by the block record, and a row means "`user_did` blocks
+`blocked_did`" whoever wrote it — the account's own refresh (§2.5) writes the row
+that answers its target's `blockedBy`. A stream that delivers nothing therefore
+costs *latency*, not correctness: a block placed by an account this appserver
+serves is enforced for its target from that account's own request, and only a
+block placed by an account this appserver has never served waits for the stream.
+No read path asks which mechanism produced a row, which is why the fallback needs
+no second code path — it is the same rows, written by whichever mechanism is
+still running.
+
+**The sweep does not come back, and nothing here is gated behind a flag.** §2.5
+removed the member sweep with every part of it: `sweepBlockers`, `warmBlockers`,
+`candidateBlockerDids`, `SWEEP_CONCURRENCY`, `mapWithConcurrency` and
+`_blockSweepsInFlight` are gone from `queries/userBlocks.ts`, leaving `hiddenBy`
+reading `user_blocks` and `startFetch` as the detached, in-flight-collapsing
+fetch `warmBlockSet` calls. This revision reinstates none of it: `hiddenBy` gains
+no side effect, and the replay's candidate set is one read-state query rather
+than a per-viewer fan-out over space members. The two new loops are single loops
+under a lease, and the feature flag that gates enforcement decides whether blocks
+*redact* a read, not whether an index is maintained.
+
+**Schema and staging.** Two read-state changes, and neither of them is what makes
+a deploy safe — the rows are.
+
+*v16, data: `user_blocks` is keyed by the record it came from.*
+
+```sql
+create table if not exists user_blocks (
+  record_uri  text primary key,   -- at://<blocker>/<collection>/<rkey>
+  user_did    text not null,      -- the blocker
+  blocked_did text not null,      -- the subject
+  source      text not null check(source in ('roomy', 'bluesky')),
+  created_at  integer,
+  seen_at     integer not null default (unixepoch() * 1000)
+) strict;
+create index if not exists idx_user_blocks_blocked on user_blocks(blocked_did);
+create index if not exists idx_user_blocks_user on user_blocks(user_did);
+```
+
+The key changes because the *record* is the identity of a block, and two
+mechanisms now write the same fact: the URI is what makes a replayed frame
+idempotent and what lets a delete remove exactly the row its own record created.
+It also covers a case the pair-keyed shape cannot represent at all — `key: "tid"`
+means one repo may hold two block records naming the same subject, and rows keyed
+by the pair can carry only one fact about that pair. The `up` carries the existing
+rows forward under a synthetic `legacy:` URI: the table is a cache, a carried row
+can only over-hide, and the next forward refresh for that account replaces it —
+its delete-by-absence covers rows `seen_at` before the snapshot began, so a
+concurrent stream event for a newer record survives. A stream delete names a real
+URI and does not match a `legacy:` row, so those rows are retired by the next
+refresh rather than by the stream.
+
+*v17, structural: one cursor row per stream.*
+
+```sql
+create table if not exists jetstream_cursors (
+  name       text primary key,   -- 'blocks.stream' | 'blocks.replay'
+  cursor     text not null,      -- the last seq applied on that stream
+  updated_at integer not null
+) strict;
+```
+
+The read-state DB is the established home for appserver-owned,
+non-reconstructible state (§2.3), and it is the same file the rows land in:
+advancing the cursor with the fold is what keeps at-least-once delivery from
+turning into a gap.
+
+*Staging.* The forward path works on both shapes, so the order is: ship the
+schema and the code with the two loops disabled (`BLOCK_STREAM_DISABLED` set,
+`JETSTREAM_REPLAY_API_KEY` absent), let the migration carry the rows forward,
+then enable the subscription and the pass. There is no window in which a block
+stops being enforced: every row that exists before the migration exists after
+it, and a row that is *missing* is missing only for the reasons §2.3 already
+bounds — one cache window of the account's own activity. The `user-blocks` flag
+is independent of all of this: it gates enforcement, and these mechanisms are
+what enforcement reads.
 
 ---
 
@@ -917,18 +1233,27 @@ What changes, and what does not:
   union is the answer:
   1. `blocks(did)` — the viewer's own repos, both collections. This is the
      §2.2 fetch, unchanged.
-  2. `blockedBy(did)` — everyone whose Roomy repo holds a
-     `space.roomy.user.block` naming this DID. This is a *reverse* index the
-     tree does not have today, and it is the real cost of mutual hiding: the
-     appserver must learn about a record in somebody else's repo, and it has
-     only three ways to do it.
-- **Where the reverse set comes from.** Ranked by fit (§2.5):
+  2. `blockedBy(did)` — everyone whose repo holds a block naming this DID:
+     `space.roomy.user.block` and imported `app.bsky.graph.block` alike. This is
+     a *reverse* index the tree does not have today, and it is the real cost of
+     mutual hiding — the appserver must learn about a record in somebody else's
+     repo, and it cannot do that by reading the viewer's own (§2.6).
+- **Where the reverse set comes from.** Three mechanisms, one per direction, and
+  the shape that was removed (§2.6):
 
   | Source | Freshness | Cost | Verdict |
   |---|---|---|---|
-  | HappyView `app.bsky.graph.block` index with a `filter = { field = "subject", value = did }` query | Jetstream lag (minutes, unbounded) | One index and one query lexicon (§Appendix; the appendix's Lua `filter` is exactly this lookup) | **Not in v1.** A safety property whose enforcement window "depends on HappyView's ingest lag, not on the appserver" is the same defect §2.1 rejected for the forward direction |
-  | Reading a blocker's repo when *that account* authenticates | Exact for the write that placed the block (`refreshBlocks`, §2.4); otherwise as old as that account's last authenticated request | One PDS page loop per account per cache window — proportional to the accounts that use the appserver, not to the space-mates of everyone reading | **Shipped.** `warmBlockSet` in `queries/userBlocks.ts`, called for every authenticated request; a read serves `user_blocks` and never fetches |
+  | One unfiltered Jetstream subscription on `space.roomy.user.block`, folded into `user_blocks` | seconds (relay lag); exact for an in-app write, which §2.4 already covers in-request | One socket, no key, no index, one lease (§2.6) | **In v1**, for the in-app direction. It is the only mechanism that learns a Roomy block written by an account this appserver has never served |
+  | A metered Jetstream **replay** pass over a bounded DID set for `app.bsky.graph.block` | ≤ the pass interval + relay lag; the forward path is usually sooner | Metered response bytes, proportional to the events the filter matches (§2.6) | **In v1**, for the imported direction. An imported block is a prior assertion, not an interaction, so eventual consistency is the right answer here |
+  | Reading a blocker's repo when *that account* authenticates | Exact for the write that placed the block (`refreshBlocks`, §2.4); otherwise as old as that account's last authenticated request | One PDS page loop per account per cache window — proportional to the accounts that use the appserver, not to the space-mates of everyone reading | **Shipped**, and still the fallback: `warmBlockSet` in `queries/userBlocks.ts`, called for every authenticated request. It is what a silent stream degrades to |
+  | HappyView `app.bsky.graph.block` index with a `subject` filter | Jetstream lag (unbounded) | ≥300k repos to discover, ~20M records, a multi-hour backfill and a permanent index (§2.1) | **Rejected on that cost, not on lag.** §2.1's measurement decides it, and the reverse question is answered by the mechanisms above without building that index |
   | Nothing — one-way only | — | — | Rejected by §7.7 |
+
+  §3.5's earlier reason for rejecting HappyView is corrected in §2.6: it cited
+  §2.1's rejection as if §2.1 had been about lag, when §2.1 was about index size
+  and about the forward direction only. A reader who wants the argument in one
+  place should read §2.6, which states what the reverse direction is worth
+  paying for and what it is not.
 
 - **`space.roomy.user.refreshBlocks` has to fan out.** §2.4 drops the memo for
   the *writer*. With mutual hiding, a block also changes what the *target*
@@ -1435,6 +1760,11 @@ exist for the fetch to have anything to read).
 and Bluesky blocks plus every recovered reverse block — from `user_blocks`
 alone, and no read path starts a fetch.
 
+**Extended, not replaced:** items 3–4 are the forward direction and the
+predicate, and both stand. The *reverse* set they describe as coming from each
+account's own refresh is widened by Phase 7 (§2.6) to two further mechanisms;
+nothing in this phase is removed by it.
+
 ---
 
 ### Phase 3 — Timeline redaction and the indicator
@@ -1571,6 +1901,39 @@ E2E suite covers both the blocked and the revealed rendering.
 
 ---
 
+### Phase 7 — The reverse index: one stream and one replay pass
+
+**Base:** `next`. **Depends on:** Phase 2 (the table this writes) and Phase 3
+(the read path it feeds). **Adds** the two mechanisms that recover the facts the
+per-account refresh cannot reach (§2.6).
+
+1. `packages/appserver/src/db/readStateSchema.sql` + `readStateVersions.ts`:
+   rekey `user_blocks` to `record_uri` with `seen_at` and both indexes (v16,
+   `kind: "data"`, carrying existing rows forward as `legacy:` URIs), and add
+   `jetstream_cursors` (v17, structural). `replaceBlockRows` writes the fetched
+   records' URIs and deletes by absence within its own `(user_did, source)`,
+   bounded by `seen_at`.
+2. `packages/appserver/src/materialization/blockStream.ts` — the subscription,
+   the URI-keyed fold, the cursor, the heartbeat metric, reconnect with backoff,
+   and the worker lease; started and stopped with the background workers, like
+   the embed sweeper.
+3. `packages/appserver/src/materialization/blockReplay.ts` — `planSnapshot` →
+   `getBlock`/`getSegment` over the candidate set, with the byte guard and the
+   four degradation paths, plus the candidate-set query.
+4. Tests: a redelivered create and a redelivered delete leave the rows
+   unchanged; a delete for one of two records naming the same subject leaves the
+   other row; a reconnect resumes from the stored cursor and absorbs the
+   inclusive redelivery; a missing API key leaves the pass disabled; a `429`
+   leaves the cursor where it was; the migration carries rows forward and the
+   first forward refresh retires the `legacy:` URIs.
+
+**Acceptance:** no read path starts a fetch of any account's repos; the only
+per-account PDS reads are the account's own refresh (§2.5) and the metered
+replay pass; no part of the removed sweep returns; and the metrics named in
+§2.6 are exported.
+
+---
+
 ## 7. Decisions
 
 Every question this plan raised is answered: the recommendation was accepted on
@@ -1666,12 +2029,21 @@ expect from Bluesky.
 **What it costs in the appserver, stated plainly:** the blocker's repo is the
 only place the reverse fact lives, so the reverse set must be *recovered* from
 public repos (§3.5). That is a `blockedBy` predicate over `user_blocks`, whose
-rows are written by the blocker's own authenticated refresh (§2.5) — all in
-Phase 2, none of it a new phase or a new read path. There is no
+rows are written by whoever learns the fact: the blocker's own authenticated
+refresh (§2.5), one unfiltered Jetstream subscription on
+`space.roomy.user.block` — the only mechanism that learns a Roomy block written
+by an account this appserver has never served — and a lazy, metered Jetstream
+*replay* pass over a bounded DID set for imported `app.bsky.graph.block`
+records. Neither of the latter two builds an index: the replay asks for the
+events its DID filter matched and downloads only those bytes, which is the shape
+§2.1's size measurement leaves open (§2.6). There is no
 `space.roomy.user.getBlocks` query and no fan-out on `refreshBlocks` beyond the
 writer and the block's subject: the client reads its own blocks straight from
 its own repo with `listBlocks` (`mutations/blocks.ts`), and the server never
-needs to answer "who blocked me" over HTTP.
+needs to answer "who blocked me" over HTTP. What the two added mechanisms trade
+away is latency, not correctness: an imported block is enforced within the
+replay interval or sooner, and a subscription that never delivers costs only
+latency, because the account's own refresh writes the same rows (§2.6).
 
 **8. Should blocking in Roomy also write an `app.bsky.graph.block` record?**
 **Decided: no.** Blocking on Roomy is a Roomy act; silently changing a
@@ -1879,12 +2251,14 @@ whole point of §7.12 is that there is none.
 
 ## Appendix — if HappyView is nonetheless required
 
-Recorded so the §2.1 decision can be revisited on evidence, and because it is
-the obvious eventual home for §3.5's reverse lookup: a `db.query` filtered on
-`subject` answers "who blocked this DID" in one call, which is exactly the
-`blockedBy(did)` query the per-account trigger stands in for. What it cannot yet
-do is answer it *freshly* — Jetstream lag is the same objection §2.1 records,
-and the PDS read that ships is exact at the moment it runs (§2.5). Indexing
+Recorded so the §2.1 decision can be revisited on evidence. It is no longer the
+eventual home for §3.5's reverse lookup: §2.6 answers that question from
+Jetstream directly — the events, not an index of the collection — so what this
+appendix holds is the shape a HappyView-side index would take if the *forward*
+direction were ever revisited. A `db.query` filtered on `subject` answers "who
+blocked this DID" in one call, which is what the per-account trigger and the
+subscription stand in for together; what it cannot do is answer it *freshly*,
+and §2.1's size measurement is what decides against building it. Indexing
 `app.bsky.graph.block` in HappyView needs three out-of-band registrations
 (nothing in this repository performs them — the `packages/appserver/lexicons/`
 directory is documentation only and is never read at runtime):
@@ -2055,6 +2429,28 @@ security-relevant read rather than a convenience.
   stacked-PR dispatch model)
 - `packages/app-lite/docs/plans/e2e-ui-coverage.md`
 
+**In-tree — the reverse index (§2.6)**
+- `packages/appserver/src/materialization/blockStream.ts` (new) — the Jetstream
+  subscription, the URI-keyed fold, the cursor, the heartbeat metric
+- `packages/appserver/src/materialization/blockReplay.ts` (new) — the metered
+  replay pass, its candidate set, its byte guard
+- `packages/appserver/src/queries/userBlocks.ts` — `hiddenBy` / `blocks` /
+  `blockedBy` (reads), `warmBlockSet` / `startFetch` / `replaceBlockRows` /
+  `recordFetchError` (writes)
+- `packages/appserver/src/xrpc/router.ts` — `setOnAuthenticated`, the hook the
+  refresh trigger and the replay's demand flag are installed on
+- `packages/appserver/src/embed/sweeper.ts` — the background-loop lifecycle
+  (`startEmbedSweeper`/`stopEmbedSweeper`) the subscription follows
+- `packages/appserver/src/workers/lease.ts` — the lease that keeps one replica
+  subscribed
+- `packages/appserver/src/metrics.ts` — `counter`/`gauge`, for the stream's
+  liveness signals
+- `packages/appserver/src/db/readStateSchema.sql` — `user_blocks`,
+  `user_block_fetches`, and `user_space_membership:31-46` (the replay's
+  candidate set)
+- `packages/appserver/src/db/readStateVersions.ts` — the manifest the block
+  set's and the cursors' versions are declared in
+
 **Network — measured 2026-09-26**
 - `app.bsky.graph.block` lexicon: `bluesky-social/atproto`,
   `lexicons/app/bsky/graph/block.json` — `key: "tid"`, `subject` (did),
@@ -2072,6 +2468,35 @@ security-relevant read rather than a convenience.
 - SQLite (bun:sqlite, 3.53.0): `json_each` over a bound JSON array inside an
   `in (...)` predicate returns the expected rows
 
+**Network — measured 2026-10-15**
+- Jetstream v2 live tail, unfiltered, on `space.roomy.user.block`: 0 commits in
+  120 s — nobody has ever written one
+- `com.atproto.sync.listReposByCollection` for `space.roomy.user.block`:
+  `{"repos":[]}` on `relay1.us-west.bsky.network` *and*
+  `relay1.us-east.bsky.network`
+- One viewer's spaces: 753 member DIDs scanned against their real PDSs — 0 hold
+  a `space.roomy.user.block` record, 467 hold an `app.bsky.graph.block` record,
+  61 hold a Roomy profile record
+- Live tail with two `collections` parameters
+  (`space.roomy.user.block` + `app.bsky.graph.block`): 48 commits in 15 s, all
+  `app.bsky.graph.block`, ~3.2/s. Each frame is
+  `{"$type":"message","payload":{…}}`, and the commit payload carries `did`,
+  `collection`, `rkey`, `operation`, `record`, `seq`, `time`
+- `?cursor=<seq>` is inclusive: reconnecting with the `seq` of a delivered event
+  redelivers that event (delta 0)
+- The live tail's `dids` filter travels in the query string, so the URL ceiling
+  binds long before the documented 10,000-DID limit: 100 DIDs (4.4 KB) upgrades,
+  200 DIDs (~8.5 KB) is refused before the upgrade
+- `planSnapshot` accepts a 900-DID body (31 KB) and answers
+  `401 {"error":"invalid bearer credential"}` — the auth check runs before any
+  size limit
+- `POST /xrpc/network.bsky.jetstream.{planSnapshot,getSegment,getBlock}` each
+  answer `401 {"error":"invalid bearer credential"}` without an API key
+- `app.bsky.graph.block` live rate: ~3.07 commits/s network-wide, create and
+  delete
+- HappyView is on v1: `happyview.roomy.chat/xrpc/_health` →
+  `{"version":"0.4.5009"}`
+
 **External**
 - Lexicon spec: https://atproto.com/specs/lexicon — record `key` is required;
   `type: "record"`, `key`, `record`
@@ -2083,3 +2508,9 @@ security-relevant read rather than a convenience.
 - HappyView lexicons: https://happyview.dev/guides/lexicons
 - HappyView Lua database API:
   https://happyview.dev/api-reference/lua/database-api
+- Jetstream docs: https://bsky.network/docs/jetstream — the envelope shape, the
+  filter set, `cursor` inclusivity, at-least-once delivery
+- Jetstream replay: https://bsky.network/docs/jetstream-replay —
+  `planSnapshot` / `getSegment` / `getBlock`, byte metering, `Retry-After`,
+  `Range` resumption
+- Jetstream SDK: `@bsky/jetstream` (plan, download, decode, live cutover)
