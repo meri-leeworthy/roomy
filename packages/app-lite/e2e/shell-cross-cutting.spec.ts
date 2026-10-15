@@ -10,8 +10,10 @@
  * Both tests run on the `mobile-chromium` project only. The rest of the suite
  * asserts the desktop shell — a sidebar that is simply there, a navbar-wide
  * searchbar, hover-revealed toolbars — and at 393px would be asserting the
- * wrong arrangement rather than finding a bug, so that project is scoped to
- * this file (`playwright.config.ts`).
+ * wrong arrangement rather than finding a bug. So that project is narrowed by
+ * the group title (`playwright.config.ts`), and each desktop-shaped test here
+ * carries a `test.skip(!isMobile)` to keep the desktop project from collecting
+ * it in turn.
  *
  * ## A live frame from a second client
  *
