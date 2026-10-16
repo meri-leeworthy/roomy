@@ -1,13 +1,18 @@
 # User-level blocks — Implementation Plan
 
 **Date:** 2026-09-26 (revised 2026-09-27, 2026-09-28, 2026-10-13, 2026-10-15)
-**Status:** Phase 1 shipped (#317, `9731537c5`); Phase 2 (the appserver block
-set) merged to `next` (#427). Phases 3–6 are ready to dispatch; §7 is a
+**Status:** Phases 1–4 shipped. Phase 1 (#317, `9731537c5`), Phase 2 (#427),
+Phase 3 (#428) and Phase 4 (#445, every other read surface) are all merged to
+`next`. Phase 5's PR (#448) is open and green; Phase 6 (block management UX and
+flag on) is not started and must not ship before Phase 5 merges. §7 is a
 decision record and every question in it is answered. Phase 2's
 `space.roomy.user.refreshBlocks` scope is deferred (`BLOCK_RPC_SCOPES`,
 `UNREGISTERED_SCOPES`) until it is registered on the HappyView API client,
 alongside `repo:space.roomy.user.block` — a `base`-tier entry breaks sign-in
 for everyone (§1.4, §1.5).
+**Next:** Phase 5 — live path, counters, push. Its PR (#448) is open and green,
+so the remaining step for it is review and merge, not a dispatch. Phase 6 (block
+management UX and flag on) follows and is not dispatched.
 
 **Revision 2026-10-13 (a) — the reveal is a transient read, not a state.** An
 admin may *look at* a message from an account they personally blocked, in a
@@ -1333,12 +1338,12 @@ previous phase is merged or green, on a stacked branch.
 
 ```
 next
- └── <worker>/user-blocks-p1      (record + write path, flag off)   — shipped
-      └── <worker>/user-blocks-p2   (appserver block set)
-           └── <worker>/user-blocks-p3   (timeline + getMessage + indicator)
-                ├── <worker>/user-blocks-p4  (other read surfaces)
-                ├── <worker>/user-blocks-p5  (live path, counters, push)
-                └── <worker>/user-blocks-p6  (block management UX, flag on)
+ └── <worker>/user-blocks-p1      (record + write path, flag off)   — shipped (#317)
+      └── <worker>/user-blocks-p2   (appserver block set)            — shipped (#427)
+           └── <worker>/user-blocks-p3   (timeline + getMessage + indicator) — shipped (#428)
+                ├── <worker>/user-blocks-p4  (other read surfaces)   — shipped (#445)
+                ├── <worker>/user-blocks-p5  (live path, counters, push) — PR #448 open
+                └── <worker>/user-blocks-p6  (block management UX, flag on) — not started
 ```
 
 A new server-side feature flag `user-blocks` is registered in
