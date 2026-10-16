@@ -1,7 +1,13 @@
 # Search Endpoints — Qdrant vs SQLite FTS
 
 **Date:** 2026-08-11
-**Status:** Plan / exploration
+**Status:** Messages and rooms search shipped. `space.roomy.search.messages`
+and `space.roomy.search.rooms` are registered in the appserver
+(`handlers/space.roomy.search.messages.ts`), built on Qdrant with the config
+singleton and no-op fallback §"Qdrant client in Bun" describes (the endpoint
+returns 503 when `QDRANT_URL` is unset). The semantic/vector endpoint and the
+members/threads name search are not built; the plan's recommendations for those
+stand.
 **Parent doc:** `appserver-architecture.md`
 **Related:** `xrpc-interface-spec.md`, `query-response-cache-plan.md`, `per-space-dbs.md`
 
