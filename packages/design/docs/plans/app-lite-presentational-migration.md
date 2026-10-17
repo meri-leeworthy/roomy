@@ -1,7 +1,9 @@
 # Presentational-UI migration: app-lite → @roomy/design
 
-**Date:** 2026-09-25 (phase 2 outcome added 2026-10-13)
-**Status:** Phase 1 complete (TASK-208); phase 2 keystone seam landed — `MessageContent` + `BlocksRenderer` are next
+**Date:** 2026-09-25 (phase 2 outcome added 2026-10-13, 2026-10-15)
+**Status:** Phase 1 complete (TASK-208). Phase 2: `MessageContent` +
+`BlocksRenderer` are PR #453, the thin-wrapper batch is PR #462 — both open for
+review, not for a worker. The phase-2 triage below names what remains.
 **Umbrella:** "refactor presentational UI code from app-lite to `design` and set up
 storybook stories" (Meri, `#coordination`, 2026-09-25T11:52Z)
 
