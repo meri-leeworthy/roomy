@@ -2,8 +2,8 @@
 
 **Status:** phase 2 in progress — areas A (`#442`) and B (`#446`) merged;
 C (`#455`), E (`#463`) and F (`#464`) open for review; D (search depth) is
-blocked on a Qdrant stub in the harness (§3 D, §4).
-**Updated:** 2026-10-15
+built against an in-process Qdrant fake and open as `#476`.
+**Updated:** 2026-10-17
 **Suite:** `packages/app-lite/e2e/` · run with `pnpm --filter app-lite test:e2e`
 
 Meri's goal: "set up playwright and begin testing of app-lite behaviours, with a
