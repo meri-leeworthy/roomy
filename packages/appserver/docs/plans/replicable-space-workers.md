@@ -1,6 +1,8 @@
 # Near-Term Plan: Read-Path Throughput and Replicable Space Workers
 
-*Draft for review. Companion to 'Roomy Protocol Migration Plan: Records as Source of Truth'. A one-line pointer to both documents goes into appserver-architecture.md, replacing its Phase 4 goal ('hand off to Rust appserver').*
+**Status (2026-10-19):** WS1 complete — purity Steps 1–5 are merged (#338, #405, #403, #422, #436), and the acceptance oracle `src/streams/rebuildEquality.ts` is reusable (#424). WS2 mostly merged: R1/R2/R3/R6/R7 of `denormalised-read-projections.md` are in `next`; R4 was measured and deferred as below value. WS5b is written and in review (#454). WS3 and WS4 have not started: WS3 is held by a product decision, and WS4 waits on WS3 plus the Rust building-blocks research, which has not been done.
+
+**Next:** WS3 (the change-record interface) is the one gate before a Rust worker. It is dispatchable as a staged port — one event type at a time, with the equality harness as the gate — once the `RecordChange` shape is decided. The companion document this plan was drafted against, *Roomy Protocol Migration Plan: Records as Source of Truth*, is not in this repository; §3 below is the constraints it fixed, so `RecordChange` is defined from §3 rather than from an external document.
 
 ## 1. Purpose and baseline
 
