@@ -1,14 +1,14 @@
 # Web Tiles Integration — Design Plan
 
 **Date:** 2026-10-09
-**Status:** Planned. Not started. This is the current plan for Web Tiles in
-Roomy. `docs/plans/web-tiles-roomy-feasibility.md` is the earlier feasibility
-read, kept as a historical record; §0 below states which of its conclusions
-still hold.
-**Next:** Milestone A (§11.1) — render a standalone tile in app-lite. That needs
-a `TileMothership` and an `ATTileLoader`, and no loading domain of Roomy's own:
-the mothership falls back to the DASL project's shared loading server (§8.1,
-§11.3).
+**Status:** Milestone A shipped (#440) — a tile renders in app-lite from its
+AT-URI over the shared loading server. Step B0, the unified attachment read
+path, is PR #457, open for review, not for a worker. This is the current plan
+for Web Tiles in Roomy. `docs/plans/web-tiles-roomy-feasibility.md` is the
+earlier feasibility read, kept as a historical record; §0 below states which of
+its conclusions still hold.
+**Next:** Step B0 (§11.1) merges, then the tile variant and content-type
+resolver (§4.6, §11.1 B).
 **Scope of the funded stint:** two weeks, two features (§5, §6), plus a
 30-day engagement write-up (§10).
 **Verified against:** `origin/next` @ `4276631e`.
