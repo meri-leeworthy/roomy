@@ -1,0 +1,46 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.getDiscoverableSpaces",
+  "defs": {
+    "spaces": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
+    },
+    "main": {
+      "type": "query",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "limit": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "spaces"
+          ],
+          "properties": {
+            "spaces": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#spaces"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

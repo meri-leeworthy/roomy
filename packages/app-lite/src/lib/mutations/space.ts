@@ -1,5 +1,6 @@
-import { newUlid } from "@roomy-space/sdk";
+import { newUlid, cache } from "@roomy-space/sdk";
 import { px } from "$lib/auth.svelte";
+import { queryClient } from "$lib/client";
 import { sendEvents } from "./send-events";
 
 export async function joinSpace(
@@ -87,4 +88,12 @@ export async function updateSpaceInfo(
       }),
     },
   ]);
+
+  // The caller's space list carries this space's row — its display fields and
+  // the `suggestToOthers` answer the admin prompt reads. The appserver evicts
+  // its cached copy on `updateSpaceInfo` without pushing a frame (the list is
+  // a pulled view), so refetch it here once the write has materialised.
+  await queryClient.invalidateQueries({
+    queryKey: cache.queryKey("space.roomy.space.getSpaces"),
+  });
 }

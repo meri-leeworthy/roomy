@@ -47,6 +47,7 @@ import {
 } from "../embed/enricher.ts";
 import { openReadStateDb } from "../db/db.ts";
 import { recordSpaceStats, selectMemberCount } from "../queries/spaceStats.ts";
+import { writeSpaceDiscovery } from "../queries/spaceDiscovery.ts";
 import { maintainRoomAccess } from "../queries/roomAccessProjection.ts";
 import { maintainRoomActivity } from "../queries/roomActivityProjection.ts";
 import {
@@ -84,6 +85,19 @@ const MEMBERSHIP_EVENT_TYPES: ReadonlySet<string> = new Set([
   "space.roomy.space.removeAdmin.v0",
   "space.roomy.query.spaceMeta.v0",
 ]);
+
+/**
+ * Materialised events that can write `comp_space`, and so change the global
+ * `space_discovery` projection (`space.roomy.space.getDiscoverableSpaces`).
+ *
+ * `space.roomy.query.spaceMeta.v0` is included because the synthetic
+ * space-metadata event upserts the space's join policy (synthetic.ts), and a
+ * `createSpace` seeds an `updateSpaceInfo` for the same row.
+ */
+const SPACE_CONFIG_EVENT_TYPES: Readonly<Record<string, true>> = {
+  "space.roomy.space.updateSpaceInfo.v0": true,
+  "space.roomy.query.spaceMeta.v0": true,
+};
 
 export interface MaterializationStats {
   applied: number;
@@ -513,6 +527,23 @@ export async function applyBatch(
       } catch (err) {
         log.warn(
           `[materialize] space_stats refresh failed for ${streamId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    // Refresh the global `space_discovery` projection when this chunk wrote a
+    // space's `comp_space` settings. One extra worker round-trip per such
+    // chunk, which keeps the discovery read free of per-space DB opens; a
+    // failure is non-fatal because the boot sweep rebuilds the row.
+    if (
+      globalDb &&
+      chunk.some((e) => Object.hasOwn(SPACE_CONFIG_EVENT_TYPES, e.event.$type))
+    ) {
+      try {
+        await writeSpaceDiscovery(globalDb, db, streamId);
+      } catch (err) {
+        log.warn(
+          `[materialize] space_discovery refresh failed for ${streamId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
