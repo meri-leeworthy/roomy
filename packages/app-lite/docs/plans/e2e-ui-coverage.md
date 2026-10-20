@@ -1,9 +1,9 @@
 # app-lite E2E UI coverage — plan
 
-**Status:** phase 2 in progress — areas A (`#442`) and B (`#446`) merged;
-C (`#455`), E (`#463`) and F (`#464`) open for review; D (search depth) is
-built against an in-process Qdrant fake and open as `#476`.
-**Updated:** 2026-10-17
+**Status:** phase 2 in progress — areas A (`#442`), B (`#446`) and C (`#455`)
+merged; D (search depth, built against an in-process Qdrant fake), E (`#463`)
+and F (`#464`) open for review.
+**Updated:** 2026-10-20
 **Suite:** `packages/app-lite/e2e/` · run with `pnpm --filter app-lite test:e2e`
 
 Meri's goal: "set up playwright and begin testing of app-lite behaviours, with a
