@@ -17,7 +17,7 @@ Design the search surface for the Roomy appserver: which endpoints to add, which
 use cases belong on **SQLite FTS5** vs **Qdrant** (vector/semantic), and how to
 handle the cross-space fan-out problem for full-text message search.
 
-This is a design/exploration doc — no code yet. It answers the questions in the
+This document records the design and what shipped. It answers the questions in the
 task: *how would we integrate Qdrant, which use cases make sense to go to it vs
 SQLite search, and is cross-space full-text message search feasible given the
 fan-out?*
