@@ -1,8 +1,12 @@
 # Near-Term Plan: Read-Path Throughput and Replicable Space Workers
 
-**Status (2026-10-19):** WS1 complete — purity Steps 1–5 are merged (#338, #405, #403, #422, #436), and the acceptance oracle `src/streams/rebuildEquality.ts` is reusable (#424). WS2 mostly merged: R1/R2/R3/R6/R7 of `denormalised-read-projections.md` are in `next`; R4 was measured and deferred as below value. WS5b is written and in review (#454). WS3 and WS4 have not started: WS3 is held by a product decision, and WS4 waits on WS3 plus the Rust building-blocks research, which has not been done.
+**Status (2026-10-20):** WS1 complete — purity Steps 1–5 are merged (#338, #405, #403, #422, #436), and the acceptance oracle `src/streams/rebuildEquality.ts` is reusable (#424). WS2 mostly merged: R1/R2/R3/R6/R7 of `denormalised-read-projections.md` are in `next`; R4 was measured and deferred as below value. WS5b is written and in review (#454). WS3 is unblocked and not started; WS4 waits on WS3 plus the Rust building-blocks research, which has not been done.
 
-**Next:** WS3 (the change-record interface) is the one gate before a Rust worker. It is dispatchable as a staged port — one event type at a time, with the equality harness as the gate — once the `RecordChange` shape is decided. The companion document this plan was drafted against, *Roomy Protocol Migration Plan: Records as Source of Truth*, is not in this repository; §3 below is the constraints it fixed, so `RecordChange` is defined from §3 rather than from an external document.
+**Next:** WS3 (the change-record interface) is the one gate before a Rust worker, and it is now unblocked. The companion plan is *Roomy Protocol Migration Plan: Records as Source of Truth* — muni-town/roomy#683, `docs/plans/atproto-spaces-migration-plan.md` on that branch — whose §5.1 fixes the `RecordChange` type. WS3 builds the adaptor for that model; it does not migrate the storage. See §5 WS3.
+
+The storage migration itself is deliberately not scheduled. It waits for ATProto permissioned spaces to be deployed to users, because until then records cannot be the source of truth. `RecordChange` is defined now so the Rust worker is written once, against the input type the migration will hand it.
+
+**Ownership of the ordering stamp.** The stamp is assigned at ingest — on the internal path in `StreamManager.sendEvents` (`stream_events.received_at` plus log idx), and on the protocol path from the client TID plus repo DID. The space worker never assigns one; it treats the stamp as opaque and sorts by it. That is what lets a worker be restarted, replaced or replicated without changing any ordering, and it is why the lease below is about write serialisation rather than about ordering authority.
 
 ## 1. Purpose and baseline
 
@@ -44,7 +48,7 @@ remain are the link-index pair, the activity feed and the author-scoped space me
 
 These keep the Rust worker from being written twice:
 
-- The materialiser's input is a change record with an opaque, sortable ordering stamp. Today the stamp comes from `received_at` plus log idx.
+- The materialiser's input is a change record with an opaque, sortable ordering stamp. Today the stamp comes from `received_at` plus log idx, assigned once at append; the worker reads it and never re-derives it.
 - The log sits behind the narrow interface that already exists (`onEvents`, `getEventsFrom`, `append`).
 - Projection rules are set-like: upserts keyed by entity id, reorder events that record the resulting key, and deletes treated as removal from a set.
 - No derived value comes from an ambient clock or process-local state.
@@ -55,7 +59,7 @@ These keep the Rust worker from being written twice:
 
 **Space worker (Rust).** Materialises per-space databases from change records, serves per-space XRPC reads, computes unread counts from `last_read`, and emits invalidation signals.
 
-**Lease per space.** Use the conditional-upsert pattern already in the tree, the voice reconciler in `global.sqlite` (`schema-global.sql`, lines 228 to 236). A lease has failure semantics where a hash does not: when it expires another worker can take over. One owner per space preserves the single-writer total order through the whole Rust phase, since the owner assigns ordering stamps.
+**Lease per space.** Use the conditional-upsert pattern already in the tree, `workers/lease.ts` over `worker_leases` (`schema-global.sql`). A lease has failure semantics where a hash does not: when it expires another worker can take over. The lease is over **applying change records to the per-space DB**, so that one space has one writer and one total order of projection. It is not over the ordering stamp — that is assigned at ingest, upstream of any worker, and is carried in the record (§ above). A worker that loses and regains a lease resumes from the ingest stream and produces the same projection it would have produced without ever losing it; that is the property the lease's simplicity depends on.
 
 **Read replication.** Replicas follow the owner for the read plane only. Ownership is not split. Causal broadcast of events to several replicas of one space is deferred until a measured hot subset needs it.
 
@@ -87,11 +91,34 @@ The projections work already planned targets `getActivityFeed`, `getThreads`, `r
 
 ### WS3. Change-record interface
 
-- Define the `RecordChange` type from the migration plan.
-- Make the internal append path produce it, with the ordering stamp built from `received_at` plus log idx.
-- Map each current event type to create, update or delete changes on keyed records.
+**This is an adaptor, not the migration.** `RecordChange` (migration plan §5.1) becomes the materialiser's only input type while `stream_events` remains the source of truth. The storage migration is Stage 3 of that plan and waits on ATProto permissioned spaces reaching users; the adaptor is what lets the Rust worker be written against the final input shape now, and nothing about it is discarded at the swap — the internal producer is replaced by the HappyView producer, and the materialiser is unchanged.
 
-**Acceptance:** the equality harness still passes byte-for-byte, and the materialiser has no remaining dependency on log position other than through the stamp.
+The type, from the migration plan §5.1:
+
+```
+RecordChange {
+  repo: DID
+  collection: NSID
+  rkey: string
+  op: create | update | delete
+  cid?: CID
+  prev?: CID
+  rev?: TID           // cursor and per-repo ordering only, never the sort key
+  orderStamp: string  // opaque, sortable, assigned at ingest
+  record?: object     // present for create and update
+}
+```
+
+Work, in order:
+
+1. **Define the type and its producer seam.** One `RecordChange` type; one function from `LoggedEvent` (or `DecodedStreamEvent`) to `RecordChange[]`. `orderStamp` is `received_at` plus log idx, encoded so it sorts as a string — the value `sortIdx.ts` already derives, lifted into the record rather than read back out of `stream_events`.
+2. **Map events to records.** Each of the 47 registered event types becomes create/update/delete on a keyed record: `createMessage` → create `(repo=authorDID, collection=message NSID, rkey=event id)`, `editMessage` → update, `deleteMessage` → delete, `reorderMessage` → update carrying the resulting key, and so on. This mapping is the substantive workstream; it is also the input the lexicon workstream in the migration plan needs.
+3. **Move materialisation onto records.** Each of the 49 materialisers takes `RecordChange` and emits its SQL from `record`, not from the event envelope. The 122 statements are rehosted, not rewritten: the SQL stays, the source of its parameters changes.
+4. **Delete the log-position dependency.** A materialiser may reach `orderStamp`; nothing else. Today `applyBatch.ts:218` reads `e.idx`/`e.receivedAt` beside the materialiser, and `StreamManager` stamps `received_at` at append — both collapse into the stamp carried on the record.
+
+**Acceptance:** the rebuild-equality harness passes byte-for-byte with records as the only input, and `grep` finds no materialiser reading log position, `received_at` or `idx`. The golden files are unchanged by this workstream — it changes the input type, not the projection — which is the property that makes it safe to do before the Rust port.
+
+**Explicitly out of scope:** replacing `stream_events` with HappyView ingest (migration Stage 1), the Open Social record model (Stage 2), moving member content to user PDSes (Stage 3). The adaptor is validated by the fact that Stages 1–3 replace its producer and leave its consumer alone.
 
 ### WS4. Rust worker
 
@@ -172,11 +199,13 @@ is what makes WS5 expensive to build.
 1. ~~Do `getSpaces` and `getActivityFeed` need a gateway-side rollup projection, or is fan-out with caching fast enough?~~ Answered: neither needs one, because both are pulled rather than pushed (§4). Fan-out over workers with a short-TTL cache is the whole mechanism, and `getSpaces`' remaining question is only whether its unread badge needs a push frame while a page sits open.
 2. What are the p95 targets for each endpoint?
 3. What is the invalidation signal contract and transport before a bus exists?
-4. How does `last_read` reach the worker, as a query parameter or by ingestion?
+4. ~~How does `last_read` reach the worker, as a query parameter or by ingestion?~~ Answered: it does not reach the worker as state. Read receipts stay in the gateway — `roomy-readstate.sqlite` behind it today, the user's PDS after migration Stage 4. **What is still open is where the count is derived:** unread is a difference between `last_read` and the room's message set, and once the message set lives in a worker the gateway either asks the worker for a count per room or the worker receives `last_read` as a query parameter. The latter keeps the derivation beside the data; the former keeps the read-state store in one place. This is a per-request cost decision (N rooms per sidebar), not an architecture one, and it is decided when WS4's read surface is designed.
 5. Which purity items belong to which of steps 2 to 5?
 6. What do the pending research jobs on JetStream, Rust building blocks and deployment reality change?
+7. **Are synthetic events (`space.roomy.query.spaceMeta.v0`, `space.roomy.query.profile.v0`) still reachable at all?** They are a leftover of the client-side materialisation architecture: `synthetic.ts` is 439 lines, `getSyntheticMaterializer`/`syntheticEventRegistry` have **zero** consumers outside their own module, and neither type is in `eventRegistry`, so `getMaterializer` never returns one. Four references survive in the appserver — one `MEMBERSHIP_EVENT_TYPES` entry (`applyBatch.ts:78`), one `roomAccessProjection` table (`:87`), one signal-suppression prefix (`inferSignals.ts:68`), and the comment at `applyBatch.ts:68`. They should be deleted rather than carried into the record model, where an event that is neither a record nor a log entry has no place. Not deleted as part of this plan because the `space_stats` member-count gate explicitly preserves their historical absence (`spaceStats.ts:30-40`); removing them is a separate, verifiable change.
 
 ## 10. Housekeeping
 
-- Add a one-line pointer in appserver-architecture.md to this document and the migration plan, and mark its Phase 4 goal as superseded.
+- Add a one-line pointer in appserver-architecture.md to this document and the migration plan, and mark its Phase 4 goal as superseded. (Done, with the pointer to `atproto-spaces-migration-plan.md` pending that plan's merge.)
 - Keep pure-materialisation.md as the detailed plan for WS1.
+- Delete the synthetic-event module (`sdk/src/schema/events/synthetic.ts`) once the `space_stats` member-count gate is re-derived without it; see §9 Q7. Its only live effect is preserving the absence of a `comp_space` row for ~2,700 spaces.
