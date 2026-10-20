@@ -109,22 +109,65 @@ RecordChange {
 }
 ```
 
-Work, in order:
+Work, in order. The unit is the **record object**, not the event type: 47 event types collapse to a smaller set of record kinds (`message`, `reaction`, `room`, `spaceInfo`, `membership`, `role`, `roleGrant`, `roomPermission`, `federationGrant`, `invite`, `ban`, `calendarLink`, `pageEdit`, `profile`, `roomLink`, `voiceCall`, …), and each kind gets one create, one update and one delete rule rather than one materialiser per event.
 
-1. **Define the type and its producer seam.** One `RecordChange` type; one function from `LoggedEvent` (or `DecodedStreamEvent`) to `RecordChange[]`. `orderStamp` is `received_at` plus log idx, encoded so it sorts as a string — the value `sortIdx.ts` already derives, lifted into the record rather than read back out of `stream_events`.
+1. **Define the record kinds and their keys.** For each kind: its collection NSID, what `rkey` is (the message id, the role id, `<user>/<role>` for a grant), and the record body's fields. This is the lexicon workstream the migration plan §6 calls for, and it is what the adapter maps onto. Two shapes do not survive the move unchanged and must be decided here:
+   - **`moveMessages`** is one event that rewrites many messages across two rooms. As records it is N updates plus N deletes; the record kind must make that expressible.
+   - **`reorderMessage`** currently carries `after` (a neighbour) and the appserver recomputes a midpoint key from it (`sortIdx.ts:236-300`). Migration plan §6 requires the record to carry the **resulting key** instead, so the worker never recomputes from neighbours. The adapter computes the key at ingest (it has the neighbour, as it does today) and writes it into the record.
+
+   The event-to-record mapping, as it stands today. Several event types collapse onto one record kind, and a few collapse onto two (a membership change is one record plus one edge); the "op" column is what the adapter emits:
+
+   | Record kind | Created by | Updated by | Deleted by |
+   | --- | --- | --- | --- |
+   | `message` | `createMessage`, `forwardMessages` (as a forward attachment) | `editMessage`, `reorderMessage` (key), `moveMessages` (room) | `deleteMessage` |
+   | `reaction` | `addReaction`, `addBridgedReaction` | — | `removeReaction`, `removeBridgedReaction` |
+   | `room` | `createRoom` | `updateRoom`, `restoreRoom` | `deleteRoom` |
+   | `spaceInfo` | `updateSpaceInfo` | `updateSpaceInfo` | — |
+   | `spaceSidebar` | `updateSidebar.v1` | `updateSidebar.v1` | — |
+   | `membership` | `joinSpace`, `addAdmin` | `addAdmin`, `removeAdmin` | `leaveSpace` |
+   | `ban` | `banAccount` | — | `unbanAccount` |
+   | `invite` | `createInvite` | — | `revokeInvite` |
+   | `role` | `createRole` | `updateRole` | `deleteRole` |
+   | `roleGrant` | `addMemberRole` | — | `removeMemberRole` |
+   | `roomPermission` | `setRoleRoomPermission` (non-null) | `setRoleRoomPermission` (non-null) | `setRoleRoomPermission` (null) |
+   | `federationRequest` | `federation.request` | `federation.respond` | `federation.remove` |
+   | `federationGrant` | `federation.setRoomPermission`, `setReceiverPermission` | same | `federation.remove` |
+   | `roomLink` | `createRoomLink` | — | `removeRoomLink` |
+   | `pageEdit` | `editPage` | `editPage` | — |
+   | `profile` | `updateProfile` | `updateProfile` | — |
+   | `handleProvider` | `setHandleProvider` | `setHandleProvider` | — |
+   | `calendarLink` | `openmeet.configure` | `openmeet.configure` | — |
+   | `voiceCall` | `callStarted` | `callJoined`, `callLeft` | `callEnded` |
+
+   Three observations from building it. `updateSidebar.v0` and `.v1` are the same record kind with a schema change, so the adapter maps both and the `v0` form is a legacy producer only. `setRoleRoomPermission` with a null permission is a **delete**, which is what makes the current materialiser's "delete then maybe insert" (`roles.ts`) two different ops on the same record. And `federation.remove` deletes two record kinds at once, which is fine — one event, several changes.
+2. **Define the type and its producer seam.** One `RecordChange` type; one function `LoggedEvent → RecordChange[]`. `orderStamp` is `received_at` plus log idx, encoded so it sorts as a string — the value `sortIdx.ts` already derives, lifted into the record rather than read back out of `stream_events`.
 
    Two things the adapter must get right, because they are the differences between the internal and the protocol path:
 
-   - **`repo` has to be derived, not copied.** The internal log is per-*space*: `sendEvents` asserts `streamDid = spaceId` and appends every event to that one stream (`space.roomy.space.sendEvents.ts:198-207`). The protocol log is per-*repo*, and the migration plan splits member content (user repos) from collective records (the space repo, §8). So the adapter derives `repo` from the event — the author DID for member content, the space DID for collective records — rather than passing the stream DID through. Any materialiser that keys on `repo` is wrong if this is fudged.
-   - **The stamp is opaque and the two formats disagree.** Internal: server-observed `received_at` plus log idx. Protocol: client TID plus repo DID (migration plan §7). They order the same log differently where a sender's clock is off, which is why that plan expects one re-sort and new golden files at the source swap. A materialiser may therefore sort *by* the stamp but never parse it or re-derive a key from it; anything that has to decide "is this newer than what I hold" must be tested against both formats, or it will be rewritten at the swap.
-2. **Map events to records.** Each of the 47 registered event types becomes create/update/delete on a keyed record: `createMessage` → create `(repo=authorDID, collection=message NSID, rkey=event id)`, `editMessage` → update, `deleteMessage` → delete, `reorderMessage` → update carrying the resulting key, and so on. This mapping is the substantive workstream; it is also the input the lexicon workstream in the migration plan needs.
-3. **Move materialisation onto records.** Each of the 49 materialisers takes `RecordChange` and emits its SQL from `record`, not from the event envelope. The 122 statements are rehosted, not rewritten: the SQL stays, the source of its parameters changes.
-4. **Delete the log-position dependency.** A materialiser may reach `orderStamp`; nothing else. Today `applyBatch.ts:218` reads `e.idx`/`e.receivedAt` beside the materialiser, and `StreamManager` stamps `received_at` at append — both collapse into the stamp carried on the record.
-5. **Decide the events that are not records.** `space.roomy.state.markRead.v0` is already rejected at the write path (`writeAuth.ts:44-46`, `updateSeen` is the real receipt write), so it produces no record. The two synthetic types produce no record either and have no live producer (§9 Q7). The record model therefore has no representation for them, and the adapter should say so explicitly rather than inventing one.
+   - **`repo` has to be derived, not copied.** The internal log is per-*space*: `sendEvents` asserts `streamDid = spaceId` and appends every event to that one stream (`space.roomy.space.sendEvents.ts:198-207`). The protocol log is per-*repo*, and the migration plan splits member content (user repos) from collective records (the space repo, §8). So the adapter derives `repo` from the event — the author DID for member content, the space DID for collective records — rather than passing the stream DID through.
+   - **The stamp is opaque and the two formats disagree.** Internal: server-observed `received_at` plus log idx. Protocol: client TID plus repo DID (migration plan §7). They order the same log differently where a sender's clock is off, which is why that plan expects one re-sort and new golden files at the source swap. A materialiser may sort *by* the stamp but never parse it or re-derive a key from it.
+3. **Write the projection rules per record kind.** Create/update/delete for each kind, computed from the record body plus the state the worker already holds. **This is not a rehosting of the current SQL, and three cases prove it:**
 
-**Acceptance:** the rebuild-equality harness passes byte-for-byte with records as the only input, and `grep` finds no materialiser reading log position, `received_at` or `idx`. The golden files are unchanged by this workstream — it changes the input type, not the projection — which is the property that makes it safe to do before the Rust port.
+   - **`deleteMessage` cannot be a delete.** Today it is two `delete from entities` statements plus an appserver-side rebuild of two projections (`deleteMessage.ts:22-46`, `rebuildActivityWindow` then `rebuildRoomActivity`). Rules 5 and 4 of the migration plan (deletes are removals from a set; derived state must not remember a deletion, because a snapshot never sees one) mean the rule must recompute the affected room's window from what remains — a query, not a delete.
+   - **`editMessage` is a read-modify-write that needs a SQL function that does not exist.** The materialiser calls `apply_dmp_patch(...)` (`message.ts:218`, `page.ts:47,50`); **nothing in the repository defines it** — not in the appserver, not as a SQLite extension, and Bun's SQLite rejects it (`no such function: apply_dmp_patch`). No client sends `text/x-dmp-patch`. The rule must be restated as "replace the content with the record's body", which is what actually happens.
+   - **Three projection steps live outside the materialisers entirely** — `setMessageSortIdxByReorder` (`applyBundle.ts:155`), the delete/move activity-window rebuilds (`deleteMessage.ts`, `moveMessages.ts:119`), and the `sort_idx` update in `applyBatch.ts:218`. A worker implementing only the record rules would miss them. They must move into the rules, or the Rust worker reproduces the TS worker only by accident.
+4. **Delete the log-position dependency.** A rule may read `orderStamp`; nothing else. `applyBatch.ts:218` and `StreamManager`'s `received_at` stamping both collapse into the stamp carried on the record.
+5. **Decide what produces no record.** `space.roomy.state.markRead.v0` is rejected at the write path (`writeAuth.ts:44-46`; `updateSeen` is the real receipt write) and read receipts stay gateway-side. The two synthetic types have no live producer (§9 Q7). None of the three becomes a record, and the adapter should say so rather than invent a representation.
+6. **Retire the SDK's event materialisers from the worker path.** They are dead to every other consumer already: `getMaterializer` has exactly one importer in the repository (`materialization/materializer.ts:33`) and no client-side user. Keeping them beside the record rules leaves two implementations of the same projection in TS, which is the thing the equality oracle cannot distinguish.
+
+**Acceptance:** the rebuild-equality harness passes byte-for-byte with records as the only input, **and** the worker no longer imports `getMaterializer`. The projection output is unchanged, so the golden files are unchanged — the input type and the rule's shape change, not what they produce. That last property is what makes this safe to do before the Rust port.
 
 **Explicitly out of scope:** replacing `stream_events` with HappyView ingest (migration Stage 1), the Open Social record model (Stage 2), moving member content to user PDSes (Stage 3). The adaptor is validated by the fact that Stages 1–3 replace its producer and leave its consumer alone.
+
+**Staging.** This is delivered as a sequence of PRs that are individually safe, not one cutover:
+
+| Slice | Content | Gate |
+| --- | --- | --- |
+| S1 | `RecordChange` type, the adapter, and the record-kind definitions. Producer wired but not consumed. | Adapter round-trip test: replaying today's corpus through the adapter and back reproduces today's projection byte-for-byte. |
+| S2 | Projection rules for one record kind at a time, largest first (`message` — 6 event types, 31 statements, both non-trivial cases above). The worker switches that kind over and drops its event materialiser. | Harness byte-identical + that kind's tests. |
+| S3 | Remaining kinds; `getMaterializer` retired from the worker. | `grep` shows no worker-side importer; harness byte-identical. |
+
+Each slice leaves one input type per code path — the adapter sits upstream of every rule — so there is no runtime dual mode and no flag. A kind that has not been converted still reads events; a kind that has been converted reads records; the same request never sees both.
 
 ### WS4. Rust worker
 
