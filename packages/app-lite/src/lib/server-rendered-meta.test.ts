@@ -108,6 +108,14 @@ describe("the server read path is anonymous and total", () => {
     assert.match(mod, /APP_SERVER_HTTP_ORIGIN/);
     assert.match(mod, /resolveAppserverHttpOrigin/);
   });
+
+  test("a rendered document does not cost one XRPC request", () => {
+    // The appserver limits per client IP before its response cache, and the
+    // server is one IP for every visitor: an uncached read here is a budget
+    // the site spends once per rendered document. See `server/read-cache.ts`.
+    assert.match(mod, /readThrough\(/);
+    assert.match(mod, /createReadCache/);
+  });
 });
 
 describe("the server's own read reaches the head", () => {

@@ -6,8 +6,8 @@
  * out of the client bundle: SvelteKit refuses to import a `$lib/server` module
  * from client code.
  *
- * Two rules it carries:
- *
+ * Three rules it carries:
+
  * - **No caller credentials, ever.** The reads are `fetch`es with no
  *   `Authorization` and no cookies, using the global `fetch` rather than the
  *   load's `event.fetch` — so there is no per-request header bag to inherit
@@ -17,11 +17,17 @@
  *   invite-only space, a rate limit and a network failure are one outcome for
  *   the head: fall back to the site defaults and serve the document anyway.
  *   The document must be served in every case.
+ * - **One request per URL per minute, at most.** The appserver rate-limits per
+ *   client IP *before* its response cache, and this process is one client for
+ *   every visitor, so a rendered document must not map 1:1 onto an XRPC call.
+ *   `read-cache.ts` holds a success for the window the appserver would itself
+ *   have cached it, and folds concurrent renders of one URL into one request.
  */
 
 import { env } from "$env/dynamic/private";
 import { transport } from "@roomy-space/sdk";
 import { CONFIG } from "$lib/config";
+import { createReadCache } from "./read-cache";
 
 const { resolveAppserverHttpOrigin } = transport;
 
@@ -32,6 +38,27 @@ const { resolveAppserverHttpOrigin } = transport;
  * own timeout.
  */
 const XRPC_TIMEOUT_MS = 5_000;
+
+/**
+ * The window a successful read is reused for.
+ *
+ * It matches the appserver's own default response-cache TTL: past it, the
+ * appserver would recompute the answer anyway, so serving the held value
+ * costs a head nothing it could have had by asking again.
+ */
+const READ_TTL_MS = 60_000;
+
+/**
+ * How many distinct reads are held at once. Each is a small metadata object;
+ * the cap is what keeps a crawler walking arbitrary space DIDs from turning
+ * the cache into the leak the rate limit exists to prevent.
+ */
+const READ_CACHE_ENTRIES = 512;
+
+const reads = createReadCache({
+  ttlMs: READ_TTL_MS,
+  maxEntries: READ_CACHE_ENTRIES,
+});
 
 /**
  * The appserver origin this process reads from, resolved once.
@@ -78,16 +105,18 @@ export async function publicXrpc<T>(
     url.searchParams.set(key, value);
   }
 
-  try {
-    const res = await fetch(url, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(XRPC_TIMEOUT_MS),
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
-  } catch {
-    return null;
-  }
+  return reads.readThrough(url.href, async () => {
+    try {
+      const res = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(XRPC_TIMEOUT_MS),
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as T;
+    } catch {
+      return null;
+    }
+  });
 }
 
 /** The `space.roomy.space.getMetadata` fields an unfurl of a space reads. */
