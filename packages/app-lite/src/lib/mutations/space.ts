@@ -67,6 +67,7 @@ export async function updateSpaceInfo(
     allowPublicJoin?: boolean;
     allowMemberInvites?: boolean;
     suggestToOthers?: boolean;
+    showJoinNotices?: boolean;
   },
 ): Promise<void> {
   await sendEvents(spaceId, [
@@ -84,6 +85,9 @@ export async function updateSpaceInfo(
       }),
       ...(opts.suggestToOthers !== undefined && {
         suggestToOthers: opts.suggestToOthers,
+      }),
+      ...(opts.showJoinNotices !== undefined && {
+        showJoinNotices: opts.showJoinNotices,
       }),
     },
   ]);
