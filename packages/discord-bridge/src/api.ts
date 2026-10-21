@@ -95,6 +95,17 @@ function route(
 			return jsonResponse({ channels });
 		}
 
+		// Messages the bridge read and did not bridge, with the reason and a
+		// per-channel count. A drop is otherwise invisible: the message is gone
+		// from Roomy, and the only trace was a log line that rotates away.
+		case "/messages/dropped": {
+			const spaceDid = url.searchParams.get("spaceDid") ?? undefined;
+			return jsonResponse({
+				totals: repo.countDroppedMessages(spaceDid),
+				dropped: repo.listDroppedMessages(200, spaceDid),
+			});
+		}
+
 		// Sends the bridge owes a space after their retries were exhausted.
 		// `pending` entries are still being re-offered; `terminal` ones are
 		// counted drops. Event payloads are omitted — this is a status read, and

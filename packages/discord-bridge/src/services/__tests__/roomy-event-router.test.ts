@@ -2568,3 +2568,63 @@ describe("reply quote text helpers", () => {
 		expect(suppressUrlEmbeds("no links here")).toBe("no links here");
 	});
 });
+
+/**
+ * A forum or media channel accepts messages only inside its threads — Discord
+ * has no timeline on the channel itself. The bridge's room for such a channel
+ * exists so threads can link under it, so a Roomy message written in that room
+ * has nowhere to land. Sending anyway earns a 400 that freezes the space's
+ * cursor, so the drop is decided here and recorded.
+ */
+describe("Roomy→Discord for a forum parent room", () => {
+	const FORUM_CHANNEL_ID = "920000000000000001";
+
+	function forumSetup() {
+		const state = setup();
+		const forumRoomId = newUlid();
+		state.repo.registerMapping(
+			SPACE_A,
+			"channel",
+			FORUM_CHANNEL_ID,
+			forumRoomId,
+		);
+		state.discord.setGuildId(FORUM_CHANNEL_ID, GUILD);
+		state.discord.setChannelType(FORUM_CHANNEL_ID, 15); // GuildForum
+		return { ...state, forumRoomId };
+	}
+
+	test("does not post a Roomy message into the forum channel", async () => {
+		const { roomy, discord, router, repo, forumRoomId } = forumSetup();
+		await router.subscribeToSpace(SPACE_A);
+
+		await roomy.fireEvent(
+			SPACE_A,
+			makeCreateMessageEvent({ room: forumRoomId }),
+		);
+
+		expect(discord.sent).toHaveLength(0);
+		const rows = repo.listDroppedMessagesForChannel(FORUM_CHANNEL_ID);
+		expect(rows.map((r) => r.reason)).toEqual(["forum_parent_has_no_timeline"]);
+	});
+
+	test("does not try to start a thread in the forum channel", async () => {
+		const { roomy, discord, router, repo, forumRoomId } = forumSetup();
+		await router.subscribeToSpace(SPACE_A);
+
+		const threadId = newUlid();
+		await roomy.fireEvent(SPACE_A, makeCreateThreadEvent({ id: threadId }));
+		await roomy.fireEvent(
+			SPACE_A,
+			makeCreateRoomLinkEvent({
+				room: forumRoomId,
+				linkToRoom: threadId,
+				isCreationLink: true,
+			}),
+		);
+
+		expect(discord.threads).toHaveLength(0);
+		expect(
+			repo.listDroppedMessagesForChannel(FORUM_CHANNEL_ID).map((r) => r.reason),
+		).toEqual(["forum_thread_creation_unsupported"]);
+	});
+});

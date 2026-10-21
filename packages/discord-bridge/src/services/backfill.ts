@@ -7,12 +7,14 @@ import type {
 	BridgeRepository,
 } from "../db/repository.ts";
 import {
+	CATEGORY_TYPE,
 	CHANNEL_TYPES,
 	type DiscordMessageData,
 	isChannelPublic,
 	MESSAGE_CHANNEL_TYPES,
 	mappingKindForChannel,
 	PRIVATE_THREAD,
+	THREAD_ONLY_PARENT_TYPES,
 	THREAD_TYPES,
 } from "../discord/data.ts";
 import type { DiscordDataSource } from "../discord/data-source.ts";
@@ -23,7 +25,11 @@ import { createLogger } from "../logger.ts";
 import { getCapacityGate } from "../roomy/capacity.ts";
 import type { RoomyGateway } from "../roomy/gateway.ts";
 import { ingestDiscordMessage } from "./message-ingestion.ts";
-import { ensureRoomyChannel, syncInitialStructure } from "./room-sync.ts";
+import {
+	ensureRoomyChannel,
+	recordUnbridgedChannel,
+	syncInitialStructure,
+} from "./room-sync.ts";
 import { sendEventOrQueue } from "./send-retry.ts";
 
 const log = createLogger("backfill");
@@ -310,12 +316,15 @@ export async function runBackfill(
 		}
 	}
 
+	// A guild of forum channels only has no (channel, space) pairs to walk —
+	// their content is the threads under them — so the message pass is
+	// skipped, but the thread pass below still has to run. Returning here
+	// would leave a forum-only guild's posts unbridged.
 	if (tasks.length === 0) {
-		log.info("No channels to backfill");
-		return;
+		log.info("No channels with a message timeline to backfill");
+	} else {
+		log.info(`Backfilling ${tasks.length} (channel, space) pairs`);
 	}
-
-	log.info(`Backfilling ${tasks.length} (channel, space) pairs`);
 
 	// ── Phase 1: bounded recent window, serial ───────────────────────────
 	// For each pair with no durable progress yet, ingest the most recent
@@ -531,9 +540,19 @@ async function ensureRoomyRooms(
 			if (mode === "full") {
 				const guild = await discord.getGuild(guildId);
 				if (!guild?.channels) continue;
-				channelIds = guild.channels
-					.filter((ch) => CHANNEL_TYPES.has(ch.type))
-					.map((ch) => ch.id);
+				channelIds = [];
+				for (const ch of guild.channels) {
+					if (CHANNEL_TYPES.has(ch.type)) {
+						channelIds.push(ch.id);
+						continue;
+					}
+					// A thread has its own creation path, and a category is
+					// sidebar structure. Every other type can never have a
+					// Roomy room, which is worth saying once per channel —
+					// otherwise its messages drop silently forever.
+					if (THREAD_TYPES.has(ch.type) || ch.type === CATEGORY_TYPE) continue;
+					recordUnbridgedChannel(repo, ch.id, guildId, ch.type);
+				}
 			} else {
 				const guild = await discord.getGuild(guildId);
 				const guildChannels = guild?.channels ?? [];
@@ -552,9 +571,11 @@ async function ensureRoomyRooms(
 					const chType = await discord.resolveChannelType(entry.channelId);
 					if (chType !== undefined && CHANNEL_TYPES.has(chType)) {
 						channelIds.push(entry.channelId);
+					} else if (chType !== undefined) {
+						recordUnbridgedChannel(repo, entry.channelId, guildId, chType);
 					} else {
 						log.debug(
-							`Skipping allowlist entry ${entry.channelId}: resolved type ${chType} is not a top-level channel`,
+							`Skipping allowlist entry ${entry.channelId}: could not resolve its type`,
 						);
 					}
 				}
@@ -834,8 +855,13 @@ async function channelsForConfig(
 			}
 		}
 	} else {
-		const allowlist = repo.listAllowlistForBridge(config.spaceDid);
-		for (const entry of allowlist) {
+		const guild = await discord.getGuild(config.guildId);
+		const guildChannels = guild?.channels ?? [];
+		for (const entry of repo.listAllowlistForBridge(config.spaceDid)) {
+			const channel = guildChannels.find((ch) => ch.id === entry.channelId);
+			// An entry the guild listing does not carry is kept: its type is
+			// unknown here, and Phase 1 is where a stale entry gets decided.
+			if (channel && THREAD_ONLY_PARENT_TYPES.has(channel.type)) continue;
 			channels.push(entry.channelId);
 		}
 	}
@@ -895,16 +921,27 @@ export async function enumerateBackfillWork(
 					channelIds.push(entry.channelId);
 				}
 			}
+			const threadOnlyParents = new Set(
+				guild.channels
+					.filter((ch) => THREAD_ONLY_PARENT_TYPES.has(ch.type))
+					.map((ch) => ch.id),
+			);
 			for (const channelId of channelIds) {
 				if (repo.getBackfillProgress(spaceDid, channelId)) continue;
 				if (repo.getChannelCursor(spaceDid, channelId)) continue;
+				// A forum or media channel has no message timeline of its own
+				// — its threads are its content, and they are enumerated below
+				// as rows nested under it. The parent row is therefore
+				// `complete` from the start: `phase1` would report it as
+				// pending work that no run can ever do.
+				const threadOnly = threadOnlyParents.has(channelId);
 				repo.upsertBackfillProgress({
 					spaceDid,
 					channelId,
 					guildId,
 					kind: "channel",
 					channelName: nameById.get(channelId) ?? null,
-					phase: "phase1",
+					phase: threadOnly ? "complete" : "phase1",
 					messagesSynced: 0,
 					messagesSkipped: 0,
 					windowBoundary: null,
@@ -970,6 +1007,23 @@ export async function backfillSingleChannel(
 				);
 				return;
 			}
+		}
+		// A thread-only parent gets a room, but has no messages of its own to
+		// backfill: its content is the threads linked under it.
+		if (cachedChannel && THREAD_ONLY_PARENT_TYPES.has(cachedChannel.type)) {
+			const targetSpaces = repo.getTargetSpacesForChannel(guildId, channelId);
+			const channelName = cachedChannel.name;
+			if (channelName) {
+				await ensureRoomyChannel(
+					repo,
+					roomy,
+					channelId,
+					guildId,
+					channelName,
+					targetSpaces,
+				);
+			}
+			return;
 		}
 
 		const targetSpaces = repo.getTargetSpacesForChannel(guildId, channelId);
@@ -1261,6 +1315,35 @@ export async function backfillChannel(
 			// missing. Callers (runBackfill, backfillSingleChannel) already
 			// catch and log/report failures.
 			throw new Error(`Cannot resolve guildId for channel ${channelId}`);
+		}
+
+		// A channel whose content is its threads has no message timeline to
+		// page: Discord answers a message-list request on a forum or media
+		// channel with an error, not an empty page. One channel read per pair
+		// is cheap beside the hundred-page walk it prevents, and it covers the
+		// callers that reach here without knowing the channel's type.
+		const channelType = await discord.resolveChannelType(channelId);
+		if (channelType !== undefined && THREAD_ONLY_PARENT_TYPES.has(channelType)) {
+			const progress = repo.getBackfillProgress(spaceDid, channelId);
+			if (progress?.phase !== "complete") {
+				repo.upsertBackfillProgress({
+					spaceDid,
+					channelId,
+					guildId,
+					kind: "channel",
+					phase: "complete",
+					messagesSynced: progress?.messagesSynced ?? 0,
+					messagesSkipped: progress?.messagesSkipped ?? 0,
+					windowBoundary: progress?.windowBoundary ?? null,
+					walkCursor: progress?.walkCursor ?? null,
+					parentId: progress?.parentId ?? null,
+					windowSynced: progress?.windowSynced ?? null,
+				});
+			}
+			log.debug(
+				`Channel ${channelId} → ${spaceDid}: thread-only parent, nothing to walk; its threads carry the content`,
+			);
+			return;
 		}
 
 		// Capacity enforcement: backfill is the main cost driver — abort
