@@ -144,6 +144,23 @@ test.describe("space discoverability setting", () => {
     await expect(radio(other)).not.toBeChecked();
   });
 
+  test("the join-notices toggle is unanswered on a seeded space", async ({
+    page,
+  }) => {
+    await page.goto(`/${SEED_SPACE_ID}/settings`);
+    await waitForAuthenticated(page);
+    await expect(page.locator("input#space-name")).toHaveValue(SEED_SPACE_NAME);
+
+    await expect(page.getByText("Show join notices?")).toBeVisible();
+
+    // Same tri-state as discoverability: `show_join_notices` is NULL on the
+    // seeded space, so the control shows no choice and the space keeps
+    // rendering notices.
+    const toggle = 'input[name="showJoinNotices"]';
+    await expect(page.locator(`${toggle}[value="yes"]`)).not.toBeChecked();
+    await expect(page.locator(`${toggle}[value="no"]`)).not.toBeChecked();
+  });
+
   test("the new-space flow asks the question", async ({ page }) => {
     await page.goto("/new");
     await waitForAuthenticated(page);

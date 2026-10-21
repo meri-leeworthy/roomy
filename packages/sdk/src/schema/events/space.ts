@@ -157,6 +157,10 @@ const UpdateSpaceInfoSchema = type({
   // Null = the admins have not answered yet (reads as yes); an explicit
   // false opts the space out of being suggested to other users.
   "suggestToOthers?": "boolean | null",
+  // Null = the admins have not answered yet (reads as shown, which is what
+  // every space did before the setting existed); an explicit false hides the
+  // join notices the space materialiser writes.
+  "showJoinNotices?": "boolean | null",
 })
   .and(BasicInfoUpdate)
   .describe(
@@ -179,6 +183,7 @@ export const UpdateSpaceInfo = defineEvent(
       { key: "allow_public_join", value: event.allowPublicJoin },
       { key: "allow_member_invites", value: event.allowMemberInvites },
       { key: "suggest_to_others", value: event.suggestToOthers },
+      { key: "show_join_notices", value: event.showJoinNotices },
     ];
     const setSpaceUpdates = spaceUpdates.filter((x) => x.value !== undefined);
 
