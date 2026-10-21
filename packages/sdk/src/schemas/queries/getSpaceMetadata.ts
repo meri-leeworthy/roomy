@@ -79,6 +79,14 @@ export const Response = type({
    * answered one.
    */
   "suggestToOthers?": "boolean",
+  /**
+   * Whether join notices are shown in this space's rooms. The key is absent
+   * when an admin has not answered (which reads as shown, the behaviour every
+   * space had before the setting existed); `false` is an explicit opt-out.
+   * Storage keeps the unanswered state as NULL rather than collapsing it to a
+   * value, so a client can tell a defaulted space from an answered one.
+   */
+  "showJoinNotices?": "boolean",
   isMember: "boolean",
   isAdmin: "boolean",
   /** Number of channels with unread messages (sidebar-visible rooms only). */
