@@ -651,17 +651,22 @@ describe("selectMessages room page plan", () => {
     db.exec("pragma foreign_keys = on");
     db.exec(readFileSync(SCHEMA_PATH, "utf8"));
 
+    // Both filters the page can carry: the keyset, the join-notice drop, and
+    // both together. The notice filter is a `like` on the body, so it must not
+    // push SQLite into sorting the room into a temp B-tree.
     for (const hasCursor of [false, true]) {
-      const plan = db
-        .query<{ detail: string }, []>(
-          `explain query plan ${roomPageSql(hasCursor, 50)}`,
-        )
-        .all()
-        .map((r) => r.detail)
-        .join(" | ");
+      for (const hideJoinNotices of [false, true]) {
+        const plan = db
+          .query<{ detail: string }, []>(
+            `explain query plan ${roomPageSql(hasCursor, 50, hideJoinNotices)}`,
+          )
+          .all()
+          .map((r) => r.detail)
+          .join(" | ");
 
-      expect(plan).not.toMatch(/TEMP B-TREE/);
-      expect(plan).toContain("idx_entities_room_sort_key");
+        expect(plan).not.toMatch(/TEMP B-TREE/);
+        expect(plan).toContain("idx_entities_room_sort_key");
+      }
     }
   });
 });
@@ -1492,5 +1497,215 @@ describe("selectMessages attachment-encoded links", () => {
     // compares it against the attachment `uri` it sends in the edit.
     expect(linkEmbeds[0]!.url).toBe(entityId);
     expect(linkEmbeds[0]!.embed).toEqual({ t: "Article" });
+  });
+});
+
+describe("selectMessages join notices", () => {
+  const JOINER = "did:plc:joiner";
+
+  /**
+   * The notice exactly as `space.joinSpace` writes it: an entity in the
+   * space's channel, an author edge back to the space itself, and the
+   * markdown body the client renders as a system row.
+   */
+  async function seedJoinNotice(
+    db: DbLike,
+    roomId: string,
+    joiner: string,
+  ): Promise<string> {
+    const id = newUlid();
+    await db.run(
+      "insert into entities (id, stream_id, room) values (?, ?, ?)",
+      [id, STREAM, roomId],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      id,
+      STREAM,
+    ]);
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit) values (?, 'text/markdown', ?, ?)",
+      [id, Buffer.from(`[@${joiner}](/user/${joiner}) joined the space.`), id],
+    );
+    return id;
+  }
+
+  /** The other system message: the room-link notice a reader needs. */
+  async function seedRoomLinkNotice(
+    db: DbLike,
+    roomId: string,
+    creator: string,
+  ): Promise<string> {
+    const id = newUlid();
+    const target = newUlid();
+    await db.run(
+      "insert into entities (id, stream_id, room) values (?, ?, ?)",
+      [id, STREAM, roomId],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      id,
+      STREAM,
+    ]);
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit) values (?, 'text/markdown', ?, ?)",
+      [
+        id,
+        Buffer.from(
+          `[@${creator}](/user/${creator}) created [bugs](${target}?parent=${roomId}).`,
+        ),
+        id,
+      ],
+    );
+    return id;
+  }
+
+  /** A member's own message. Its body can contain any words it likes. */
+  async function seedMemberMessage(
+    db: DbLike,
+    roomId: string,
+    sortIdx: string,
+    body: string,
+  ): Promise<string> {
+    const id = newUlid();
+    // The author edge's tail is a foreign key into `entities`.
+    await db.run("insert or ignore into entities (id, stream_id) values (?, ?)", [
+      JOINER,
+      JOINER,
+    ]);
+    await db.run(
+      "insert into entities (id, stream_id, room, sort_idx) values (?, ?, ?, ?)",
+      [id, STREAM, roomId, sortIdx],
+    );
+    await db.run("insert into edges (head, tail, label) values (?, ?, 'author')", [
+      id,
+      JOINER,
+    ]);
+    await db.run(
+      "insert into comp_content (entity, mime_type, data, last_edit) values (?, 'text/markdown', ?, ?)",
+      [id, Buffer.from(body), id],
+    );
+    return id;
+  }
+
+  /** A per-space DB with a room entity and an answered/unanswered setting. */
+  async function spaceWith(showJoinNotices: number | null): Promise<{
+    db: DbLike;
+    roomId: string;
+  }> {
+    const db = freshSpaceDb();
+    const roomId = newUlid();
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [
+      STREAM,
+      STREAM,
+    ]);
+    await db.run(
+      "insert into entities (id, stream_id) values (?, ?)",
+      [roomId, STREAM],
+    );
+    await db.run(
+      "insert into comp_space (entity, show_join_notices) values (?, ?)",
+      [STREAM, showJoinNotices],
+    );
+    return { db, roomId };
+  }
+
+  async function page(db: DbLike, roomId: string, limit = 50) {
+    return selectMessages(db, { kind: "room", roomId, limit, cursor: null });
+  }
+
+  test("an unanswered space shows the notice, exactly as before the setting existed", async () => {
+    const { db, roomId } = await spaceWith(null);
+    const notice = await seedJoinNotice(db, roomId, JOINER);
+
+    const { messages } = await page(db, roomId);
+    expect(messages.map((m) => m.id)).toEqual([notice]);
+    expect(messages[0]!.system).toBe(true);
+  });
+
+  test("an explicit yes shows the notice", async () => {
+    const { db, roomId } = await spaceWith(1);
+    const notice = await seedJoinNotice(db, roomId, JOINER);
+
+    const { messages } = await page(db, roomId);
+    expect(messages.map((m) => m.id)).toEqual([notice]);
+  });
+
+  test("an explicit no drops the notice from the page and keeps the stored row", async () => {
+    const { db, roomId } = await spaceWith(0);
+    const notice = await seedJoinNotice(db, roomId, JOINER);
+    const real = await seedMemberMessage(db, roomId, "01", "hello");
+
+    const { messages } = await page(db, roomId);
+    expect(messages.map((m) => m.id)).toEqual([real]);
+
+    // The event is a read preference, not a delete: the row is still there.
+    const row = await db
+      .query("select id from entities where id = ?")
+      .get<{ id: string }>(notice);
+    expect(row?.id).toBe(notice);
+  });
+
+  test("the room-created notice still renders with join notices hidden", async () => {
+    // It is the only trace a thread/link creation leaves in the timeline, and
+    // it is a system message with the same author-to-stream edge — so the
+    // filter has to tell the two apart by body, not by `system`.
+    const { db, roomId } = await spaceWith(0);
+    const link = await seedRoomLinkNotice(db, roomId, JOINER);
+
+    const { messages } = await page(db, roomId);
+    expect(messages.map((m) => m.id)).toEqual([link]);
+    expect(messages[0]!.system).toBe(true);
+    expect(messages[0]!.content).toContain("created [bugs]");
+  });
+
+  test("a member's own message ending in ' joined the space.' is not a notice", async () => {
+    const { db, roomId } = await spaceWith(0);
+    const impostor = await seedMemberMessage(
+      db,
+      roomId,
+      "01",
+      "I can't believe I joined the space.",
+    );
+
+    const { messages } = await page(db, roomId);
+    expect(messages.map((m) => m.id)).toEqual([impostor]);
+  });
+
+  test("the page fills with real messages, and still pages, past hidden notices", async () => {
+    // Filtering before the `limit` is the point: a page that counted the
+    // notices would come back short and end the scrollback.
+    const { db, roomId } = await spaceWith(0);
+    const ids: string[] = [];
+    for (let i = 1; i <= 6; i++) {
+      await seedJoinNotice(db, roomId, `did:plc:joiner${i}`);
+      ids.push(await seedMemberMessage(db, roomId, `0${i}`, `body ${i}`));
+    }
+
+    const newest = await page(db, roomId, 3);
+    expect(newest.messages.map((m) => m.id)).toEqual([ids[3]!, ids[4]!, ids[5]!]);
+    expect(newest.nextCursor).toBe(ids[3]!);
+
+    const older = await selectMessages(db, {
+      kind: "room",
+      roomId,
+      limit: 3,
+      cursor: newest.nextCursor,
+    });
+    expect(older.messages.map((m) => m.id)).toEqual([ids[0]!, ids[1]!, ids[2]!]);
+  });
+
+  test("an id lookup returns nothing for a hidden notice, so no #messageDiff can carry one", async () => {
+    // The live path's `add` op is the row `selectMessages` returns for the
+    // event id; an empty result is what makes the diff not exist.
+    const { db, roomId } = await spaceWith(0);
+    const notice = await seedJoinNotice(db, roomId, JOINER);
+
+    const hidden = await selectMessages(db, { kind: "ids", ids: [notice] });
+    expect(hidden.messages).toEqual([]);
+
+    // Same row, unanswered space: still resolvable.
+    const { db: shown, roomId: shownRoom } = await spaceWith(null);
+    const shownNotice = await seedJoinNotice(shown, shownRoom, JOINER);
+    const visible = await selectMessages(shown, { kind: "ids", ids: [shownNotice] });
+    expect(visible.messages.map((m) => m.id)).toEqual([shownNotice]);
   });
 });
