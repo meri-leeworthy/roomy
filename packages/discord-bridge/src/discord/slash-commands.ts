@@ -279,6 +279,8 @@ export const slashCommands = [
 						channelTypes: [
 							ChannelTypes.GuildText,
 							ChannelTypes.GuildAnnouncement,
+							ChannelTypes.GuildForum,
+							ChannelTypes.GuildMedia,
 						],
 						required: true,
 					},
@@ -302,6 +304,8 @@ export const slashCommands = [
 						channelTypes: [
 							ChannelTypes.GuildText,
 							ChannelTypes.GuildAnnouncement,
+							ChannelTypes.GuildForum,
+							ChannelTypes.GuildMedia,
 						],
 						required: true,
 					},
@@ -341,7 +345,12 @@ export const slashCommands = [
 				description:
 					"A specific channel to re-backfill. Omit to re-backfill all bridged channels.",
 				type: ApplicationCommandOptionTypes.Channel,
-				channelTypes: [ChannelTypes.GuildText, ChannelTypes.GuildAnnouncement],
+				channelTypes: [
+					ChannelTypes.GuildText,
+					ChannelTypes.GuildAnnouncement,
+					ChannelTypes.GuildForum,
+					ChannelTypes.GuildMedia,
+				],
 				required: false,
 			},
 		],

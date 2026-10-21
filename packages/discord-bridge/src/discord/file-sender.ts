@@ -53,6 +53,7 @@ export class FileDiscordSender implements DiscordSender {
 	#reactionsAdded: AddedReaction[] = [];
 	#reactionsRemoved: RemovedReaction[] = [];
 	#parents = new Map<string, string>();
+	#types = new Map<string, number>();
 	#guilds = new Map<string, string>();
 	#messages = new Map<string, { content: string; webhookId?: string }>();
 	#threads: CreatedThread[] = [];
@@ -110,6 +111,10 @@ export class FileDiscordSender implements DiscordSender {
 		this.#reactionsRemoved.push({ channelId, messageId, emoji });
 	}
 
+	async getChannelType(channelId: string): Promise<number | undefined> {
+		return this.#types.get(channelId);
+	}
+
 	async getParentChannelId(channelId: string): Promise<string | undefined> {
 		return this.#parents.get(channelId);
 	}
@@ -141,6 +146,11 @@ export class FileDiscordSender implements DiscordSender {
 	/** Register a parent channel ID for a thread (for tests). */
 	setParentChannelId(threadId: string, parentId: string): void {
 		this.#parents.set(threadId, parentId);
+	}
+
+	/** Register a channel's Discord type (for tests). */
+	setChannelType(channelId: string, type: number): void {
+		this.#types.set(channelId, type);
 	}
 
 	/** Register a guild ID for a channel (for tests). */
@@ -220,5 +230,6 @@ export class FileDiscordSender implements DiscordSender {
 		this.#threads = [];
 		this.#sendError = undefined;
 		this.#sendAttempts = 0;
+		this.#types.clear();
 	}
 }

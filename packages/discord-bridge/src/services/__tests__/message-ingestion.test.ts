@@ -1,10 +1,11 @@
 /**
  * Unit tests for message-ingestion.ts
  *
- * Covers: MI01–MI17 — basic sync, fan-out, dedup, system messages,
+ * Covers: MI01–MI20 — basic sync, fan-out, dedup, system messages,
  * thread starters, mentions, attachments, embeds, backfill restriction,
- * subset mode, and messages whose body comes only from a poll, components,
- * or a Lottie sticker.
+ * subset mode, messages whose body comes only from a poll, components, or a
+ * Lottie sticker, and channels that gain no room (a forum one that does, and
+ * the counts a channel with no room accrues).
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
@@ -1144,5 +1145,116 @@ describe("ingestDiscordMessage — messages with no content", () => {
 		} finally {
 			warnSpy.mockRestore();
 		}
+	});
+});
+
+/**
+ * A message with no Roomy room to land in used to warn once per message —
+ * 3,386 lines in a month from five channels, none of which could ever gain a
+ * room. The warning belongs to the first drop in a channel; the count belongs
+ * in the durable ledger.
+ */
+describe("ingestDiscordMessage — channel with no Roomy room", () => {
+	let repo: BridgeRepository;
+	let roomy: MockRoomyGateway;
+
+	beforeEach(() => {
+		repo = setupRepo();
+		roomy = new MockRoomyGateway();
+		mapChannel(repo, CHANNEL);
+	});
+
+	// MI18: a message in a forum's room reaches that room
+	test("MI18: a message posted in a forum channel lands in the forum's room", async () => {
+		const forumRoomId = ROOMY_MESSAGE_ULID_2;
+		mapChannel(repo, CHANNEL_2, forumRoomId);
+
+		const result = await ingestDiscordMessage(
+			makeMessage({ id: MSG_ID, channelId: CHANNEL_2 }),
+			repo,
+			roomy,
+		);
+
+		expect(result).toEqual({ synced: 1, skipped: 0 });
+		const event = createMessageEvent(roomy, SPACE_A);
+		expectToBeDefined(event);
+		expect(event.room).toBe(forumRoomId);
+		expect(repo.getRoomyId(SPACE_A, "message", MSG_ID)).toBe(event.id);
+	});
+
+	// MI19: unmapped channel — one warning, every drop counted
+	test("MI19: warns once per channel and counts every dropped message", async () => {
+		const unmapped = "999999999999999999";
+		const warns: string[] = [];
+		const consoleWarn = console.warn;
+		console.warn = (line: unknown) => {
+			warns.push(String(line));
+		};
+		try {
+			for (let i = 0; i < 3; i++) {
+				const result = await ingestDiscordMessage(
+					makeMessage({ id: `${MSG_ID}${i}`, channelId: unmapped }),
+					repo,
+					roomy,
+				);
+				expect(result).toEqual({ synced: 0, skipped: 1 });
+			}
+		} finally {
+			console.warn = consoleWarn;
+		}
+
+		expect(createMessageEvent(roomy, SPACE_A)).toBeUndefined();
+		expect(warns.filter((line) => line.includes(unmapped))).toHaveLength(1);
+
+		const rows = repo.listDroppedMessagesForChannel(unmapped);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.reason).toBe("no_room_mapping");
+		expect(rows[0]?.count).toBe(3);
+		expect(rows[0]?.spaceDid).toBe(SPACE_A);
+	});
+
+	// MI20: an already-synced message is a dedup hit, not a loss
+	test("MI20: re-ingesting a mapped message writes no ledger row", async () => {
+		mapMessage(repo, MSG_ID);
+
+		await ingestDiscordMessage(makeMessage({ id: MSG_ID }), repo, roomy);
+
+		expect(repo.listDroppedMessagesForChannel(CHANNEL)).toHaveLength(0);
+	});
+});
+
+/**
+ * The warning a channel with no room produces must say why, not just that it
+ * happened — an operator reading it should not have to know which channel type
+ * Discord gives no timeline.
+ */
+describe("ingestDiscordMessage — refusal reason on the warning", () => {
+	test("names the unsupported channel type in the drop warning", async () => {
+		const repo = setupRepo();
+		const roomy = new MockRoomyGateway();
+		const stage = "888888888888888888";
+		repo.recordUnbridgedChannel(
+			stage,
+			GUILD,
+			"channel type 13 (GuildStageVoice) has no Roomy equivalent",
+		);
+
+		const warns: string[] = [];
+		const consoleWarn = console.warn;
+		console.warn = (line: unknown) => {
+			warns.push(String(line));
+		};
+		try {
+			await ingestDiscordMessage(
+				makeMessage({ id: MSG_ID, channelId: stage }),
+				repo,
+				roomy,
+			);
+		} finally {
+			console.warn = consoleWarn;
+		}
+
+		const warning = warns.find((line) => line.includes(stage));
+		expect(warning).toContain("GuildStageVoice");
 	});
 });

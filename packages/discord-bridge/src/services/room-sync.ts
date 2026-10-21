@@ -8,6 +8,7 @@ import {
 	mappingKindForChannel,
 	PRIVATE_THREAD,
 	THREAD_TYPES,
+	unbridgedChannelReason,
 } from "../discord/data.ts";
 import type { DiscordDataSource } from "../discord/data-source.ts";
 import { createLogger } from "../logger.ts";
@@ -16,6 +17,36 @@ import type { BridgeSidebarCategory, RoomyGateway } from "../roomy/gateway.ts";
 import { sendEventOrQueue } from "./send-retry.ts";
 
 const log = createLogger("room");
+
+/**
+ * Record — and on the first record, warn about — a channel whose type has no
+ * Roomy equivalent.
+ *
+ * The decision belongs to the channel, not to any message in it: a stage,
+ * directory or voice channel has no timeline Roomy can hold, so nothing
+ * posted there can ever be bridged. Warning per message repeats the same line
+ * forever (`No Roomy room mapping …`, thousands a day); warning here says it
+ * once per channel, names the type, and leaves a durable row that a later
+ * boot reads instead of re-deriving.
+ *
+ * The row is keyed on the channel with no space, because the channel type is
+ * a property of the channel — the same reason applies to every space the
+ * guild is bridged to.
+ */
+export function recordUnbridgedChannel(
+	repo: BridgeRepository,
+	channelId: string,
+	guildId: string,
+	type: number,
+): void {
+	const reason = unbridgedChannelReason(type);
+	if (!reason) return;
+	if (!repo.recordUnbridgedChannel(channelId, guildId, reason)) return;
+	log.warn(
+		`Not bridging Discord channel ${channelId}: ${reason}. Nothing posted in it is synced; later drops for it are counted in dropped_messages, not logged again.`,
+		{ channelId, guildId, channelType: type },
+	);
+}
 
 /**
  * Ensure a Roomy room exists for a Discord channel in the given spaces.
@@ -91,9 +122,16 @@ export async function handleChannelCreate(
 	const guildId = channel.guildId;
 
 	if (!guildId) return;
-	// Defense-in-depth: also exclude thread types explicitly.
-	if (!CHANNEL_TYPES.has(channel.type) || THREAD_TYPES.has(channel.type))
+	// Threads have their own creation path (handleThreadCreate).
+	if (THREAD_TYPES.has(channel.type)) return;
+	// A category is sidebar structure, never a room; the initial structure
+	// sync reads it. Any other type outside CHANNEL_TYPES has no Roomy
+	// equivalent, and saying so once per channel is the only trace it needs.
+	if (channel.type === CATEGORY_TYPE) return;
+	if (!CHANNEL_TYPES.has(channel.type)) {
+		recordUnbridgedChannel(repo, channelId, guildId, channel.type);
 		return;
+	}
 
 	const targetSpaces = repo.getTargetSpacesForChannel(guildId, channelId);
 
