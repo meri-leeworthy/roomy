@@ -32,6 +32,29 @@ export class SpaceManager {
 		return entry;
 	}
 
+	/**
+	 * Whether `did` holds an admin edge in `spaceDid`.
+	 *
+	 * Reads the appserver's member list through the bridge's own service-auth
+	 * client, so the caller being checked need not be able to read the space
+	 * itself. `search` narrows the response to the DID in question.
+	 *
+	 * Fails closed: an unreachable appserver, or a space the bridge cannot
+	 * read, reports "not an admin" and logs why.
+	 */
+	async isAdmin(spaceDid: string, did: string): Promise<boolean> {
+		try {
+			const { members } = await this.#xrpc.query(
+				"space.roomy.space.getMembers",
+				{ spaceId: spaceDid, search: did },
+			);
+			return members.some((member) => member.did === did && member.isAdmin);
+		} catch (err) {
+			log.warn("admin check failed", err);
+			return false;
+		}
+	}
+
 	get(spaceDid: string): { streamDid: string } | undefined {
 		return this.#spaces.get(spaceDid);
 	}

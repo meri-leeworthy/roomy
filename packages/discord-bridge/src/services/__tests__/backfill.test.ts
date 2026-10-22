@@ -984,9 +984,13 @@ describe("two-phase backfill", () => {
 			  }
 			| undefined;
 		try {
-			server = startApi(repo, () => "app-id");
+			server = startApi(repo, () => "app-id", {
+				verifyRequest: async () => ({ did: "did:plc:tester" }),
+				isSpaceAdmin: async () => true,
+			});
 			const res = await fetch(
 				`http://127.0.0.1:${server.port}/backfill/progress?spaceDid=${encodeURIComponent(SPACE)}`,
+				{ headers: { authorization: "Bearer did:plc:tester" } },
 			);
 			expect(res.status).toBe(200);
 			const body = (await res.json()) as {
@@ -1021,6 +1025,7 @@ describe("two-phase backfill", () => {
 				"http://127.0.0.1:" +
 					server.port +
 					"/backfill/progress?spaceDid=did%3Aweb%3Anone",
+				{ headers: { authorization: "Bearer did:plc:tester" } },
 			);
 			expect(emptyRes.status).toBe(200);
 			const emptyBody = (await emptyRes.json()) as { channels: unknown[] };

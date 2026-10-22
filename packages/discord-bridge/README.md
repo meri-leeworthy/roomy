@@ -202,6 +202,34 @@ error and is left alone. A backfill that stalls is resumed from the last event
 seen, and a read that does not reach the end of the log within two minutes
 fails.
 
+## HTTP API
+
+Serves read-only status on `PORT`. Every route requires a service-auth JWT:
+`Authorization: Bearer <jwt>` where the token's `aud` is `ATPROTO_BRIDGE_DID`
+and its `iss`/`sub` names the caller's DID. The gate runs before routing, so a
+route added later is authenticated by default. `OPTIONS` (CORS preflight) is
+answered without credentials.
+
+| Route                          | Returns                                    | Standing required                         |
+| ------------------------------ | ------------------------------------------ | ----------------------------------------- |
+| `/info`                        | Discord app id + bridge DID                | any authenticated caller                  |
+| `/get-guild-id?spaceId=`       | guild bridged to that space                | admin of `spaceId`                        |
+| `/get-space-id?guildId=`       | spaces bridged to that guild               | admin of every returned space             |
+| `/bridges[?guildId=]`          | bridge configs                             | admin of every returned space              |
+| `/backfill/progress[?spaceDid=\|guildId=]` | per-channel backfill state      | admin of the named/returned spaces        |
+| `/sends/failed[?spaceDid=]`    | durable failed-send queue                  | admin of the named/returned spaces        |
+
+Absent or invalid credentials give `401`; a verified caller without standing in
+a space gives `403`. The unfiltered `/bridges` and `/sends/failed` forms return
+rows across spaces, so they are operator-only: they succeed only for a caller
+who administers every space the response would cover. Admin standing is read
+from `space.roomy.space.getMembers`, and a failed lookup fails closed (`403`).
+
+Consequence for deployments: a dashboard calling these routes must mint a
+service-auth token for the bridge (`createServiceJwt({ iss: <user DID>, aud:
+ATPROTO_BRIDGE_DID, ... })`, signed by the user's PDS session key) and send it
+on every request; unauthenticated calls that returned `200` now get `401`.
+
 ## Environment variables
 
 ### Required

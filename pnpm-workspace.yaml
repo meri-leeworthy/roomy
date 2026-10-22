@@ -4,6 +4,7 @@ packages:
   - packages/docs
   - packages/design
   - packages/sdk
+  - packages/service-auth
   - packages/discord-bridge
   - packages/cli
   - packages/tsconfig
