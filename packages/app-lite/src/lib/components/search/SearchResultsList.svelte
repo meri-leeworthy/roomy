@@ -15,13 +15,14 @@
   import type { ThreadInfo } from "@roomy/design/components/content/thread/boardView/types.ts";
   import SpaceAvatar from "@roomy/design/components/spaces/SpaceAvatar.svelte";
   import UserAvatar from "@roomy/design/components/user/UserAvatar.svelte";
-  import MessageContent from "../chat/MessageContent.svelte";
+  import MessageContent from "@roomy/design/components/content/thread/message/MessageContent.svelte";
   import ForwardContext from "../chat/ForwardContext.svelte";
   import MessageReactions from "../chat/MessageReactions.svelte";
   import MediaEmbed from "../chat/embeds/MediaEmbed.svelte";
+  import { linkItems, mediaItems } from "../chat/attachment-views";
   import LinkCard from "@roomy/design/components/content/thread/message/embeds/LinkCard.svelte";
   import { messageContentToPlaintext } from "../chat/messagePreview";
-  import { messageHasVisibleContent } from "../chat/message-body";
+  import { messageHasVisibleContent } from "@roomy/design/utils";
   import {
     IconChevronRight,
     IconNeedleThread,
@@ -458,7 +459,7 @@
                     {/snippet}
 
                     {#snippet linkEmbeds()}
-                      {@const embeds = (isForward ? original?.linkEmbeds : m.linkEmbeds) ?? []}
+                      {@const embeds = linkItems((isForward ? original?.attachments : m.attachments) ?? [])}
                       {#if embeds.some((l) => l.embed)}
                         <div class="flex flex-col gap-2 mt-1">
                           {#each embeds.filter((l) => l.embed) as link (link.url)}
@@ -469,13 +470,9 @@
                     {/snippet}
 
                     {#snippet media()}
-                      {@const media = (isForward ? original?.media : m.media) ?? []}
-                      {#if media.some((item) => !item.type.startsWith("text/"))}
-                        <MediaEmbed
-                          media={media
-                            .filter((item) => !item.type.startsWith("text/"))
-                            .map((item) => ({ ...item, alt: item.alt ?? undefined }))}
-                        />
+                      {@const media = mediaItems((isForward ? original?.attachments : m.attachments) ?? [])}
+                      {#if media.length > 0}
+                        <MediaEmbed {media} />
                       {/if}
                     {/snippet}
 

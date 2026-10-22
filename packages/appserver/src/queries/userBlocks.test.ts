@@ -7,31 +7,32 @@
  *   - The **fetch** is driven against a stub PDS over real HTTP, so the union of
  *     the two collections, the page loop and the unknown-collection answer are
  *     the real code paths. Those are properties of the wire, not of the cache.
- *   - The **cache, backoff and mutual relation** run against the fetcher override
- *     (`_setTestFetchBlockRecords`), so their timing is observable instead of
- *     being buried in a network round-trip.
+ *   - The **cache, the refresh trigger and the mutual relation** run against
+ *     the fetcher override (`_setTestFetchBlockRecords`), so their timing is
+ *     observable instead of being buried in a network round-trip.
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import { StreamDid, UserDid } from "@roomy-space/sdk";
-import { closeDb, openDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
+import { UserDid } from "@roomy-space/sdk";
+import { closeDb, openDb, openReadStateDb } from "../db/db.ts";
 import { idResolver } from "../identity.ts";
 import { _setTestFetchBlockRecords, fetchBlockRecords } from "../materialization/blocks.ts";
-import { setUserSpaceMembership } from "./userSpaceMembership.ts";
 import {
-  _blockFetchesInFlight,
-  _blockSweepsInFlight,
+  _blockRefreshesInFlight,
   _resetBlockCaches,
   blocks,
+  blockedBy,
   hiddenBy,
   refreshBlockSet,
+  warmBlockSet,
+  replaceBlockRows,
 } from "./userBlocks.ts";
+import type { BlockRecord } from "../materialization/blocks.ts";
 
 const ALICE = UserDid.assert("did:plc:alice");
 const BOB = UserDid.assert("did:plc:bob");
 const CAROL = UserDid.assert("did:plc:carol");
 const DAVE = UserDid.assert("did:plc:dave");
-const SPACE = StreamDid.assert("did:web:space.example");
 
 const originalTtl = process.env.BLOCK_CACHE_TTL_MS;
 const originalBackoff = process.env.BLOCK_ERROR_BACKOFF_MS;
@@ -231,8 +232,9 @@ describe("fetchBlockRecords", () => {
   });
 
   /**
-   * The fetch is a third-party call on a read path, so it must give up rather
-   * than hang. The DID document is served (pointing at the black hole) so that
+   * The fetch is a third-party call, so it must give up rather than hang: the
+   * refresh holding it never resolves otherwise, and the DID is left without a
+   * stamp. The DID document is served (pointing at the black hole) so that
    * resolution succeeds and the *record* call is what the deadline bounds.
    */
   test("the PDS record fetch returns instead of hanging", async () => {
@@ -263,27 +265,75 @@ describe("fetchBlockRecords", () => {
   });
 });
 
-// ─── Cache, backoff and the mutual relation ────────────────────────────────
+// ─── The refresh trigger, its backoff, and the mutual relation ─────────────
 
-describe("the block set cache", () => {
-  test("a failed fetch is recorded as an error and backs off instead of retrying per read", async () => {
+describe("the refresh trigger", () => {
+  test("a read starts no fetch, however cold the cache", async () => {
+    let calls = 0;
+    _setTestFetchBlockRecords(async () => {
+      calls++;
+      return [{ subject: BOB, source: "roomy", createdAt: null }];
+    });
+
+    // Nothing has ever been stored for ALICE or BOB: no rows, no stamp.
+    expect([...(await blocks(ALICE))]).toEqual([]);
+    expect([...(await blockedBy(ALICE))]).toEqual([]);
+    expect([...(await hiddenBy(ALICE))]).toEqual([]);
+    expect([...(await hiddenBy(BOB))]).toEqual([]);
+    await Promise.all(_blockRefreshesInFlight());
+
+    expect(calls).toBe(0);
+  });
+
+  test("an authenticated request refreshes the account's own set", async () => {
+    _setTestFetchBlockRecords(async () => [
+      { subject: BOB, source: "roomy", createdAt: null },
+    ]);
+
+    warmBlockSet(ALICE);
+    await Promise.all(_blockRefreshesInFlight());
+
+    expect([...(await blocks(ALICE))]).toEqual([BOB]);
+    expect((await fetchStamp(ALICE))?.status).toBe("ok");
+  });
+
+  /**
+   * The trigger sits on a request path, so it returns before the fetch it starts
+   * does: a PDS that never answers must not hold up the request that warmed it.
+   */
+  test("the trigger returns before the fetch it starts", async () => {
+    const gate = Promise.withResolvers<void>();
+    _setTestFetchBlockRecords(async () => {
+      await gate.promise;
+      return [{ subject: BOB, source: "roomy", createdAt: null }];
+    });
+
+    warmBlockSet(ALICE);
+    expect([...(await blocks(ALICE))]).toEqual([]);
+
+    gate.resolve();
+    await Promise.all(_blockRefreshesInFlight());
+    expect([...(await blocks(ALICE))]).toEqual([BOB]);
+  });
+
+  test("a failed fetch is recorded as an error and backs off instead of retrying per request", async () => {
     let calls = 0;
     _setTestFetchBlockRecords(async () => {
       calls++;
       throw new Error("PDS unreachable");
     });
 
-    await blocks(ALICE);
-    await Promise.all(_blockFetchesInFlight());
+    warmBlockSet(ALICE);
+    await Promise.all(_blockRefreshesInFlight());
 
     expect((await fetchStamp(ALICE))?.status).toBe("error");
     expect(calls).toBe(1);
 
-    // Reads inside the backoff window do not retry the failed fetch.
-    await blocks(ALICE);
-    await Promise.all(_blockFetchesInFlight());
-    await blocks(ALICE);
-    await Promise.all(_blockFetchesInFlight());
+    // Requests inside the backoff window do not retry the failed fetch.
+    warmBlockSet(ALICE);
+    await Promise.all(_blockRefreshesInFlight());
+    warmBlockSet(ALICE);
+    await Promise.all(_blockRefreshesInFlight());
     expect(calls).toBe(1);
   });
 
@@ -304,7 +354,7 @@ describe("the block set cache", () => {
     expect((await fetchStamp(ALICE))?.status).toBe("error");
   });
 
-  test("the cache expires and refetches", async () => {
+  test("the stamp expires and the next request refreshes", async () => {
     process.env.BLOCK_CACHE_TTL_MS = "40";
     let calls = 0;
     _setTestFetchBlockRecords(async () => {
@@ -312,20 +362,20 @@ describe("the block set cache", () => {
       return [{ subject: BOB, source: "roomy", createdAt: null }];
     });
 
-    await blocks(ALICE);
-    await Promise.all(_blockFetchesInFlight());
+    warmBlockSet(ALICE);
+    await Promise.all(_blockRefreshesInFlight());
     expect(calls).toBe(1);
 
-    // Inside the window the memo answers without another fetch.
-    await blocks(ALICE);
-    await Promise.all(_blockFetchesInFlight());
+    // Inside the window an authenticated request costs nothing.
+    warmBlockSet(ALICE);
+    await Promise.all(_blockRefreshesInFlight());
     expect(calls).toBe(1);
 
     vi.useFakeTimers();
     try {
       vi.advanceTimersByTime(60);
-      await blocks(ALICE);
-      await Promise.all(_blockFetchesInFlight());
+      warmBlockSet(ALICE);
+      await Promise.all(_blockRefreshesInFlight());
       expect(calls).toBe(2);
     } finally {
       vi.useRealTimers();
@@ -349,6 +399,98 @@ describe("the block set cache", () => {
   });
 });
 
+describe("replaceBlockRows", () => {
+  /** One record, as a fetch would report it. */
+  const record = (
+    subject: string,
+    source: "roomy" | "bluesky" = "roomy",
+    createdAt: number | null = null,
+  ): BlockRecord => ({ subject, source, createdAt });
+
+  test("the stored set is exactly the records passed in, in one write", async () => {
+    await replaceBlockRows(openReadStateDb(), ALICE, [
+      record(BOB, "roomy", 1_700_000_000_000),
+      record(CAROL, "bluesky"),
+    ]);
+
+    expect(await storedRows(ALICE)).toEqual([`${BOB}:roomy`, `${CAROL}:bluesky`]);
+    // The stamp the refresh trigger reads for freshness lands with the rows.
+    expect((await fetchStamp(ALICE))?.status).toBe("ok");
+  });
+
+  test("a record's created_at survives the round trip, absent one included", async () => {
+    await replaceBlockRows(openReadStateDb(), ALICE, [
+      record(BOB, "roomy", 1_700_000_000_000),
+      record(CAROL, "bluesky", null),
+    ]);
+
+    const rows = await openReadStateDb()
+      .query(
+        "select blocked_did, created_at from user_blocks where user_did = ? order by blocked_did",
+      )
+      .all<{ blocked_did: string; created_at: number | null }>([ALICE]);
+    expect(rows).toEqual([
+      { blocked_did: BOB, created_at: 1_700_000_000_000 },
+      { blocked_did: CAROL, created_at: null },
+    ]);
+  });
+
+  /**
+   * A block set is the union of two collections, so one account can hold several
+   * records naming the same subject. That is not two rows — the primary key is
+   * `(user_did, blocked_did)` — and a write that assumed they were distinct would
+   * abort on the key and leave the account's previous set in place.
+   */
+  test("a subject blocked in both collections is one row", async () => {
+    await replaceBlockRows(openReadStateDb(), ALICE, [
+      record(BOB, "roomy"),
+      record(BOB, "bluesky"),
+      record(CAROL),
+    ]);
+
+    // One row per subject, carrying the last source read for it; the union is
+    // the set that matters, not which collection named the subject.
+    expect(await storedRows(ALICE)).toEqual([`${BOB}:bluesky`, `${CAROL}:roomy`]);
+    expect([...(await blocks(ALICE))].sort()).toEqual([BOB, CAROL].sort());
+  });
+
+  test("a write replaces the previous set rather than adding to it", async () => {
+    await replaceBlockRows(openReadStateDb(), ALICE, [record(BOB), record(CAROL)]);
+    await replaceBlockRows(openReadStateDb(), ALICE, [record(CAROL)]);
+
+    expect(await storedRows(ALICE)).toEqual([`${CAROL}:roomy`]);
+  });
+
+  test("an empty set clears the rows and still stamps the attempt", async () => {
+    await replaceBlockRows(openReadStateDb(), ALICE, [record(BOB)]);
+    await replaceBlockRows(openReadStateDb(), ALICE, []);
+
+    expect(await storedRows(ALICE)).toEqual([]);
+    // The stamp is what separates "blocks nobody" from "never read", so an
+    // empty set has to leave one behind.
+    expect((await fetchStamp(ALICE))?.status).toBe("ok");
+  });
+
+  test("one account's write leaves another account's rows alone", async () => {
+    await replaceBlockRows(openReadStateDb(), BOB, [record(CAROL)]);
+    await replaceBlockRows(openReadStateDb(), ALICE, [record(CAROL)]);
+
+    expect(await storedRows(BOB)).toEqual([`${CAROL}:roomy`]);
+  });
+
+  /**
+   * The set is a user's whole repo, so its length is not bounded by anything the
+   * appserver controls. The write carries it as one binding rather than one
+   * statement per record; a set large enough to matter for that is still a set.
+   */
+  test("a set far larger than one page of records is written whole", async () => {
+    const many = Array.from({ length: 5_000 }, (_, i) => record(`did:plc:blocked${i}`));
+    await replaceBlockRows(openReadStateDb(), ALICE, many);
+
+    expect((await blocks(ALICE)).size).toBe(many.length);
+  });
+});
+
 describe("hiddenBy", () => {
   test("an anonymous viewer hides nobody and reads nothing", async () => {
     expect([...(await hiddenBy(null))]).toEqual([]);
@@ -365,35 +507,10 @@ describe("hiddenBy", () => {
 
   /**
    * The mutual case. B's own repos hold nothing at all, so `blocks(B)` is empty
-   * and the only evidence of the block lives in A's repo — which is the whole
-   * reason the reverse direction needs an enumeration of the other members'
-   * repos rather than a read of B's.
+   * and the only evidence of the block lives in A's repo — which is why the row
+   * that answers `blockedBy(B)` is written by A's refresh and never by B's read.
    */
   test("a blocker is hidden from the account they blocked, with nothing in that account's own repos", async () => {
-    // A and B share a space; B is the viewer.
-    await setUserSpaceMembership(
-      openReadStateDb(),
-      BOB,
-      SPACE,
-      "joined",
-      "test",
-      "01TEST0000000000000000000000",
-    );
-    const spaceDb = openSpaceDb(SPACE);
-    // `edges` carries FKs onto entities(id), so the space and its members have
-    // to exist before the member edges do.
-    for (const id of [SPACE, ALICE, BOB]) {
-      await spaceDb.run("insert into entities (id, stream_id) values (?, ?)", [id, SPACE]);
-    }
-    await spaceDb.run(
-      "insert into edges (head, tail, label) values (?, ?, 'member')",
-      [SPACE, ALICE],
-    );
-    await spaceDb.run(
-      "insert into edges (head, tail, label) values (?, ?, 'member')",
-      [SPACE, BOB],
-    );
-
     // A holds a block naming B; B's repos hold nothing.
     _setTestFetchBlockRecords(async (did) =>
       did === ALICE
@@ -401,62 +518,37 @@ describe("hiddenBy", () => {
         : [],
     );
 
+    // B's read learns nothing: nobody has been read yet.
     expect([...(await hiddenBy(BOB))]).toEqual([]);
-    await Promise.all(_blockSweepsInFlight());
-    await Promise.all(_blockFetchesInFlight());
 
-    // The sweep read A's repo and stored their set, so the reverse lookup now
-    // answers without any knowledge of a record in B's own repo.
+    // A is present, so A's own request reads A's repo — and that is what writes
+    // the row B's reverse lookup answers from.
+    warmBlockSet(ALICE);
+    await Promise.all(_blockRefreshesInFlight());
+
     expect([...(await hiddenBy(BOB))]).toEqual([ALICE]);
     // A's own view is unchanged: they blocked B, and B blocked nobody.
-    await refreshBlockSet(ALICE);
     expect([...(await hiddenBy(ALICE))]).toEqual([BOB]);
   });
 
   /**
    * The reverse set is built from ATProto repos, so a bridged author holds no
-   * repo to block from and can never be the *blocker*. They can be the blocked
-   * party, though, and their DID does not resolve — so a sweep that includes
-   * them has to record the failure and carry on with the candidates that can
-   * answer.
+   * repo to block from and can never be the *blocker*. One that reaches the
+   * refresh path anyway — a DID that does not resolve — records the failure and
+   * leaves the request that triggered it standing.
    */
-  test("an unresolvable bridged candidate does not stop the sweep", async () => {
+  test("a refresh for an unresolvable DID records the failure instead of throwing", async () => {
     const BRIDGED = "did:discord:123456789012345678" as UserDid;
-    await setUserSpaceMembership(
-      openReadStateDb(),
-      CAROL,
-      SPACE,
-      "joined",
-      "test",
-      "01TEST0000000000000000000000",
-    );
-    const spaceDb = openSpaceDb(SPACE);
-    for (const id of [SPACE, ALICE, BRIDGED]) {
-      await spaceDb.run("insert into entities (id, stream_id) values (?, ?)", [id, SPACE]);
-    }
-    for (const member of [ALICE, BRIDGED]) {
-      await spaceDb.run(
-        "insert into edges (head, tail, label) values (?, ?, 'member')",
-        [SPACE, member],
-      );
-    }
-
     _setTestFetchBlockRecords(async (did) => {
       if (did === BRIDGED) throw new Error("no DID document for a bridged author");
-      return did === ALICE
-        ? [{ subject: CAROL, source: "roomy", createdAt: null }]
-        : [];
+      return [];
     });
 
-    await hiddenBy(CAROL);
-    await Promise.all(_blockSweepsInFlight());
-    await Promise.all(_blockFetchesInFlight());
+    warmBlockSet(BRIDGED);
+    await Promise.all(_blockRefreshesInFlight());
 
-    // The unresolvable candidate is recorded as a failure — backed off, not
-    // retried per read — and the readable candidate still answered.
     expect((await fetchStamp(BRIDGED))?.status).toBe("error");
-    expect((await fetchStamp(ALICE))?.status).toBe("ok");
-    expect([...(await hiddenBy(CAROL))]).toEqual([ALICE]);
+    expect([...(await hiddenBy(CAROL))]).toEqual([]);
   });
 
   test("the reverse set is read from the same table the forward set is written to", async () => {

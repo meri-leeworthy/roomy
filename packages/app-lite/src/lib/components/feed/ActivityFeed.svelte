@@ -8,19 +8,21 @@
   import ActivityFeedSkeleton from "@roomy/design/components/content/feed/ActivityFeedSkeleton.svelte";
   import ErrorMessage from "@roomy/design/components/helper/ErrorMessage.svelte";
   import MediaEmbed from "../chat/embeds/MediaEmbed.svelte";
+  import { linkItems, mediaItems } from "../chat/attachment-views";
   import LinkCard from "@roomy/design/components/content/thread/message/embeds/LinkCard.svelte";
-  import MessageContent from "../chat/MessageContent.svelte";
+  import MessageContent from "@roomy/design/components/content/thread/message/MessageContent.svelte";
   import MessageReactions from "../chat/MessageReactions.svelte";
   import { prefetchInternalLinkSummaries } from "../chat/prefetch-link-summaries";
   import {
     prefetchInternalLinkSummariesFromBlocks,
   } from "../chat/prefetch-link-summaries";
-  import { parseRichTextContent } from "../chat/message-body";
+  import { parseRichTextContent } from "@roomy/design/utils";
   import { RICHTEXT_MIME } from "@roomy-space/sdk";
   import type { Block } from "@roomy-space/sdk";
   import { auth } from "$lib/auth.svelte";
   import { blockState, ensureOwnBlocks } from "$lib/blocks-state.svelte";
-  import { IconChevronRight } from "@roomy/design/icons";
+  import { IconChevronRight, IconRetry } from "@roomy/design/icons";
+  import Button from "@roomy/design/components/ui/button/Button.svelte";
 
   let { spaceId, showSpaceInfo = true, limit = 20 }: { spaceId?: string; showSpaceInfo?: boolean; limit?: number } = $props();
 
@@ -237,16 +239,13 @@
                   <MessageContent content={last.content} mimeType={last.mimeType} />
                 </div>
 
-                {#if last.media && last.media.length > 0}
-                  {@const nonLinkMedia = last.media.filter((m) => !m.type.startsWith("text/"))}
-                  {#if nonLinkMedia.length > 0}
-                    <MediaEmbed media={nonLinkMedia.map((m) => ({ ...m, alt: m.alt ?? undefined }))} />
-                  {/if}
+                {#if last.attachments && mediaItems(last.attachments).length > 0}
+                  <MediaEmbed media={mediaItems(last.attachments)} />
                 {/if}
 
-                {#if last.linkEmbeds && last.linkEmbeds.length > 0}
+                {#if last.attachments && linkItems(last.attachments).length > 0}
                   <div class="flex flex-col gap-2 mt-1">
-                    {#each last.linkEmbeds as link (link.url)}
+                    {#each linkItems(last.attachments) as link (link.url)}
                       <LinkCard url={link.url} embed={link.embed} />
                     {/each}
                   </div>
@@ -285,13 +284,30 @@
           <hr class="border-base-200/50 dark:border-base-800/50" />
         {/if}
       {/each}
-
-      <!-- End of feed notice -->
-      <div class="flex justify-center py-6">
-        <p class="text-sm text-base-400 italic">That's all we got.</p>
-      </div>
     </div>
   {/if}
+
+  <!-- End of feed: the notice, plus the refresh a pulled view needs.
+       The server sends no frame for a message-driven change to the feed, so
+       this is how a reader who is already here asks for what landed since —
+       the other half being the mount fetch in the query itself. -->
+  <div class="flex items-center justify-center gap-3 py-6">
+    {#if feed.length > 0}
+      <p class="text-sm text-base-400 italic">That's all we got.</p>
+    {/if}
+    <Button
+      variant="ghost"
+      size="sm"
+      class="text-base-400"
+      disabled={feedQuery.isFetching}
+      aria-label="Refresh activity feed"
+      title="Refresh activity feed"
+      onclick={() => feedQuery.refetch()}
+    >
+      <IconRetry class={feedQuery.isFetching ? "animate-spin" : ""} />
+      Refresh
+    </Button>
+  </div>
 {/if}
 
 <style>

@@ -86,7 +86,7 @@ the messages are authored by a second account that administers it:
 
 ---
 
-## 2. Covered now (36 tests)
+## 2. Covered now
 
 Every test below states the observable behaviour it defends.
 
@@ -215,6 +215,31 @@ behaviour under test. A room a test just created has one message, which is
 both the newest and the row the room parks on. (`room-kinds.spec.ts` and
 `message-lifecycle.spec.ts` reached the same conclusion for the same reason.)
 
+### `profile-identity.spec.ts` — profile & identity (area E)
+| Test | Defends |
+|---|---|
+| renders the signed-in user's own name and handle, and offers Edit | The profile query resolved for the caller's own DID — the page's `h1` and the handle link are its own, so an unresolved profile fails rather than merely rendering a route. The Edit affordance is the page's read of `isOwnProfile`. |
+| renders another account's name and handle, which are that account's and not the viewer's | The same page for a *different* DID renders that account's identity, not the signed-in user's — the fixture pair is what makes "the identity it resolved" a claim rather than "a name appeared". Also the negative: Edit is absent and Block is offered. |
+| a saved display name is written to the user's repo, and is what the page renders after a reload | **The load-bearing one:** a profile save is a `space.roomy.user.profile/self` record in the user's own repo, so the listed record proves the client's `putRecord`, and the post-reload heading proves the appserver read that record back. Only a real write produces both. |
+| the typeahead offers the room's other author once '@' is typed | The empty-query preseed is built from the room's own timeline, filtered to mentionable accounts and excluding the sender: exactly one row, and it is the other author's. |
+| the typeahead searches the space's members for what is typed after '@' | The typed text drives a real `getMembers?search=` server query — the row it renders came from the appserver, not a local filter. |
+| an inserted mention renders as a link to the mentioned account, and survives a reload | **The second write path:** the editor holds an atomic mention node, submitting writes a `#didMention` facet, and after a reload the anchor can only come from that facet having been stored and materialised (`@label` alone renders as text). |
+| the theme action cycles the mode and re-applies the choice after a reload | light → dark → system → light, each step asserted on both the stored value and the applied `dark` class, then re-read after a reload. The inline script in `app.html` is what applies it, so a reload that flashes the default fails. |
+| Settings opens the user settings page | The menu item's `goto` lands on `/user/settings` and the page its content renders there. |
+| Log Out ends the session, reloads, and signs back in | The session is revoked at the PDS (`deleteSession`), the tab is a **new document** (a per-document marker changes — the app cannot fake that by flipping its own flags), and the test-mode `AtpAgent` login runs again in it (`createSession`). |
+
+Two harness facts this area depends on, both added with it:
+
+- **The appserver reads the stub PDS for a Roomy profile record.** A save is
+  only observable because `launch-stack.ts` wires
+  `_setTestGetRoomyProfileRecord` to the stub's own repo (`stubGetRecord`),
+  which `getProfile` consults before its materialised row. The stub decodes
+  `$bytes` on the way out because a real PDS hands the record back decoded
+  from CBOR.
+- **The stub's `putRecord` reports a freshly minted TID as the commit `rev`.**
+  The lexicon format-checks it as a TID, and a caller-supplied rkey is not one
+  for every collection (`space.roomy.user.profile` uses `self`).
+
 ### Deliberate-break evidence (acceptance criterion 2)
 
 Demonstrated, not asserted, on 2026-09-25:
@@ -280,7 +305,43 @@ Demonstrated, not asserted, on 2026-09-25:
 
 All breaks were reverted; the suite is green.
 
-8. **Deleted the `#messageDiff` arm of the SDK's `SyncRouter`** (leaving the
+8. **Undid the harness hook that lets the appserver read the stub PDS's
+   records** (`launch-stack.ts`'s `_setTestGetRoomyProfileRecord` back to a
+   constant `null`), keeping the spec. Demonstrated 2026-10-15:
+   → `a saved display name is written to the user's repo, and is what the page
+   renders after a reload` **failed** — the page kept rendering the seeded
+   name.
+   → the other eight tests in `profile-identity.spec.ts` **passed**, including
+   both profile-page render tests: they read the seeded global row, which that
+   hook does not feed.
+   This is the pair that shows the profile test defends the write, not the
+   render: with the record's own source gone the render still works and only
+   the save stops being observable.
+
+9. **Stopped rendering the mention facet** (`BlocksRenderer.svelte`'s
+   `#didMention` case emptied, keeping the spec). Demonstrated 2026-10-15:
+   → `an inserted mention renders as a link to the mentioned account, and
+   survives a reload` **failed** on the row's anchor.
+   → the two typeahead tests and the other six **passed** — they observe what
+   the editor inserts and what the search returns, not how a stored facet is
+   drawn. The second break proves the *write*, not just the render:
+
+10. **Dropped the composer's blocks on send** (`ChatInputArea.svelte`'s
+    `handleSend` ignoring its `submittedBlocks` argument), keeping the spec.
+    Demonstrated 2026-10-15:
+    → the same test **failed**, this time because the post-send row never
+    appeared: with no blocks the body has no `#didMention` facet and the
+    message does not carry the mention at all.
+
+11. **Restored `clearPushSubscription`'s `await navigator.serviceWorker.ready`**
+    (the logout fix reverted, keeping the spec). Demonstrated 2026-10-15:
+    → `Log Out ends the session, reloads, and signs back in` **failed** with
+    "the document after logout should be a new one" after its full 30s budget.
+    The tab never reloaded, because `logout()` was waiting on a promise that
+    never settles when no service worker is registered — see the coverage note
+    on the harness constraint below.
+    
+12. **Deleted the `#messageDiff` arm of the SDK's `SyncRouter`** (leaving the
    frame unapplied), keeping the spec. Demonstrated 2026-10-15:
    → `a message sent from another client appears without a reload` **failed**
    in ~1s of assertion time, with the row simply absent from the reader's
@@ -289,14 +350,16 @@ All breaks were reverted; the suite is green.
    frame was delivered, and only the *client-side application* of it was gone.
    → Nothing else in the spec failed, so the failure is attributable to the
    live-diff path alone rather than to the two-client setup.
-9. **Forced the deep-link mark off** (`ChatMessage.svelte`'s
+   
+13. **Forced the deep-link mark off** (`ChatMessage.svelte`'s
    `class:message-highlight={highlighted}` → `false`), keeping the spec.
    Demonstrated 2026-10-15:
    → `a ?message= link lands on that message and marks it` **failed** on
    `toHaveClass(/message-highlight/)`, and the locator resolved 31 times with
    the row present — so the search-back-and-scroll half still passed
    independently, and the failure isolates the mark rather than the link.
-10. **Made the mobile drawer never rest off screen** (`MainLayout.svelte`'s
+   
+14. **Made the mobile drawer never rest off screen** (`MainLayout.svelte`'s
    `.sidebar-mobile` `transform` pinned to `translateX(0)` — the desktop
    arrangement applied at every width), keeping the spec. Demonstrated
    2026-10-15:
@@ -353,7 +416,7 @@ half of these — it is what the toolbar-menu gating test uses.
 - Result click navigates to the message (`?message=` deep link + highlight).
 - Scope-expansion link ("Search in all your spaces").
 
-### E. Profile & identity
+### E. Profile & identity — covered by `profile-identity.spec.ts`
 - Profile page `/user/[user]` renders display name/handle; edit own profile.
 - Mention typeahead in the composer inserts a DID mention and renders it.
 - User-menu actions: theme toggle, settings link, log out.
