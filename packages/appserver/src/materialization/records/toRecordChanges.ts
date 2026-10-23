@@ -59,6 +59,7 @@ import { fromBytes } from "@atcute/cbor";
 import { decodeTime } from "ulidx";
 
 import type { LoggedEvent } from "../types.ts";
+import { log } from "../../log.ts";
 import type { RecordKind, SidebarCategory } from "./recordKinds.ts";
 import {
   type OrderStamp,
@@ -181,6 +182,11 @@ let routedKinds: ReadonlySet<RecordKind> = CONVERTED_KINDS;
  * event that could convert: deriving a change stamps it, which no other event
  * needs. Its answer is then what the rules act on, and the adapter's own kinds
  * must agree with the table — the table is tested against them.
+ *
+ * An entry the adapter cannot describe — a log row whose id is not the ULID
+ * its kind requires, say — is left to the event path rather than thrown from
+ * here: `materialize` catches a materialiser failure and records it, so one
+ * unreadable row costs its own event and not the rest of the batch.
  */
 export function convertedChanges(
   logged: LoggedEvent,
@@ -195,7 +201,20 @@ export function convertedChanges(
   if (declared === undefined || declared.length === 0) return null;
   if (!declared.every((kind) => routedKinds.has(kind))) return null;
 
-  const changes = toRecordChanges(logged, streamId);
+  let changes: RecordChange[];
+  try {
+    changes = toRecordChanges(logged, streamId);
+  } catch (err) {
+    // The materialiser reports this event's failure where the batch can count
+    // it, which is what keeps one bad row from failing the whole batch.
+    log.warn(
+      `[materialize] no record for event ${logged.event.id} (${logged.event.$type}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
+
   return changes.every((change) => routedKinds.has(change.kind))
     ? changes
     : null;

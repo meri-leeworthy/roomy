@@ -593,3 +593,78 @@ describe("routing is decided by the kinds an event emits", () => {
     expect(rows?.n).toBe(1);
   });
 });
+
+describe("an entry the adapter cannot describe", () => {
+  test("still applies, because it goes back to the event path", async () => {
+    const channel = newUlid();
+    const message = newUlid();
+    // An edit whose own id is not a ULID and which carries no receipt instant
+    // to order it by: the adapter cannot stamp it. Routing it back to the event
+    // path is what keeps one unreadable row from failing the batch — the
+    // event materialiser never reads the edit's id for ordering.
+    const unstampable = {
+      $type: "space.roomy.message.editMessage.v0",
+      id: "not-a-ulid",
+      room: channel,
+      messageId: message,
+      body: markdown("edited"),
+    } as unknown as Event;
+    const unstampableEntry: LoggedEvent = {
+      event: unstampable,
+      idx: 3 as StreamIndex,
+      user: USER,
+    };
+
+    expect(convertedChanges(unstampableEntry, STREAM)).toBeNull();
+
+    const entries: LoggedEvent[] = [
+      logged(
+        {
+          $type: "space.roomy.room.createRoom.v0",
+          id: channel,
+          kind: "space.roomy.channel",
+          name: "general",
+        } as unknown as Event,
+        1,
+      ),
+      logged(
+        {
+          $type: "space.roomy.message.createMessage.v0",
+          id: message,
+          room: channel,
+          body: markdown("original"),
+          extensions: {},
+        } as unknown as Event,
+        2,
+      ),
+      unstampableEntry,
+      logged(
+        {
+          $type: "space.roomy.message.createMessage.v0",
+          id: newUlid(),
+          room: channel,
+          body: markdown("after"),
+          extensions: {},
+        } as unknown as Event,
+        4,
+      ),
+    ];
+
+    const db = freshSpaceDb();
+    await db.run("insert into entities (id, stream_id) values (?, ?)", [
+      STREAM,
+      STREAM,
+    ]);
+    await db.run("insert into comp_space (entity) values (?)", [STREAM]);
+    const stats = await applyBatch(db, STREAM, entries, { isBackfill: false });
+
+    expect(stats.failed).toEqual([]);
+    expect(stats.applied).toBe(4);
+
+    // The edit landed, and the message after it did too.
+    const content = await db
+      .query("select data from comp_content where entity = ?")
+      .get<{ data: Uint8Array }>(message);
+    expect(new TextDecoder().decode(content!.data)).toBe("edited");
+  });
+});
