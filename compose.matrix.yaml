@@ -2,11 +2,14 @@
 #
 # Profiles:
 #   synapse       (default) Synapse + Postgres. The measured choice: the
-#                 capability probe reports all three of MSC4190, MSC3202 and
-#                 MSC2409 as passing, so encrypted rooms work.
+#                 capability probe reports every feature encryption needs —
+#                 MSC4190, MSC4203 to-device and the three MSC3202 fields — as
+#                 passing, so encrypted rooms work.
 #   continuwuity  continuwuity with an embedded database and no Postgres. It
-#                 passes MSC4190 only; the probe therefore reports E2EE
-#                 unavailable, and the bridge refuses encrypted rooms.
+#                 passes MSC4190 and delivers MSC2409 ephemeral events, but a
+#                 transaction carries no to-device stream and no MSC3202 fields;
+#                 the probe therefore reports E2EE unavailable, and the bridge
+#                 refuses encrypted rooms.
 #
 #   docker compose -f compose.matrix.yaml up -d                    # Synapse
 #   docker compose -f compose.matrix.yaml --profile continuwuity up -d
@@ -89,8 +92,8 @@ services:
 
   homeserver:
     # Synapse is the default because it is the only homeserver the capability
-    # probe measures as supporting MSC2409 and MSC3202, which end-to-bridge
-    # encryption needs. See the PR body for the per-MSC measurement.
+    # probe measures as carrying the to-device stream and the MSC3202 fields,
+    # which end-to-bridge encryption needs. See the PR body for the measurement.
     image: matrixdotorg/synapse:latest
     profiles: ["synapse", "default"]
     restart: unless-stopped
@@ -192,9 +195,9 @@ services:
       ATPROTO_APP_PASSWORD: ${ATPROTO_APP_PASSWORD:-}
       BRIDGE_DID: ${BRIDGE_DID:-did:web:bridge.roomy.space}
       PDS_URL: ${PDS_URL:-https://bsky.social}
-      # continuwuity does not deliver MSC2409 to-device messages or MSC3202
-      # device lists, so encryption cannot run. `off` makes that explicit rather
-      # than discovered per room.
+      # continuwuity delivers MSC2409 ephemeral events but carries neither a
+      # to-device stream (MSC4203) nor the MSC3202 fields, so encryption cannot
+      # run. `off` makes that explicit rather than discovered per room.
       BRIDGE_E2EE_MODE: ${BRIDGE_E2EE_MODE:-off}
       HOMESERVER_URL: http://continuwuity:8008
       HOMESERVER_DOMAIN: ${HOMESERVER_DOMAIN:-matrix.roomy.local}

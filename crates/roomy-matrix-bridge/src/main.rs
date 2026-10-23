@@ -47,9 +47,10 @@ struct Cli {
 
     /// Probe the homeserver's appservice encryption capabilities and exit.
     ///
-    /// Reports pass/fail for msc4190-devices, msc3202-transactions and
-    /// msc2409-to-device. Exits non-zero when any of them fails, so a
-    /// container healthcheck can use it directly.
+    /// Reports pass/fail for msc4190-devices, msc2409-ephemeral,
+    /// msc4203-to-device and the three MSC3202 fields. Exits non-zero when a
+    /// feature encryption needs fails, so a container healthcheck can use it
+    /// directly.
     #[arg(long)]
     check_homeserver: bool,
 
@@ -169,12 +170,12 @@ async fn serve(config: Config) -> std::process::ExitCode {
     // stops the process before it relays anything, naming what is missing —
     // running an encrypted room without the pieces encryption needs is worse
     // than not starting.
-    // The device check answers from a single call, but MSC2409 and MSC3202 are
-    // decided by what a *transaction* carries. At startup the appservice has
-    // received nothing, so asking before any traffic exists reports a working
-    // homeserver as broken and holds `e2ee = "required"` shut forever. The
-    // stimulus below runs the same measurement `--check-homeserver` does, against
-    // the observer the live server fills.
+    // The device check answers from a single call, but the MSC2409, MSC3202 and
+    // MSC4203 checks are decided by what a *transaction* carries. At startup the
+    // appservice has received nothing, so asking before any traffic exists
+    // reports a working homeserver as broken and holds `e2ee = "required"` shut
+    // forever. The stimulus below runs the same measurement `--check-homeserver`
+    // does, against the observer the live server fills.
     let probe_state = ProbeState::new();
     let observer = matrix_adapter::TransactionObserver::new();
     let capabilities = match check::measure(&config).await {
@@ -308,8 +309,8 @@ async fn serve(config: Config) -> std::process::ExitCode {
             MatrixDeviceId::parse(machine.device_id().as_str())
                 .expect("the homeserver minted a non-empty device id"),
         ),
-        None if !capabilities.msc2409_to_device.passed() => {
-            EncryptionSupport::Unavailable(MissingFeature::Msc2409ToDevice)
+        None if !capabilities.msc4203_to_device.passed() => {
+            EncryptionSupport::Unavailable(MissingFeature::Msc4203ToDevice)
         }
         None => EncryptionSupport::Unavailable(MissingFeature::CryptoDevice),
     };

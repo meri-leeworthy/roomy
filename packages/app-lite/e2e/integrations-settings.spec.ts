@@ -55,8 +55,11 @@ async function stubAdminApi(page: Page) {
     if (path.endsWith("/capabilities")) {
       return json({
         msc4190Devices: true,
-        msc3202Transactions: true,
-        msc2409ToDevice: true,
+        msc2409Ephemeral: true,
+        msc4203ToDevice: true,
+        msc3202DeviceLists: true,
+        msc3202OtkCounts: true,
+        msc3202FallbackKeys: true,
         e2eeAvailable: true,
         details: [],
       });

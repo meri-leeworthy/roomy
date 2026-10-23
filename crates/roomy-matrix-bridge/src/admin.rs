@@ -118,10 +118,16 @@ async fn health(State(state): State<AdminState>) -> Response {
 struct CapabilitiesBody {
     #[serde(rename = "msc4190Devices")]
     msc4190_devices: bool,
-    #[serde(rename = "msc3202Transactions")]
-    msc3202_transactions: bool,
-    #[serde(rename = "msc2409ToDevice")]
-    msc2409_to_device: bool,
+    #[serde(rename = "msc2409Ephemeral")]
+    msc2409_ephemeral: bool,
+    #[serde(rename = "msc4203ToDevice")]
+    msc4203_to_device: bool,
+    #[serde(rename = "msc3202DeviceLists")]
+    msc3202_device_lists: bool,
+    #[serde(rename = "msc3202OtkCounts")]
+    msc3202_otk_counts: bool,
+    #[serde(rename = "msc3202FallbackKeys")]
+    msc3202_fallback_keys: bool,
     #[serde(rename = "e2eeAvailable")]
     e2ee_available: bool,
     /// Per-MSC evidence, so an operator can see why something failed.
@@ -153,29 +159,24 @@ async fn capabilities(State(state): State<AdminState>) -> Response {
 
     match state.probe.capabilities() {
         Some(capabilities) => {
-            let details = vec![
-                CapabilityDetail {
-                    feature: "msc4190-devices".into(),
-                    status: verdict(capabilities.msc4190_devices.passed()),
-                    evidence: capabilities.msc4190_devices.evidence().to_string(),
-                },
-                CapabilityDetail {
-                    feature: "msc3202-transactions".into(),
-                    status: verdict(capabilities.msc3202_transactions.passed()),
-                    evidence: capabilities.msc3202_transactions.evidence().to_string(),
-                },
-                CapabilityDetail {
-                    feature: "msc2409-to-device".into(),
-                    status: verdict(capabilities.msc2409_to_device.passed()),
-                    evidence: capabilities.msc2409_to_device.evidence().to_string(),
-                },
-            ];
+            let details = capabilities
+                .features()
+                .into_iter()
+                .map(|(feature, status)| CapabilityDetail {
+                    feature: feature.to_string(),
+                    status: verdict(status.passed()),
+                    evidence: status.evidence().to_string(),
+                })
+                .collect();
             (
                 StatusCode::OK,
                 Json(CapabilitiesBody {
                     msc4190_devices: capabilities.msc4190_devices.passed(),
-                    msc3202_transactions: capabilities.msc3202_transactions.passed(),
-                    msc2409_to_device: capabilities.msc2409_to_device.passed(),
+                    msc2409_ephemeral: capabilities.msc2409_ephemeral.passed(),
+                    msc4203_to_device: capabilities.msc4203_to_device.passed(),
+                    msc3202_device_lists: capabilities.msc3202_device_lists.passed(),
+                    msc3202_otk_counts: capabilities.msc3202_otk_counts.passed(),
+                    msc3202_fallback_keys: capabilities.msc3202_fallback_keys.passed(),
                     e2ee_available: capabilities.e2ee_available(),
                     details,
                 }),

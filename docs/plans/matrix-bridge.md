@@ -336,20 +336,23 @@ named.
 - No key backup import in v1: history before join is unreadable. Config
   documents this; the UI states it per portal.
 - **Capability probe.** `roomy-matrix-bridge --check-homeserver` queries
-  `/versions` and runs a self-test, reporting:
-  `msc4190-devices`, `msc3202-transactions`, `msc2409-to-device`. E2EE is
-  enabled only if all three pass; with `e2ee = "required"` the process
-  refuses to start and names the missing feature. This is what turns
-  "can we run on continuwuity" into a measurement.
+  `/versions` and runs a self-test, reporting one verdict per field:
+  `msc4190-devices`, `msc2409-ephemeral`, `msc4203-to-device`,
+  `msc3202-device-lists`, `msc3202-otk-counts`, `msc3202-fallback-keys`. E2EE
+  is enabled only if the device call and the key-bearing streams pass; the
+  ephemeral stream is relayed by the bridge but carries no key material, and
+  fallback keys only matter once the one-time-key pool is exhausted. With
+  `e2ee = "required"` the process refuses to start and names what is missing.
+  This is what turns "can we run on continuwuity" into a measurement.
 
 Verified state of the ecosystem at time of writing:
 
 | Homeserver | E2EE appservice support | Verdict |
 |---|---|---|
-| Synapse | MSC2409 to-device + otk counts + device lists in `/transactions`; MSC3202 + MSC2409 behind `experimental_features` flags | E2E target, guaranteed |
+| Synapse | MSC4203 to-device, MSC2409 ephemeral and the MSC3202 device-list, one-time-key and fallback-key fields in `/transactions`; enabled per registration | E2E target, guaranteed |
 | Dendrite | maintenance mode, security fixes only; no MSC4186 | excluded |
 | Conduit / conduwuit | archived | excluded |
-| continuwuity | MSC4190 devices fully supported, MSC3202 device masquerading partial, `receive_ephemeral` honoured | **bundled-image target, gated on the probe** |
+| continuwuity | MSC4190 devices fully supported, MSC2409 ephemeral delivered (`receive_ephemeral` honoured); transactions carry no to-device stream and no MSC3202 fields | **bundled-image target, gated on the probe** |
 
 The probe result is a first-class test output, not an assumption: a
 `continuwuity` compose profile runs the probe and the E2E, and PR acceptance
@@ -482,7 +485,7 @@ Integrations
 
 | Risk | Mitigation |
 |---|---|
-| continuwuity lacks MSC2409 to-device delivery | probe gates E2EE; Synapse profile ships as the guaranteed path; the probe result is recorded in the PR |
+| continuwuity lacks to-device delivery and the MSC3202 fields | probe gates E2EE; Synapse profile ships as the guaranteed path; the probe result is recorded in the PR |
 | Matrix DAG → two-level Roomy is lossy | mapping table is explicit; prefixed names; per-portal state in admin API |
 | Ghost joins cost on large rooms | lazy join on first message, plus an explicit cap with a warning |
 | Ghost DID scheme is unusual | percent-encoding is reversible and validated by the same DID rule as ATProto; display layer decodes |

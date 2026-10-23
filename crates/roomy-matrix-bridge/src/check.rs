@@ -1,8 +1,8 @@
 //! `--check-homeserver`: measure a homeserver without a full deployment.
 //!
-//! The stream-dependent checks (MSC2409, MSC3202) are decided by what a
+//! The stream-dependent checks (MSC2409, MSC3202, MSC4203) are decided by what a
 //! homeserver puts on a transaction, so a probe that only reads `/versions`
-//! cannot answer them: Synapse does not advertise either MSC there, it enables
+//! cannot answer them: Synapse does not advertise the MSCs there, it enables
 //! them per registration. This runs a real appservice endpoint for the duration
 //! of the check, provokes a transaction, and reports what arrived.
 //!
@@ -13,9 +13,10 @@
 //!   registration, a deployment mid-migration — would otherwise have its traffic
 //!   counted as evidence for the homeserver under test.
 //! * **A stream that could not be exercised reports that**, rather than
-//!   defaulting to a pass. MSC3202's device-list and one-time-key fields are only
-//!   emitted once the homeserver has queued a to-device message for the
-//!   appservice, which a fresh deployment has not had.
+//!   defaulting to a pass. The MSC3202 fields are only emitted once the
+//!   homeserver has queued a to-device message for the appservice, and the
+//!   `ephemeral` array only appears once a typing, receipt or presence EDU has
+//!   been queued, neither of which a fresh deployment has had.
 
 use std::time::Duration;
 
@@ -49,11 +50,11 @@ pub async fn run(config: &Config) -> std::process::ExitCode {
     };
     print!("{}", capabilities.report());
 
-    if !capabilities.msc3202_transactions.passed() && capabilities.msc2409_to_device.passed() {
+    if !capabilities.msc3202_device_lists.passed() && capabilities.msc4203_to_device.passed() {
         eprintln!(
-            "note: this homeserver delivers to-device messages but no MSC3202 device-list or \
-             one-time-key fields, so an `OlmMachine` cannot track device changes and \
-             encryption is unsafe even though to-device works."
+            "note: this homeserver delivers to-device messages but no MSC3202 device-list \
+             field, so an `OlmMachine` cannot track device changes and encryption is unsafe \
+             even though to-device works."
         );
     }
 
@@ -159,8 +160,15 @@ async fn provoke_streams(config: &Config, probe_room: &str, observer: &Transacti
     let probe_device = queue_to_device(config).await;
     if probe_device.is_none() {
         tracing::warn!(
-            "could not queue a to-device message; MSC3202's device-list fields may be unobservable"
+            "could not queue a to-device message; the MSC3202 fields may be unobservable"
         );
+    }
+    // A typing EDU is what makes the `ephemeral` array appear on a transaction.
+    // The bridge does not relay typing or receipts, but the report says whether
+    // the homeserver pushes them, so the stream has to be provoked to be
+    // measured at all.
+    if !send_typing(config, probe_room).await {
+        tracing::warn!(%probe_room, "could not send a typing notification; MSC2409 may be unobservable");
     }
     if !send_probe_message(config, probe_room).await {
         tracing::warn!(%probe_room, "could not send the probe message");
@@ -173,29 +181,61 @@ async fn provoke_streams(config: &Config, probe_room: &str, observer: &Transacti
     }
 }
 
-/// Wait until the observer has seen both stream-dependent capabilities, or the
+/// Wait until the observer has seen every stream-dependent capability, or the
 /// deadline passes.
 ///
 /// A homeserver batches transactions on a timer and backs off exponentially
 /// while a previous attempt failed, so the first delivery after a registration
-/// change can take tens of seconds. The wait ends as soon as both capabilities
-/// have been seen: a homeserver that answers them is measured, and waiting
-/// further proves nothing.
+/// change can take tens of seconds. The wait ends as soon as the streams have
+/// been seen: a homeserver that answers them is measured, and waiting further
+/// proves nothing.
 async fn wait_for_streams(observer: &TransactionObserver) {
-    // Two minutes, returning as soon as both arrive. Synapse batches
+    // Two minutes, returning as soon as every stream arrives. Synapse batches
     // transactions on a timer and backs off after a failed attempt, so the
     // first delivery after a registration change can take tens of seconds; a
     // shorter window measures a healthy homeserver as broken, and the process
     // then runs without a crypto device until it is restarted.
+    //
+    // Every stream, not any: Synapse sends the room's ephemeral and to-device
+    // traffic in one transaction and the MSC3202 fields with it, but a homeserver
+    // that splits them would otherwise be measured after the first and the rest
+    // reported as absent when they had merely not been sent yet.
     for _ in 0..240 {
         if observer
             .last()
-            .is_some_and(|observed| observed.has_to_device() && observed.has_msc3202())
+            .is_some_and(|observed| observed.has_probed_streams())
         {
             return;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// Ask the homeserver to relay a typing notification for the appservice user.
+///
+/// The registration carries `receive_ephemeral`, so a homeserver that supports
+/// MSC2409 turns this into an `m.typing` entry in the transaction's `ephemeral`
+/// array. A homeserver that does not simply never sends the key, which is what
+/// the probe reports.
+async fn send_typing(config: &Config, probe_room: &str) -> bool {
+    let sender = format!(
+        "@{}:{}",
+        config.homeserver.sender_localpart, config.homeserver.domain
+    );
+    let url = format!(
+        "{}/_matrix/client/v3/rooms/{}/typing/{}?user_id={}",
+        config.homeserver.url.trim_end_matches('/'),
+        percent_encode(probe_room),
+        percent_encode(&sender),
+        percent_encode(&sender),
+    );
+    let response = reqwest::Client::new()
+        .put(&url)
+        .bearer_auth(&config.homeserver.as_token)
+        .json(&serde_json::json!({ "typing": true, "timeout": 20_000 }))
+        .send()
+        .await;
+    matches!(response, Ok(response) if response.status().is_success())
 }
 
 #[derive(Debug, Default, serde::Deserialize)]

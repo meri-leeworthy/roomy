@@ -94,9 +94,9 @@ pub enum EncryptionDevice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MissingFeature {
-    /// The homeserver does not deliver MSC2409 to-device messages, so room
+    /// The homeserver does not deliver MSC4203 to-device messages, so room
     /// keys never arrive.
-    Msc2409ToDevice,
+    Msc4203ToDevice,
     /// No crypto device is running at all.
     CryptoDevice,
 }
@@ -104,7 +104,7 @@ pub enum MissingFeature {
 impl MissingFeature {
     pub fn label(self) -> &'static str {
         match self {
-            MissingFeature::Msc2409ToDevice => "msc2409-to-device",
+            MissingFeature::Msc4203ToDevice => "msc4203-to-device",
             MissingFeature::CryptoDevice => "crypto-device",
         }
     }
@@ -255,10 +255,10 @@ mod tests {
 
     #[test]
     fn an_unusable_encrypted_portal_exposes_no_device() {
-        let encryption = PortalEncryption::encrypted_unusable(MissingFeature::Msc2409ToDevice);
+        let encryption = PortalEncryption::encrypted_unusable(MissingFeature::Msc4203ToDevice);
         assert!(encryption.is_encrypted());
         assert!(encryption.device().is_none());
-        assert_eq!(encryption.missing(), Some(MissingFeature::Msc2409ToDevice));
+        assert_eq!(encryption.missing(), Some(MissingFeature::Msc4203ToDevice));
     }
 
     #[test]

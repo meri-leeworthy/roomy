@@ -448,11 +448,11 @@ fn unique(tag: &str) -> String {
     format!("{tag} {}", ulid::Ulid::generate())
 }
 
-/// The probe reports all three capabilities on the homeserver under test.
+/// The probe reports every capability on the homeserver under test.
 ///
-/// MSC4190 always passes on the supported homeservers; the other two are
-/// reported, and the assertion is that the report agrees with the running
-/// bridge's own `/capabilities`, which is what gates encryption.
+/// MSC4190 always passes on the supported homeservers; the rest are reported,
+/// and the assertion is that the report agrees with the running bridge's own
+/// `/capabilities`, which is what gates encryption.
 #[tokio::test]
 #[ignore = "needs a live homeserver; run via scripts/matrix-bridge-e2e.sh"]
 async fn the_homeserver_supports_what_encryption_needs() {
@@ -463,15 +463,25 @@ async fn the_homeserver_supports_what_encryption_needs() {
         Some(true),
         "msc4190-devices must pass on the homeserver under test: {capabilities}"
     );
-    // The report is the gate: whatever it says, the bridge must agree.
-    let all = ["msc4190Devices", "msc3202Transactions", "msc2409ToDevice"]
+    // The report is the gate: whatever the key-bearing streams say, the bridge
+    // must agree. All of them pass on the homeserver this suite runs against, so
+    // the bridge running with a crypto device is part of the assertion.
+    let gate = [
+        "msc4190Devices",
+        "msc4203ToDevice",
+        "msc3202DeviceLists",
+        "msc3202OtkCounts",
+    ];
+    let all = gate
         .iter()
         .all(|key| capabilities[key].as_bool() == Some(true));
+    assert!(all, "the gate must pass on this homeserver: {capabilities}");
     assert_eq!(capabilities["e2eeAvailable"].as_bool(), Some(all));
     assert_eq!(
         capabilities["details"].as_array().map(Vec::len),
-        Some(3),
-        "every feature is reported with its evidence: {capabilities}"
+        Some(6),
+        "every feature is reported with its evidence, including the two that do \
+         not gate encryption: {capabilities}"
     );
 }
 

@@ -1,10 +1,11 @@
 # continuwuity, for the profile that runs it without encryption.
 #
 # The capability probe measures this homeserver as supporting MSC4190 (device
-# management) but not MSC2409 (to-device delivery) or MSC3202 (device lists and
-# one-time-key counts in transactions). End-to-bridge encryption needs all three,
-# so the bridge runs with `e2ee = "off"` here and refuses encrypted rooms rather
-# than joining them and going silent.
+# management) and MSC2409 (ephemeral typing, receipt and presence events), but
+# its transactions carry neither the to-device stream (MSC4203) nor the MSC3202
+# fields (device lists and one-time-key counts). End-to-bridge encryption needs
+# those, so the bridge runs with `e2ee = "off"` here and refuses encrypted rooms
+# rather than joining them and going silent.
 
 [global]
 server_name = "matrix.roomy.local"
