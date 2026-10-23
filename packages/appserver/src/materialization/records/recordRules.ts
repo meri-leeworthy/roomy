@@ -13,7 +13,7 @@ import type { Did, SqlStatement, StreamDid } from "@roomy-space/sdk";
 
 import type { LoggedEvent } from "../types.ts";
 import type { RecordChange } from "./recordChange.ts";
-import { messageStatements, type MessageChange } from "./messageRules.ts";
+import { messageStatements } from "./messageRules.ts";
 import { reactionStatements } from "./reactionRules.ts";
 import { roomStatements } from "./roomRules.ts";
 import { spaceInfoStatements, spaceSidebarStatements } from "./spaceConfigRules.ts";
