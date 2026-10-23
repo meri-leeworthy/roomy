@@ -8,6 +8,27 @@
 
 import type { DbMemoryBounds } from "./bounds.ts";
 
+/** What `DbLike.bootProbe` reads from one per-space DB. */
+export interface SpaceBootProbe {
+  /** The canonical DB is on the schema version this build expects. */
+  current: boolean;
+  /** It owes an in-place data migration, so the boot upgrade pass must run. */
+  pendingMigrations: boolean;
+  /** Its `materialization_cursor`; -1 when the stream has no cursor row. */
+  materializedTo: number;
+  /** It holds entity rows the global `entity_space` index should know about. */
+  hasEntities: boolean;
+}
+
+/** One row of `DbLike.globalIndexProbe`. */
+export interface GlobalIndexProbeRow {
+  spaceDid: string;
+  /** `entity_space` has a row for this space. */
+  indexed: boolean;
+  /** `space_stats` has this space's aggregate row. */
+  hasStats: boolean;
+}
+
 export interface DbLike {
   query(sql: string): {
     all<T = Record<string, unknown>>(...params: unknown[]): Promise<T[]>;
@@ -105,6 +126,27 @@ export interface DbLike {
    */
   events?(): DbLike;
   /**
+   * Optional (boot sweep): every fact the sweep needs from one per-space DB,
+   * in one round trip — schema currency, owed migrations, the materialization
+   * cursor, and whether it holds entity rows.
+   *
+   * The sweep asks this of every space on every boot, so the read is
+   * read-only: opening the DB through the normal path would re-apply its
+   * schema, upgrade a stale one outside the migration gate, and refill the
+   * worker's LRU, which is a write per space for four facts. Absent on sync
+   * adapters; the sweep then asks the individual seams.
+   */
+  bootProbe?(spaceDid: string): Promise<SpaceBootProbe>;
+  /**
+   * Optional (boot sweep): which of `spaceDids` the global DBs already account
+   * for — a row in `entity_space`, and one in `space_stats`. Both are written
+   * on the materialisation path, so an absent row is the only state the sweep
+   * has to repair, and one batched request per chunk answers it for a whole
+   * run of streams instead of two round trips each. Absent where there is no
+   * global DB to consult.
+   */
+  globalIndexProbe?(spaceDids: readonly string[]): Promise<GlobalIndexProbeRow[]>;
+  /**
    * Optional: backfill the global `entity_space` index from a
    * per-space DB's `entities` table. Absent on sync adapters used in tests
    * that don't exercise the entity→space index.
@@ -164,6 +206,8 @@ export interface WorkerRequest {
     | "spaceMigrationEnd"
     | "isSpaceMigrating"
     | "checkSpaceSchema"
+    | "bootProbe"
+    | "globalIndexProbe"
     | "analyze";
   /** SQL string (for query/run/exec/prepare). */
   sql?: string;
@@ -173,6 +217,8 @@ export interface WorkerRequest {
   targetDb?: "main" | "space" | "global" | "readstate" | "events";
   /** Per-space DB selector (required when targetDb is "space"). */
   spaceDid?: string;
+  /** Per-space DB selectors (for globalIndexProbe): the spaces to look up. */
+  spaceDids?: readonly string[];
   /** Blue-green route for a "space" target: canonical read-serving DB vs the
    *  temp `.sqlite.new` rebuild DB. Defaults to "canonical" (never wipes). */
   route?: "canonical" | "rebuild";
