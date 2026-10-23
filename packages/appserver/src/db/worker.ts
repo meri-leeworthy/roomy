@@ -36,7 +36,12 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { WorkerRequest, WorkerResponse } from "./types.ts";
+import type {
+  GlobalIndexProbeRow,
+  SpaceBootProbe,
+  WorkerRequest,
+  WorkerResponse,
+} from "./types.ts";
 import {
   READSTATE_MIGRATIONS,
   readStateMigrationEntry,
@@ -789,6 +794,115 @@ function handleCheckSpaceSchema(spaceDid: string): { current: boolean } {
   }
 }
 
+/**
+ * The boot sweep's four per-space facts in one request (see
+ * `DbLike.bootProbe`).
+ *
+ * Read-only on purpose: the sweep visits every space on every boot, and
+ * `openSpaceDb` re-applies the schema, upgrades a stale DB outside the
+ * migration gate, and refills the worker's LRU — a write per space to learn
+ * four facts. The version is read first, from a read-only connection, because
+ * a DB this build cannot upgrade must stay byte-for-byte untouched for the
+ * rebuild to keep serving it. A space with no file yet (a fresh space) has
+ * nothing to read, so it takes the normal open, which creates and stamps it.
+ *
+ * A read-only connection can fail on a WAL database whose `-shm` is not
+ * readable; the normal open is then the answer, and it is what this would have
+ * cost anyway.
+ */
+function handleBootProbe(spaceDid: string): SpaceBootProbe {
+  if (!spacesDir) throw new Error("Per-space DBs not initialized (no init)");
+  const path =
+    spacesDir === ":memory:" ? null : join(spacesDir, `${spaceDid}.sqlite`);
+  if (path === null || !existsSync(path)) {
+    return probeRows(openSpaceDb(spaceDid), spaceDid);
+  }
+  let db: Database | null = null;
+  try {
+    db = new Database(path, { readonly: true });
+    const row = db
+      .query<{ version: string }, []>(
+        "select version from space_schema_version where id = 1",
+      )
+      .get();
+    if ((row?.version ?? "") !== (spaceSchemaVersion ?? "")) {
+      return {
+        current: false,
+        pendingMigrations: true,
+        materializedTo: -1,
+        hasEntities: false,
+      };
+    }
+    return probeRows(db, spaceDid);
+  } catch {
+    try {
+      db?.close();
+    } catch {
+      /* best-effort */
+    }
+    db = null;
+    return probeRows(openSpaceDb(spaceDid), spaceDid);
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
+/** The per-space reads behind `handleBootProbe`. */
+function probeRows(db: Database, spaceDid: string): SpaceBootProbe {
+  const pending = db
+    .query<{ n: number }, []>(
+      "select count(*) as n from space_schema_migrations where completed_at is null",
+    )
+    .get();
+  const cursor = db
+    .query<{ materialized_to: number }, [string]>(
+      "select materialized_to from materialization_cursor where stream_id = ?",
+    )
+    .get(spaceDid);
+  const entity = db
+    .query<{ x: number }, []>(
+      "select 1 as x from entities where stream_id is not null and stream_id != '' limit 1",
+    )
+    .get();
+  return {
+    current: true,
+    pendingMigrations: (pending?.n ?? 0) > 0,
+    materializedTo: cursor?.materialized_to ?? -1,
+    hasEntities: entity !== null,
+  };
+}
+
+/**
+ * Which of `spaceDids` the global DBs already account for (see
+ * `DbLike.globalIndexProbe`). Two index lookups per space, all in one request.
+ */
+function handleGlobalIndexProbe(req: WorkerRequest): GlobalIndexProbeRow[] {
+  if (role !== "global" && role !== "system") {
+    throw new Error("globalIndexProbe requires the global DB (global worker)");
+  }
+  const dids = req.spaceDids ?? [];
+  if (dids.length === 0) return [];
+  const global = openGlobalDbInternal();
+  const indexed = global.prepare(
+    "select 1 as x from entity_space where space_did = ? limit 1",
+  );
+  const stats = global.prepare(
+    "select 1 as x from space_stats where space_did = ? limit 1",
+  );
+  const out: GlobalIndexProbeRow[] = [];
+  for (const spaceDid of dids) {
+    out.push({
+      spaceDid,
+      indexed: indexed.get(spaceDid) !== null,
+      hasStats: stats.get(spaceDid) !== null,
+    });
+  }
+  return out;
+}
 
 /** Open (or return) the global DB. Created lazily on first request. */
 function openGlobalDbInternal(): Database {
@@ -934,6 +1048,10 @@ function handleRequest(req: WorkerRequest): unknown {
       return handleIsSpaceRebuilding(requireSpaceDid(req));
     case "checkSpaceSchema":
       return handleCheckSpaceSchema(requireSpaceDid(req));
+    case "bootProbe":
+      return handleBootProbe(requireSpaceDid(req));
+    case "globalIndexProbe":
+      return handleGlobalIndexProbe(req);
     case "spaceMigrationBegin":
       return handleSpaceMigrationBegin(requireSpaceDid(req));
     case "spaceMigrationEnd":

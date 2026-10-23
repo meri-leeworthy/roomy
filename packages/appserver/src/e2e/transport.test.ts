@@ -5,6 +5,7 @@
  * Tests:
  * - GET /blob/<did>/<cid> → graceful error (no remote backend in disabled mode)
  * - OPTIONS preflight → 204 + CORS headers
+ * - GET /health → 200 when ready, 503 while the boot sweep's first pass runs
  * - GET /health/embed → 200 with stats
  * - Non-existent path → 404
  * - Malformed query params → 400 (schema rejection)
@@ -14,6 +15,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { readStateDb, startAppserver } from "./helpers.ts";
+import type { BootReadiness } from "../readiness.ts";
 
 describe("Transport-level edge cases", () => {
   test("GET /blob/<did>/<cid> → graceful error (no remote backend)", async () => {
@@ -47,6 +49,38 @@ describe("Transport-level edge cases", () => {
       method: "OPTIONS",
     });
     expect(res.status).toBe(204);
+  });
+
+  test("GET /health reports 503 until the boot sweep's first pass completes", async () => {
+    let boot: BootReadiness = {
+      ready: false,
+      phase: "sweeping",
+      elapsed_ms: 1_200,
+      streams_total: 4_442,
+      streams_scanned: 1_200,
+      replay_total: 0,
+      replay_done: 0,
+      replay_failed: 0,
+    };
+    const ctx = await startAppserver({ readiness: () => boot });
+
+    const starting = await ctx.anonFetch(`${ctx.baseUrl}/health`);
+    expect(starting.status).toBe(503);
+    const body = await starting.json();
+    expect(body.status).toBe("starting");
+    expect(body.boot).toMatchObject({
+      ready: false,
+      phase: "sweeping",
+      streams_scanned: 1_200,
+      streams_total: 4_442,
+    });
+
+    // The sweep's first pass returned: the same route is the readiness signal
+    // a platform health check routes traffic on.
+    boot = { ...boot, ready: true, phase: "ready", streams_scanned: 4_442 };
+    const ready = await ctx.anonFetch(`${ctx.baseUrl}/health`);
+    expect(ready.status).toBe(200);
+    expect((await ready.json()).status).toBe("ok");
   });
 
   test("GET /health/embed → 200 with stats", async () => {
