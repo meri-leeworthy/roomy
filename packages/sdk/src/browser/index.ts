@@ -25,6 +25,19 @@ export {
   type OAuthSession,
 } from "./oauth";
 
+export {
+  NativeSessionMirror,
+  NATIVE_SESSION_KEY,
+  restoreNativeSession,
+  toSnapshot,
+  fromSnapshot,
+  enableExportableDpopKeys,
+  type NativeSessionClient,
+  type NativeSessionMirrorOptions,
+  type NativeSessionSnapshot,
+  type SerializedDpopKey,
+} from "./native-session";
+
 export { createTanstackCacheAdapter } from "./tanstack";
 export { createCachePersistence } from "./persistence";
 export type {
