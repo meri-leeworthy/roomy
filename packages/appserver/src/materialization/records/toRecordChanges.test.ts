@@ -49,6 +49,7 @@ import {
   NO_RECORD_EVENT_TYPES,
   NO_RECORD_SYNTHETIC_EVENT_TYPES,
   RECORD_KINDS_FOR_EVENT,
+  convertedChanges,
   toRecordChanges,
 } from "./toRecordChanges.ts";
 import type { RecordChange } from "./recordChange.ts";
@@ -504,6 +505,32 @@ describe("the mapping covers every event type the SDK knows", () => {
       expect(registered as readonly string[]).not.toContain($type);
       expect(RECORD_KINDS_FOR_EVENT[$type as EventType]).toBeUndefined();
     }
+  });
+});
+
+describe("every event type that emits a record routes through the rules", () => {
+  const registered = Object.keys(eventRegistry) as EventType[];
+
+  test("a non-empty mapping always converts", () => {
+    const stillOnEventPath: string[] = [];
+    for (const $type of registered) {
+      if (RECORD_KINDS_FOR_EVENT[$type].length === 0) continue;
+      if (convertedChanges(logged(sample($type, emptyFixture()), 1), STREAM) === null) {
+        stillOnEventPath.push($type);
+      }
+    }
+    expect(stillOnEventPath).toEqual([]);
+  });
+
+  test("the entries that do not convert are exactly the no-record types", () => {
+    const unmapped = registered.filter(
+      ($type) =>
+        convertedChanges(logged(sample($type, emptyFixture()), 1), STREAM) ===
+        null,
+    );
+    expect([...(unmapped as readonly string[])].sort()).toEqual(
+      Object.keys(NO_RECORD_EVENT_TYPES).sort(),
+    );
   });
 });
 
