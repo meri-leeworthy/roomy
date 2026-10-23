@@ -18,10 +18,12 @@ import {
 } from "@atproto/oauth-client-browser";
 import type { TauriStoreLike } from "./tauri-store-persister";
 import {
+  NATIVE_AUTH_DIAGNOSTIC_KEY,
   NATIVE_SESSION_KEY,
   NativeSessionMirror,
   clientSessionStore,
   fromSnapshot,
+  readAuthDiagnostic,
   restoreNativeSession,
   toSnapshot,
   type NativeSessionClient,
@@ -183,9 +185,10 @@ describe("restoring through the mirror", () => {
     await expect(
       restoreNativeSession(client, sessionStore, mirror),
     ).resolves.toBeUndefined();
-    // Nothing seeded, nothing written: `init()` alone, as without the mirror.
+    // Nothing seeded: `init()` alone, as without the mirror. The launch's
+    // diagnostic is written, the session is not.
     expect(events).toEqual(["init"]);
-    expect(store.writes).toEqual([]);
+    expect(store.data.has(NATIVE_SESSION_KEY)).toBe(false);
   });
 
   it("discards a corrupt snapshot and starts cold", async () => {
@@ -305,11 +308,11 @@ describe("the startup line", () => {
     });
 
     await mirror.load();
-    mirror.reportStartup({ session: false });
+    await mirror.reportStartup({ session: false });
 
     await store.set(NATIVE_SESSION_KEY, await toSnapshot(SUB, await makeSession()));
     await mirror.load();
-    mirror.reportStartup({
+    await mirror.reportStartup({
       session: false,
       error: new DOMException("token expired", "TokenRefreshError"),
     });
@@ -318,6 +321,78 @@ describe("the startup line", () => {
       "auth: session present=no native snapshot=no init error=none",
       "auth: session present=no native snapshot=yes init error=TokenRefreshError",
     ]);
+  });
+});
+
+describe("the launch record", () => {
+  it("keeps the launch's facts under its own key, with nothing from the session", async () => {
+    const store = new FakeStore();
+    await store.set(NATIVE_SESSION_KEY, await toSnapshot(SUB, await makeSession()));
+    const mirror = new NativeSessionMirror({ store });
+
+    const events: string[] = [];
+    const { client, sessionStore } = fakeClient(events, () => ({
+      session: { sub: SUB },
+    }));
+
+    await restoreNativeSession(client, sessionStore, mirror);
+
+    const record = await readAuthDiagnostic(store);
+    expect(record).toMatchObject({
+      session: true,
+      nativeSnapshot: true,
+      initError: null,
+    });
+    expect(typeof record?.at).toBe("string");
+    // The record's whole shape: a tester can paste it anywhere.
+    expect(
+      Object.keys(store.data.get(NATIVE_AUTH_DIAGNOSTIC_KEY) as object).sort(),
+    ).toEqual(["at", "initError", "nativeSnapshot", "session", "version"]);
+  });
+
+  it("names the error that stopped a restore, and still rejects", async () => {
+    const store = new FakeStore();
+    const mirror = new NativeSessionMirror({ store });
+    const events: string[] = [];
+    const { client, sessionStore } = fakeClient(events);
+    client.init = async () => {
+      throw new DOMException("token expired", "TokenRefreshError");
+    };
+
+    await expect(
+      restoreNativeSession(client, sessionStore, mirror),
+    ).rejects.toThrow("token expired");
+
+    expect(await readAuthDiagnostic(store)).toMatchObject({
+      session: false,
+      nativeSnapshot: false,
+      initError: "TokenRefreshError",
+    });
+  });
+
+  it("outlives the sign-out that deletes the session", async () => {
+    const store = new FakeStore();
+    await store.set(NATIVE_SESSION_KEY, await toSnapshot(SUB, await makeSession()));
+    const mirror = new NativeSessionMirror({ store });
+
+    await mirror.load();
+    await mirror.reportStartup({ session: true });
+    await mirror.hooks.onDelete(SUB);
+
+    expect(store.data.has(NATIVE_SESSION_KEY)).toBe(false);
+    expect(await readAuthDiagnostic(store)).toMatchObject({
+      session: true,
+      nativeSnapshot: true,
+    });
+  });
+
+  it("reads nothing from a store without a usable record", async () => {
+    expect(await readAuthDiagnostic(null)).toBeNull();
+    expect(await readAuthDiagnostic(new FakeStore())).toBeNull();
+
+    const corrupt = new FakeStore();
+    corrupt.data.set(NATIVE_AUTH_DIAGNOSTIC_KEY, { version: 1 });
+    expect(await readAuthDiagnostic(corrupt)).toBeNull();
   });
 });
 

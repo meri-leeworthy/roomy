@@ -33,6 +33,11 @@
  * that can reach it. Every operation degrades rather than throws — a store that
  * is missing, unreadable or holding an unusable snapshot leaves startup exactly
  * where it was without one.
+ *
+ * What a launch found is also written back beside the session, under its own
+ * key: whether a session was restored, whether the shell's copy was there, and
+ * the name of the error `init()` raised. A shell has no log sink a tester can
+ * read, so those facts are kept where the app can show them.
  */
 import {
   WebcryptoKey,
@@ -45,6 +50,13 @@ import type { TauriStoreLike } from "./tauri-store-persister";
 
 /** The store key. One client, one session, so one key. */
 export const NATIVE_SESSION_KEY = "roomy-oauth-session";
+
+/**
+ * The key the last launch's outcome is kept under. A key of its own, beside
+ * the session rather than inside it: the record has to outlive a sign-out, and
+ * it holds no token, key or DID.
+ */
+export const NATIVE_AUTH_DIAGNOSTIC_KEY = "roomy-auth-diagnostics";
 
 /**
  * Snapshot format version. A record stamped with another version is discarded:
@@ -82,6 +94,96 @@ export interface NativeSessionSnapshot {
   dpopKey: SerializedDpopKey;
   authMethod: unknown;
   tokenSet: Record<string, unknown>;
+}
+
+/**
+ * What one launch found, as the shell keeps it. Fixed shape on purpose: there
+ * is nowhere in it to put a token, a key or a DID, so a record copied off a
+ * tester's phone is safe to paste into a chat.
+ */
+export interface NativeAuthDiagnostic {
+  version: number;
+  /** ISO timestamp of the launch that wrote it. */
+  at: string;
+  /** Whether the client came up with a session. */
+  session: boolean;
+  /** Whether the shell's own copy of the session was in the store. */
+  nativeSnapshot: boolean;
+  /** The `name` of the error `init()` raised, or `null`. */
+  initError: string | null;
+}
+
+const DIAGNOSTIC_VERSION = 1;
+
+/** The `name` of an error, which is the part that identifies the failure mode. */
+function errorName(error: unknown): string | null {
+  if (error === undefined) return null;
+  return error instanceof Error ? error.name : typeof error;
+}
+
+/**
+ * Keep one launch's outcome, for a tester to read back from the app. Never
+ * throws: a store that will not take a diagnostic is not a reason to fail a
+ * launch.
+ */
+export async function recordLaunchDiagnostic(
+  store: TauriStoreLike | null | undefined,
+  facts: { session: boolean; nativeSnapshot: boolean; error?: unknown },
+): Promise<void> {
+  if (!store) return;
+  const record: NativeAuthDiagnostic = {
+    version: DIAGNOSTIC_VERSION,
+    at: new Date().toISOString(),
+    session: facts.session,
+    nativeSnapshot: facts.nativeSnapshot,
+    initError: errorName(facts.error),
+  };
+  try {
+    await store.set(NATIVE_AUTH_DIAGNOSTIC_KEY, record);
+    await store.save();
+  } catch {
+    // Nothing to do: the console line has already been emitted.
+  }
+}
+
+/**
+ * The last launch's outcome, or `null` when the shell has not recorded one
+ * (a web build, a store that will not open, or a first launch).
+ */
+export async function readAuthDiagnostic(
+  store: TauriStoreLike | null | undefined,
+): Promise<NativeAuthDiagnostic | null> {
+  if (!store) return null;
+  try {
+    const raw = await store.get(NATIVE_AUTH_DIAGNOSTIC_KEY);
+    if (typeof raw !== "object" || raw === null) return null;
+    const record = raw as Partial<NativeAuthDiagnostic>;
+    if (record.version !== DIAGNOSTIC_VERSION) return null;
+    if (typeof record.at !== "string") return null;
+    if (typeof record.session !== "boolean") return null;
+    if (typeof record.nativeSnapshot !== "boolean") return null;
+    if (
+      record.initError !== null &&
+      typeof record.initError !== "string"
+    )
+      return null;
+    return record as NativeAuthDiagnostic;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the store holds a session snapshot at all, readable or not. */
+export async function nativeSnapshotPresent(
+  store: TauriStoreLike | null | undefined,
+): Promise<boolean> {
+  if (!store) return false;
+  try {
+    const raw = await store.get(NATIVE_SESSION_KEY);
+    return raw !== undefined && raw !== null;
+  } catch {
+    return false;
+  }
 }
 
 /** The import parameters for the algorithms a DPoP key can be generated with. */
@@ -326,22 +428,32 @@ export class NativeSessionMirror {
   }
 
   /**
-   * One line per launch, naming what session restore found. The two ways a
+   * One record per launch, naming what session restore found. The two ways a
    * session is lost look identical to the user and are fixed differently:
    * nothing left to restore (the webview's storage was evicted) versus a
    * session that was there and could not be used (a token error, which
    * `error-recovery.ts` handles). No token, key or DID is logged.
+   *
+   * The same facts go to the store as well as the diagnostic sink: a shell has
+   * no log a tester can read, and the app shows this record on its sign-in and
+   * error screens. Awaited, so the record is on disk before the UI that reads
+   * it appears.
    */
-  reportStartup({ session, error }: { session: boolean; error?: unknown }): void {
-    const name =
-      error === undefined
-        ? "none"
-        : error instanceof Error
-          ? error.name
-          : typeof error;
+  async reportStartup({
+    session,
+    error,
+  }: {
+    session: boolean;
+    error?: unknown;
+  }): Promise<void> {
     this.report(
-      `auth: session present=${session ? "yes" : "no"} native snapshot=${this.snapshotPresent ? "yes" : "no"} init error=${name}`,
+      `auth: session present=${session ? "yes" : "no"} native snapshot=${this.snapshotPresent ? "yes" : "no"} init error=${errorName(error) ?? "none"}`,
     );
+    await recordLaunchDiagnostic(this.store, {
+      session,
+      nativeSnapshot: this.snapshotPresent,
+      error,
+    });
   }
 
   /** Queue a write, wait for it at most {@link WRITE_BOUND_MS}. Never rejects. */
@@ -430,18 +542,18 @@ export async function restoreNativeSession(
   try {
     const result = await client.init();
     if (result?.session) {
-      mirror.reportStartup({ session: true });
+      await mirror.reportStartup({ session: true });
       return result;
     }
     if (sub) {
       const session = await client.restore(sub);
-      mirror.reportStartup({ session: true });
+      await mirror.reportStartup({ session: true });
       return { session };
     }
-    mirror.reportStartup({ session: false });
+    await mirror.reportStartup({ session: false });
     return undefined;
   } catch (err) {
-    mirror.reportStartup({ session: false, error: err });
+    await mirror.reportStartup({ session: false, error: err });
     throw err;
   }
 }

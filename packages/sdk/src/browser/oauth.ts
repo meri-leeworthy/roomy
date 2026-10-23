@@ -48,6 +48,8 @@ import {
   NativeSessionMirror,
   clientSessionStore,
   enableExportableDpopKeys,
+  nativeSnapshotPresent,
+  recordLaunchDiagnostic,
   restoreNativeSession,
 } from "./native-session";
 import type { Diagnostic } from "../cache/persister";
@@ -799,24 +801,42 @@ function toLoginResult(result: { session: OAuthSession }): LoginResult {
 export async function initSession(
   opts: InitSessionOptions = {},
 ): Promise<LoginResult | null> {
-  const client = await createOAuthClient(opts);
+  let reported = false;
+  try {
+    const client = await createOAuthClient(opts);
 
-  if (!(client instanceof HappyViewBrowserClient)) {
-    const mirror = nativeSessionMirrors.get(client);
-    if (mirror) {
-      const result = await restoreNativeSession(
-        client,
-        clientSessionStore(client),
-        mirror,
-      );
-      return result?.session ? toLoginResult(result) : null;
+    if (!(client instanceof HappyViewBrowserClient)) {
+      const mirror = nativeSessionMirrors.get(client);
+      if (mirror) {
+        // The mirror records the launch's outcome itself, on every path.
+        reported = true;
+        const result = await restoreNativeSession(
+          client,
+          clientSessionStore(client),
+          mirror,
+        );
+        return result?.session ? toLoginResult(result) : null;
+      }
     }
+
+    const result = await client.init();
+
+    if (result?.session) return toLoginResult(result);
+    return null;
+  } catch (err) {
+    // A launch that fails before a client exists — the metadata document is
+    // unreachable, the client cannot be built — has no mirror to record it,
+    // and a shell has no log a tester can read. Record what this launch found
+    // so the sign-in screen can show it.
+    if (!reported) {
+      await recordLaunchDiagnostic(opts.nativeSessionStore, {
+        session: false,
+        nativeSnapshot: await nativeSnapshotPresent(opts.nativeSessionStore),
+        error: err,
+      });
+    }
+    throw err;
   }
-
-  const result = await client.init();
-
-  if (result?.session) return toLoginResult(result);
-  return null;
 }
 
 /**
