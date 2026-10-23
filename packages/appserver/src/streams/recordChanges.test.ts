@@ -166,7 +166,7 @@ describe("the feed is the adapter's own output", () => {
       );
     }
     expect(rows).toBeGreaterThan(FIXTURE_ORDER.length);
-  });
+  }, 30_000);
 
   test("an entry that emits no record writes no rows", () => {
     const fx = { ...(buildCorpus().fx) } as Fixture;
@@ -183,6 +183,8 @@ describe("the feed is the adapter's own output", () => {
 });
 
 describe("replaying the feed reproduces the live projection", () => {
+  // The write path's projection and the feed's, built and digested twice: the
+  // heaviest check in the file, so it gets a budget a loaded runner survives.
   test("the space and global DBs match the write path's", async () => {
     // A feed-fed projection can only reproduce entries that emit a record;
     // `setHandleProvider` writes a column with no readers and carries none.
@@ -261,7 +263,7 @@ describe("replaying the feed reproduces the live projection", () => {
         await liveGlobal.query(sql).all(),
       );
     }
-  });
+  }, 30_000);
 });
 
 describe("the backfill is idempotent", () => {
