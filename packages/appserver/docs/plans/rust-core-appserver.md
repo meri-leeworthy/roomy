@@ -9,8 +9,11 @@ exclusion manifest shared by the TypeScript oracle, the Rust digest and the expo
 and reproducible fixtures — and **M1**: `crates/space-feed` (cursor, SQLite feed, and
 the HTTP-pull feed), `roomy-space-worker` as a library with injected clock,
 cancellation and signal seams plus a supervisor that owns N spaces, and `space-xrpc`
-resolving requests through a bounded `SpaceRegistry` over many spaces. M2 onwards is
-in flight.
+resolving requests through a bounded `SpaceRegistry` over many spaces — and **M2**:
+`roomy-auth` (signed, self-contained, one-shot connection tickets), `roomy-sync` (the
+sans-io session core and its axum adapter), `roomy-gateway` (health, metrics, the ticket
+endpoint, the socket plane, and the worker's reads mounted unchanged), and the
+`roomy-appserver` binary with `--role all|gateway|worker`. M3 onwards is in flight.
 
 **Scope.** The Rust rewrite of the appserver's core: the gateway (XRPC edge,
 WebSocket connection plane, auth, user-scoped and cross-space reads, write
