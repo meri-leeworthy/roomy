@@ -24,9 +24,12 @@ pub enum AppendError {
     Cbor(String),
 }
 
-/// One log entry, with the record changes it produced.
-#[derive(Debug, Clone)]
-pub struct AppendEntry {
+/// One log entry to append.
+///
+/// The record changes are a function of the entry's index rather than a list,
+/// because every row's ordering stamp encodes the position the entry lands on —
+/// and that position is assigned inside the transaction that writes it.
+pub struct AppendDraft<'a> {
     pub stream_id: String,
     /// The sender's DID, as recorded on the entry.
     pub user: String,
@@ -38,8 +41,8 @@ pub struct AppendEntry {
     /// component, and the log's own account of when the entry arrived.
     pub created_at: i64,
     pub received_at: i64,
-    /// The changes the entry produced, in emission order.
-    pub rows: Vec<RecordChangeRow>,
+    /// The changes the entry produces at the given index, in emission order.
+    pub rows: Box<dyn FnOnce(i64) -> Vec<RecordChangeRow> + 'a>,
 }
 
 /// The event log, opened for writing.
@@ -73,10 +76,10 @@ impl EventLog {
     ///
     /// The whole batch is one transaction: a failure on the last entry leaves
     /// none of them in the log.
-    pub fn append(&mut self, entries: &[AppendEntry]) -> Result<i64, AppendError> {
+    pub fn append(&mut self, entries: Vec<AppendDraft<'_>>) -> Result<i64, AppendError> {
         let transaction = self.conn.transaction()?;
         let mut start = 0i64;
-        for (position, entry) in entries.iter().enumerate() {
+        for (position, entry) in entries.into_iter().enumerate() {
             if position == 0 {
                 start = next_index(&transaction, &entry.stream_id)?;
             }
@@ -97,10 +100,7 @@ impl EventLog {
                     entry.received_at,
                 ],
             )?;
-            for row in &entry.rows {
-                // The index is assigned here, so the rows a caller passed in
-                // need not know it.
-                let row = RecordChangeRow { idx, ..row.clone() };
+            for row in (entry.rows)(idx) {
                 transaction.execute(
                     "insert or replace into record_changes
                        (stream_id, idx, ord, kind, repo, collection, rkey, op,
@@ -185,28 +185,32 @@ create table if not exists record_changes (
 mod tests {
     use super::*;
 
-    fn entry(stream: &str, event_id: &str, ord: i64) -> AppendEntry {
-        AppendEntry {
+    fn entry(stream: &str, event_id: &str, ord: i64) -> AppendDraft<'static> {
+        let stream_id = stream.to_string();
+        let rkey = event_id.to_string();
+        AppendDraft {
             stream_id: stream.to_string(),
             user: "did:plc:author".to_string(),
             payload: vec![0xa0],
             event_type: "space.roomy.message.createMessage.v0".to_string(),
             created_at: 1_700_000_000_000,
             received_at: 1_700_000_000_000,
-            rows: vec![RecordChangeRow {
-                stream_id: stream.to_string(),
-                idx: 0,
-                ord,
-                kind: "message".to_string(),
-                repo: "did:plc:author".to_string(),
-                collection: "space.roomy.message".to_string(),
-                rkey: event_id.to_string(),
-                op: "create".to_string(),
-                order_stamp: "01JC0000000000000000000C0X".to_string(),
-                actor: "did:plc:author".to_string(),
-                event_id: event_id.to_string(),
-                body: Some("{}".to_string()),
-            }],
+            rows: Box::new(move |idx| {
+                vec![RecordChangeRow {
+                    stream_id,
+                    idx,
+                    ord,
+                    kind: "message".to_string(),
+                    repo: "did:plc:author".to_string(),
+                    collection: "space.roomy.message".to_string(),
+                    rkey: rkey.clone(),
+                    op: "create".to_string(),
+                    order_stamp: "01JC0000000000000000000C0X".to_string(),
+                    actor: "did:plc:author".to_string(),
+                    event_id: rkey,
+                    body: Some("{}".to_string()),
+                }]
+            }),
         }
     }
 
@@ -214,18 +218,24 @@ mod tests {
     fn appends_take_sequential_indexes() {
         let mut log = EventLog::in_memory().unwrap();
         let start = log
-            .append(&[entry("did:web:s", "e1", 0), entry("did:web:s", "e2", 0)])
+            .append(vec![
+                entry("did:web:s", "e1", 0),
+                entry("did:web:s", "e2", 0),
+            ])
             .unwrap();
         assert_eq!(start, 0);
-        let next = log.append(&[entry("did:web:s", "e3", 0)]).unwrap();
+        let next = log.append(vec![entry("did:web:s", "e3", 0)]).unwrap();
         assert_eq!(next, 2);
     }
 
     #[test]
     fn the_stream_index_follows_the_log() {
         let mut log = EventLog::in_memory().unwrap();
-        log.append(&[entry("did:web:s", "e1", 0), entry("did:web:s", "e2", 0)])
-            .unwrap();
+        log.append(vec![
+            entry("did:web:s", "e1", 0),
+            entry("did:web:s", "e2", 0),
+        ])
+        .unwrap();
         let latest: i64 = log
             .connection()
             .query_row(
@@ -240,8 +250,11 @@ mod tests {
     #[test]
     fn an_entry_carries_its_changes_at_its_own_index() {
         let mut log = EventLog::in_memory().unwrap();
-        log.append(&[entry("did:web:s", "e1", 0), entry("did:web:s", "e2", 0)])
-            .unwrap();
+        log.append(vec![
+            entry("did:web:s", "e1", 0),
+            entry("did:web:s", "e2", 0),
+        ])
+        .unwrap();
         let rows: Vec<(i64, String)> = log
             .connection()
             .prepare("select idx, event_id from record_changes order by idx")

@@ -12,6 +12,81 @@
 
 use serde_json::Value;
 
+/// Every event type the appserver accepts, in the order its schema reports them.
+///
+/// The order is part of the wire contract: a request whose `$type` names
+/// nothing has to be refused with the same sentence the appserver produces,
+/// which enumerates this union in full.
+pub const EVENT_TYPES: &[&str] = &[
+    "space.roomy.federation.remove.v0",
+    "space.roomy.federation.request.v0",
+    "space.roomy.federation.respond.v0",
+    "space.roomy.federation.setReceiverPermission.v0",
+    "space.roomy.federation.setRoomPermission.v0",
+    "space.roomy.link.createRoomLink.v0",
+    "space.roomy.link.removeRoomLink.v0",
+    "space.roomy.message.createMessage.v0",
+    "space.roomy.message.deleteMessage.v0",
+    "space.roomy.message.editMessage.v0",
+    "space.roomy.message.forwardMessages.v0",
+    "space.roomy.message.moveMessages.v0",
+    "space.roomy.message.reorderMessage.v0",
+    "space.roomy.openmeet.configure.v0",
+    "space.roomy.page.editPage.v0",
+    "space.roomy.reaction.addBridgedReaction.v0",
+    "space.roomy.reaction.addReaction.v0",
+    "space.roomy.reaction.removeBridgedReaction.v0",
+    "space.roomy.reaction.removeReaction.v0",
+    "space.roomy.role.addMemberRole.v0",
+    "space.roomy.role.createRole.v0",
+    "space.roomy.role.deleteRole.v0",
+    "space.roomy.role.removeMemberRole.v0",
+    "space.roomy.role.setRoleRoomPermission.v0",
+    "space.roomy.role.updateRole.v0",
+    "space.roomy.room.createRoom.v0",
+    "space.roomy.room.deleteRoom.v0",
+    "space.roomy.room.restoreRoom.v0",
+    "space.roomy.room.updateRoom.v0",
+    "space.roomy.space.addAdmin.v0",
+    "space.roomy.space.banAccount.v0",
+    "space.roomy.space.createInvite.v0",
+    "space.roomy.space.joinSpace.v0",
+    "space.roomy.space.leaveSpace.v0",
+    "space.roomy.space.removeAdmin.v0",
+    "space.roomy.space.revokeInvite.v0",
+    "space.roomy.space.setHandleProvider.v0",
+    "space.roomy.space.unbanAccount.v0",
+    "space.roomy.space.updateSidebar.v0",
+    "space.roomy.space.updateSidebar.v1",
+    "space.roomy.space.updateSpaceInfo.v0",
+    "space.roomy.state.markRead.v0",
+    "space.roomy.user.updateProfile.v0",
+    "space.roomy.voice.callEnded.v0",
+    "space.roomy.voice.callJoined.v0",
+    "space.roomy.voice.callLeft.v0",
+    "space.roomy.voice.callStarted.v0",
+];
+
+/// The refusal a `$type` outside [`EVENT_TYPES`] earns, worded as the appserver
+/// words it: every member quoted, all but the last joined by commas, and the
+/// value the request carried at the end.
+fn type_union_message(was: &str) -> String {
+    let quoted: Vec<String> = EVENT_TYPES
+        .iter()
+        .map(|kind| format!("\"{kind}\""))
+        .collect();
+    let (last, rest) = quoted.split_last().expect("the union is not empty");
+    format!("$type must be {} or {last} (was {was})", rest.join(", "))
+}
+
+/// How the appserver spells the value a missing field carried.
+fn was(value: Option<&Value>) -> String {
+    match value {
+        None => "undefined".to_string(),
+        Some(value) => value.to_string(),
+    }
+}
+
 use crate::ids::{is_ulid, nsid_of};
 
 /// One event, decoded far enough that the ingress can decide about it.
@@ -35,8 +110,11 @@ impl WireEvent {
             return Err("event is not an object".to_string());
         };
         let Some(nsid) = nsid_of(object.get("$type")) else {
-            return Err("invalid $type: must be a string".to_string());
+            return Err(type_union_message(&was(object.get("$type"))));
         };
+        if !EVENT_TYPES.contains(&nsid.as_str()) {
+            return Err(type_union_message(&format!("\"{nsid}\"")));
+        }
         let Some(id) = object.get("id").and_then(Value::as_str) else {
             return Err("invalid id: must be a string".to_string());
         };
@@ -86,7 +164,7 @@ mod tests {
     #[test]
     fn a_space_level_event_has_no_room() {
         let parsed = WireEvent::parse(&json!({
-            "$type": "space.roomy.space.updateSpace.v0",
+            "$type": "space.roomy.space.updateSidebar.v0",
             "id": ID
         }))
         .unwrap();
@@ -94,9 +172,17 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_type_names_the_field() {
+    fn a_missing_type_is_refused_with_the_whole_union() {
         let error = WireEvent::parse(&json!({ "id": ID })).unwrap_err();
-        assert_eq!(error, "invalid $type: must be a string");
+        assert!(error.starts_with("$type must be \"space.roomy.federation.remove.v0\""));
+        assert!(error.ends_with("(was undefined)"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_type_is_refused_naming_the_value() {
+        let error =
+            WireEvent::parse(&json!({ "$type": "space.roomy.nope.v0", "id": ID })).unwrap_err();
+        assert!(error.ends_with("(was \"space.roomy.nope.v0\")"), "{error}");
     }
 
     #[test]

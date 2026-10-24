@@ -28,6 +28,7 @@ use space_xrpc::dto::{Attachment, LinkEmbedDto, MediaDto, ReactionDto};
 use space_xrpc::error::XrpcError;
 use space_xrpc::handlers::common::Context;
 use space_xrpc::params::Params;
+use space_xrpc::queries::links::canonical_url;
 use space_xrpc::queries::messages::decode_content;
 use space_xrpc::store::GlobalStores;
 use space_xrpc::time::iso_from_ms;
@@ -643,7 +644,7 @@ async fn run(
         })?;
         for row in embed_rows {
             if row.kind == EmbedKind::Link {
-                page_link_urls.insert(row.url.clone());
+                page_link_urls.insert(canonical_url(&row.url).to_owned());
             }
             attachments_by_message
                 .entry(row.message_id.clone())
@@ -701,7 +702,7 @@ async fn run(
                     .iter()
                     .map(|attachment| match attachment {
                         Attachment::Link { url, .. } => {
-                            match link_embed_data.get(url).cloned().flatten() {
+                            match link_embed_data.get(canonical_url(url)).cloned().flatten() {
                                 Some(embed) => Attachment::Link {
                                     url: url.clone(),
                                     embed: Some(embed),

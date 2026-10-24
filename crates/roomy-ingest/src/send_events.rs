@@ -20,13 +20,21 @@ use space_xrpc::access::space_access;
 use space_xrpc::state::SpaceReadDb;
 use space_xrpc::store::GlobalStores;
 
-use crate::append::{AppendEntry, EventLog};
+use crate::append::{AppendDraft, EventLog};
 use crate::event::WireEvent;
 use crate::record_change::{feed_rows, EntryFacts};
 use crate::write_auth::{check_write_auth, WriteAuth, WriteDenial};
 
 /// The most events one batch may carry.
 pub const MAX_BATCH_SIZE: usize = 50;
+
+/// A body that fails the procedure's schema, with the appserver's wording: the
+/// nsid, then the schema's own sentence about the field.
+fn invalid(detail: &str) -> WriteDenial {
+    WriteDenial::invalid_request(format!(
+        "space.roomy.space.sendEvents input validation failed: {detail}"
+    ))
+}
 
 /// The body of a `sendEvents` call.
 #[derive(Debug, Clone)]
@@ -41,29 +49,39 @@ impl SendEventsBody {
         let value: Value = serde_json::from_slice(body)
             .map_err(|_| WriteDenial::invalid_request("Request body is not valid JSON"))?;
         let Some(space_id) = value.get("spaceId").and_then(Value::as_str) else {
-            return Err(WriteDenial::invalid_request(
-                "Missing or empty required field: spaceId",
-            ));
+            return Err(invalid("spaceId must be a string (was missing)"));
         };
         if space_id.is_empty() {
-            return Err(WriteDenial::invalid_request(
-                "Missing or empty required field: spaceId",
-            ));
+            return Err(invalid("spaceId must be a string (was missing)"));
         }
         let Some(events) = value.get("events").and_then(Value::as_array) else {
-            return Err(WriteDenial::invalid_request(
-                "Missing or empty required field: events",
-            ));
+            return Err(invalid("events must be an array (was missing)"));
         };
         if events.is_empty() {
-            return Err(WriteDenial::invalid_request(
-                "Missing or empty required field: events",
-            ));
+            return Err(invalid("events must be non-empty"));
         }
         if events.len() > MAX_BATCH_SIZE {
-            return Err(WriteDenial::invalid_request(format!(
-                "Too many events: max {MAX_BATCH_SIZE}"
+            return Err(invalid(&format!(
+                "events must be at most length {MAX_BATCH_SIZE} (was {})",
+                events.len()
             )));
+        }
+        // The schema types each element as an object, so a batch carrying
+        // anything else is refused before any event is looked at.
+        for (index, event) in events.iter().enumerate() {
+            if !event.is_object() {
+                return Err(invalid(&format!(
+                    "events[{index}] must be an object (was {})",
+                    match event {
+                        Value::String(_) => "a string",
+                        Value::Number(_) => "a number",
+                        Value::Bool(_) => "a boolean",
+                        Value::Null => "null",
+                        Value::Array(_) => "an array",
+                        Value::Object(_) => "an object",
+                    }
+                )));
+            }
         }
         Ok(Self {
             space_id: space_id.to_string(),
@@ -153,26 +171,31 @@ pub fn send_events(
                 WriteDenial::internal(format!("event is not encodable: {error}"))
             },
         )?;
-        let facts = EntryFacts {
-            stream_id: &body.space_id,
-            idx: 0,
-            actor: caller_did,
-            received_at: now_ms,
-        };
-        let rows = feed_rows(&event.raw, &facts);
-        entries.push(AppendEntry {
+        let stream_id = body.space_id.clone();
+        let raw = event.raw.clone();
+        entries.push(AppendDraft {
             stream_id: body.space_id.clone(),
             user: caller_did.to_string(),
             payload,
             event_type: event.nsid.clone(),
             created_at: now_ms,
             received_at: now_ms,
-            rows,
+            rows: Box::new(move |idx| {
+                feed_rows(
+                    &raw,
+                    &EntryFacts {
+                        stream_id: &stream_id,
+                        idx,
+                        actor: caller_did,
+                        received_at: now_ms,
+                    },
+                )
+            }),
         });
     }
     let appended = entries.len();
     let start_idx = log
-        .append(&entries)
+        .append(entries)
         .map_err(|error| WriteDenial::internal(error.to_string()))?;
     Ok(SendEventsOutcome {
         start_idx,

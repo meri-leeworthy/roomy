@@ -19,7 +19,7 @@
  * Only the fixture changes; the appserver is untouched.
  */
 
-import { cpSync, mkdtempSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
@@ -221,7 +221,19 @@ async function main() {
         2,
       ) + "\n",
     );
-    console.log(`wrote ${cases.length} cases`);
+    // The write corpus runs last: it mutates the space's log and its projection,
+    // so the read fixtures are already copied from the pre-write state.
+    const writes = await captureWrites(base, db, ids);
+    const ingestFixtures = join(HERE, "..", "..", "..", "roomy-ingest", "tests", "fixtures");
+    mkdirSync(ingestFixtures, { recursive: true });
+    cpSync(join(HERE, "space.sqlite"), join(ingestFixtures, "space.sqlite"));
+    cpSync(join(HERE, "global.sqlite"), join(ingestFixtures, "global.sqlite"));
+    writeFileSync(
+      join(ingestFixtures, "writes.json"),
+      JSON.stringify({ space: SPACE, cases: writes }, null, 2) + "\n",
+    );
+
+    console.log(`wrote ${cases.length} read cases and ${writes.length} write cases`);
   } finally {
     await handle.close();
     closeDb();
@@ -1183,6 +1195,245 @@ async function capture(base: string, ids: SeedIds): Promise<Case[]> {
       );
     }
   }
+
+  return cases;
+}
+
+// ─── The write corpus ────────────────────────────────────────────────────
+
+/**
+ * One entry of the write differential: a batch as the client sends it, the
+ * response the appserver gave, and the log rows that batch wrote.
+ *
+ * `order_stamp` encodes the batch instant, which is a wall clock reading on
+ * both sides; a comparison drops that prefix and keeps the position it
+ * encodes.
+ */
+interface WriteCase {
+  name: string;
+  caller: string | null;
+  request: unknown;
+  status: number;
+  body: string;
+  events: Array<{
+    idx: number;
+    user: string;
+    eventType: string | null;
+    createdAt: number | null;
+    receivedAt: number;
+  }>;
+  changes: Array<{
+    idx: number;
+    ord: number;
+    kind: string;
+    repo: string;
+    collection: string;
+    rkey: string;
+    op: string;
+    orderStamp: string;
+    actor: string;
+    eventId: string;
+    body: string | null;
+  }>;
+}
+
+/**
+ * The write corpus: every decision `sendEvents` makes, in the order it makes
+ * them. The cases are independent by construction — each names a seeded room,
+ * message or space, so an earlier case's inline materialisation cannot change
+ * a later one's decision — which is what lets the Rust ingress replay them
+ * against the read fixture's own database.
+ */
+async function captureWrites(
+  base: string,
+  db: Database,
+  ids: SeedIds,
+): Promise<WriteCase[]> {
+  const cases: WriteCase[] = [];
+  let lastIdx = -1;
+
+  let eventSeq = 0;
+  const event = (kind: string, fields: Record<string, unknown>) => ({
+    id: ulid(BASE_TIME + 10_000 + eventSeq++),
+    $type: kind,
+    extensions: {},
+    ...fields,
+  });
+
+  const message = (room: string, text: string) =>
+    event("space.roomy.message.createMessage.v0", {
+      room,
+      body: {
+        mimeType: "text/plain",
+        data: {
+          $bytes: Buffer.from(text, "utf8").toString("base64"),
+        },
+      },
+    });
+
+  const run = async (
+    name: string,
+    caller: string | null,
+    request: unknown,
+  ): Promise<void> => {
+    _resetRateLimit();
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    };
+    if (caller) headers["X-Test-Did"] = caller;
+    const response = await fetch(`${base}/xrpc/space.roomy.space.sendEvents`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+    const body = await response.text();
+    const events = await db
+      .query(
+        `select idx, user, event_type, created_at, received_at
+           from stream_events where stream_id = ? and idx > ? order by idx`,
+      )
+      .all<{
+        idx: number;
+        user: string;
+        event_type: string | null;
+        created_at: number | null;
+        received_at: number;
+      }>(SPACE, lastIdx);
+    const changes = await db
+      .query(
+        `select idx, ord, kind, repo, collection, rkey, op, order_stamp,
+                actor, event_id, body
+           from record_changes where stream_id = ? and idx > ?
+          order by idx, ord`,
+      )
+      .all<{
+        idx: number;
+        ord: number;
+        kind: string;
+        repo: string;
+        collection: string;
+        rkey: string;
+        op: string;
+        order_stamp: string;
+        actor: string;
+        event_id: string;
+        body: string | null;
+      }>(SPACE, lastIdx);
+    for (const row of events) lastIdx = Math.max(lastIdx, row.idx);
+    cases.push({
+      name,
+      caller,
+      request,
+      status: response.status,
+      body,
+      events: events.map((row) => ({
+        idx: row.idx,
+        user: row.user,
+        eventType: row.event_type,
+        createdAt: row.created_at,
+        receivedAt: row.received_at,
+      })),
+      changes: changes.map((row) => ({
+        idx: row.idx,
+        ord: row.ord,
+        kind: row.kind,
+        repo: row.repo,
+        collection: row.collection,
+        rkey: row.rkey,
+        op: row.op,
+        orderStamp: row.order_stamp,
+        actor: row.actor,
+        eventId: row.event_id,
+        body: row.body,
+      })),
+    });
+  };
+
+  // Accepted writes: one message, then a batch of two, so the differential
+  // sees both the single-entry and the multi-entry append.
+  await run("valid.message", MEMBER, {
+    spaceId: SPACE,
+    events: [message(C1, "hello")],
+  });
+  await run("valid.batch-of-two", MEMBER, {
+    spaceId: SPACE,
+    events: [message(C1, "first"), message(C1, "second")],
+  });
+  await run("valid.reaction", MEMBER, {
+    spaceId: SPACE,
+    events: [
+      event("space.roomy.reaction.addReaction.v0", {
+        room: C1,
+        reactionTo: ids.m1,
+        reaction: "👍",
+      }),
+    ],
+  });
+  await run("valid.create-room", ADMIN, {
+    spaceId: SPACE,
+    events: [
+      event("space.roomy.room.createRoom.v0", {
+        kind: "space.roomy.channel",
+        name: "A new channel",
+      }),
+    ],
+  });
+
+  // Denials, in the order the handler decides them.
+  await run("invalid.not-an-object", MEMBER, {
+    spaceId: SPACE,
+    events: ["not an event"],
+  });
+  await run("invalid.missing-type", MEMBER, {
+    spaceId: SPACE,
+    events: [{ id: ulid(BASE_TIME + 20_000) }],
+  });
+  await run("invalid.unknown-type", MEMBER, {
+    spaceId: SPACE,
+    events: [event("space.roomy.nope.v0", {})],
+  });
+  await run("invalid.oversized", MEMBER, {
+    spaceId: SPACE,
+    events: Array.from({ length: 51 }, (_, index) =>
+      message(C1, `overflow ${index}`),
+    ),
+  });
+  await run("invalid.missing-spaceId", MEMBER, {
+    events: [message(C1, "no space")],
+  });
+  await run("invalid.empty-events", MEMBER, { spaceId: SPACE, events: [] });
+  await run("unauthorized.outsider", OUTSIDER, {
+    spaceId: SPACE,
+    events: [message(C1, "outsider")],
+  });
+  await run("unauthorized.no-write-room", MEMBER, {
+    spaceId: SPACE,
+    events: [message(C2, "read only")],
+  });
+  await run("unauthorized.banned", BANNED, {
+    spaceId: SPACE,
+    events: [message(C1, "banned")],
+  });
+  await run("unauthorized.create-room", MEMBER, {
+    spaceId: SPACE,
+    events: [
+      event("space.roomy.room.createRoom.v0", {
+        kind: "space.roomy.channel",
+        name: "Not allowed",
+      }),
+    ],
+  });
+  await run("anonymous", null, {
+    spaceId: SPACE,
+    events: [message(C1, "anonymous")],
+  });
+  // The same event twice in one batch: the log's key is the position, not the
+  // event id, so what the appserver does here is a decision worth recording.
+  const repeated = message(C1, "twice");
+  await run("duplicate.event-id", MEMBER, {
+    spaceId: SPACE,
+    events: [repeated, repeated],
+  });
 
   return cases;
 }

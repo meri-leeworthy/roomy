@@ -21,20 +21,22 @@ response cache (keyed by nsid, canonical params and caller; TTL-bounded; evicted
 signals). An absent space is answered from an empty one rather than a 404, which is
 what makes the access decisions match. The read differential covers 237 cases across
 every served NSID, the caller matrix, unknown and malformed ids, pagination edges and
-the read-state header, all byte-identical. **M4** is implemented but not yet gated:
-`roomy-ingest` validates, authorizes, adapts and appends a `sendEvents` batch in one
-transaction, and the gateway answers `sendEvents` and `roomUpdateSeen`; the write
-differential that comparison needs does not exist yet. **M5** has its fencing epoch —
+the read-state header, all byte-identical. **M4** is complete and gated: `roomy-ingest`
+validates, authorizes, adapts and appends a `sendEvents` batch in one transaction, the
+gateway answers `sendEvents` and `roomUpdateSeen`, and the write differential replays a
+sixteen-case corpus — accepted single and batched writes, every schema refusal, the
+authorization matrix and the anonymous call — against the appserver, requiring the same
+status, the same bytes and the same log rows. **M5** has its fencing epoch —
 the lease's epoch advances on takeover, the batch carries it, and a commit whose
 epoch is older than the stored one is refused — with a test for the refusal; the
 remaining multi-node work (signal relay, replicated reads, the simulation harness)
 is not started. M6 and M7 are not started.
 
 Evaluation layers: **L1** (pure properties over `space-core`), **L3** (batch/replay
-equivalence, crashing after the global half at every commit point) and **L4** (the
-read differential, for all twenty-four per-space NSIDs) are implemented and run in
-CI; **L2** is the parity fixture. L5 (write differential) is the M4 gap; L6–L10 are
-not implemented.
+equivalence, crashing after the global half at every commit point), **L4** (the
+read differential, for all twenty-four per-space NSIDs) and **L5** (the write
+differential, over `sendEvents`) are implemented and run in CI; **L2** is the parity
+fixture. L6–L10 are not implemented.
 
 **Scope.** The Rust rewrite of the appserver's core: the gateway (XRPC edge,
 WebSocket connection plane, auth, user-scoped and cross-space reads, write
