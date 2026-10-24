@@ -1197,3 +1197,81 @@ describe("readGuildStructure", () => {
 		expect(structure.channels.map((c) => c.id)).toContain(CHANNEL_2);
 	});
 });
+
+/**
+ * A channel whose type has no Roomy equivalent — a stage or directory channel
+ * — never gets a room, and every message posted in it used to be dropped with
+ * one `No Roomy room mapping` warning each. The channel type is a property of
+ * the channel, so the refusal is decided and recorded once per channel.
+ */
+describe("channel types without a Roomy equivalent", () => {
+	let repo: BridgeRepository;
+	let roomy: MockRoomyGateway;
+
+	beforeEach(() => {
+		repo = setupRepo();
+		roomy = new MockRoomyGateway();
+	});
+
+	// RO14: forum channel gets a room, so its threads can link under it
+	test("RO14: creates a room for a forum channel", async () => {
+		const forum = makeChannel({ type: 15, name: "questions" }); // GuildForum
+
+		await handleChannelCreate(forum, repo, roomy);
+
+		const event = createRoomEvent(roomy, SPACE_A);
+		expectToBe(event?.$type, "space.roomy.room.createRoom.v0");
+		expect(event?.name).toBe("questions");
+		expect(repo.getRoomyId(SPACE_A, "channel", CHANNEL)).toBe(event?.id);
+	});
+
+	test("creates a room for a media channel", async () => {
+		const media = makeChannel({ type: 16, name: "clips" }); // GuildMedia
+
+		await handleChannelCreate(media, repo, roomy);
+
+		expect(createRoomEvent(roomy, SPACE_A)?.name).toBe("clips");
+	});
+
+	// RO15: a forum post's thread links under the forum's room
+	test("RO15: a thread under a forum room links under it", async () => {
+		const forum = makeChannel({ type: 15, name: "questions" });
+		await handleChannelCreate(forum, repo, roomy);
+		const forumRoomId = repo.getRoomyId(SPACE_A, "channel", CHANNEL);
+		expectToBeDefined(forumRoomId);
+
+		await handleThreadCreate(makeThread({ parentId: CHANNEL }), repo, roomy);
+
+		const link = roomy.findEvent(SPACE_A, "space.roomy.link.createRoomLink.v0");
+		expectToBeDefined(link);
+		expect(link.room).toBe(Ulid.assert(forumRoomId));
+		expect(repo.getRoomyId(SPACE_A, "thread", THREAD)).toBeDefined();
+	});
+
+	// RO16: unsupported type — one warning naming the type, one durable row
+	test("RO16: a stage channel is refused once with the type named", async () => {
+		const stage = makeChannel({ type: 13 }); // GuildStageVoice
+		const warns: string[] = [];
+		const consoleWarn = console.warn;
+		console.warn = (line: unknown) => {
+			warns.push(String(line));
+		};
+		try {
+			await handleChannelCreate(stage, repo, roomy);
+			// A second CHANNEL_CREATE for the same channel (a reconnect) must
+			// not repeat the warning: the durable row answers it.
+			await handleChannelCreate(stage, repo, roomy);
+		} finally {
+			console.warn = consoleWarn;
+		}
+
+		expect(createRoomEvent(roomy, SPACE_A)).toBeUndefined();
+		const mentions = warns.filter((line) => line.includes(CHANNEL));
+		expect(mentions).toHaveLength(1);
+		expect(mentions[0]).toContain("GuildStageVoice");
+		expect(repo.countDroppedMessages().unsupported_channel_type).toBe(1);
+		expect(repo.listDroppedMessagesForChannel(CHANNEL)[0]?.detail).toContain(
+			"GuildStageVoice",
+		);
+	});
+});

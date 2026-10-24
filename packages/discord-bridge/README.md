@@ -64,7 +64,7 @@ src/
 | MESSAGE_CREATE          | `createMessage.v0`              | Dedup by Discord message ID → Roomy ULID mapping |
 | MESSAGE_UPDATE          | `editMessage.v0`                | Skips if no prior mapping exists; one relay per edit (`editedTimestamp`) |
 | MESSAGE_DELETE          | `deleteMessage.v0`              | Skips if no prior mapping exists                 |
-| THREAD_CREATE           | `createRoom` + `createRoomLink` | Thread auto-inherits parent channel's bridge     |
+| THREAD_CREATE           | `createRoom` + `createRoomLink` | Thread auto-inherits parent channel's bridge; a forum post is a thread under the forum's room |
 | MESSAGE_REACTION_ADD    | `addBridgedReaction.v0`         |                                                  |
 | MESSAGE_REACTION_REMOVE | `removeBridgedReaction.v0`      |                                                  |
 | (per-message)           | `updateProfile.v0`              | Hash-based change detection on author profile    |
@@ -284,6 +284,36 @@ outlive the bridge config and are reused rather than re-created (re-creating
 them would orphan the existing rooms). Reconnecting therefore re-walks the
 history, re-applies the sidebar structure, and lands the missing messages in
 the rooms the space already has.
+
+## Which channels get a room
+
+| Discord channel type | Roomy |
+| -------------------- | ----- |
+| `GUILD_TEXT` (0), `GUILD_ANNOUNCEMENT` (5) | a room; its messages are the room's messages |
+| `GUILD_FORUM` (15), `GUILD_MEDIA` (16) | a room for the channel, whose **threads** are its content — each post becomes a Roomy thread linked under it. Discord refuses a message on the channel itself, so the room never holds messages of its own |
+| threads (10, 11, 12) | a Roomy thread linked under the parent's room |
+| `GUILD_CATEGORY` (4) | never a room — sidebar structure only, read by the initial structure sync |
+| anything else (stage 13, directory 14, voice 2, …) | refused: no Roomy equivalent |
+
+The refusal is a recorded decision, not a repeated warning. The first time the
+bridge sees an unsupported channel it writes one `dropped_messages` row naming
+the channel type and logs one `warn` line; every message posted in that channel
+afterwards is counted against that same row, so the loss stays countable while
+the log stays quiet. A channel with no room for any other reason (capacity, a
+failed create) warns once per channel the same way.
+
+## Dropped messages
+
+Every Discord message the bridge reads and does **not** bridge is recorded in
+`dropped_messages` (migration 12), keyed by `(reason, channel_id, space_did)`
+with a count — one row per channel and reason, not one row per message. Reasons
+include `no_room_mapping`, `send_failed`, `capacity_over_limit`,
+`unsupported_channel_type` and `system_message`. A dedup hit is not a drop: a
+message already mapped in a space (including the bridge's own webhook echo) is
+present, so it writes no row.
+
+`GET /messages/dropped[?spaceDid=…]` returns the totals by reason and the most
+recent 200 rows.
 
 ## Subset mode
 

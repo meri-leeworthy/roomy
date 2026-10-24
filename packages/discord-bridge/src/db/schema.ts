@@ -313,6 +313,45 @@ export const MIGRATIONS: Migration[] = [
 			db.run("ALTER TABLE id_mappings ADD COLUMN edit_stamp INTEGER");
 		},
 	},
+	{
+		version: 13,
+		name: "dropped_messages",
+		up(db) {
+			// Every Discord message the bridge read and did not bridge, with
+			// why. The bridge drops messages for reasons it cannot retry — the
+			// channel has no Roomy room because its type has no Roomy
+			// equivalent, it is a system message, its author is the bridge's
+			// own webhook — and until this table existed the only trace was a
+			// per-message log line, which is both unbounded (one line per
+			// message, forever) and, for a channel type that can never work,
+			// exactly the same line repeated for every message in it.
+			//
+			// One row per (reason, channel, space) with a count, not one row
+			// per message: the question this answers is "how many messages has
+			// this channel lost, and why", which a counter answers without the
+			// table growing with every drop.
+			//
+			// `space_did` is '' rather than NULL for a drop that is not
+			// per-space (the message had no guild, or the channel is not
+			// bridged to any space): a NULL would make every such row distinct
+			// under SQLite's primary-key comparison and defeat the upsert.
+			db.run(`
+        CREATE TABLE dropped_messages (
+          reason        TEXT NOT NULL,
+          channel_id    TEXT NOT NULL,
+          guild_id      TEXT,
+          space_did     TEXT NOT NULL,
+          detail        TEXT,
+          count         INTEGER NOT NULL DEFAULT 0,
+          first_seen_at INTEGER NOT NULL,
+          last_seen_at  INTEGER NOT NULL,
+          PRIMARY KEY (reason, channel_id, space_did)
+        );
+        CREATE INDEX idx_dropped_messages_channel ON dropped_messages (channel_id);
+        CREATE INDEX idx_dropped_messages_recent ON dropped_messages (last_seen_at);
+      `);
+		},
+	},
 ];
 
 export function runMigrations(db: Database): {

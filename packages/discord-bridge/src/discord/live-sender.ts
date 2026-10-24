@@ -7,6 +7,7 @@
  */
 
 import { ChannelTypes } from "@discordeno/bot";
+import { createLogger } from "../logger.ts";
 import { discordFailureDetail } from "./rest-errors.ts";
 import type { DiscordSender, SendMessageOptions } from "./sender.ts";
 import type { DiscordBot } from "./types.ts";
@@ -22,6 +23,8 @@ import type { DiscordBot } from "./types.ts";
  * minutes it takes an intermediary to reap an idle socket.
  */
 const DISCORD_REQUEST_TIMEOUT_MS = 10_000;
+
+const log = createLogger("live-sender");
 
 /**
  * Race a promise against a timeout. Resolves/rejects with the underlying
@@ -225,6 +228,16 @@ export class LiveDiscordSender implements DiscordSender {
 			BigInt(messageId),
 			emoji,
 		);
+	}
+
+	async getChannelType(channelId: string): Promise<number | undefined> {
+		try {
+			const channel = await this.#bot.helpers.getChannel(BigInt(channelId));
+			return channel?.type;
+		} catch (err) {
+			log.warn(`getChannel failed for channel ${channelId}`, err);
+			return undefined;
+		}
 	}
 
 	async getParentChannelId(channelId: string): Promise<string | undefined> {
