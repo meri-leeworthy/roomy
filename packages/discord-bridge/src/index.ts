@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createBot, Intents } from "@discordeno/bot";
+import { createBridgeApiAuth } from "./api-auth.ts";
 import { startApi } from "./api.ts";
 import { BridgeRepository } from "./db/repository.ts";
 import { type DiscordBotWithCache, getProxyCacheBot } from "./discord/cache.ts";
@@ -165,13 +166,15 @@ async function main() {
 	log.info(`sqlite store opened at ${BRIDGE_DB_PATH()}`);
 
 	log.info("starting api...");
-
-	// Start HTTP API
-	startApi(repo, () => appId);
+	// The listener comes up before ATProto login so `/info` stays reachable
+	// while the bridge connects. Admin-gated routes answer 403 until the
+	// space manager exists, since standing cannot be checked without it.
+	let spaceManager: SpaceManager | undefined;
+	startApi(repo, () => appId, createBridgeApiAuth(() => spaceManager));
 
 	// Initialize Roomy client
 	const roomyClient = await initRoomyClient();
-	const spaceManager = new SpaceManager(
+	spaceManager = new SpaceManager(
 		roomyClient,
 		APPSERVER_URL(),
 		APPSERVER_DID(),
