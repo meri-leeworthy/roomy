@@ -15,7 +15,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use tower::ServiceExt;
 
-use space_xrpc::state::{SpaceDb, XrpcState};
+use space_xrpc::registry::{FixedSpaces, SpaceResolver};
+use space_xrpc::state::{SpaceReadDb, XrpcState};
 use space_xrpc::store::{GlobalStores, SqliteGlobalStores};
 use space_xrpc::verify::TestMode;
 
@@ -48,19 +49,38 @@ struct WirePosition {
     last_active_at: Option<i64>,
 }
 
-fn state() -> XrpcState {
-    let db = SpaceDb::open_readonly(concat!(
+/// The router's state, resolving requests through a registry like a process
+/// serving several spaces does: `spaceId` names the space, and a room or
+/// message id resolves through the entity→space index.
+fn state(fixture: &Fixture) -> XrpcState {
+    let db = SpaceReadDb::open_readonly(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/space.sqlite"
     ))
     .expect("fixture space db");
+    let mut spaces = FixedSpaces::new([(fixture.space.clone(), Arc::new(db))]);
+    // Every entity the cases name resolves to the fixture's space.
+    for case in &fixture.cases {
+        for key in ["roomId", "messageId", "threadId"] {
+            if let Some(Value::String(entity)) = case.params.get(key) {
+                spaces = spaces.with_entity(entity.clone(), fixture.space.clone());
+            }
+        }
+    }
     let stores = SqliteGlobalStores::open(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/global.sqlite"
     ))
     .expect("fixture global db");
-    XrpcState::new(Arc::new(db), Arc::new(TestMode))
-        .with_stores(Arc::new(stores) as Arc<dyn GlobalStores>)
+    let spaces: Arc<dyn SpaceResolver> = Arc::new(spaces);
+    XrpcState::new(
+        Arc::new(SpaceReadDb::from_connection(
+            rusqlite::Connection::open_in_memory().expect("placeholder"),
+        )),
+        Arc::new(TestMode),
+    )
+    .with_spaces(spaces)
+    .with_stores(Arc::new(stores) as Arc<dyn GlobalStores>)
 }
 
 fn query(params: &Map<String, Value>) -> String {
@@ -96,7 +116,7 @@ async fn every_fixture_case_is_byte_identical() {
     .expect("parse expected.json");
 
     assert!(!fixture.cases.is_empty(), "fixture has no cases");
-    let app = space_xrpc::router(state());
+    let app = space_xrpc::router(state(&fixture));
     let mut failures: Vec<String> = Vec::new();
 
     for case in &fixture.cases {

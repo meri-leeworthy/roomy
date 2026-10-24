@@ -61,7 +61,6 @@ import {
 import {
   CLOCK_COLUMNS,
   TABLE_CLOCK_COLUMNS,
-  snapshotSpaceDb,
   READ_PATH_CACHES,
   materialiseAndDiff,
   materialiseFromLog,

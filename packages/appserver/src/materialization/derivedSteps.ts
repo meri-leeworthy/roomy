@@ -53,7 +53,14 @@ export async function applyDerivedStep(
       );
       return [];
     case "storeLinks":
-      return await storeLinks(db, globalDb, step.spaceId, step.messageId, step.urls);
+      return await storeLinks(
+        db,
+        globalDb,
+        step.spaceId,
+        step.messageId,
+        step.urls,
+        step.at,
+      );
     case "queueLinkAttachments":
       await queueLinks(globalDb, step.spaceId, step.messageId, step.urls);
       return [...step.urls];
@@ -97,20 +104,21 @@ async function storeLinks(
   spaceId: StreamDid,
   messageId: string,
   urls: readonly string[],
+  at: number,
 ): Promise<string[]> {
   const stored: string[] = [];
   for (const url of urls) {
     // The link entity is scoped to the message: `room` holds the message id so
     // a read can find a message's links by it.
     await db.run(
-      `insert or ignore into entities (id, stream_id, room, created_at)
-       values (?, '', ?, (unixepoch() * 1000))`,
-      [url, messageId],
+      `insert or ignore into entities (id, stream_id, room, created_at, updated_at)
+       values (?, '', ?, ?, ?)`,
+      [url, messageId, at, at],
     );
     const inserted = await db.run(
       `insert or ignore into comp_embed_link (entity, show_preview, created_at, updated_at)
-       values (?, 1, (unixepoch() * 1000), (unixepoch() * 1000))`,
-      [url],
+       values (?, 1, ?, ?)`,
+      [url, at, at],
     );
     if (inserted.changes > 0) stored.push(url);
   }
