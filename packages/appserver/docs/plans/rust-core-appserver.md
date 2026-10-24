@@ -45,8 +45,8 @@ read differential, for all twenty-four per-space NSIDs) and **L5** (the write
 differential, over `sendEvents`) and **L7** (a two-node fault schedule over one log)
 are implemented and run in CI; **L8**'s mechanism — mirror a live read, compare, record
 the divergence — is in the gateway and runs in its tests, but it has not been run
-against production traffic. **L2** is the parity fixture. L6, L9 and L10 are not
-implemented.
+against production traffic. **L10** is the budget harness in `roomy-appserver`'s
+tests, run on demand. **L2** is the parity fixture. L6 and L9 are not implemented.
 
 **Scope.** The Rust rewrite of the appserver's core: the gateway (XRPC edge,
 WebSocket connection plane, auth, user-scoped and cross-space reads, write
