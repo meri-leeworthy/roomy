@@ -97,11 +97,13 @@ export function attachmentStatements(
     switch (att.$type) {
       case "space.roomy.attachment.reply.v0":
         statements.push(sql`
-          insert or ignore into edges (head, tail, label)
+          insert or ignore into edges (head, tail, label, created_at, updated_at)
           values (
             ${messageId},
             ${att.target},
-            'reply'
+            'reply',
+            ${at},
+            ${at}
           )
         `);
         break;
@@ -233,11 +235,13 @@ export function attachmentStatements(
 
       case "space.roomy.attachment.forward.v0":
         statements.push(sql`
-          insert or ignore into edges (head, tail, label)
+          insert or ignore into edges (head, tail, label, created_at, updated_at)
           select
             ${messageId},
             ${att.target},
-            'forward'
+            'forward',
+            ${at},
+            ${at}
           where exists (select 1 from entities where id = ${att.target})
         `);
         break;

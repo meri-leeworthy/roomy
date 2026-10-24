@@ -56,6 +56,17 @@ const HERE = new URL(".", import.meta.url).pathname;
 
 // ─── ULIDs (Crockford base32, timestamp prefix) ──────────────────────────
 const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/**
+ * The instant every seeded row and ULID is stamped with. Fixed, so re-running
+ * this script regenerates byte-identical files: a fixture whose ids and
+ * timestamps moved between runs could not be compared with a recorded digest.
+ */
+const BASE_TIME = 1_700_000_000_000;
+
+/** A counter, so the 16 random characters of a ULID are the same every run. */
+let ulidCounter = 0;
+
 function ulid(at: number): string {
   let time = "";
   let n = at;
@@ -64,8 +75,10 @@ function ulid(at: number): string {
     n = Math.floor(n / 32);
   }
   let random = "";
+  let value = ++ulidCounter;
   for (let i = 0; i < 16; i++) {
-    random += ALPHABET[Math.floor(Math.random() * 32)];
+    random = ALPHABET[value % 32] + random;
+    value = Math.floor(value / 32);
   }
   return time + random;
 }
@@ -135,6 +148,11 @@ async function main() {
   try {
     const ids = await seed(db);
     const cases = await capture(base, ids);
+    // The seed helpers leave the clock columns to the schema default, which is
+    // the wall clock at generation time. Stamp them with the fixture's own
+    // instant so the files the script writes are the same every run.
+    await freezeClockColumns(SPACE);
+    await freezeClockColumns(null);
     // The DBs run in WAL mode: fold the log into the main file so the copied
     // fixture is self-contained.
     await openSpaceDb(SPACE).run("pragma wal_checkpoint(truncate)");
@@ -180,7 +198,7 @@ const C3 = "01JC0000000000000000000C03";
 const T1 = "01JC0000000000000000000T01";
 
 async function seed(db: Database): Promise<SeedIds> {
-  const base = Date.now() - 10 * 60 * 1000;
+  const base = BASE_TIME;
 
   seedSpace(db, SPACE, ADMIN, { allowPublicJoin: 0 });
   seedMembership(db, SPACE, MEMBER, "member");
@@ -212,7 +230,7 @@ async function seed(db: Database): Promise<SeedIds> {
   for (const [did, name, avatar] of profiles) {
     await globalDb(db).run(
       "update profiles set name = ?, avatar = ?, updated_at = ? where did = ?",
-      [name, avatar, Date.now(), did],
+      [name, avatar, BASE_TIME, did],
     );
   }
 
@@ -371,7 +389,7 @@ async function seed(db: Database): Promise<SeedIds> {
         title: "Example",
         description: "An example card",
       }),
-      Date.now(),
+      BASE_TIME,
     ],
   );
 
@@ -402,7 +420,7 @@ async function seed(db: Database): Promise<SeedIds> {
         `insert or replace into read_positions
            (user_did, room_id, space_did, seen_up_to, updated_at)
          values (?, ?, ?, ?, ?)`,
-        [user, roomId, SPACE, seen, Date.now()],
+        [user, roomId, SPACE, seen, BASE_TIME],
       );
     }
   }
@@ -411,7 +429,7 @@ async function seed(db: Database): Promise<SeedIds> {
       `insert or replace into user_thread_activity
          (user_did, thread_id, space_did, last_active_at, updated_at)
        values (?, ?, ?, ?, ?)`,
-      [user, T1, SPACE, Date.now() - 60 * 60 * 1000, Date.now()],
+      [user, T1, SPACE, BASE_TIME - 60 * 60 * 1000, BASE_TIME],
     );
   }
 
@@ -421,6 +439,35 @@ async function seed(db: Database): Promise<SeedIds> {
   await openReadStateDb().query("select 1 as n").get();
 
   return { m1, m2, m4, t2, deletedMessageId: m3 };
+}
+
+/**
+ * Rewrite every clock column in a database to the fixture's instant.
+ *
+ * `space` selects the per-space DB; `null` the global one. Runs after the seed
+ * and before the databases are copied, so a fixture regenerated a month later
+ * is byte-identical to this one.
+ */
+async function freezeClockColumns(space: string | null): Promise<void> {
+  const db = space === null ? openGlobalDb() : openSpaceDb(space);
+  const tables = await db
+    .query(
+      `select name from sqlite_master where type = 'table' and name not like 'sqlite_%'`,
+    )
+    .all<{ name: string }>();
+  for (const { name } of tables) {
+    const columns = await db
+      .query(`select name from pragma_table_info('${name}')`)
+      .all<{ name: string }>();
+    // `BASE_TIME + rowid` keeps insertion order: a column a read orders by
+    // (`comp_reaction.created_at`) still means "written in this order".
+    const sets = columns
+      .map((column) => column.name)
+      .filter((column) => column === "created_at" || column === "updated_at")
+      .map((column) => `${column} = ${BASE_TIME} + rowid`);
+    if (sets.length === 0) continue;
+    await db.run(`update "${name}" set ${sets.join(", ")}`);
+  }
 }
 
 // ─── Capture ─────────────────────────────────────────────────────────────
