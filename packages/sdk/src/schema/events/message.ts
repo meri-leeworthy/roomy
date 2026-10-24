@@ -352,7 +352,7 @@ const ForwardMessagesSchema = type({
  */
 export const ForwardMessages = defineEvent(
   ForwardMessagesSchema,
-  ({ streamId, event }) => {
+  ({ streamId, event, decidedAt }) => {
     if (!event.room) {
       console.warn("Forward event missing room");
       return [];
@@ -363,7 +363,7 @@ export const ForwardMessages = defineEvent(
     // event.id serves as the forward reference entity ULID
     return event.messageIds.flatMap((msgId) => [
       // Ensure the forwarded reference entity exists in the target (destination) room
-      ensureEntity(streamId, event.id, event.room),
+      ensureEntity(streamId, event.id, event.room, decidedAt),
       // Create forward edge: head = forward reference (event.id), tail = original
       // message. Guard with `where exists` so a missing original (deleted before
       // the forward, not-yet-materialised, or cross-space) does not trip the
@@ -371,11 +371,13 @@ export const ForwardMessages = defineEvent(
       // is still recorded, just without the edge. In the normal case the
       // original is already materialised and the edge is created as expected.
       sql`
-        insert or ignore into edges (head, tail, label)
+        insert or ignore into edges (head, tail, label, created_at, updated_at)
         select
           ${event.id},
           ${msgId},
-          'forward'
+          'forward',
+          ${decidedAt ?? Date.now()},
+          ${decidedAt ?? Date.now()}
         where exists (select 1 from entities where id = ${msgId})
       `,
     ]);

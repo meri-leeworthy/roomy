@@ -3,9 +3,9 @@
   "facts": {
     "channelId": "01JC0000000000000000000C01",
     "threadId": "01JC0000000000000000000T01",
-    "deletedMessageId": "01M5ND81W630W55YKCT8T18C7F",
-    "editedMessageId": "01M5ND81W555QKAF005QF9Z5CG",
-    "reactedMessageId": "01M5ND81W4GRY0CE6ZHDWXY3S2"
+    "deletedMessageId": "01HF7YAT030000000000000003",
+    "editedMessageId": "01HF7YAT020000000000000002",
+    "reactedMessageId": "01HF7YAT010000000000000001"
   },
   "cases": [
     {
@@ -18,7 +18,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -30,12 +30,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"name\":\"Test Space\",\"joinPolicy\":{\"allowPublicJoin\":false,\"allowMemberInvites\":true},\"isMember\":true,\"isAdmin\":true,\"unreadRoomCount\":3,\"unreadThreadCount\":1,\"sidebar\":{\"categories\":[{\"id\":\"cat1\",\"name\":\"Category\",\"position\":0,\"channels\":[{\"id\":\"01JC0000000000000000000C01\",\"name\":\"general\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"unreadCount\":3,\"lastRead\":\"2026-10-23T22:14:02.887Z\",\"activeThreads\":[{\"id\":\"01JC0000000000000000000T01\",\"name\":\"Thread One\",\"activity\":{\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}]},\"canRead\":true,\"canWrite\":true,\"unreadCount\":1,\"lastRead\":\"2026-10-23T22:14:02.894Z\"}]}]}],\"orphans\":[{\"id\":\"01JC0000000000000000000C02\",\"name\":\"secret\",\"defaultAccess\":\"none\",\"canRead\":true,\"canWrite\":true,\"unreadCount\":1},{\"id\":\"01JC0000000000000000000C03\",\"name\":\"readonly\",\"defaultAccess\":\"read\",\"canRead\":true,\"canWrite\":true,\"unreadCount\":1}]},\"voiceRooms\":[]}"
+      "body": "{\"name\":\"Test Space\",\"joinPolicy\":{\"allowPublicJoin\":false,\"allowMemberInvites\":true},\"isMember\":true,\"isAdmin\":true,\"unreadRoomCount\":3,\"unreadThreadCount\":1,\"sidebar\":{\"categories\":[{\"id\":\"cat1\",\"name\":\"Category\",\"position\":0,\"channels\":[{\"id\":\"01JC0000000000000000000C01\",\"name\":\"general\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"unreadCount\":3,\"lastRead\":\"2023-11-14T22:13:20.004Z\"}]}],\"orphans\":[{\"id\":\"01JC0000000000000000000C02\",\"name\":\"secret\",\"defaultAccess\":\"none\",\"canRead\":true,\"canWrite\":true,\"unreadCount\":1},{\"id\":\"01JC0000000000000000000C03\",\"name\":\"readonly\",\"defaultAccess\":\"read\",\"canRead\":true,\"canWrite\":true,\"unreadCount\":1}]},\"voiceRooms\":[]}"
     },
     {
       "name": "admin/space.getThreads",
@@ -48,7 +48,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -60,12 +60,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2026-10-23T22:14:02.890Z\",\"latestMessage\":{\"id\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2026-10-23T22:14:02.890Z\"}},\"unreadCount\":3,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMessage\":{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.895Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"}],\"cursor\":\"1792793642918::01JC0000000000000000000T01\"}"
+      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.007Z\",\"latestMessage\":{\"id\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2023-11-14T22:13:20.007Z\"}},\"unreadCount\":3,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"}],\"cursor\":\"1700000000035::01JC0000000000000000000T01\"}"
     },
     {
       "name": "admin/room.getMetadata.c1",
@@ -77,7 +77,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -89,12 +89,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"name\":\"general\",\"kind\":\"channel\",\"spaceId\":\"did:web:space.example\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"lastRead\":\"2026-10-23T22:14:02.887Z\",\"unreadCount\":3,\"unreadThreadCount\":1}"
+      "body": "{\"name\":\"general\",\"kind\":\"channel\",\"spaceId\":\"did:web:space.example\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"lastRead\":\"2023-11-14T22:13:20.004Z\",\"unreadCount\":3,\"unreadThreadCount\":1}"
     },
     {
       "name": "admin/room.getMetadata.thread",
@@ -106,7 +106,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -118,12 +118,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"name\":\"Thread One\",\"kind\":\"thread\",\"spaceId\":\"did:web:space.example\",\"parentChannelId\":\"01JC0000000000000000000C01\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"lastRead\":\"2026-10-23T22:14:02.894Z\",\"unreadCount\":1,\"unreadThreadCount\":0}"
+      "body": "{\"name\":\"Thread One\",\"kind\":\"thread\",\"spaceId\":\"did:web:space.example\",\"parentChannelId\":\"01JC0000000000000000000C01\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"lastRead\":\"2023-11-14T22:13:20.011Z\",\"unreadCount\":1,\"unreadThreadCount\":0}"
     },
     {
       "name": "admin/room.getMetadata.secret",
@@ -135,7 +135,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -147,8 +147,8 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
@@ -165,7 +165,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -177,12 +177,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"messages\":[{\"id\":\"01M5ND81W923ECZ2CHWVJZSKM9\",\"sort_idx\":\"01M5ND81W923ECZ2CHWVJZSKM9\",\"content\":\"six\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.889Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"sort_idx\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"content\":\"seven\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.890Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01M5ND81W923ECZ2CHWVJZSKM9\"}"
+      "body": "{\"messages\":[{\"id\":\"01HF7YAT060000000000000006\",\"sort_idx\":\"01HF7YAT060000000000000006\",\"content\":\"six\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.006Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01HF7YAT070000000000000007\",\"sort_idx\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.007Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01HF7YAT060000000000000006\"}"
     },
     {
       "name": "admin/room.getMessages.thread",
@@ -195,7 +195,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -207,12 +207,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"messages\":[{\"id\":\"01M5ND81WEMDG1VFPVFDZCP8R2\",\"sort_idx\":\"01M5ND81WEMDG1VFPVFDZCP8R2\",\"content\":\"thread one\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.894Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"},{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"sort_idx\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.895Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}],\"cursor\":\"01M5ND81WEMDG1VFPVFDZCP8R2\"}"
+      "body": "{\"messages\":[{\"id\":\"01HF7YAT0B000000000000000A\",\"sort_idx\":\"01HF7YAT0B000000000000000A\",\"content\":\"thread one\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.011Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"},{\"id\":\"01HF7YAT0C000000000000000B\",\"sort_idx\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.012Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}],\"cursor\":\"01HF7YAT0B000000000000000A\"}"
     },
     {
       "name": "admin/room.getThreads.c1",
@@ -225,7 +225,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -237,12 +237,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"threads\":[{\"id\":\"01JC0000000000000000000T01\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMessage\":{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.895Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"canonicalParent\":\"01JC0000000000000000000C01\"}]}"
+      "body": "{\"threads\":[{\"id\":\"01JC0000000000000000000T01\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"canonicalParent\":\"01JC0000000000000000000C01\"}]}"
     },
     {
       "name": "admin/room.getLinks.c1",
@@ -255,7 +255,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -267,24 +267,24 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"links\":[{\"url\":\"https://example.com/a\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01M5ND81W555QKAF005QF9Z5CG\",\"timestamp\":\"2026-10-23T22:14:02.885Z\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}}],\"cursor\":\"01M5ND81W555QKAF005QF9Z5CG::https://example.com/a\"}"
+      "body": "{\"links\":[{\"url\":\"https://example.com/a\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01HF7YAT020000000000000002\",\"timestamp\":\"2023-11-14T22:13:20.002Z\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}}],\"cursor\":\"01HF7YAT020000000000000002::https://example.com/a\"}"
     },
     {
       "name": "admin/message.getMessage.edited",
       "nsid": "space.roomy.message.getMessage",
       "params": {
-        "messageId": "01M5ND81W555QKAF005QF9Z5CG"
+        "messageId": "01HF7YAT020000000000000002"
       },
       "caller": "did:plc:admin",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -296,24 +296,24 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"id\":\"01M5ND81W555QKAF005QF9Z5CG\",\"sort_idx\":\"01M5ND81W555QKAF005QF9Z5CG\",\"content\":\"two edited\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.885Z\",\"lastEdit\":\"01M5ND82BSADS0FRW01BF638AT\",\"attachments\":[{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a?message=01M5ND81W555QKAF005QF9Z5CG\"}],\"reactions\":[{\"emoji\":\"👍\",\"count\":1,\"myReactionId\":\"01M5ND81ZANMZEWTTA2WVP191E\"}],\"media\":[{\"url\":\"https://example.com/a\",\"type\":\"text/uri-list\"},{\"url\":\"https://example.com/a?message=01M5ND81W555QKAF005QF9Z5CG\",\"type\":\"text/uri-list\"}],\"linkEmbeds\":[{\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"url\":\"https://example.com/a?message=01M5ND81W555QKAF005QF9Z5CG\"}],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}"
+      "body": "{\"id\":\"01HF7YAT020000000000000002\",\"sort_idx\":\"01HF7YAT020000000000000002\",\"content\":\"two edited\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.002Z\",\"lastEdit\":\"01HF7YATFP000000000000000C\",\"attachments\":[{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\"}],\"reactions\":[{\"emoji\":\"👍\",\"count\":1,\"myReactionId\":\"01HF7YAT37000000000000000F\"}],\"media\":[{\"url\":\"https://example.com/a\",\"type\":\"text/uri-list\"},{\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\",\"type\":\"text/uri-list\"}],\"linkEmbeds\":[{\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\"}],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}"
     },
     {
       "name": "admin/message.getMessage.reply",
       "nsid": "space.roomy.message.getMessage",
       "params": {
-        "messageId": "01M5ND81W75YBZ4VX590DX05DX"
+        "messageId": "01HF7YAT040000000000000004"
       },
       "caller": "did:plc:admin",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -325,24 +325,24 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"id\":\"01M5ND81W75YBZ4VX590DX05DX\",\"sort_idx\":\"01M5ND81W75YBZ4VX590DX05DX\",\"content\":\"four\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.887Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.reply.v0\",\"messageId\":\"01M5ND81W4GRY0CE6ZHDWXY3S2\"}],\"replyTo\":\"01M5ND81W4GRY0CE6ZHDWXY3S2\",\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}"
+      "body": "{\"id\":\"01HF7YAT040000000000000004\",\"sort_idx\":\"01HF7YAT040000000000000004\",\"content\":\"four\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.004Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.reply.v0\",\"messageId\":\"01HF7YAT010000000000000001\"}],\"replyTo\":\"01HF7YAT010000000000000001\",\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}"
     },
     {
       "name": "admin/message.getMessage.thread",
       "nsid": "space.roomy.message.getMessage",
       "params": {
-        "messageId": "01M5ND81WFY9B30AAW5YAVBAFD"
+        "messageId": "01HF7YAT0C000000000000000B"
       },
       "caller": "did:plc:admin",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -354,24 +354,24 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"sort_idx\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.895Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}"
+      "body": "{\"id\":\"01HF7YAT0C000000000000000B\",\"sort_idx\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.012Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}"
     },
     {
       "name": "admin/message.getReactions",
       "nsid": "space.roomy.message.getReactions",
       "params": {
-        "messageId": "01M5ND81W4GRY0CE6ZHDWXY3S2"
+        "messageId": "01HF7YAT010000000000000001"
       },
       "caller": "did:plc:admin",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -383,8 +383,8 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
@@ -400,7 +400,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -409,11 +409,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"name\":\"Test Space\",\"joinPolicy\":{\"allowPublicJoin\":false,\"allowMemberInvites\":true},\"isMember\":true,\"isAdmin\":false,\"unreadRoomCount\":2,\"unreadThreadCount\":1,\"sidebar\":{\"categories\":[{\"id\":\"cat1\",\"name\":\"Category\",\"position\":0,\"channels\":[{\"id\":\"01JC0000000000000000000C01\",\"name\":\"general\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"unreadCount\":4,\"lastRead\":\"2026-10-23T22:14:02.885Z\",\"activeThreads\":[{\"id\":\"01JC0000000000000000000T01\",\"name\":\"Thread One\",\"activity\":{\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}]},\"canRead\":true,\"canWrite\":true,\"unreadCount\":2,\"lastRead\":null}]}]}],\"orphans\":[{\"id\":\"01JC0000000000000000000C03\",\"name\":\"readonly\",\"defaultAccess\":\"read\",\"canRead\":true,\"canWrite\":false,\"unreadCount\":1}]},\"voiceRooms\":[]}"
+      "body": "{\"name\":\"Test Space\",\"joinPolicy\":{\"allowPublicJoin\":false,\"allowMemberInvites\":true},\"isMember\":true,\"isAdmin\":false,\"unreadRoomCount\":2,\"unreadThreadCount\":1,\"sidebar\":{\"categories\":[{\"id\":\"cat1\",\"name\":\"Category\",\"position\":0,\"channels\":[{\"id\":\"01JC0000000000000000000C01\",\"name\":\"general\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"unreadCount\":4,\"lastRead\":\"2023-11-14T22:13:20.002Z\"}]}],\"orphans\":[{\"id\":\"01JC0000000000000000000C03\",\"name\":\"readonly\",\"defaultAccess\":\"read\",\"canRead\":true,\"canWrite\":false,\"unreadCount\":1}]},\"voiceRooms\":[]}"
     },
     {
       "name": "member/space.getThreads",
@@ -426,7 +426,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -435,11 +435,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2026-10-23T22:14:02.890Z\",\"latestMessage\":{\"id\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2026-10-23T22:14:02.890Z\"}},\"unreadCount\":4,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMessage\":{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.895Z\"}},\"unreadCount\":2,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"}],\"cursor\":\"1792793642918::01JC0000000000000000000T01\"}"
+      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.007Z\",\"latestMessage\":{\"id\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2023-11-14T22:13:20.007Z\"}},\"unreadCount\":4,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":2,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"}],\"cursor\":\"1700000000035::01JC0000000000000000000T01\"}"
     },
     {
       "name": "member/room.getMetadata.c1",
@@ -451,7 +451,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -460,11 +460,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"name\":\"general\",\"kind\":\"channel\",\"spaceId\":\"did:web:space.example\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"lastRead\":\"2026-10-23T22:14:02.885Z\",\"unreadCount\":4,\"unreadThreadCount\":1}"
+      "body": "{\"name\":\"general\",\"kind\":\"channel\",\"spaceId\":\"did:web:space.example\",\"defaultAccess\":\"readwrite\",\"canRead\":true,\"canWrite\":true,\"lastRead\":\"2023-11-14T22:13:20.002Z\",\"unreadCount\":4,\"unreadThreadCount\":1}"
     },
     {
       "name": "member/room.getMetadata.thread",
@@ -476,7 +476,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -485,7 +485,7 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
@@ -501,7 +501,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -510,7 +510,7 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 403,
@@ -527,7 +527,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -536,11 +536,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"messages\":[{\"id\":\"01M5ND81W923ECZ2CHWVJZSKM9\",\"sort_idx\":\"01M5ND81W923ECZ2CHWVJZSKM9\",\"content\":\"six\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.889Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"sort_idx\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"content\":\"seven\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.890Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01M5ND81W923ECZ2CHWVJZSKM9\"}"
+      "body": "{\"messages\":[{\"id\":\"01HF7YAT060000000000000006\",\"sort_idx\":\"01HF7YAT060000000000000006\",\"content\":\"six\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.006Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01HF7YAT070000000000000007\",\"sort_idx\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.007Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01HF7YAT060000000000000006\"}"
     },
     {
       "name": "member/room.getMessages.thread",
@@ -553,7 +553,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -562,11 +562,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"messages\":[{\"id\":\"01M5ND81WEMDG1VFPVFDZCP8R2\",\"sort_idx\":\"01M5ND81WEMDG1VFPVFDZCP8R2\",\"content\":\"thread one\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.894Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"},{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"sort_idx\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.895Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}],\"cursor\":\"01M5ND81WEMDG1VFPVFDZCP8R2\"}"
+      "body": "{\"messages\":[{\"id\":\"01HF7YAT0B000000000000000A\",\"sort_idx\":\"01HF7YAT0B000000000000000A\",\"content\":\"thread one\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.011Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"},{\"id\":\"01HF7YAT0C000000000000000B\",\"sort_idx\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.012Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}],\"cursor\":\"01HF7YAT0B000000000000000A\"}"
     },
     {
       "name": "member/room.getThreads.c1",
@@ -579,7 +579,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -588,11 +588,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"threads\":[{\"id\":\"01JC0000000000000000000T01\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMessage\":{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.895Z\"}},\"unreadCount\":2,\"unread\":true,\"name\":\"Thread One\",\"canonicalParent\":\"01JC0000000000000000000C01\"}]}"
+      "body": "{\"threads\":[{\"id\":\"01JC0000000000000000000T01\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":2,\"unread\":true,\"name\":\"Thread One\",\"canonicalParent\":\"01JC0000000000000000000C01\"}]}"
     },
     {
       "name": "member/room.getLinks.c1",
@@ -605,7 +605,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -614,23 +614,23 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"links\":[{\"url\":\"https://example.com/a\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01M5ND81W555QKAF005QF9Z5CG\",\"timestamp\":\"2026-10-23T22:14:02.885Z\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}}],\"cursor\":\"01M5ND81W555QKAF005QF9Z5CG::https://example.com/a\"}"
+      "body": "{\"links\":[{\"url\":\"https://example.com/a\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01HF7YAT020000000000000002\",\"timestamp\":\"2023-11-14T22:13:20.002Z\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}}],\"cursor\":\"01HF7YAT020000000000000002::https://example.com/a\"}"
     },
     {
       "name": "member/message.getMessage.edited",
       "nsid": "space.roomy.message.getMessage",
       "params": {
-        "messageId": "01M5ND81W555QKAF005QF9Z5CG"
+        "messageId": "01HF7YAT020000000000000002"
       },
       "caller": "did:plc:member",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -639,23 +639,23 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"id\":\"01M5ND81W555QKAF005QF9Z5CG\",\"sort_idx\":\"01M5ND81W555QKAF005QF9Z5CG\",\"content\":\"two edited\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.885Z\",\"lastEdit\":\"01M5ND82BSADS0FRW01BF638AT\",\"attachments\":[{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a?message=01M5ND81W555QKAF005QF9Z5CG\"}],\"reactions\":[{\"emoji\":\"👍\",\"count\":1}],\"media\":[{\"url\":\"https://example.com/a\",\"type\":\"text/uri-list\"},{\"url\":\"https://example.com/a?message=01M5ND81W555QKAF005QF9Z5CG\",\"type\":\"text/uri-list\"}],\"linkEmbeds\":[{\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"url\":\"https://example.com/a?message=01M5ND81W555QKAF005QF9Z5CG\"}],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}"
+      "body": "{\"id\":\"01HF7YAT020000000000000002\",\"sort_idx\":\"01HF7YAT020000000000000002\",\"content\":\"two edited\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.002Z\",\"lastEdit\":\"01HF7YATFP000000000000000C\",\"attachments\":[{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\"}],\"reactions\":[{\"emoji\":\"👍\",\"count\":1}],\"media\":[{\"url\":\"https://example.com/a\",\"type\":\"text/uri-list\"},{\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\",\"type\":\"text/uri-list\"}],\"linkEmbeds\":[{\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\"}],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}"
     },
     {
       "name": "member/message.getMessage.reply",
       "nsid": "space.roomy.message.getMessage",
       "params": {
-        "messageId": "01M5ND81W75YBZ4VX590DX05DX"
+        "messageId": "01HF7YAT040000000000000004"
       },
       "caller": "did:plc:member",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -664,23 +664,23 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"id\":\"01M5ND81W75YBZ4VX590DX05DX\",\"sort_idx\":\"01M5ND81W75YBZ4VX590DX05DX\",\"content\":\"four\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.887Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.reply.v0\",\"messageId\":\"01M5ND81W4GRY0CE6ZHDWXY3S2\"}],\"replyTo\":\"01M5ND81W4GRY0CE6ZHDWXY3S2\",\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}"
+      "body": "{\"id\":\"01HF7YAT040000000000000004\",\"sort_idx\":\"01HF7YAT040000000000000004\",\"content\":\"four\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.004Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.reply.v0\",\"messageId\":\"01HF7YAT010000000000000001\"}],\"replyTo\":\"01HF7YAT010000000000000001\",\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}"
     },
     {
       "name": "member/message.getMessage.thread",
       "nsid": "space.roomy.message.getMessage",
       "params": {
-        "messageId": "01M5ND81WFY9B30AAW5YAVBAFD"
+        "messageId": "01HF7YAT0C000000000000000B"
       },
       "caller": "did:plc:member",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -689,23 +689,23 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"sort_idx\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.895Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}"
+      "body": "{\"id\":\"01HF7YAT0C000000000000000B\",\"sort_idx\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.012Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"}"
     },
     {
       "name": "member/message.getReactions",
       "nsid": "space.roomy.message.getReactions",
       "params": {
-        "messageId": "01M5ND81W4GRY0CE6ZHDWXY3S2"
+        "messageId": "01HF7YAT010000000000000001"
       },
       "caller": "did:plc:member",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -714,7 +714,7 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
@@ -828,7 +828,7 @@
       "name": "outsider/message.getMessage.edited",
       "nsid": "space.roomy.message.getMessage",
       "params": {
-        "messageId": "01M5ND81W555QKAF005QF9Z5CG"
+        "messageId": "01HF7YAT020000000000000002"
       },
       "caller": "did:plc:outsider",
       "readPositions": [],
@@ -839,7 +839,7 @@
       "name": "outsider/message.getMessage.reply",
       "nsid": "space.roomy.message.getMessage",
       "params": {
-        "messageId": "01M5ND81W75YBZ4VX590DX05DX"
+        "messageId": "01HF7YAT040000000000000004"
       },
       "caller": "did:plc:outsider",
       "readPositions": [],
@@ -850,7 +850,7 @@
       "name": "outsider/message.getMessage.thread",
       "nsid": "space.roomy.message.getMessage",
       "params": {
-        "messageId": "01M5ND81WFY9B30AAW5YAVBAFD"
+        "messageId": "01HF7YAT0C000000000000000B"
       },
       "caller": "did:plc:outsider",
       "readPositions": [],
@@ -861,7 +861,7 @@
       "name": "outsider/message.getReactions",
       "nsid": "space.roomy.message.getReactions",
       "params": {
-        "messageId": "01M5ND81W4GRY0CE6ZHDWXY3S2"
+        "messageId": "01HF7YAT010000000000000001"
       },
       "caller": "did:plc:outsider",
       "readPositions": [],
@@ -913,7 +913,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -925,12 +925,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2026-10-23T22:14:02.890Z\",\"latestMessage\":{\"id\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2026-10-23T22:14:02.890Z\"}},\"unreadCount\":3,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMessage\":{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.895Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"}],\"cursor\":\"1792793642918::01JC0000000000000000000T01\"}"
+      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.007Z\",\"latestMessage\":{\"id\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2023-11-14T22:13:20.007Z\"}},\"unreadCount\":3,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"}],\"cursor\":\"1700000000035::01JC0000000000000000000T01\"}"
     },
     {
       "name": "admin/space.getThreads.page2",
@@ -938,13 +938,13 @@
       "params": {
         "spaceId": "did:web:space.example",
         "limit": "2",
-        "cursor": "1792793642918::01JC0000000000000000000T01"
+        "cursor": "1700000000035::01JC0000000000000000000T01"
       },
       "caller": "did:plc:admin",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -956,12 +956,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C03\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2026-10-23T22:14:02.914Z\",\"latestMessage\":{\"id\":\"01M5ND81X29SZMGXZ9NBH9N62R\",\"content\":\"readonly message\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.914Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"readonly\"},{\"id\":\"01JC0000000000000000000C02\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2026-10-23T22:14:02.904Z\",\"latestMessage\":{\"id\":\"01M5ND81WRPVZ88EKKEV29AJ0N\",\"content\":\"secret\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2026-10-23T22:14:02.904Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"secret\"}]}"
+      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C03\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.031Z\",\"latestMessage\":{\"id\":\"01HF7YAT0Z0000000000000009\",\"content\":\"readonly message\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.031Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"readonly\"},{\"id\":\"01JC0000000000000000000C02\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.021Z\",\"latestMessage\":{\"id\":\"01HF7YAT0N0000000000000008\",\"content\":\"secret\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2023-11-14T22:13:20.021Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"secret\"}]}"
     },
     {
       "name": "admin/room.getMessages.c1.page1",
@@ -974,7 +974,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -986,12 +986,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"messages\":[{\"id\":\"01M5ND81W923ECZ2CHWVJZSKM9\",\"sort_idx\":\"01M5ND81W923ECZ2CHWVJZSKM9\",\"content\":\"six\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.889Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"sort_idx\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"content\":\"seven\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.890Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01M5ND81W923ECZ2CHWVJZSKM9\"}"
+      "body": "{\"messages\":[{\"id\":\"01HF7YAT060000000000000006\",\"sort_idx\":\"01HF7YAT060000000000000006\",\"content\":\"six\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.006Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01HF7YAT070000000000000007\",\"sort_idx\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.007Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01HF7YAT060000000000000006\"}"
     },
     {
       "name": "admin/room.getMessages.c1.page2",
@@ -999,13 +999,13 @@
       "params": {
         "roomId": "01JC0000000000000000000C01",
         "limit": "2",
-        "cursor": "01M5ND81W923ECZ2CHWVJZSKM9"
+        "cursor": "01HF7YAT060000000000000006"
       },
       "caller": "did:plc:admin",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -1017,12 +1017,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"messages\":[{\"id\":\"01M5ND81W75YBZ4VX590DX05DX\",\"sort_idx\":\"01M5ND81W75YBZ4VX590DX05DX\",\"content\":\"four\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.887Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.reply.v0\",\"messageId\":\"01M5ND81W4GRY0CE6ZHDWXY3S2\"}],\"replyTo\":\"01M5ND81W4GRY0CE6ZHDWXY3S2\",\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01M5ND81W8H71SSKG78TVX4DBJ\",\"sort_idx\":\"01M5ND81W8H71SSKG78TVX4DBJ\",\"content\":\"five\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.888Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01M5ND81W75YBZ4VX590DX05DX\"}"
+      "body": "{\"messages\":[{\"id\":\"01HF7YAT040000000000000004\",\"sort_idx\":\"01HF7YAT040000000000000004\",\"content\":\"four\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.004Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.reply.v0\",\"messageId\":\"01HF7YAT010000000000000001\"}],\"replyTo\":\"01HF7YAT010000000000000001\",\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01HF7YAT050000000000000005\",\"sort_idx\":\"01HF7YAT050000000000000005\",\"content\":\"five\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.005Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01HF7YAT040000000000000004\"}"
     },
     {
       "name": "admin/room.getThreads.c1.page1",
@@ -1035,7 +1035,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -1047,12 +1047,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"threads\":[{\"id\":\"01JC0000000000000000000T01\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMessage\":{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.895Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"canonicalParent\":\"01JC0000000000000000000C01\"}]}"
+      "body": "{\"threads\":[{\"id\":\"01JC0000000000000000000T01\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"canonicalParent\":\"01JC0000000000000000000C01\"}]}"
     },
     {
       "name": "admin/room.getLinks.c1.page1",
@@ -1065,7 +1065,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -1077,12 +1077,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"links\":[{\"url\":\"https://example.com/a\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01M5ND81W555QKAF005QF9Z5CG\",\"timestamp\":\"2026-10-23T22:14:02.885Z\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}}],\"cursor\":\"01M5ND81W555QKAF005QF9Z5CG::https://example.com/a\"}"
+      "body": "{\"links\":[{\"url\":\"https://example.com/a\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01HF7YAT020000000000000002\",\"timestamp\":\"2023-11-14T22:13:20.002Z\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}}],\"cursor\":\"01HF7YAT020000000000000002::https://example.com/a\"}"
     },
     {
       "name": "admin/room.getLinks.c1.page2",
@@ -1090,13 +1090,13 @@
       "params": {
         "roomId": "01JC0000000000000000000C01",
         "limit": "1",
-        "cursor": "01M5ND81W555QKAF005QF9Z5CG::https://example.com/a"
+        "cursor": "01HF7YAT020000000000000002::https://example.com/a"
       },
       "caller": "did:plc:admin",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W75YBZ4VX590DX05DX"
+          "seenUpTo": "01HF7YAT040000000000000004"
         },
         {
           "roomId": "01JC0000000000000000000C02",
@@ -1108,12 +1108,12 @@
         },
         {
           "roomId": "01JC0000000000000000000T01",
-          "seenUpTo": "01M5ND81WEMDG1VFPVFDZCP8R2",
-          "lastActiveAt": 1792790642990
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"links\":[{\"url\":\"https://example.com/a?message=01M5ND81W555QKAF005QF9Z5CG\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01M5ND81W555QKAF005QF9Z5CG\",\"timestamp\":\"2026-10-23T22:14:02.885Z\"}]}"
+      "body": "{\"links\":[{\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01HF7YAT020000000000000002\",\"timestamp\":\"2023-11-14T22:13:20.002Z\"}]}"
     },
     {
       "name": "member/space.getThreads.page1",
@@ -1126,7 +1126,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -1135,11 +1135,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2026-10-23T22:14:02.890Z\",\"latestMessage\":{\"id\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2026-10-23T22:14:02.890Z\"}},\"unreadCount\":4,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMessage\":{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.895Z\"}},\"unreadCount\":2,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"}],\"cursor\":\"1792793642918::01JC0000000000000000000T01\"}"
+      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.007Z\",\"latestMessage\":{\"id\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2023-11-14T22:13:20.007Z\"}},\"unreadCount\":4,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":2,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"}],\"cursor\":\"1700000000035::01JC0000000000000000000T01\"}"
     },
     {
       "name": "member/space.getThreads.page2",
@@ -1147,13 +1147,13 @@
       "params": {
         "spaceId": "did:web:space.example",
         "limit": "2",
-        "cursor": "1792793642918::01JC0000000000000000000T01"
+        "cursor": "1700000000035::01JC0000000000000000000T01"
       },
       "caller": "did:plc:member",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -1162,11 +1162,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C03\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2026-10-23T22:14:02.914Z\",\"latestMessage\":{\"id\":\"01M5ND81X29SZMGXZ9NBH9N62R\",\"content\":\"readonly message\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.914Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"readonly\"}]}"
+      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C03\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.031Z\",\"latestMessage\":{\"id\":\"01HF7YAT0Z0000000000000009\",\"content\":\"readonly message\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.031Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"readonly\"}]}"
     },
     {
       "name": "member/room.getMessages.c1.page1",
@@ -1179,7 +1179,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -1188,11 +1188,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"messages\":[{\"id\":\"01M5ND81W923ECZ2CHWVJZSKM9\",\"sort_idx\":\"01M5ND81W923ECZ2CHWVJZSKM9\",\"content\":\"six\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.889Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"sort_idx\":\"01M5ND81WAK0PGSHDKD5YGVD49\",\"content\":\"seven\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.890Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01M5ND81W923ECZ2CHWVJZSKM9\"}"
+      "body": "{\"messages\":[{\"id\":\"01HF7YAT060000000000000006\",\"sort_idx\":\"01HF7YAT060000000000000006\",\"content\":\"six\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.006Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01HF7YAT070000000000000007\",\"sort_idx\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.007Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01HF7YAT060000000000000006\"}"
     },
     {
       "name": "member/room.getMessages.c1.page2",
@@ -1200,13 +1200,13 @@
       "params": {
         "roomId": "01JC0000000000000000000C01",
         "limit": "2",
-        "cursor": "01M5ND81W923ECZ2CHWVJZSKM9"
+        "cursor": "01HF7YAT060000000000000006"
       },
       "caller": "did:plc:member",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -1215,11 +1215,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"messages\":[{\"id\":\"01M5ND81W75YBZ4VX590DX05DX\",\"sort_idx\":\"01M5ND81W75YBZ4VX590DX05DX\",\"content\":\"four\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2026-10-23T22:14:02.887Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.reply.v0\",\"messageId\":\"01M5ND81W4GRY0CE6ZHDWXY3S2\"}],\"replyTo\":\"01M5ND81W4GRY0CE6ZHDWXY3S2\",\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01M5ND81W8H71SSKG78TVX4DBJ\",\"sort_idx\":\"01M5ND81W8H71SSKG78TVX4DBJ\",\"content\":\"five\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2026-10-23T22:14:02.888Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01M5ND81W75YBZ4VX590DX05DX\"}"
+      "body": "{\"messages\":[{\"id\":\"01HF7YAT040000000000000004\",\"sort_idx\":\"01HF7YAT040000000000000004\",\"content\":\"four\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.004Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.reply.v0\",\"messageId\":\"01HF7YAT010000000000000001\"}],\"replyTo\":\"01HF7YAT010000000000000001\",\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01HF7YAT050000000000000005\",\"sort_idx\":\"01HF7YAT050000000000000005\",\"content\":\"five\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.005Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}],\"cursor\":\"01HF7YAT040000000000000004\"}"
     },
     {
       "name": "member/room.getThreads.c1.page1",
@@ -1232,7 +1232,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -1241,11 +1241,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"threads\":[{\"id\":\"01JC0000000000000000000T01\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2026-10-23T22:14:02.895Z\",\"latestMessage\":{\"id\":\"01M5ND81WFY9B30AAW5YAVBAFD\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2026-10-23T22:14:02.895Z\"}},\"unreadCount\":2,\"unread\":true,\"name\":\"Thread One\",\"canonicalParent\":\"01JC0000000000000000000C01\"}]}"
+      "body": "{\"threads\":[{\"id\":\"01JC0000000000000000000T01\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":2,\"unread\":true,\"name\":\"Thread One\",\"canonicalParent\":\"01JC0000000000000000000C01\"}]}"
     },
     {
       "name": "member/room.getLinks.c1.page1",
@@ -1258,7 +1258,7 @@
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -1267,11 +1267,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"links\":[{\"url\":\"https://example.com/a\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01M5ND81W555QKAF005QF9Z5CG\",\"timestamp\":\"2026-10-23T22:14:02.885Z\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}}],\"cursor\":\"01M5ND81W555QKAF005QF9Z5CG::https://example.com/a\"}"
+      "body": "{\"links\":[{\"url\":\"https://example.com/a\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01HF7YAT020000000000000002\",\"timestamp\":\"2023-11-14T22:13:20.002Z\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}}],\"cursor\":\"01HF7YAT020000000000000002::https://example.com/a\"}"
     },
     {
       "name": "member/room.getLinks.c1.page2",
@@ -1279,13 +1279,13 @@
       "params": {
         "roomId": "01JC0000000000000000000C01",
         "limit": "1",
-        "cursor": "01M5ND81W555QKAF005QF9Z5CG::https://example.com/a"
+        "cursor": "01HF7YAT020000000000000002::https://example.com/a"
       },
       "caller": "did:plc:member",
       "readPositions": [
         {
           "roomId": "01JC0000000000000000000C01",
-          "seenUpTo": "01M5ND81W555QKAF005QF9Z5CG"
+          "seenUpTo": "01HF7YAT020000000000000002"
         },
         {
           "roomId": "01JC0000000000000000000C03",
@@ -1294,11 +1294,11 @@
         {
           "roomId": "01JC0000000000000000000T01",
           "seenUpTo": "0",
-          "lastActiveAt": 1792790642990
+          "lastActiveAt": 1699996400000
         }
       ],
       "status": 200,
-      "body": "{\"links\":[{\"url\":\"https://example.com/a?message=01M5ND81W555QKAF005QF9Z5CG\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01M5ND81W555QKAF005QF9Z5CG\",\"timestamp\":\"2026-10-23T22:14:02.885Z\"}]}"
+      "body": "{\"links\":[{\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\",\"roomId\":\"01JC0000000000000000000C01\",\"messageId\":\"01HF7YAT020000000000000002\",\"timestamp\":\"2023-11-14T22:13:20.002Z\"}]}"
     }
   ]
 }

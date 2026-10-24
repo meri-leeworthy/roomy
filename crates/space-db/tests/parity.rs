@@ -176,7 +176,6 @@ fn every_fixture_projects_to_the_typescript_digests() {
     }
 }
 
-
 #[test]
 fn a_stamp_and_its_log_position_are_the_fixture_order() {
     // The feed is written in `(idx, ord)` order and a stamp sorts by time then

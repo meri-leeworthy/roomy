@@ -517,12 +517,15 @@ pub fn select_messages(
     let live_ids: Vec<String> = base_rows.iter().map(|row| row.id.clone()).collect();
     let id_ph = live_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
+    // `created_at asc, reaction_id asc` is the oracle's order: reactions are
+    // grouped in the order they were made, and the id breaks a tie.
     let reaction_rows: Vec<(String, String, String, String)> = if live_ids.is_empty() {
         Vec::new()
     } else {
         let mut stmt = conn.prepare(&format!(
             "select entity, reaction, user, reaction_id from comp_reaction
-              where entity in ({id_ph})"
+              where entity in ({id_ph})
+              order by created_at asc, reaction_id asc"
         ))?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(live_ids.iter()), |row| {
