@@ -66,13 +66,26 @@ pub enum Body {
 ///
 /// The path and query are already encoded and the base url already applied, so
 /// an [`Exchange`] has nothing left to decide.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Request {
     pub method: Method,
     pub url: String,
     /// Sent as `Authorization: Bearer`. Absent for an origin that needs none.
     pub token: Option<String>,
     pub body: Body,
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Request")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            // A shared secret does not go into a log line.
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 /// One answer, with the headers the media path reads kept apart from the body.
