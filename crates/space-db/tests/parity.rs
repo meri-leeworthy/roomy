@@ -124,8 +124,16 @@ fn every_fixture_projects_to_the_typescript_digests() {
             })
             .collect();
 
-        let planned = plan_batch(db.connection(), &stream, &batch, fixture.received_at)
-            .unwrap_or_else(|err| panic!("{name}: planning failed: {err}"));
+        // The fixture is the live write path's projection: the TypeScript
+        // corpus is materialised as the appserver materialises a live space.
+        let planned = plan_batch(
+            db.connection(),
+            &stream,
+            &batch,
+            space_core::PlanMode::Live,
+            fixture.received_at,
+        )
+        .unwrap_or_else(|err| panic!("{name}: planning failed: {err}"));
 
         // The effects and steps are planned once and applied in the batch's
         // order, which is how a worker drains a feed batch.

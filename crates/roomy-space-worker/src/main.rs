@@ -50,6 +50,7 @@ async fn main() {
         holder: config.holder.clone(),
         lease_ttl: config.lease_ttl,
         batch_limit: config.batch_limit,
+        mode: space_core::PlanMode::Live,
         feed,
         lease,
         sink,

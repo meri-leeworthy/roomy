@@ -14,13 +14,17 @@
 //!    accumulates it.
 //!  * **Re-materialisation from the log.** The feed is the input; a worker with
 //!    a stale DB resumes from its cursor and a worker with a corrupt one is
-//!    rebuilt by replaying the feed from zero, which is the same code path.
+//!    rebuilt by replaying the feed from zero. A rebuild plans in
+//!    [`PlanMode::Backfill`], which invalidates the read-path projections
+//!    instead of maintaining them, so a database being rebuilt never answers a
+//!    read from a half-replayed projection.
 //!  * **Serving reads.** The router is a separate crate; this one materialises.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use space_core::change::DecodeError;
 use space_core::ids::SpaceDid;
+use space_core::PlanMode;
 use space_db::plan::{group_entries, plan_batch};
 use space_db::{DbError, SpaceDb};
 
@@ -74,6 +78,9 @@ pub struct WorkerParts<F: ChangeFeed, L: Lease, S: GlobalSink> {
     pub lease_ttl: Duration,
     /// The most changes one batch may hold.
     pub batch_limit: usize,
+    /// Whether this worker is the live write path or a rebuild. A rebuild
+    /// invalidates the read-path projections rather than writing them.
+    pub mode: PlanMode,
     pub feed: F,
     pub lease: L,
     pub sink: S,
@@ -86,6 +93,7 @@ pub struct Worker<F: ChangeFeed, L: Lease, S: GlobalSink> {
     holder: String,
     lease_ttl: Duration,
     batch_limit: usize,
+    mode: PlanMode,
     feed: F,
     lease: L,
     sink: S,
@@ -102,6 +110,7 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
             holder: parts.holder,
             lease_ttl: parts.lease_ttl,
             batch_limit: parts.batch_limit,
+            mode: parts.mode,
             feed: parts.feed,
             lease: parts.lease,
             sink: parts.sink,
@@ -116,6 +125,18 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
 
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    /// What this worker plans in: the live path, or a rebuild's backfill.
+    pub fn mode(&self) -> PlanMode {
+        self.mode
+    }
+
+    /// Switch between the live path and a rebuild. A supervisor sets this while
+    /// a space is being replayed from zero and clears it once the replay has
+    /// caught up to the feed.
+    pub fn set_mode(&mut self, mode: PlanMode) {
+        self.mode = mode;
     }
 
     /// Whether this process holds the lease right now.
@@ -171,15 +192,20 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
         })?;
         let changes = rows.len();
 
-        let planned = plan_batch(self.db.connection(), &self.space, &entries, now_ms()).map_err(
-            |source| match source {
-                DbError::Rule(source) => WorkerError::Plan {
-                    idx: entries.first().map(|entry| entry.idx).unwrap_or(-1),
-                    source,
-                },
-                other => WorkerError::Db(other),
+        let planned = plan_batch(
+            self.db.connection(),
+            &self.space,
+            &entries,
+            self.mode,
+            now_ms(),
+        )
+        .map_err(|source| match source {
+            DbError::Rule(source) => WorkerError::Plan {
+                idx: entries.first().map(|entry| entry.idx).unwrap_or(-1),
+                source,
             },
-        )?;
+            other => WorkerError::Db(other),
+        })?;
 
         let last = rows.last().expect("a non-empty batch has a last row");
         let next_cursor = (last.idx, last.ord);

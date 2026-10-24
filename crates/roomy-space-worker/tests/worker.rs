@@ -123,6 +123,7 @@ fn a_fixture_feed_drains_to_the_typescript_digest() {
         // One batch, matching the chunk the TypeScript materialiser applies the
         // same log in: the derived steps see a batch's rows as a whole.
         batch_limit: 500,
+        mode: space_core::PlanMode::Live,
         feed,
         lease,
         sink,
@@ -299,6 +300,7 @@ fn drain(space: &SpaceDid, changes: &[FeedRow], space_path: &Path, global_path: 
         holder: "test-holder".to_string(),
         lease_ttl: Duration::from_secs(30),
         batch_limit: 500,
+        mode: space_core::PlanMode::Live,
         feed,
         lease,
         sink,
@@ -375,7 +377,14 @@ fn a_crash_between_the_global_write_and_the_commit_replays_to_the_same_projectio
             .batch(&space, (-1, -1), 500)
             .expect("a batch from the start");
         let entries = group_entries(&rows).expect("the rows group into entries");
-        let planned = plan_batch(db.connection(), &space, &entries, 0).expect("planning");
+        let planned = plan_batch(
+            db.connection(),
+            &space,
+            &entries,
+            space_core::PlanMode::Live,
+            0,
+        )
+        .expect("planning");
         let last = rows.last().expect("a non-empty batch");
         let mut sink = SqliteGlobalSink::open(&global_path).expect("sink");
         let batch = db
