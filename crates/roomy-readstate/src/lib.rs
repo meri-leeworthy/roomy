@@ -148,6 +148,11 @@ pub trait ReadStateStore: Send + Sync {
         last_active_at: i64,
         updated_at: i64,
     ) -> Result<(), ReadStateError>;
+
+    /// Forget a user's pending push digest for a room, so the next burst starts
+    /// a fresh batch. A pair with no row is not an error.
+    fn reset_notification_state(&self, user_did: &str, room_id: &str)
+        -> Result<(), ReadStateError>;
 }
 
 /// No read state on this node: every caller has no watermarks, no blocks and no
@@ -194,6 +199,14 @@ impl ReadStateStore for NoReadState {
         _thread_id: &str,
         _last_active_at: i64,
         _updated_at: i64,
+    ) -> Result<(), ReadStateError> {
+        Ok(())
+    }
+
+    fn reset_notification_state(
+        &self,
+        _user_did: &str,
+        _room_id: &str,
     ) -> Result<(), ReadStateError> {
         Ok(())
     }
@@ -399,6 +412,20 @@ impl ReadStateStore for SqliteReadStateStore {
         })?;
         Ok(())
     }
+
+    fn reset_notification_state(
+        &self,
+        user_did: &str,
+        room_id: &str,
+    ) -> Result<(), ReadStateError> {
+        self.with(|conn| {
+            conn.execute(
+                "delete from notification_state where user_did = ? and room_id = ?",
+                (user_did, room_id),
+            )
+        })?;
+        Ok(())
+    }
 }
 
 /// The columns this crate reads, spelled the way `readStateSchema.sql` spells
@@ -587,6 +614,42 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn resetting_a_digest_forgets_only_that_pair() {
+        let store = store();
+        store
+            .with(|conn| {
+                conn.execute(
+                    "insert into notification_state (user_did, room_id, unseen_count) values
+                       ('did:plc:a', 'r1', 3), ('did:plc:a', 'r2', 1), ('did:plc:b', 'r1', 2)",
+                    [],
+                )
+            })
+            .unwrap();
+        store.reset_notification_state("did:plc:a", "r1").unwrap();
+        let remaining: Vec<(String, String)> = store
+            .with(|conn| {
+                let mut statement = conn.prepare(
+                    "select user_did, room_id from notification_state
+                     order by user_did, room_id",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(
+            remaining,
+            vec![
+                ("did:plc:a".to_string(), "r2".to_string()),
+                ("did:plc:b".to_string(), "r1".to_string()),
+            ]
+        );
+        // Re-arming an already-reset pair is not an error.
+        store.reset_notification_state("did:plc:a", "r1").unwrap();
     }
 
     #[test]

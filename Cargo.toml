@@ -27,6 +27,7 @@ roomy-gateway = { path = "crates/roomy-gateway" }
 roomy-appserver = { path = "crates/roomy-appserver" }
 space-xrpc = { path = "crates/space-xrpc" }
 roomy-readstate = { path = "crates/roomy-readstate" }
+roomy-ingest = { path = "crates/roomy-ingest" }
 
 # The space worker opens the SQLite files the TypeScript appserver writes, so
 # the driver is `rusqlite` with the bundled amalgamation: one SQLite version,

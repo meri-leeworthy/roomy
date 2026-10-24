@@ -17,6 +17,7 @@
 //! split one.
 
 pub mod cache;
+pub mod procedures;
 pub mod reads;
 pub mod signals;
 pub mod ws;
@@ -53,6 +54,14 @@ pub struct GatewayState {
     pub counters: Arc<Counters>,
     /// Answers to repeat, bounded by a TTL and evicted by signals.
     pub cache: Arc<cache::ResponseCache>,
+    /// The event log, when this process accepts writes. A gateway without one
+    /// is a read replica and refuses `sendEvents` rather than losing it.
+    pub ingest: Option<Arc<Mutex<roomy_ingest::EventLog>>>,
+    /// The service's own DID, which authorizes the narrow set of events the
+    /// service may write without membership.
+    pub service_did: Option<String>,
+    /// Injected so a write's ordering key is a function of its inputs.
+    pub clock: Arc<dyn roomy_space_worker::clock::Clock>,
 }
 
 /// The numbers `/metrics` reports.
@@ -107,7 +116,27 @@ impl GatewayState {
             signals,
             counters: Arc::new(Counters::default()),
             cache: Arc::new(cache::ResponseCache::new(Duration::from_millis(2000))),
+            ingest: None,
+            service_did: None,
+            clock: Arc::new(roomy_space_worker::clock::SystemClock),
         }
+    }
+
+    /// The same gateway, accepting writes into `log` as `service_did`.
+    pub fn with_ingest(
+        mut self,
+        log: Arc<Mutex<roomy_ingest::EventLog>>,
+        service_did: Option<String>,
+    ) -> Self {
+        self.ingest = Some(log);
+        self.service_did = service_did;
+        self
+    }
+
+    /// The same gateway, reading an injected clock.
+    pub fn with_clock(mut self, clock: Arc<dyn roomy_space_worker::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 }
 
@@ -141,6 +170,33 @@ pub fn router(state: Arc<GatewayState>) -> Router {
             post(get_connection_ticket),
         )
         .route("/xrpc/space.roomy.sync.subscribe", get(ws::subscribe))
+        .route(
+            "/xrpc/space.roomy.space.sendEvents",
+            post(procedures::send_events::http),
+        )
+        .route(
+            "/xrpc/space.roomy.room.updateSeen",
+            post(procedures::update_seen::http),
+        )
+        // The reads no single space can answer: a feed merged across the
+        // caller's spaces, mentions hydrated per space, a profile that may
+        // leave the process, and a link card fetched from its host.
+        .route(
+            "/xrpc/space.roomy.space.getActivityFeed",
+            get(reads::activity_feed::http),
+        )
+        .route(
+            "/xrpc/space.roomy.mention.getMentions",
+            get(reads::mentions::http),
+        )
+        .route(
+            "/xrpc/space.roomy.user.getProfile",
+            get(reads::profiles::http),
+        )
+        .route(
+            "/xrpc/space.roomy.embed.getLinkMetadata",
+            get(reads::link_metadata::http),
+        )
         .with_state(state)
         .merge(reads)
 }
