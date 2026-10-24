@@ -23,6 +23,7 @@ pub mod cancel;
 pub mod clock;
 pub mod health;
 pub mod lease;
+pub mod relay;
 pub mod signal;
 pub mod sink;
 pub mod supervisor;
