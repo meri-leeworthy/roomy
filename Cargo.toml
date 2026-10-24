@@ -21,6 +21,10 @@ space-core = { path = "crates/space-core" }
 space-db = { path = "crates/space-db" }
 space-feed = { path = "crates/space-feed" }
 roomy-space-worker = { path = "crates/roomy-space-worker" }
+roomy-auth = { path = "crates/roomy-auth" }
+roomy-sync = { path = "crates/roomy-sync" }
+roomy-gateway = { path = "crates/roomy-gateway" }
+roomy-appserver = { path = "crates/roomy-appserver" }
 space-xrpc = { path = "crates/space-xrpc" }
 
 # The space worker opens the SQLite files the TypeScript appserver writes, so
