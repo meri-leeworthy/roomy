@@ -22,6 +22,11 @@
 //! ROOMY_TICKET_TTL     60              a ticket's lifetime, in seconds
 //! ROOMY_TICKET_AUDIENCE roomy-gateway  the audience a ticket is bound to
 //! ROOMY_TEST_MODE      —               `true` enables `X-Test-Did`
+//! ROOMY_INTERNAL_SECRET —              the shared secret for `/internal/feed`; a
+//!                                     gateway that sets it serves its log to
+//!                                     workers on other machines
+//! ROOMY_FEED_URL       —               the gateway whose log this worker reads;
+//!                                     unset reads this machine's SQLite file
 //! ```
 
 use std::net::SocketAddr;
@@ -30,10 +35,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use roomy_auth::{InMemoryNonces, TicketIssuer, TicketVerifier};
+use roomy_gateway::internal::{FeedService, INTERNAL_HEADER};
 use roomy_gateway::{cache, router, GatewaySignals, GatewayState};
 use roomy_space_worker::signal::SignalSink;
+use roomy_space_worker::supervisor::FeedFactory;
 use roomy_space_worker::{Supervisor, SupervisorConfig};
 use space_core::ids::SpaceDid;
+use space_feed::http::{HttpChangeFeed, UreqPull};
+use space_feed::sqlite::SqliteChangeFeed;
+use space_feed::ChangeFeed;
 use space_xrpc::registry::{SpaceRegistry, SpaceResolver};
 use space_xrpc::state::{SpaceReadDb, XrpcState};
 use space_xrpc::verify::{GatewayServiceAuth, TestMode};
@@ -55,6 +65,11 @@ struct Config {
     ticket_audience: String,
     test_mode: bool,
     max_open_spaces: usize,
+    /// Serves this process's event log to workers on other machines. Unset keeps
+    /// the endpoint unmounted.
+    internal_secret: Option<String>,
+    /// Where this worker pulls its changes from, when it does not own the log.
+    feed_url: Option<String>,
 }
 
 fn main() {
@@ -140,6 +155,12 @@ impl Config {
             .transpose()?
             .unwrap_or(256);
 
+        let internal_secret = var("ROOMY_INTERNAL_SECRET").filter(|secret| !secret.is_empty());
+        let feed_url = var("ROOMY_FEED_URL").filter(|url| !url.is_empty());
+        if feed_url.is_some() && role != Role::Worker {
+            return Err("ROOMY_FEED_URL is for a worker; a gateway reads the log it owns".into());
+        }
+
         Ok(Self {
             role,
             data_dir,
@@ -150,6 +171,8 @@ impl Config {
             ticket_audience: var("ROOMY_TICKET_AUDIENCE").unwrap_or_else(|| "roomy-gateway".into()),
             test_mode: var("ROOMY_TEST_MODE").as_deref() == Some("true"),
             max_open_spaces,
+            internal_secret,
+            feed_url,
         })
     }
 
@@ -180,10 +203,11 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         // have a projection would serve reads from empty databases.
         let supervisor = if config.role != Role::Gateway {
             let signals = signals.clone();
-            let supervisor =
-                Supervisor::new(supervisor_config(&config)).with_signals(Arc::new(move || {
+            let supervisor = Supervisor::new(supervisor_config(&config))
+                .with_signals(Arc::new(move || {
                     Box::new(signals.clone()) as Box<dyn SignalSink>
-                }));
+                }))
+                .with_feed(feed_factory(&config));
             supervisor.start_all(config.spaces.clone())?;
             Some(supervisor)
         } else {
@@ -272,7 +296,7 @@ fn gateway_state(
     let reads = XrpcState::new(placeholder, verifier)
         .with_spaces(Arc::clone(&registry) as Arc<dyn SpaceResolver>);
 
-    Ok(Arc::new(GatewayState::new(
+    let state = GatewayState::new(
         reads,
         Arc::new(TicketIssuer::new(
             config.ticket_secret.clone(),
@@ -285,7 +309,38 @@ fn gateway_state(
             Box::new(InMemoryNonces::new()),
         )),
         signals,
-    )))
+    );
+    // A gateway that owns the log serves it; one that does not leaves the route
+    // unmounted rather than answering an empty feed.
+    let state = match &config.internal_secret {
+        Some(secret) => state.with_feed(FeedService::open(config.events_db(), secret.clone())?),
+        None => state,
+    };
+    Ok(Arc::new(state))
+}
+
+/// Where this process reads its changes from: the log it owns, or the owner's
+/// endpoint when the log lives on another machine.
+fn feed_factory(config: &Config) -> FeedFactory {
+    match &config.feed_url {
+        Some(url) => {
+            let url = url.clone();
+            let secret = config.internal_secret.clone();
+            Arc::new(move || {
+                let mut pull = UreqPull::default();
+                if let Some(secret) = &secret {
+                    pull = pull.with_header(INTERNAL_HEADER, secret);
+                }
+                Ok(Box::new(HttpChangeFeed::new(url.clone(), pull)) as Box<dyn ChangeFeed>)
+            })
+        }
+        None => {
+            let events_db = config.events_db();
+            Arc::new(move || {
+                Ok(Box::new(SqliteChangeFeed::open(&events_db)?) as Box<dyn ChangeFeed>)
+            })
+        }
+    }
 }
 
 fn var(name: &str) -> Option<String> {

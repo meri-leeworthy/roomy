@@ -17,6 +17,7 @@
 //! split one.
 
 pub mod cache;
+pub mod internal;
 pub mod procedures;
 pub mod reads;
 pub mod signals;
@@ -62,6 +63,9 @@ pub struct GatewayState {
     pub service_did: Option<String>,
     /// Injected so a write's ordering key is a function of its inputs.
     pub clock: Arc<dyn roomy_space_worker::clock::Clock>,
+    /// The event log, served to workers on other machines over `/internal/feed`.
+    /// `None` in a process that neither owns the log nor relays it.
+    pub feed: Option<Arc<internal::FeedService>>,
 }
 
 /// The numbers `/metrics` reports.
@@ -119,6 +123,7 @@ impl GatewayState {
             ingest: None,
             service_did: None,
             clock: Arc::new(roomy_space_worker::clock::SystemClock),
+            feed: None,
         }
     }
 
@@ -130,6 +135,12 @@ impl GatewayState {
     ) -> Self {
         self.ingest = Some(log);
         self.service_did = service_did;
+        self
+    }
+
+    /// The same gateway, serving its event log to workers on other machines.
+    pub fn with_feed(mut self, feed: internal::FeedService) -> Self {
+        self.feed = Some(Arc::new(feed));
         self
     }
 
@@ -178,6 +189,9 @@ pub fn router(state: Arc<GatewayState>) -> Router {
             "/xrpc/space.roomy.room.updateSeen",
             post(procedures::update_seen::http),
         )
+        // The owner's half of the change feed: not part of the XRPC surface, and
+        // answered from the log this process holds.
+        .route("/internal/feed/{space}", get(internal::feed))
         // The reads no single space can answer: a feed merged across the
         // caller's spaces, mentions hydrated per space, a profile that may
         // leave the process, and a link card fetched from its host.

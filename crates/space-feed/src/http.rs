@@ -114,6 +114,9 @@ impl<P: Pull> ChangeFeed for HttpChangeFeed<P> {
 /// A [`Pull`] over `ureq`, blocking, with a timeout.
 pub struct UreqPull {
     agent: ureq::Agent,
+    /// Sent on every request: the feed an owner serves to workers other than
+    /// its own is behind a shared secret, never open to the edge.
+    header: Option<(String, String)>,
 }
 
 impl UreqPull {
@@ -123,7 +126,14 @@ impl UreqPull {
                 .timeout_connect(timeout)
                 .timeout_read(timeout)
                 .build(),
+            header: None,
         }
+    }
+
+    /// Authenticate every pull with `name: value`.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.header = Some((name.into(), value.into()));
+        self
     }
 }
 
@@ -135,9 +145,11 @@ impl Default for UreqPull {
 
 impl Pull for UreqPull {
     fn get(&self, url: &str) -> Result<String, PullError> {
-        let response = self
-            .agent
-            .get(url)
+        let mut request = self.agent.get(url);
+        if let Some((name, value)) = &self.header {
+            request = request.set(name, value);
+        }
+        let response = request
             .call()
             .map_err(|error| PullError::Transport(error.to_string()))?;
         response

@@ -15,6 +15,7 @@ roomy-auth.workspace = true
 roomy-gateway.workspace = true
 roomy-space-worker.workspace = true
 space-core.workspace = true
+space-feed.workspace = true
 space-xrpc.workspace = true
 axum = "0.8"
 rusqlite.workspace = true
