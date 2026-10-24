@@ -27,6 +27,8 @@
 //!                                     workers on other machines
 //! ROOMY_FEED_URL       —               the gateway whose log this worker reads;
 //!                                     unset reads this machine's SQLite file
+//! ROOMY_SIGNAL_URL     —               the gateway this worker's signals go to;
+//!                                     unset keeps them in this process
 //! ```
 
 use std::net::SocketAddr;
@@ -37,8 +39,9 @@ use std::time::Duration;
 use roomy_auth::{InMemoryNonces, TicketIssuer, TicketVerifier};
 use roomy_gateway::internal::{FeedService, INTERNAL_HEADER};
 use roomy_gateway::{cache, router, GatewaySignals, GatewayState};
+use roomy_space_worker::relay::RelaySignals;
 use roomy_space_worker::signal::SignalSink;
-use roomy_space_worker::supervisor::FeedFactory;
+use roomy_space_worker::supervisor::{FeedFactory, SignalFactory};
 use roomy_space_worker::{Supervisor, SupervisorConfig};
 use space_core::ids::SpaceDid;
 use space_feed::http::{HttpChangeFeed, UreqPull};
@@ -70,6 +73,9 @@ struct Config {
     internal_secret: Option<String>,
     /// Where this worker pulls its changes from, when it does not own the log.
     feed_url: Option<String>,
+    /// Where this worker relays its post-commit signals, when the sockets that
+    /// need them are in another process.
+    signal_url: Option<String>,
 }
 
 fn main() {
@@ -160,6 +166,12 @@ impl Config {
         if feed_url.is_some() && role != Role::Worker {
             return Err("ROOMY_FEED_URL is for a worker; a gateway reads the log it owns".into());
         }
+        let signal_url = var("ROOMY_SIGNAL_URL").filter(|url| !url.is_empty());
+        if signal_url.is_some() && role != Role::Worker {
+            return Err(
+                "ROOMY_SIGNAL_URL is for a worker; a gateway fans signals out locally".into(),
+            );
+        }
 
         Ok(Self {
             role,
@@ -173,6 +185,7 @@ impl Config {
             max_open_spaces,
             internal_secret,
             feed_url,
+            signal_url,
         })
     }
 
@@ -204,9 +217,7 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         let supervisor = if config.role != Role::Gateway {
             let signals = signals.clone();
             let supervisor = Supervisor::new(supervisor_config(&config))
-                .with_signals(Arc::new(move || {
-                    Box::new(signals.clone()) as Box<dyn SignalSink>
-                }))
+                .with_signals(signal_factory(&config, signals.clone()))
                 .with_feed(feed_factory(&config));
             supervisor.start_all(config.spaces.clone())?;
             Some(supervisor)
@@ -313,10 +324,27 @@ fn gateway_state(
     // A gateway that owns the log serves it; one that does not leaves the route
     // unmounted rather than answering an empty feed.
     let state = match &config.internal_secret {
-        Some(secret) => state.with_feed(FeedService::open(config.events_db(), secret.clone())?),
+        Some(secret) => state
+            .with_internal_secret(secret.clone())
+            .with_feed(FeedService::open(config.events_db())?),
         None => state,
     };
     Ok(Arc::new(state))
+}
+
+/// Where this process's signals go: to the gateway in this process, or to the one
+/// that serves the sockets.
+fn signal_factory(config: &Config, signals: GatewaySignals) -> SignalFactory {
+    match &config.signal_url {
+        Some(url) => {
+            let url = url.clone();
+            let secret = config.internal_secret.clone();
+            Arc::new(move || {
+                Box::new(RelaySignals::new(url.clone(), secret.clone())) as Box<dyn SignalSink>
+            })
+        }
+        None => Arc::new(move || Box::new(signals.clone()) as Box<dyn SignalSink>),
+    }
 }
 
 /// Where this process reads its changes from: the log it owns, or the owner's

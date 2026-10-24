@@ -97,6 +97,10 @@ struct Served {
 
 /// A gateway over `events_db`, listening on a loopback port.
 async fn serve_gateway(events_db: &Path) -> Served {
+    serve_gateway_with_signals(events_db, GatewaySignals::new(16)).await
+}
+
+async fn serve_gateway_with_signals(events_db: &Path, signals: GatewaySignals) -> Served {
     let placeholder = Arc::new(SpaceReadDb::from_connection(
         rusqlite::Connection::open_in_memory().expect("placeholder"),
     ));
@@ -110,9 +114,10 @@ async fn serve_gateway(events_db: &Path) -> Served {
             "test",
             Box::new(InMemoryNonces::new()),
         )),
-        GatewaySignals::new(16),
+        signals,
     )
-    .with_feed(FeedService::open(events_db, SECRET).expect("feed service"));
+    .with_internal_secret(SECRET)
+    .with_feed(FeedService::open(events_db).expect("feed service"));
 
     let app = router(Arc::new(state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -287,4 +292,75 @@ async fn an_unknown_space_is_an_empty_feed_not_an_error() {
 
     assert!(rows.is_empty());
     assert_eq!(latest, -1, "a space with no rows has no last entry");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_worker_s_signal_reaches_the_gateway_s_sockets() {
+    let gateway_dir = tempfile::tempdir().expect("gateway dir");
+    let space = SpaceDid::parse(SPACE.to_string()).expect("space DID");
+    let events_db = gateway_dir.path().join("events.sqlite");
+    build_events_db(&events_db, &space);
+
+    let signals = GatewaySignals::new(16);
+    let mut received = signals.subscribe();
+    let gateway = serve_gateway_with_signals(&events_db, signals).await;
+
+    // The worker's half: a relay that only knows a URL and the secret.
+    let url = gateway.base_url.clone();
+    let delivered = tokio::task::spawn_blocking(move || {
+        let mut relay = roomy_space_worker::relay::RelaySignals::new(url, Some(SECRET.to_string()));
+        let signal = roomy_space_worker::signal::SpaceSignal {
+            space: SpaceDid::parse(SPACE.to_string()).expect("space DID"),
+            cursor: (4, 2),
+            entries: 3,
+        };
+        roomy_space_worker::signal::SignalSink::signal(&mut relay, &signal);
+        relay.counts()
+    })
+    .await
+    .expect("join");
+
+    let signal = tokio::time::timeout(Duration::from_secs(10), received.recv())
+        .await
+        .expect("the relayed signal arrives")
+        .expect("the gateway's sender is alive");
+    let _ = gateway.shutdown.send(());
+    let _ = gateway.handle.await;
+
+    assert_eq!(delivered, (1, 0), "the relay delivered the signal");
+    assert_eq!(signal.space, space);
+    assert_eq!(signal.cursor, (4, 2), "the cursor crosses untouched");
+    assert_eq!(signal.entries, 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_without_the_secret_is_refused_and_drops_the_signal() {
+    let gateway_dir = tempfile::tempdir().expect("gateway dir");
+    let space = SpaceDid::parse(SPACE.to_string()).expect("space DID");
+    let events_db = gateway_dir.path().join("events.sqlite");
+    build_events_db(&events_db, &space);
+
+    let signals = GatewaySignals::new(16);
+    let mut received = signals.subscribe();
+    let gateway = serve_gateway_with_signals(&events_db, signals).await;
+
+    let url = gateway.base_url.clone();
+    let counts = tokio::task::spawn_blocking(move || {
+        let mut relay = roomy_space_worker::relay::RelaySignals::new(url, None);
+        let signal = roomy_space_worker::signal::SpaceSignal {
+            space: SpaceDid::parse(SPACE.to_string()).expect("space DID"),
+            cursor: (1, 0),
+            entries: 1,
+        };
+        roomy_space_worker::signal::SignalSink::signal(&mut relay, &signal);
+        relay.counts()
+    })
+    .await
+    .expect("join");
+
+    let _ = gateway.shutdown.send(());
+    let _ = gateway.handle.await;
+
+    assert_eq!(counts, (0, 1), "a refused signal is dropped, not retried");
+    assert!(received.try_recv().is_err(), "nothing reached the sockets");
 }

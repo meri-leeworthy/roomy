@@ -66,6 +66,10 @@ pub struct GatewayState {
     /// The event log, served to workers on other machines over `/internal/feed`.
     /// `None` in a process that neither owns the log nor relays it.
     pub feed: Option<Arc<internal::FeedService>>,
+    /// The secret the internal endpoints require. `None` refuses every internal
+    /// call: a process that serves neither a feed nor a signal relay has no
+    /// reason to accept one.
+    pub internal_secret: Option<String>,
 }
 
 /// The numbers `/metrics` reports.
@@ -124,6 +128,7 @@ impl GatewayState {
             service_did: None,
             clock: Arc::new(roomy_space_worker::clock::SystemClock),
             feed: None,
+            internal_secret: None,
         }
     }
 
@@ -141,6 +146,12 @@ impl GatewayState {
     /// The same gateway, serving its event log to workers on other machines.
     pub fn with_feed(mut self, feed: internal::FeedService) -> Self {
         self.feed = Some(Arc::new(feed));
+        self
+    }
+
+    /// The same gateway, accepting the internal endpoints' shared secret.
+    pub fn with_internal_secret(mut self, secret: impl Into<String>) -> Self {
+        self.internal_secret = Some(secret.into());
         self
     }
 
@@ -192,6 +203,7 @@ pub fn router(state: Arc<GatewayState>) -> Router {
         // The owner's half of the change feed: not part of the XRPC surface, and
         // answered from the log this process holds.
         .route("/internal/feed/{space}", get(internal::feed))
+        .route("/internal/signal", post(internal::signal))
         // The reads no single space can answer: a feed merged across the
         // caller's spaces, mentions hydrated per space, a profile that may
         // leave the process, and a link card fetched from its host.

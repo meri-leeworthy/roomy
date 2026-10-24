@@ -32,9 +32,10 @@ epoch is older than the stored one is refused — with a test for the refusal. S
 mode now works end to end: one process serves `/internal/feed/{space}` behind a
 shared secret, a worker elsewhere pulls that feed and materialises the same
 projection as a worker reading the log's file, and a process's workers feed the
-same signal sink its sockets subscribe to. What remains is the signal relay across
-processes, replicated reads, and the simulation harness that asserts the
-distributed invariants (L7). M6 and M7 are not started.
+same signal sink its sockets subscribe to, and a worker elsewhere relays its
+signals to the gateway's internal endpoint, which publishes them to the same
+sink. What remains is replicated reads and the simulation harness that asserts
+the distributed invariants (L7). M6 and M7 are not started.
 
 Evaluation layers: **L1** (pure properties over `space-core`), **L3** (batch/replay
 equivalence, crashing after the global half at every commit point), **L4** (the

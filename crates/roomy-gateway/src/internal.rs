@@ -25,34 +25,60 @@ use crate::GatewayState;
 /// user credential: it authenticates a process, and every worker shares it.
 pub const INTERNAL_HEADER: &str = "x-roomy-internal";
 
+/// Whether `headers` carry this process's internal secret. An unset secret
+/// refuses everything, so a mounted endpoint cannot be reached by accident.
+pub fn authorized(secret: Option<&str>, headers: &HeaderMap) -> bool {
+    let Some(secret) = secret else {
+        return false;
+    };
+    headers
+        .get(INTERNAL_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|presented| presented == secret)
+}
+
+/// `POST /internal/signal` — a worker in another process says a space moved.
+pub async fn signal(
+    State(state): State<std::sync::Arc<GatewayState>>,
+    headers: HeaderMap,
+    Json(wire): Json<roomy_space_worker::signal::WireSignal>,
+) -> Response {
+    if !authorized(state.internal_secret.as_deref(), &headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Forbidden", "message": "the internal signal endpoint requires its secret"})),
+        )
+            .into_response();
+    }
+    match wire.into_signal() {
+        Ok(signal) => {
+            state.signals.publish(signal);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "InvalidRequest", "message": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 /// The log's rows, and the highest index it holds for the same space.
 pub struct FeedService {
     conn: Mutex<rusqlite::Connection>,
-    secret: String,
 }
 
 impl FeedService {
     /// Open the event log read-only. A gateway that accepted writes has the file
     /// already; a read replica must be pointed at the owner's copy.
-    pub fn open(
-        path: impl AsRef<std::path::Path>,
-        secret: impl Into<String>,
-    ) -> rusqlite::Result<Self> {
+    pub fn open(path: impl AsRef<std::path::Path>) -> rusqlite::Result<Self> {
         let conn = rusqlite::Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
-            secret: secret.into(),
         })
-    }
-
-    fn authorized(&self, headers: &HeaderMap) -> bool {
-        headers
-            .get(INTERNAL_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|presented| presented == self.secret)
     }
 
     /// The rows strictly after `cursor`, oldest first, with the rest of the last
@@ -155,7 +181,7 @@ pub async fn feed(
         )
             .into_response();
     };
-    if !service.authorized(&headers) {
+    if !authorized(state.internal_secret.as_deref(), &headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "Forbidden", "message": "the internal feed requires its secret"})),

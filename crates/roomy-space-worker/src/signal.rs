@@ -17,6 +17,38 @@ pub struct SpaceSignal {
     pub entries: usize,
 }
 
+/// A signal as it crosses a process boundary.
+///
+/// The space travels as its DID string: the wire format is the deployment's, and
+/// a worker and a gateway that upgrade on different days still agree on it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WireSignal {
+    pub space: String,
+    pub cursor: (i64, i64),
+    pub entries: usize,
+}
+
+impl From<&SpaceSignal> for WireSignal {
+    fn from(signal: &SpaceSignal) -> Self {
+        Self {
+            space: signal.space.as_str().to_string(),
+            cursor: signal.cursor,
+            entries: signal.entries,
+        }
+    }
+}
+
+impl WireSignal {
+    /// The signal it names, or the reason its space id is not one.
+    pub fn into_signal(self) -> Result<SpaceSignal, space_core::ids::KeyError> {
+        Ok(SpaceSignal {
+            space: SpaceDid::parse(self.space)?,
+            cursor: self.cursor,
+            entries: self.entries,
+        })
+    }
+}
+
 /// Where a worker's signals go.
 pub trait SignalSink: Send {
     /// A batch committed. Called after the commit, so a listener that reads the
