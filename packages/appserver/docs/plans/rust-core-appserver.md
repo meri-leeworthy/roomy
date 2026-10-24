@@ -43,7 +43,9 @@ Evaluation layers: **L1** (pure properties over `space-core`), **L3** (batch/rep
 equivalence, crashing after the global half at every commit point), **L4** (the
 read differential, for all twenty-four per-space NSIDs) and **L5** (the write
 differential, over `sendEvents`) and **L7** (a two-node fault schedule over one log)
-are implemented and run in CI; **L2** is the parity fixture. L6 and L8–L10 are not
+are implemented and run in CI; **L8**'s mechanism — mirror a live read, compare, record
+the divergence — is in the gateway and runs in its tests, but it has not been run
+against production traffic. **L2** is the parity fixture. L6, L9 and L10 are not
 implemented.
 
 **Scope.** The Rust rewrite of the appserver's core: the gateway (XRPC edge,

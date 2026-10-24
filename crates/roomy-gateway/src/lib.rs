@@ -17,10 +17,12 @@
 //! split one.
 
 pub mod cache;
+pub mod cutover;
 pub mod internal;
 pub mod procedures;
 pub mod reads;
 pub mod signals;
+pub mod traffic;
 pub mod ws;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,6 +68,10 @@ pub struct GatewayState {
     /// The event log, served to workers on other machines over `/internal/feed`.
     /// `None` in a process that neither owns the log nor relays it.
     pub feed: Option<Arc<internal::FeedService>>,
+    /// Where undecided traffic goes while a space is still the TypeScript
+    /// appserver's, and what is mirrored for comparison. `None` serves every space
+    /// from this process.
+    pub traffic: Option<Arc<traffic::Traffic>>,
     /// The secret the internal endpoints require. `None` refuses every internal
     /// call: a process that serves neither a feed nor a signal relay has no
     /// reason to accept one.
@@ -80,6 +86,9 @@ pub struct Counters {
     pub sessions_closed: AtomicU64,
     pub frames_sent: AtomicU64,
     pub signals_received: AtomicU64,
+    /// Reads and writes answered by the TypeScript appserver because their space
+    /// is not this implementation's yet.
+    pub proxied: AtomicU64,
 }
 
 impl Counters {
@@ -105,6 +114,10 @@ impl Counters {
                 "roomy_gateway_signals_received".to_string(),
                 self.signals_received.load(Ordering::Relaxed),
             ),
+            (
+                "roomy_gateway_proxied".to_string(),
+                self.proxied.load(Ordering::Relaxed),
+            ),
         ]
     }
 }
@@ -128,6 +141,7 @@ impl GatewayState {
             service_did: None,
             clock: Arc::new(roomy_space_worker::clock::SystemClock),
             feed: None,
+            traffic: None,
             internal_secret: None,
         }
     }
@@ -146,6 +160,13 @@ impl GatewayState {
     /// The same gateway, serving its event log to workers on other machines.
     pub fn with_feed(mut self, feed: internal::FeedService) -> Self {
         self.feed = Some(Arc::new(feed));
+        self
+    }
+
+    /// The same gateway, routing per space between this implementation and the
+    /// TypeScript appserver.
+    pub fn with_traffic(mut self, traffic: traffic::Traffic) -> Self {
+        self.traffic = Some(Arc::new(traffic));
         self
     }
 
@@ -223,8 +244,15 @@ pub fn router(state: Arc<GatewayState>) -> Router {
             "/xrpc/space.roomy.embed.getLinkMetadata",
             get(reads::link_metadata::http),
         )
-        .with_state(state)
+        .with_state(Arc::clone(&state))
         .merge(reads)
+        // Outermost: a space the TypeScript appserver still answers is proxied
+        // before any handler here sees it, and an answer produced here is mirrored
+        // for comparison after it exists.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            traffic::cutover_layer,
+        ))
 }
 
 async fn health(State(state): State<Arc<GatewayState>>) -> Response {
@@ -243,7 +271,11 @@ async fn health(State(state): State<Arc<GatewayState>>) -> Response {
 
 async fn metrics(State(state): State<Arc<GatewayState>>) -> Response {
     let mut body = String::new();
-    for (name, value) in state.counters.snapshot() {
+    let mut lines = state.counters.snapshot();
+    if let Some(traffic) = &state.traffic {
+        lines.extend(traffic::metric_lines(traffic));
+    }
+    for (name, value) in lines {
         body.push_str(&format!("# TYPE {name} counter\n{name} {value}\n"));
     }
     (

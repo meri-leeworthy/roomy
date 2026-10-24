@@ -31,6 +31,9 @@
 //!                                     unset keeps them in this process
 //! ROOMY_OWNERSHIP      owner           `follower` replays beside the owner and
 //!                                     serves reads without taking a lease
+//! ROOMY_TS_ORIGIN      —               the TypeScript appserver; when set, spaces
+//!                                     not yet cut over are proxied to it
+//! ROOMY_SHADOW_PERCENT 0               how many eligible reads to mirror to it
 //! ```
 
 use std::net::SocketAddr;
@@ -39,7 +42,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use roomy_auth::{InMemoryNonces, TicketIssuer, TicketVerifier};
+use roomy_gateway::cutover::{MaterialisationOwners, OwnerStore, ShadowConfig, SqliteOwnerStore};
 use roomy_gateway::internal::{FeedService, INTERNAL_HEADER};
+use roomy_gateway::traffic::Traffic;
 use roomy_gateway::{cache, router, GatewaySignals, GatewayState};
 use roomy_space_worker::relay::RelaySignals;
 use roomy_space_worker::signal::SignalSink;
@@ -78,6 +83,10 @@ struct Config {
     /// Where this worker relays its post-commit signals, when the sockets that
     /// need them are in another process.
     signal_url: Option<String>,
+    /// The TypeScript appserver this gateway proxies to and mirrors against.
+    ts_origin: Option<String>,
+    /// The percentage of reads mirrored to it for comparison.
+    shadow_percent: u8,
 }
 
 fn main() {
@@ -175,6 +184,17 @@ impl Config {
             );
         }
 
+        let ts_origin = var("ROOMY_TS_ORIGIN");
+        let shadow_percent = var("ROOMY_SHADOW_PERCENT")
+            .map(|value| {
+                value
+                    .parse::<u8>()
+                    .map(|percent| percent.min(100))
+                    .map_err(|_| "ROOMY_SHADOW_PERCENT is not a number".to_string())
+            })
+            .transpose()?
+            .unwrap_or(0);
+
         Ok(Self {
             role,
             data_dir,
@@ -188,6 +208,8 @@ impl Config {
             internal_secret,
             feed_url,
             signal_url,
+            ts_origin,
+            shadow_percent,
         })
     }
 
@@ -334,6 +356,25 @@ fn gateway_state(
             .with_internal_secret(secret.clone())
             .with_feed(FeedService::open(config.events_db())?),
         None => state,
+    };
+    let state = match (&config.ts_origin, config.role) {
+        (Some(origin), _) => {
+            let owners = Arc::new(MaterialisationOwners::new(Box::new(SqliteOwnerStore::open(
+                config.global_db(),
+            )?)
+                as Box<dyn OwnerStore>));
+            state.with_traffic(Traffic::new(
+                origin.clone(),
+                owners,
+                ShadowConfig {
+                    sample_percent: config.shadow_percent,
+                    seed: 0,
+                    eligible_nsids: Vec::new(),
+                    ..ShadowConfig::default()
+                },
+            ))
+        }
+        (None, _) => state,
     };
     Ok(Arc::new(state))
 }

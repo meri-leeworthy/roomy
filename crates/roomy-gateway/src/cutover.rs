@@ -45,7 +45,10 @@ pub struct ShadowRequest {
 
 impl ShadowRequest {
     /// Build a request from its NSID and parameter pairs.
-    pub fn new(nsid: impl Into<String>, params: impl IntoIterator<Item = (String, String)>) -> Self {
+    pub fn new(
+        nsid: impl Into<String>,
+        params: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
         Self {
             nsid: nsid.into(),
             params: params.into_iter().collect(),
@@ -320,10 +323,12 @@ impl DivergenceLog {
 
     /// Record a comparison whose answers agreed.
     pub fn record_match(&self, nsid: &str) {
-        self.logs()
-            .entry(nsid.to_string())
-            .or_default()
-            .record(false, None, self.retained_per_nsid, self.samples_per_nsid);
+        self.logs().entry(nsid.to_string()).or_default().record(
+            false,
+            None,
+            self.retained_per_nsid,
+            self.samples_per_nsid,
+        );
     }
 
     /// Record a divergence: count it, keep it if there is room, and remember it
@@ -538,6 +543,25 @@ pub trait OwnerStore: Send + Sync {
     fn clear(&self, space: &str, expected_revision: u64) -> Result<bool, StoreError>;
 }
 
+impl OwnerStore for Box<dyn OwnerStore> {
+    fn load(&self, space: &str) -> Result<Option<Owner>, StoreError> {
+        (**self).load(space)
+    }
+
+    fn compare_and_swap(
+        &self,
+        space: &str,
+        expected_revision: Option<u64>,
+        next: &Owner,
+    ) -> Result<bool, StoreError> {
+        (**self).compare_and_swap(space, expected_revision, next)
+    }
+
+    fn clear(&self, space: &str, expected_revision: u64) -> Result<bool, StoreError> {
+        (**self).clear(space, expected_revision)
+    }
+}
+
 /// The in-process ownership table.
 #[derive(Debug, Default)]
 pub struct InMemoryOwnerStore {
@@ -653,7 +677,9 @@ impl OwnerStore for SqliteOwnerStore {
                         node: row.get(0)?,
                         changed_by: row.get(1)?,
                         changed_at_ms: row.get(2)?,
-                        revision: row.get(3)?,
+                        // The revision is a counter, not a quantity; the column is
+                        // an integer because that is what SQLite has.
+                        revision: row.get::<_, i64>(3)? as u64,
                     })
                 },
             )
@@ -678,8 +704,8 @@ impl OwnerStore for SqliteOwnerStore {
                     next.node,
                     next.changed_by,
                     next.changed_at_ms,
-                    next.revision,
-                    revision
+                    next.revision as i64,
+                    revision as i64
                 ],
             )?,
             None => conn.execute(
@@ -691,7 +717,7 @@ impl OwnerStore for SqliteOwnerStore {
                     next.node,
                     next.changed_by,
                     next.changed_at_ms,
-                    next.revision
+                    next.revision as i64
                 ],
             )?,
         };
@@ -702,7 +728,7 @@ impl OwnerStore for SqliteOwnerStore {
         let conn = self.conn();
         let changed = conn.execute(
             "delete from materialisation_owners where space = ?1 and revision = ?2",
-            rusqlite::params![space, expected_revision],
+            rusqlite::params![space, expected_revision as i64],
         )?;
         Ok(changed > 0)
     }
@@ -718,9 +744,7 @@ pub trait MaterialisationAuthority: Send + Sync {
     /// Whether `node` may materialise `space` right now. This is the check a
     /// supervisor makes before it commits a batch.
     fn owns(&self, space: &SpaceDid, node: &str) -> Result<bool, OwnerError> {
-        Ok(self
-            .owner(space)?
-            .is_some_and(|owner| owner.node == node))
+        Ok(self.owner(space)?.is_some_and(|owner| owner.node == node))
     }
 
     /// Flip ownership to `to` in one compare-and-swap and return what it
@@ -771,9 +795,7 @@ impl<S: OwnerStore> MaterialisationOwners<S> {
 
     /// Whether `node` may materialise `space` right now.
     pub fn owns(&self, space: &SpaceDid, node: &str) -> Result<bool, OwnerError> {
-        Ok(self
-            .owner(space)?
-            .is_some_and(|owner| owner.node == node))
+        Ok(self.owner(space)?.is_some_and(|owner| owner.node == node))
     }
 
     /// Flip ownership to `to` in one compare-and-swap. The returned handover
@@ -796,7 +818,10 @@ impl<S: OwnerStore> MaterialisationOwners<S> {
                     .map_or(1, |owner| owner.revision.saturating_add(1)),
             };
             let expected = current.as_ref().map(|owner| owner.revision);
-            if self.store.compare_and_swap(space.as_str(), expected, &next)? {
+            if self
+                .store
+                .compare_and_swap(space.as_str(), expected, &next)?
+            {
                 return Ok(Handover {
                     space: space.as_str().to_string(),
                     from: current,
@@ -840,11 +865,10 @@ impl<S: OwnerStore> MaterialisationOwners<S> {
                     changed_at_ms: at_ms,
                     revision: current.revision.saturating_add(1),
                 };
-                if self.store.compare_and_swap(
-                    space.as_str(),
-                    Some(current.revision),
-                    &restored,
-                )? {
+                if self
+                    .store
+                    .compare_and_swap(space.as_str(), Some(current.revision), &restored)?
+                {
                     Ok(Some(restored))
                 } else {
                     Err(OwnerError::RollbackConflict {
@@ -997,12 +1021,14 @@ impl WriteCutover {
             at_ms,
         };
         let mut spaces = self.lock();
-        let state = spaces.entry(space.to_string()).or_insert_with(|| SpaceWrite {
-            path: WritePath::TypeScript,
-            flipped_by: None,
-            flipped_at_ms: None,
-            history: Vec::new(),
-        });
+        let state = spaces
+            .entry(space.to_string())
+            .or_insert_with(|| SpaceWrite {
+                path: WritePath::TypeScript,
+                flipped_by: None,
+                flipped_at_ms: None,
+                history: Vec::new(),
+            });
         state.path = to;
         state.flipped_by = Some(by.to_string());
         state.flipped_at_ms = Some(at_ms);
@@ -1221,10 +1247,7 @@ mod tests {
     fn an_agreeing_comparison_is_counted_but_records_no_divergence() {
         let shadow = shadow(100);
         let request = request(&[("roomId", "01ROOM")]);
-        let response = ShadowResponse::json(
-            200,
-            &serde_json::json!({"a": 1, "b": [true, null]}),
-        );
+        let response = ShadowResponse::json(200, &serde_json::json!({"a": 1, "b": [true, null]}));
 
         assert!(!shadow.compare(&request, &response, &response));
         assert_eq!(shadow.divergences().count(&request.nsid), 0);
@@ -1257,18 +1280,18 @@ mod tests {
             seed: 7,
             ..ShadowConfig::default()
         });
-        let request = request(&[("roomId", "01ROOM"), ("limit", "50")]);
+        let original = request(&[("roomId", "01ROOM"), ("limit", "50")]);
 
-        let sampled = shadow.should_sample(&request);
+        let sampled = shadow.should_sample(&original);
         for _ in 0..64 {
-            assert_eq!(shadow.should_sample(&request), sampled);
+            assert_eq!(shadow.should_sample(&original), sampled);
         }
 
         // Parameter order and empty values are part of neither the key nor the
         // decision.
         let reordered = request(&[("limit", "50"), ("roomId", "01ROOM"), ("cursor", "")]);
-        assert_eq!(reordered.key(), request.key());
-        assert_eq!(reordered.params_hash(), request.params_hash());
+        assert_eq!(reordered.key(), original.key());
+        assert_eq!(reordered.params_hash(), original.params_hash());
         assert_eq!(shadow.should_sample(&reordered), sampled);
     }
 
@@ -1366,7 +1389,10 @@ mod tests {
         let flip = owners
             .handover(&space, "rust-node", "ops", 2_000)
             .expect("the handover");
-        assert_eq!(flip.from.as_ref().map(|owner| owner.node.as_str()), Some("ts-node"));
+        assert_eq!(
+            flip.from.as_ref().map(|owner| owner.node.as_str()),
+            Some("ts-node")
+        );
         assert_eq!(flip.from.as_ref().map(|owner| owner.revision), Some(1));
         assert_eq!(flip.to.revision, 2);
         assert!(owners.owns(&space, "rust-node").expect("read ownership"));
