@@ -25,6 +25,10 @@ pub trait SpaceResolver: Send + Sync {
     /// The database holding `entity_id`, resolved through the entity→space
     /// index.
     fn resolve_entity(&self, entity_id: &str) -> Option<Arc<SpaceReadDb>>;
+
+    /// The space that holds `entity_id`. A router that has to make a routing
+    /// decision before it can open anything asks this first.
+    fn space_of_entity(&self, entity_id: &str) -> Option<String>;
 }
 
 /// A bounded registry over a directory of per-space databases.
@@ -137,8 +141,12 @@ impl SpaceResolver for SpaceRegistry {
     }
 
     fn resolve_entity(&self, entity_id: &str) -> Option<Arc<SpaceReadDb>> {
-        let space = self.space_of_entity(entity_id)?;
+        let space = SpaceRegistry::space_of_entity(self, entity_id)?;
         self.touch(&space)
+    }
+
+    fn space_of_entity(&self, entity_id: &str) -> Option<String> {
+        SpaceRegistry::space_of_entity(self, entity_id)
     }
 }
 
@@ -175,6 +183,10 @@ impl SpaceResolver for FixedSpaces {
     fn resolve_entity(&self, entity_id: &str) -> Option<Arc<SpaceReadDb>> {
         let space = self.entities.get(entity_id)?;
         self.spaces.get(space).cloned()
+    }
+
+    fn space_of_entity(&self, entity_id: &str) -> Option<String> {
+        self.entities.get(entity_id).cloned()
     }
 }
 
