@@ -2,12 +2,25 @@
  * XRPC: space.roomy.admin.getSpaceMembership (query, admin-only).
  *
  * Returns the bridge-token capacity picture for one space: every grant,
- * its live Polar-derived capacity, spend state, and the space's
- * maxMembers (Σ valid capacities) vs current member count.
+ * its live Polar-derived capacity, spend state, and the bridged guild's
+ * population vs the space's maxMembers (Σ valid capacities).
  *
- * The Discord bridge polls this endpoint to decide whether bridging may
- * continue: `overLimit` (memberCount > maxMembers) means the bridge must
- * halt.
+ * There are TWO populations and they are not interchangeable:
+ *
+ *   - `memberCount` — the bridged guild's population, sent by the bridge as
+ *     the `memberCount` parameter. Capacity, `overLimit`, and the spend rule
+ *     are all defined against it: a guild member's messages are what the
+ *     space receives, and bridged participants are authored as
+ *     `did:discord:<snowflake>` with no `member` edge.
+ *   - `spaceMemberCount` — the space's Roomy membership (its `member`/`admin`
+ *     edges), read from the global `space_stats` aggregate. Informational;
+ *     never capacity-bearing.
+ *
+ * The parameter is REQUIRED. A caller that omits it is making no statement
+ * about a guild, and the Roomy count is not a substitute for one — it counts
+ * a different population, and the spend rule it would drive is irreversible
+ * (a spent grant can never be re-granted or revoked). Rejecting is the only
+ * answer that leaves the response unambiguous.
  *
  * Per-grant processing (read-time validity):
  *   - Polar validity check per grantor (300s TTL cache). Valid state →
@@ -25,20 +38,27 @@
  *
  * Response:
  * {
- *   spaceDid, memberCount, validTokenCount, maxMembers, overLimit, checkedAt,
+ *   spaceDid, memberCount, spaceMemberCount?, validTokenCount, maxMembers,
+ *   overLimit, checkedAt,
  *   tokens: [{ grantorDid, capacity, status: "pending"|"spent", live }],
  *   stale: boolean,   // any Polar state served from cache-on-error
  * }
+ *
+ * `spaceMemberCount` is absent for a space with no `space_stats` row — never
+ * swept, so unknown rather than zero. The read does not repair it: repairing
+ * means opening that space's DB, which is the per-request fan-out this
+ * aggregate exists to avoid.
  */
 
-import { openReadStateDb, openSpaceDb } from "../db/db.ts";
+import { openGlobalDb, openReadStateDb } from "../db/db.ts";
 import { requireAdmin } from "../admin.ts";
 import { selectGrantsForSpace } from "../queries/bridgeTokens.ts";
+import { selectSpaceMemberCount } from "../queries/spaceStats.ts";
 import { resolveGrantorCapacityWith } from "../billing/capacity.ts";
 import { getPolar } from "../billing/polar.ts";
 import { markGrantSpent } from "../queries/bridgeTokens.ts";
 import { XrpcError } from "../xrpc/errors.ts";
-import { requireString } from "../xrpc/params.ts";
+import { optionalInt, requireString } from "../xrpc/params.ts";
 import type { AuthCtx, QueryHandler, QueryParams } from "../xrpc/types.ts";
 
 /** Guilds above this member count spend the bridge token (permanent). */
@@ -58,23 +78,17 @@ export interface GetSpaceMembershipResult {
   validTokenCount: number;
   /** Σ of live token capacities (spent grants contribute 0). */
   maxMembers: number;
+  /** The bridged guild's population (the `memberCount` parameter).
+   *  `overLimit` and the spend rule are defined against it. */
   memberCount: number;
-  /** memberCount > maxMembers — the bridge must halt. */
+  /** The space's Roomy membership (`member`/`admin` edges), from the global
+   *  `space_stats` aggregate. Absent when the space has never been swept. */
+  spaceMemberCount?: number;
+  /** memberCount > maxMembers — the bridge alerts, and halts at 2x. */
   overLimit: boolean;
   /** Any Polar state served from cache because a refresh failed. */
   stale: boolean;
   checkedAt: number;
-}
-
-function memberCountOf(spaceDid: string): Promise<number> {
-  const spaceDb = openSpaceDb(spaceDid);
-  return spaceDb
-    .query(
-      `select count(*) as n from edges
-        where head = ? and label in ('member', 'admin')`,
-    )
-    .get<{ n: number }>(spaceDid)
-    .then((r) => r?.n ?? 0);
 }
 
 export const adminGetSpaceMembershipHandler: QueryHandler<
@@ -93,7 +107,23 @@ export const adminGetSpaceMembershipHandler: QueryHandler<
   }
 
   const spaceDid = requireString(params, "spaceId");
-  const memberCount = await memberCountOf(spaceDid);
+  // The bridged guild's population: the only figure capacity is measured
+  // against. Required — a caller that omits it makes no capacity claim, and
+  // the space's Roomy membership is a different population (bridged
+  // participants author as `did:discord:<snowflake>` with no member edge).
+  // Substituting it would spend grants irreversibly on the wrong one.
+  const memberCount = optionalInt(params, "memberCount", { min: 0 });
+  if (memberCount === undefined) {
+    throw new XrpcError(
+      400,
+      "InvalidRequest",
+      "Missing required param: memberCount (the bridged guild's member count)",
+    );
+  }
+  const spaceMemberCount = await selectSpaceMemberCount(
+    openGlobalDb(),
+    spaceDid,
+  );
 
   const readStateDb = openReadStateDb();
   const grants = await selectGrantsForSpace(readStateDb, spaceDid);
@@ -152,6 +182,7 @@ export const adminGetSpaceMembershipHandler: QueryHandler<
     validTokenCount,
     maxMembers,
     memberCount,
+    ...(spaceMemberCount === null ? {} : { spaceMemberCount }),
     overLimit: memberCount > maxMembers,
     stale,
     checkedAt: Date.now(),

@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { StreamDid, UserDid } from "@roomy-space/sdk";
 
-import { closeDb, openDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
+import { closeDb, openDb, openGlobalDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
 import { Router } from "../invalidation/router.ts";
 import { _setAdminDids } from "../admin.ts";
 import {
@@ -21,6 +21,7 @@ import {
   type PolarCustomerState,
 } from "../billing/polar.ts";
 import { markGrantSpent, selectGrantForGrantor } from "../queries/bridgeTokens.ts";
+import { recordSpaceStats } from "../queries/spaceStats.ts";
 import { grantBridgeTokenHandler } from "./space.roomy.space.grantBridgeToken.ts";
 import { revokeBridgeTokenHandler } from "./space.roomy.space.revokeBridgeToken.ts";
 import { adminGetSpaceMembershipHandler } from "./space.roomy.admin.getSpaceMembership.ts";
@@ -91,6 +92,15 @@ async function makeMember(userDid: string, spaceDid: StreamDid = SPACE): Promise
     spaceDid,
     userDid,
   );
+}
+
+/**
+ * Publish the space's `space_stats` row — what the boot sweep and
+ * `applyBatch` write when the member edge set changes. `spaceMemberCount`
+ * comes from this aggregate, never from counting edges per request.
+ */
+async function seedSpaceStats(count: number, spaceDid: StreamDid = SPACE): Promise<void> {
+  await recordSpaceStats(openGlobalDb(), spaceDid, count);
 }
 
 beforeEach(async () => {
@@ -259,7 +269,7 @@ describe("revokeBridgeToken", () => {
 });
 
 describe("admin getSpaceMembership (spend rule + response shape)", () => {
-  test("memberCount ≤ 100 keeps a pending grant pending and live", async () => {
+  test("guild count ≤ 100 keeps a pending grant pending and live", async () => {
     stubPolar(proState());
     await makeMember(GRANTOR);
     await grantBridgeTokenHandler({}, auth(GRANTOR), { spaceId: SPACE });
@@ -268,13 +278,15 @@ describe("admin getSpaceMembership (spend rule + response shape)", () => {
     for (let i = 0; i < 49; i++) {
       await makeMember(`did:plc:bt-extra-${i}`);
     }
+    await seedSpaceStats(50);
 
     const res = await adminGetSpaceMembershipHandler(
-      { spaceId: SPACE },
+      { spaceId: SPACE, memberCount: "50" },
       auth(GRANTOR),
     );
     expect(res.spaceDid).toBe(SPACE);
     expect(res.memberCount).toBe(50);
+    expect(res.spaceMemberCount).toBe(50);
     const token = res.tokens.find((t) => t.grantorDid === String(GRANTOR));
     expect(token?.status).toBe("pending");
     expect(token?.live).toBe(true);
@@ -286,7 +298,7 @@ describe("admin getSpaceMembership (spend rule + response shape)", () => {
     expect(res.checkedAt).toBeTypeOf("number");
   });
 
-  test("memberCount > 100 marks a pending grant spent (persisted, permanent)", async () => {
+  test("guild count > 100 marks a pending grant spent (persisted, permanent)", async () => {
     stubPolar(proState());
     await makeMember(GRANTOR);
     await grantBridgeTokenHandler({}, auth(GRANTOR), { spaceId: SPACE });
@@ -295,9 +307,10 @@ describe("admin getSpaceMembership (spend rule + response shape)", () => {
     for (let i = 0; i < 100; i++) {
       await makeMember(`did:plc:bt-extra-${i}`);
     }
+    await seedSpaceStats(101);
 
     const res = await adminGetSpaceMembershipHandler(
-      { spaceId: SPACE },
+      { spaceId: SPACE, memberCount: "101" },
       auth(GRANTOR),
     );
     expect(res.memberCount).toBe(101);
@@ -327,6 +340,105 @@ describe("admin getSpaceMembership (spend rule + response shape)", () => {
     }
   });
 
+  test("capacity is measured against the bridged guild, not the space's Roomy membership", async () => {
+    stubPolar(proState());
+    await makeMember(GRANTOR);
+    await grantBridgeTokenHandler({}, auth(GRANTOR), { spaceId: SPACE });
+
+    // 12 Roomy members, a 5000-member guild: the guild is what the space
+    // carries, so the space is over its 1000-member capacity.
+    for (let i = 0; i < 11; i++) {
+      await makeMember(`did:plc:bt-extra-${i}`);
+    }
+    await seedSpaceStats(12);
+
+    const res = await adminGetSpaceMembershipHandler(
+      { spaceId: SPACE, memberCount: "5000" },
+      auth(GRANTOR),
+    );
+    // The response reports the guild's 5000, not the space's 12, and the
+    // space is over its limit on that basis.
+    expect(res.memberCount).toBe(5000);
+    expect(res.spaceMemberCount).toBe(12);
+    expect(res.overLimit).toBe(true);
+    // 5000 also clears the spend threshold, so the grant is spent on the
+    // guild's population — the same population the limit was measured
+    // against.
+    const token = res.tokens.find((t) => t.grantorDid === String(GRANTOR));
+    expect(token?.status).toBe("spent");
+    expect(res.maxMembers).toBe(0);
+
+    // And the spend is persisted: the grant never comes back.
+    const row = await selectGrantForGrantor(openReadStateDb(), GRANTOR);
+    expect(row?.spent_at).not.toBeNull();
+  });
+
+  test("a large Roomy membership under a small guild is within capacity and does not spend the grant", async () => {
+    stubPolar(proState());
+    await makeMember(GRANTOR);
+    await grantBridgeTokenHandler({}, auth(GRANTOR), { spaceId: SPACE });
+
+    // 150 Roomy members would exceed the spend threshold if it counted the
+    // wrong population — and spending is irreversible.
+    for (let i = 0; i < 149; i++) {
+      await makeMember(`did:plc:bt-extra-${i}`);
+    }
+    await seedSpaceStats(150);
+
+    const res = await adminGetSpaceMembershipHandler(
+      { spaceId: SPACE, memberCount: "50" },
+      auth(GRANTOR),
+    );
+    expect(res.memberCount).toBe(50);
+    expect(res.spaceMemberCount).toBe(150);
+    expect(res.overLimit).toBe(false);
+    expect(res.maxMembers).toBe(1000);
+    const token = res.tokens.find((t) => t.grantorDid === String(GRANTOR));
+    expect(token?.status).toBe("pending");
+
+    const row = await selectGrantForGrantor(openReadStateDb(), GRANTOR);
+    expect(row?.spent_at).toBeNull();
+  });
+
+  test("omitting memberCount → 400 and leaves the grant pending", async () => {
+    stubPolar(proState());
+    await makeMember(GRANTOR);
+    await grantBridgeTokenHandler({}, auth(GRANTOR), { spaceId: SPACE });
+    for (let i = 0; i < 149; i++) {
+      await makeMember(`did:plc:bt-extra-${i}`);
+    }
+    await seedSpaceStats(150);
+
+    try {
+      await adminGetSpaceMembershipHandler({ spaceId: SPACE }, auth(GRANTOR));
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(XrpcError);
+      expect((err as XrpcError).status).toBe(400);
+      expect((err as XrpcError).xrpcError).toBe("InvalidRequest");
+    }
+
+    // The Roomy count was never substituted for the guild's, so nothing was
+    // spent on the strength of it.
+    const row = await selectGrantForGrantor(openReadStateDb(), GRANTOR);
+    expect(row?.spent_at).toBeNull();
+  });
+
+  test("spaceMemberCount is absent for a space that has never been swept", async () => {
+    stubPolar(proState());
+    await makeMember(GRANTOR);
+    await grantBridgeTokenHandler({}, auth(GRANTOR), { spaceId: SPACE });
+
+    // No `space_stats` row: unknown, not zero. The read does not open the
+    // space DB to repair it.
+    const res = await adminGetSpaceMembershipHandler(
+      { spaceId: SPACE, memberCount: "50" },
+      auth(GRANTOR),
+    );
+    expect(res.spaceMemberCount).toBeUndefined();
+    expect(res.memberCount).toBe(50);
+  });
+
   test("spent grant stays spent even though the grantor's Polar lapses", async () => {
     stubPolar(proState());
     await makeMember(GRANTOR);
@@ -338,7 +450,7 @@ describe("admin getSpaceMembership (spend rule + response shape)", () => {
     // Grantor's sub lapsing must not resurrect the token.
     stubPolar({ active_subscriptions: [], granted_benefits: [] });
     const res = await adminGetSpaceMembershipHandler(
-      { spaceId: SPACE },
+      { spaceId: SPACE, memberCount: "50" },
       auth(GRANTOR),
     );
     const token = res.tokens.find((t) => t.grantorDid === String(GRANTOR));
