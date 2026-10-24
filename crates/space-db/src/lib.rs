@@ -20,7 +20,8 @@ mod digest;
 pub mod plan;
 
 pub use digest::{
-    diff_snapshots, digest_of, snapshot_db, worker_snapshot, TableDivergence, TableSnapshot,
+    diff_snapshots, digest_of, global_tables, snapshot_db, snapshot_tables, worker_snapshot,
+    TableDivergence, TableSnapshot,
 };
 pub use plan::{apply_plan, plan_batch, EntryChanges, PlannedEntry};
 pub use to_sql as value_to_sql;
@@ -43,6 +44,8 @@ pub enum DbError {
     Step(String),
     #[error("{0}")]
     Rule(#[from] space_core::RuleError),
+    #[error("{0} is not an ordering stamp")]
+    Stamp(String),
 }
 
 /// A per-space database.

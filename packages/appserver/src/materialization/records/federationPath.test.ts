@@ -2,10 +2,9 @@
  * The federation record path reproduces the event path's global projection.
  *
  * Both kinds write the global DB only, so the comparison reads the three
- * federation tables rather than the per-space snapshot. The derivation clock is
- * the one value the record model does not carry — `requested_at` and
- * `decided_at` are `Date.now()` in both paths — so those columns are masked;
- * every other column must agree.
+ * federation tables rather than the per-space snapshot. Every column agrees,
+ * including `requested_at` and `decided_at`: both paths stamp them from the
+ * change's ordering stamp, which the log assigned at ingest.
  *
  * The corpus is the relationship's whole life: a request, an approval, an origin
  * grant and a receiver grant, a removal that marks the relationship and drops
@@ -147,10 +146,7 @@ interface Derived {
   receiverPermissions: unknown[];
 }
 
-/**
- * The federation tables with their derivation-clock columns dropped. Both
- * paths read the clock, so the instant is the one value they cannot share.
- */
+/** The federation tables, every column included. */
 async function globalSnapshot(globalDb: Database): Promise<{
   federations: unknown[];
   roomPermissions: unknown[];
@@ -160,7 +156,8 @@ async function globalSnapshot(globalDb: Database): Promise<{
     federations: globalDb
       .query(
         `select space_id, federating_space_did, status, requested_by_did,
-                message, decided_by_did, decision_message
+                requested_at, message, decided_by_did, decided_at,
+                decision_message
            from space_federations order by space_id, federating_space_did`,
       )
       .all(),

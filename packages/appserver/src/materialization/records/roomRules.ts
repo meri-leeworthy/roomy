@@ -46,15 +46,18 @@ function createStatements(
   const record = change.record;
   const id = change.rkey;
   const statements: SqlStatement[] = [
-    ensureEntity(ctx.streamId, id),
+    ensureEntity(ctx.streamId, id, undefined, ctx.decidedAt),
     sql`
-      insert into comp_info (entity, name, avatar, description)
-      values (${id}, ${record.name}, ${record.avatar}, ${record.description})
+      insert into comp_info (entity, name, avatar, description, created_at, updated_at)
+      values (
+        ${id}, ${record.name}, ${record.avatar}, ${record.description},
+        ${ctx.decidedAt}, ${ctx.decidedAt}
+      )
       on conflict do nothing
     `,
     sql`
-      insert into comp_room (entity, label, default_access)
-      values (${id}, ${record.kind}, ${record.defaultAccess})
+      insert into comp_room (entity, label, default_access, created_at, updated_at)
+      values (${id}, ${record.kind}, ${record.defaultAccess}, ${ctx.decidedAt}, ${ctx.decidedAt})
       on conflict do nothing
     `,
   ];
@@ -104,10 +107,10 @@ function updateStatements(
     const columns = info.map((field) => field.key);
     statements.push(
       space({
-        sql: `insert into comp_info (entity, ${columns.join(", ")})
-          values (?, ${columns.map(() => "?").join(", ")})
+        sql: `insert into comp_info (entity, ${columns.join(", ")}, created_at, updated_at)
+          values (?, ${columns.map(() => "?").join(", ")}, ?, ?)
           on conflict do update set ${columns.map((c) => `${c} = excluded.${c}`).join(", ")}`,
-        params: [id, ...info.map((field) => field.value)],
+        params: [id, ...info.map((field) => field.value), ctx.decidedAt, ctx.decidedAt],
       }),
     );
   }
@@ -156,7 +159,7 @@ function parentStatements(
 
   return [
     space(sql`
-      insert into edges (head, tail, label, payload)
+      insert into edges (head, tail, label, payload, created_at, updated_at)
       values (
         ${parent},
         ${roomId},
@@ -167,7 +170,9 @@ function parentStatements(
           WHERE head = ${parent}
             AND tail = ${roomId}
             AND label = 'link'
-        ))
+        )),
+        ${ctx.decidedAt},
+        ${ctx.decidedAt}
       )
       on conflict (head, tail, label) do nothing
     `),

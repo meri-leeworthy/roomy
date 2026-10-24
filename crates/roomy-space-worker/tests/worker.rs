@@ -15,7 +15,7 @@ use serde::Deserialize;
 use space_core::change::FeedRow;
 use space_core::ids::SpaceDid;
 use space_db::plan::{group_entries, plan_batch};
-use space_db::{digest_of, snapshot_db, worker_snapshot, SpaceDb};
+use space_db::{digest_of, snapshot_db, snapshot_tables, worker_snapshot, SpaceDb};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -34,8 +34,20 @@ struct Expected {
 struct FixtureGlobal {
     #[serde(rename = "globalTables")]
     tables: Vec<String>,
-    #[serde(rename = "globalClockColumns")]
-    clock_columns: Vec<String>,
+}
+
+/// The instant the fixture's log was received. Seeded rows carry it, so the
+/// projection does not depend on when the test ran.
+fn fixture_received_at() -> i64 {
+    #[derive(Deserialize)]
+    struct ReceivedAt {
+        #[serde(rename = "receivedAt")]
+        received_at: i64,
+    }
+    let text = std::fs::read_to_string(fixture_path()).expect("fixture readable");
+    serde_json::from_str::<ReceivedAt>(&text)
+        .expect("fixture carries receivedAt")
+        .received_at
 }
 
 fn fixture_path() -> PathBuf {
@@ -80,16 +92,17 @@ fn seeded_feed(fixture: &Fixture) -> SqliteChangeFeed {
 
 fn seeded_space(stream: &SpaceDid) -> SpaceDb {
     let db = SpaceDb::open_in_memory(stream.clone()).expect("space DB");
+    let seeded_at = fixture_received_at();
     db.connection()
         .execute(
-            "insert into entities (id, stream_id) values (?, ?)",
-            rusqlite::params![stream.as_str(), stream.as_str()],
+            "insert into entities (id, stream_id, created_at, updated_at) values (?, ?, ?, ?)",
+            rusqlite::params![stream.as_str(), stream.as_str(), seeded_at, seeded_at],
         )
         .expect("seed entity");
     db.connection()
         .execute(
-            "insert into comp_space (entity) values (?)",
-            rusqlite::params![stream.as_str()],
+            "insert into comp_space (entity, created_at, updated_at) values (?, ?, ?)",
+            rusqlite::params![stream.as_str(), seeded_at, seeded_at],
         )
         .expect("seed space row");
     db
@@ -220,7 +233,6 @@ struct FixtureParts {
     changes: Vec<FeedRow>,
     space_digest: String,
     global_tables: Vec<String>,
-    global_clock_columns: Vec<String>,
 }
 
 fn load_fixture() -> FixtureParts {
@@ -237,7 +249,6 @@ fn load_fixture() -> FixtureParts {
             .collect(),
         space_digest: fixture.expected.space_digest,
         global_tables: globals.tables,
-        global_clock_columns: globals.clock_columns,
     }
 }
 
@@ -274,16 +285,18 @@ fn feed_of(changes: &[FeedRow]) -> SqliteChangeFeed {
 /// A space database on disk, with the fixture's pre-materialisation rows.
 fn seeded_file(space: &SpaceDid, path: &Path) -> SpaceDb {
     let db = SpaceDb::open(path, space.clone()).expect("space DB");
+    let seeded_at = fixture_received_at();
     db.connection()
         .execute(
-            "insert or ignore into entities (id, stream_id) values (?, ?)",
-            rusqlite::params![space.as_str(), space.as_str()],
+            "insert or ignore into entities (id, stream_id, created_at, updated_at)
+             values (?, ?, ?, ?)",
+            rusqlite::params![space.as_str(), space.as_str(), seeded_at, seeded_at],
         )
         .expect("seed entity");
     db.connection()
         .execute(
-            "insert or ignore into comp_space (entity) values (?)",
-            rusqlite::params![space.as_str()],
+            "insert or ignore into comp_space (entity, created_at, updated_at) values (?, ?, ?)",
+            rusqlite::params![space.as_str(), seeded_at, seeded_at],
         )
         .expect("seed space row");
     db
@@ -312,34 +325,11 @@ fn drain(space: &SpaceDid, changes: &[FeedRow], space_path: &Path, global_path: 
     ))
 }
 
-/// The digest of the global tables the fixture's rules write, without the
-/// columns the fixture records as derivation time.
-fn global_digest(path: &Path, tables: &[String], clock_columns: &[String]) -> String {
+/// The digest of the global tables the manifest compares, in the oracle's
+/// encoding.
+fn global_digest(path: &Path, tables: &[String]) -> String {
     let conn = rusqlite::Connection::open(path).expect("global DB");
-    let mut snapshot = snapshot_db(&conn).expect("global snapshot");
-    snapshot.retain(|table| tables.contains(&table.table));
-    for table in &mut snapshot {
-        let keep: Vec<usize> = table
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, column)| !clock_columns.contains(*column))
-            .map(|(index, _)| index)
-            .collect();
-        if keep.len() == table.columns.len() {
-            continue;
-        }
-        table.rows = table
-            .rows
-            .iter()
-            .map(|row| keep.iter().map(|index| row[*index].clone()).collect())
-            .collect();
-        table.columns = keep
-            .iter()
-            .map(|index| table.columns[*index].clone())
-            .collect();
-    }
-    digest_of(&snapshot)
+    digest_of(&snapshot_tables(&conn, tables).expect("global snapshot"))
 }
 
 /// A crash after the global write and before the space commit leaves the
@@ -361,7 +351,6 @@ fn a_crash_between_the_global_write_and_the_commit_replays_to_the_same_projectio
     let reference_global = global_digest(
         &dir.path().join("reference-global.sqlite"),
         &fixture.global_tables,
-        &fixture.global_clock_columns,
     );
 
     let space_path = dir.path().join("space.sqlite");
@@ -382,7 +371,6 @@ fn a_crash_between_the_global_write_and_the_commit_replays_to_the_same_projectio
             &space,
             &entries,
             space_core::PlanMode::Live,
-            0,
         )
         .expect("planning");
         let last = rows.last().expect("a non-empty batch");
@@ -402,16 +390,8 @@ fn a_crash_between_the_global_write_and_the_commit_replays_to_the_same_projectio
         let empty = dir.path().join("empty-global.sqlite");
         drop(SqliteGlobalSink::open(&empty).expect("empty sink"));
         assert_ne!(
-            global_digest(
-                &global_path,
-                &fixture.global_tables,
-                &fixture.global_clock_columns
-            ),
-            global_digest(
-                &empty,
-                &fixture.global_tables,
-                &fixture.global_clock_columns
-            ),
+            global_digest(&global_path, &fixture.global_tables),
+            global_digest(&empty, &fixture.global_tables),
             "the global half is written before the space half commits"
         );
     }
@@ -424,11 +404,7 @@ fn a_crash_between_the_global_write_and_the_commit_replays_to_the_same_projectio
         "the replay after the crash does not match the TypeScript projection"
     );
     assert_eq!(
-        global_digest(
-            &global_path,
-            &fixture.global_tables,
-            &fixture.global_clock_columns
-        ),
+        global_digest(&global_path, &fixture.global_tables),
         reference_global,
         "replaying the global half is not idempotent"
     );

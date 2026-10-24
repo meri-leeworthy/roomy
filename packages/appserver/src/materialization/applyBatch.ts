@@ -28,6 +28,7 @@ import type {
 import { materialize } from "./materializer.ts";
 import { applyBundle, getSavepointMutex } from "./applyBundle.ts";
 import { messageSortIdxKey } from "./sortIdx.ts";
+import { decidedAtFor } from "./records/recordChange.ts";
 import { applyDeleteSideEffects, collectPendingDeletes } from "./deleteMessage.ts";
 import { isGlobalDbStatement } from "./statementRouting.ts";
 import type { LoggedEvent, StatementBundleSuccess } from "./types.ts";
@@ -59,6 +60,7 @@ import {
 import { decodeContent, decodeRichTextBody } from "../db/content.ts";
 import { enqueueIndexMessage, enqueueDeleteMessage } from "../search/indexer.ts";
 import { RICHTEXT_MIME, extractFacetUrls } from "@roomy-space/sdk";
+
 
 import { log } from "../log.ts";
 const MAX_TRACKED_FAILURES = 100;
@@ -183,7 +185,16 @@ export async function applyBatch(
       } else {
         const materialised = materialize(
           e.event,
-          { streamId, user: e.user },
+          {
+            streamId,
+            user: e.user,
+            decidedAt: decidedAtFor(
+              e.event,
+              e.idx,
+              e.receivedAt,
+              e.createdAt,
+            ),
+          },
           e.idx,
         );
 
@@ -549,12 +560,14 @@ export async function applyBatch(
   // materialization_cursor is advanced per-chunk (above), so it already
   // reflects progress. This cursor is kept for backwards compatibility
   // and only exists for streams that have a comp_space row.
+  //
+  // `updated_at` is deliberately not touched: the row's clock columns record
+  // the last *change* the log made to it, and advancing a cursor is not one.
   await db.transaction([
     {
       type: "run",
       sql: `update comp_space
-           set backfilled_to = ?,
-               updated_at = (unixepoch() * 1000)
+           set backfilled_to = ?
            where entity = ?
              and (backfilled_to is null or backfilled_to < ?)`,
       params: [latestIdx, streamId, latestIdx],
