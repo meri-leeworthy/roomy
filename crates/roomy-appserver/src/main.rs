@@ -30,7 +30,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use roomy_auth::{InMemoryNonces, TicketIssuer, TicketVerifier};
-use roomy_gateway::{router, GatewaySignals, GatewayState};
+use roomy_gateway::{cache, router, GatewaySignals, GatewayState};
+use roomy_space_worker::signal::SignalSink;
 use roomy_space_worker::{Supervisor, SupervisorConfig};
 use space_core::ids::SpaceDid;
 use space_xrpc::registry::{SpaceRegistry, SpaceResolver};
@@ -170,20 +171,28 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        // One sink for the process: a worker's committed batch and the sockets
+        // that must be woken share it, whether or not the two roles are the same
+        // binary invocation.
+        let signals = GatewaySignals::new(1024);
+
         // The workers first: an embedded gateway that starts before its spaces
         // have a projection would serve reads from empty databases.
         let supervisor = if config.role != Role::Gateway {
-            Some(Supervisor::start(
-                supervisor_config(&config),
-                config.spaces.clone(),
-            )?)
+            let signals = signals.clone();
+            let supervisor =
+                Supervisor::new(supervisor_config(&config)).with_signals(Arc::new(move || {
+                    Box::new(signals.clone()) as Box<dyn SignalSink>
+                }));
+            supervisor.start_all(config.spaces.clone())?;
+            Some(supervisor)
         } else {
             None
         };
 
         if config.role != Role::Worker {
-            let signal_sink = GatewaySignals::new(1024);
-            let state = gateway_state(&config, signal_sink)?;
+            let state = gateway_state(&config, signals)?;
+            let eviction = cache::spawn_eviction(Arc::clone(&state));
             let app = router(state);
             let listener = tokio::net::TcpListener::bind(config.http_addr).await?;
             tracing::info!(address = %config.http_addr, "gateway listening");
@@ -192,6 +201,7 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                     let _ = tokio::signal::ctrl_c().await;
                 })
                 .await?;
+            eviction.abort();
         } else {
             let _ = tokio::signal::ctrl_c().await;
         }
