@@ -34,10 +34,23 @@ use space_feed::{ChangeFeed, FeedError};
 use crate::cancel::Cancel;
 use crate::clock::{Clock, SystemClock};
 use crate::health::Health;
-use crate::lease::SqliteLease;
+use crate::lease::{FollowOnly, Lease, SqliteLease};
 use crate::signal::{NoSignals, SignalSink};
 use crate::sink::SqliteGlobalSink;
 use crate::worker::{Progress, Worker, WorkerParts};
+
+/// What this process is to the spaces it opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ownership {
+    /// This process is the writer: it takes each space's lease and applies both
+    /// halves of every change.
+    #[default]
+    Owner,
+    /// This process replays beside the owner to serve reads: it takes no lease.
+    /// Its global database must be its own copy, because the owner writes the
+    /// shared one.
+    Follower,
+}
 
 /// What a process needs to materialise spaces.
 #[derive(Debug, Clone)]
@@ -58,6 +71,8 @@ pub struct SupervisorConfig {
     /// Exit an actor after this long with nothing to apply. `None` keeps every
     /// space resident.
     pub idle_unload: Option<Duration>,
+    /// Whether this process owns its spaces or follows them.
+    pub ownership: Ownership,
 }
 
 impl SupervisorConfig {
@@ -171,7 +186,12 @@ impl Supervisor {
         // reported to the caller rather than logged from a thread nobody joins.
         let db = SpaceDb::open(config.space_path(&space), space.clone())?;
         let feed = (self.feed)()?;
-        let lease = SqliteLease::open(&config.global_db)?;
+        let lease: Box<dyn Lease> = match config.ownership {
+            Ownership::Owner => Box::new(SqliteLease::open(&config.global_db)?),
+            Ownership::Follower => Box::new(FollowOnly::new(db.fence()?)),
+        };
+        // Both roles write the global half; a follower writes it to its own copy,
+        // which is what makes its entity index usable for reads it serves alone.
         let sink = SqliteGlobalSink::open(&config.global_db)?;
         let holder = config.holder.clone();
         let idle_poll = config.idle_poll;

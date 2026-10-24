@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use space_core::effects::SqlEffect;
 
 /// Applies the statements a change aimed at the global database.
-pub trait GlobalSink {
+pub trait GlobalSink: Send {
     fn apply(&mut self, statements: &[SqlEffect]) -> Result<(), SinkError>;
 }
 

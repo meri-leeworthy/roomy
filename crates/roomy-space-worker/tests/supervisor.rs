@@ -84,6 +84,7 @@ fn config(dir: &Path) -> SupervisorConfig {
         idle_poll: Duration::from_millis(2),
         batch_limit: 500,
         idle_unload: None,
+        ownership: roomy_space_worker::supervisor::Ownership::Owner,
     }
 }
 

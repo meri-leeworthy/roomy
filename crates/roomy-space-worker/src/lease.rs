@@ -45,7 +45,7 @@ impl LeaseGrant {
 }
 
 /// Whether this process may write `space`.
-pub trait Lease {
+pub trait Lease: Send {
     /// Take or renew the lease for `space`, as of `now_ms`.
     fn acquire(
         &mut self,
@@ -57,6 +57,61 @@ pub trait Lease {
 
     /// Give the lease up if `holder` still holds it.
     fn release(&mut self, space: &SpaceDid, holder: &str) -> Result<(), LeaseError>;
+}
+
+/// A follower's stand-in for the lease: it claims nothing.
+///
+/// A read replica replays the log beside the owner to answer reads from its own
+/// projection (`rust-core-appserver.md` §2.1, replicated reads). It must not take
+/// the lease — that would stop the owner materialising — and it cannot be fenced
+/// by it, because the fence lives in the space file it alone writes. The epoch it
+/// carries is the one that file already holds, so a follower's commits are never
+/// refused and never regress a fence.
+#[derive(Debug, Clone, Copy)]
+pub struct FollowOnly {
+    epoch: i64,
+}
+
+impl FollowOnly {
+    /// Follow the projection that carries `epoch`.
+    pub fn new(epoch: i64) -> Self {
+        Self { epoch }
+    }
+}
+
+impl Lease for FollowOnly {
+    fn acquire(
+        &mut self,
+        _space: &SpaceDid,
+        _holder: &str,
+        _now_ms: i64,
+        _ttl: Duration,
+    ) -> Result<LeaseGrant, LeaseError> {
+        Ok(LeaseGrant {
+            held: true,
+            epoch: self.epoch,
+        })
+    }
+
+    fn release(&mut self, _space: &SpaceDid, _holder: &str) -> Result<(), LeaseError> {
+        Ok(())
+    }
+}
+
+impl Lease for Box<dyn Lease> {
+    fn acquire(
+        &mut self,
+        space: &SpaceDid,
+        holder: &str,
+        now_ms: i64,
+        ttl: Duration,
+    ) -> Result<LeaseGrant, LeaseError> {
+        (**self).acquire(space, holder, now_ms, ttl)
+    }
+
+    fn release(&mut self, space: &SpaceDid, holder: &str) -> Result<(), LeaseError> {
+        (**self).release(space, holder)
+    }
 }
 
 /// A lease operation that failed.
