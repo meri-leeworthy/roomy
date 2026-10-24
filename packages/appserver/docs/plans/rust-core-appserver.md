@@ -268,7 +268,7 @@ binary depends on everything.
 | `space-xrpc` | Per-space read router over a dynamic space registry | `space-db`, `roomy-ids` | SQLite/axum |
 | `roomy-global` | Global store, entity→space index, leases, fencing epochs | `roomy-ids` | SQLite |
 | `roomy-auth` | JWT verification, service auth, DID cache, access decisions | `roomy-ids` | HTTP/SQLite |
-| `roomy-readstate` | Read positions, per-user state, ticket/scope state | `roomy-ids` | SQLite |
+| `roomy-readstate` | `ReadStateStore` trait + SQLite impl: read positions, per-user state, ticket/scope state | `roomy-ids` | trait; SQLite now, network later |
 | `roomy-sync` | Sans-io session core + WebSocket adapter | `roomy-events`, `roomy-auth` | WS |
 | `roomy-cache` | Response cache policy and store | `roomy-ids` | no (store trait) |
 | `roomy-ingest` | `sendEvents` validation, append, record adapter | `roomy-events`, `space-feed` | SQLite |
@@ -494,8 +494,11 @@ Change if fan-out cost grows; then a bus is the transport, not a new contract.
 
 **Q6. Which state is shared and which is node-local?**
 Recommendation:
-- Read-state: shared source of truth, partitioned by user (or space) with an
-  owner; not one SQLite file written over the network by every gateway.
+- Read-state: a `ReadStateStore` trait with a SQLite implementation now —
+  embedded, one writer per node or partition — and a networked implementation
+  later if write rate or multi-node contention demands it. The gateway depends
+  on the trait, never on `rusqlite`. Partition by user when one writer stops
+  being enough.
 - Tickets: signed and self-contained (short expiry, audience, one-shot nonce),
   so any gateway can verify them. The current process-local map is a
   single-node assumption.
