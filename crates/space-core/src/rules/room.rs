@@ -57,6 +57,7 @@ pub fn create_effects(base: &ChangeBase, record: &RoomRecord, ctx: &RuleContext)
             ],
         ));
     }
+    effects.push(refresh_activity_meta_statement(id));
     effects
 }
 
@@ -90,7 +91,36 @@ pub fn update_effects(base: &ChangeBase, patch: &RoomPatch, ctx: &RuleContext) -
     if let Some(parent) = &patch.parent {
         effects.extend(parent_effects(id, parent.as_deref(), ctx));
     }
+    // A rename, a re-parent or a soft delete changes names the feed row
+    // denormalises. Refreshing them here is what makes the projection a
+    // function of the log rather than of the order it was batched in.
+    effects.push(refresh_activity_meta_statement(id));
     effects
+}
+
+/// The statement that re-derives one room's denormalised feed names.
+pub(crate) fn refresh_activity_meta_statement(room_id: &str) -> Effect {
+    Effect::space(
+        "update activity_item
+            set room_name = (select name from comp_info where entity = activity_item.room_id),
+                space_name = (select name from comp_info where entity = activity_item.space_id),
+                space_avatar = (select avatar from comp_info where entity = activity_item.space_id),
+                parent_channel_id = (
+                  select p.head from edges p
+                   where p.tail = activity_item.room_id
+                     and p.label = 'link'
+                     and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+                ),
+                parent_channel_name = (
+                  select pi.name from edges p
+                    join comp_info pi on pi.entity = p.head
+                   where p.tail = activity_item.room_id
+                     and p.label = 'link'
+                     and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+                )
+          where room_id = ?",
+        vec![Value::text(room_id)],
+    )
 }
 
 /// The `comp_info` fields a patch carries.

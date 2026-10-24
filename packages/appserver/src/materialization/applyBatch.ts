@@ -52,6 +52,7 @@ import { openReadStateDb } from "../db/db.ts";
 import { recordSpaceStats, selectMemberCount } from "../queries/spaceStats.ts";
 import { maintainRoomAccess } from "../queries/roomAccessProjection.ts";
 import { maintainRoomActivity } from "../queries/roomActivityProjection.ts";
+import { refreshActivityMetaStatement } from "./records/roomRules.ts";
 import {
   classifyMembershipEvent,
   setUserSpaceMembership,
@@ -662,6 +663,34 @@ function eventProjectionSteps(
       type: "run",
       sql: activityStep.sql,
       params: activityStep.params,
+      derived: "space",
+    });
+  }
+
+  // A room or space rename changes names the feed rows denormalise. Both paths
+  // run the same statement, so the projection does not depend on which one
+  // applied the change.
+  if (
+    e.event.$type === "space.roomy.room.createRoom.v0" ||
+    e.event.$type === "space.roomy.room.updateRoom.v0"
+  ) {
+    const roomId = (e.event as Record<string, unknown>).id;
+    if (typeof roomId === "string" && roomId !== "") {
+      steps.push({
+        type: "run",
+        sql: refreshActivityMetaStatement(roomId).sql,
+        params: refreshActivityMetaStatement(roomId).params as unknown[],
+        derived: "space",
+      });
+    }
+  }
+  if (e.event.$type === "space.roomy.space.updateSpaceInfo.v0") {
+    steps.push({
+      type: "run",
+      sql: `update activity_item
+                set space_name = (select name from comp_info where entity = activity_item.space_id),
+                    space_avatar = (select avatar from comp_info where entity = activity_item.space_id)`,
+      params: [],
       derived: "space",
     });
   }

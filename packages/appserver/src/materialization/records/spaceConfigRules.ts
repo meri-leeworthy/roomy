@@ -60,6 +60,17 @@ export function spaceInfoStatements(
     );
   }
 
+  // The space's name and avatar are denormalised into every feed row it holds.
+  if (patch.name !== undefined || patch.avatar !== undefined) {
+    statements.push(
+      space(sql`
+        update activity_item
+            set space_name = (select name from comp_info where entity = activity_item.space_id),
+                space_avatar = (select avatar from comp_info where entity = activity_item.space_id)
+      `),
+    );
+  }
+
   const policy = [
     { key: "allow_public_join", value: patch.allowPublicJoin },
     { key: "allow_member_invites", value: patch.allowMemberInvites },
