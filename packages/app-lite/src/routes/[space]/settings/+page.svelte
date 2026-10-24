@@ -41,6 +41,7 @@
   // `undefined` = the admins have not answered. The control shows no choice
   // rather than fabricating one; the stored value stays NULL until they pick.
   let suggestToOthers = $state<string | undefined>(undefined);
+  let showJoinNotices = $state<string | undefined>(undefined);
   let avatarFile = $state<File | null>(null);
   let avatarPreview = $state<string | null>(null);
 
@@ -86,12 +87,12 @@
   }
 
   /**
-   * The UI's tri-state for the stored answer: `undefined` while the admins have
-   * not answered (`suggest_to_others` is NULL), so the toggle shows no choice;
-   * otherwise "yes"/"no".
+   * The UI's tri-state for an answered-or-not space setting: `undefined` while
+   * the admins have not answered (the column is NULL), so the toggle shows no
+   * choice; otherwise "yes"/"no".
    */
-  function suggestSelection(suggest: boolean | undefined): string | undefined {
-    return suggest === undefined ? undefined : suggest ? "yes" : "no";
+  function settingSelection(value: boolean | undefined): string | undefined {
+    return value === undefined ? undefined : value ? "yes" : "no";
   }
 
   // Initialise on load and re-sync after a successful save: the space topic
@@ -102,7 +103,8 @@
     description = meta.description ?? "";
     allowPublicJoin = meta.joinPolicy.allowPublicJoin ? "yes" : "no";
     allowMemberInvites = meta.joinPolicy.allowMemberInvites ? "yes" : "no";
-    suggestToOthers = suggestSelection(meta.suggestToOthers);
+    suggestToOthers = settingSelection(meta.suggestToOthers);
+    showJoinNotices = settingSelection(meta.showJoinNotices);
     untrack(clearAvatarSelection);
   });
 
@@ -121,7 +123,10 @@
       (allowMemberInvites === "yes") !== meta.joinPolicy.allowMemberInvites,
   );
   const suggestChanged = $derived(
-    !!meta && suggestToOthers !== suggestSelection(meta.suggestToOthers),
+    !!meta && suggestToOthers !== settingSelection(meta.suggestToOthers),
+  );
+  const joinNoticesChanged = $derived(
+    !!meta && showJoinNotices !== settingSelection(meta.showJoinNotices),
   );
   const hasChanged = $derived(
     nameChanged ||
@@ -129,7 +134,8 @@
       avatarChanged ||
       publicJoinChanged ||
       memberInvitesChanged ||
-      suggestChanged,
+      suggestChanged ||
+      joinNoticesChanged,
   );
 
   function handleAvatarSelect(event: Event) {
@@ -147,7 +153,8 @@
     description = meta.description ?? "";
     allowPublicJoin = meta.joinPolicy.allowPublicJoin ? "yes" : "no";
     allowMemberInvites = meta.joinPolicy.allowMemberInvites ? "yes" : "no";
-    suggestToOthers = suggestSelection(meta.suggestToOthers);
+    suggestToOthers = settingSelection(meta.suggestToOthers);
+    showJoinNotices = settingSelection(meta.showJoinNotices);
     clearAvatarSelection();
     saveError = null;
   }
@@ -174,6 +181,7 @@
         // Sent only once an admin has picked a side; an unanswered space
         // writes nothing.
         suggestToOthers: suggestChanged ? suggestToOthers === "yes" : undefined,
+        showJoinNotices: joinNoticesChanged ? showJoinNotices === "yes" : undefined,
       });
       clearAvatarSelection();
     } catch (e) {
@@ -327,6 +335,25 @@
             <ToggleGroup
               name="suggestToOthers"
               bind:value={suggestToOthers}
+              options={[
+                { label: "Yes", value: "yes" },
+                { label: "No", value: "no" },
+              ]}
+            />
+          </div>
+          <div>
+            <p
+              class="block text-sm font-medium mb-2 text-base-900 dark:text-base-100"
+            >
+              Show join notices?
+            </p>
+            <p class="text-sm text-base-500 dark:text-base-400 mb-2">
+              A message in the channel whenever someone joins. Turn it off in a
+              busy space to keep the timeline on the conversation.
+            </p>
+            <ToggleGroup
+              name="showJoinNotices"
+              bind:value={showJoinNotices}
               options={[
                 { label: "Yes", value: "yes" },
                 { label: "No", value: "no" },

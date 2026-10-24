@@ -60,6 +60,7 @@ export function spaceInfoStatements(
     { key: "allow_public_join", value: patch.allowPublicJoin },
     { key: "allow_member_invites", value: patch.allowMemberInvites },
     { key: "suggest_to_others", value: patch.suggestToOthers },
+    { key: "show_join_notices", value: patch.showJoinNotices },
   ].filter((field) => field.value !== undefined);
   if (policy.length > 0) {
     const columns = policy.map((field) => field.key);
