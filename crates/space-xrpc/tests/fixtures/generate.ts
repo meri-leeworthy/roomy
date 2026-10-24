@@ -87,6 +87,7 @@ const SPACE = "did:web:space.example";
 const ADMIN = "did:plc:admin";
 const MEMBER = "did:plc:member";
 const OUTSIDER = "did:plc:outsider";
+const BANNED = "did:plc:banned";
 const AUTHOR1 = "did:plc:authorone";
 const AUTHOR2 = "did:plc:authortwo";
 
@@ -202,6 +203,13 @@ async function seed(db: Database): Promise<SeedIds> {
 
   seedSpace(db, SPACE, ADMIN, { allowPublicJoin: 0 });
   seedMembership(db, SPACE, MEMBER, "member");
+  // A banned caller: a member whom the space has banned, so the matrix has a
+  // caller whose access is denied by a row rather than by absence.
+  seedMembership(db, SPACE, BANNED, "member");
+  await spaceDb(db, SPACE).run(
+    "insert into comp_bans (entity, user_did, created_at) values (?, ?, 1)",
+    [SPACE, BANNED],
+  );
   await spaceDb(db, SPACE).run(
     "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
     [SPACE, ADMIN],
@@ -611,6 +619,37 @@ async function capture(base: string, ids: SeedIds): Promise<Case[]> {
   }
   for (const endpoint of endpoints.slice(0, 3)) {
     await run(`anonymous/${endpoint.key}`, endpoint.nsid, endpoint.params, null);
+  }
+
+  // The read differential's edges: a caller who is banned, a space, room and
+  // message that do not exist, parameters outside every accepted range, and
+  // limits at both ends. Each of these is a decision the two implementations
+  // have to make the same way, and each is cheap to record.
+  await run("banned/space.getMetadata", "space.roomy.space.getMetadata", {
+    spaceId: SPACE,
+  }, BANNED);
+  await run("banned/room.getMessages.c1", "space.roomy.room.getMessages", {
+    roomId: C1,
+    limit: "2",
+  }, BANNED);
+
+  for (const [key, nsid, params] of [
+    ["unknown-space", "space.roomy.space.getMetadata", { spaceId: "did:web:absent.example" }],
+    ["unknown-room", "space.roomy.room.getMessages", { roomId: "01JRZ0R0000000000000000000" }],
+    ["unknown-message", "space.roomy.message.getMessage", { messageId: "01JRZ0R0000000000000000000" }],
+    ["missing-spaceId", "space.roomy.space.getMetadata", {}],
+    ["malformed-spaceId", "space.roomy.space.getMetadata", { spaceId: "not-a-did" }],
+    ["malformed-roomId", "space.roomy.room.getMessages", { roomId: "not-a-ulid" }],
+    ["limit-zero", "space.roomy.room.getMessages", { roomId: C1, limit: "0" }],
+    ["limit-negative", "space.roomy.room.getMessages", { roomId: C1, limit: "-1" }],
+    ["limit-too-large", "space.roomy.room.getMessages", { roomId: C1, limit: "101" }],
+    ["limit-not-a-number", "space.roomy.room.getMessages", { roomId: C1, limit: "many" }],
+    ["cursor-garbage", "space.roomy.room.getMessages", { roomId: C1, cursor: "not-a-cursor" }],
+    ["no-limit", "space.roomy.space.getThreads", { spaceId: SPACE }],
+    ["max-limit", "space.roomy.space.getThreads", { spaceId: SPACE, limit: "100" }],
+  ] as Array<[string, string, Record<string, string>]>) {
+    await run(`admin/${key}`, nsid, params, ADMIN);
+    await run(`outsider/${key}`, nsid, params, OUTSIDER);
   }
 
   // Pagination walks: the next page is fetched with the cursor the handler

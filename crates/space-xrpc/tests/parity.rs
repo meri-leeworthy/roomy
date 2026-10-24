@@ -59,11 +59,16 @@ fn state(fixture: &Fixture) -> XrpcState {
     ))
     .expect("fixture space db");
     let mut spaces = FixedSpaces::new([(fixture.space.clone(), Arc::new(db))]);
-    // Every entity the cases name resolves to the fixture's space.
+    // Every entity the fixture's log created resolves to the fixture's space.
+    // A parameter that is not an entity id — a malformed one, or an id the log
+    // never created — is not in the index, which is what makes the request a
+    // not-found rather than an answer.
     for case in &fixture.cases {
         for key in ["roomId", "messageId", "threadId"] {
             if let Some(Value::String(entity)) = case.params.get(key) {
-                spaces = spaces.with_entity(entity.clone(), fixture.space.clone());
+                if is_ulid(entity) {
+                    spaces = spaces.with_entity(entity.clone(), fixture.space.clone());
+                }
             }
         }
     }
@@ -81,6 +86,15 @@ fn state(fixture: &Fixture) -> XrpcState {
     )
     .with_spaces(spaces)
     .with_stores(Arc::new(stores) as Arc<dyn GlobalStores>)
+}
+
+/// A 26-character Crockford id, the shape the log's entity ids have.
+fn is_ulid(value: &str) -> bool {
+    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    value.len() == 26
+        && value
+            .bytes()
+            .all(|byte| CROCKFORD.contains(&byte.to_ascii_uppercase()))
 }
 
 fn query(params: &Map<String, Value>) -> String {

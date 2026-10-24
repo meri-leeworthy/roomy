@@ -190,3 +190,48 @@ async fn a_ticket_endpoint_mints_one_for_the_authenticated_caller() {
     assert!(claims.exp > claims.iat);
     let _ = Duration::from_secs(1);
 }
+
+#[tokio::test]
+async fn a_repeated_read_is_served_from_the_cache_and_a_signal_evicts_it() {
+    let state = state();
+    let uri = "/xrpc/space.roomy.space.getMetadata?spaceId=did:web:alpha.example";
+
+    let (status, first) = get(&state, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(state.cache.len(), 1, "the answer is cached");
+
+    let (status, second) = get(&state, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second, first, "the cached answer is the same bytes");
+
+    // A signal for that space evicts it: the next read goes to the worker again.
+    state.cache.invalidate_space("did:web:alpha.example");
+    assert_eq!(state.cache.len(), 0);
+    let (status, third) = get(&state, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(third, first);
+}
+
+#[tokio::test]
+async fn the_cache_is_bounded_by_its_ttl() {
+    let state = state();
+    let uri = "/xrpc/space.roomy.space.getMetadata?spaceId=did:web:alpha.example";
+    let _ = get(&state, uri).await;
+    assert_eq!(state.cache.len(), 1);
+    tokio::time::sleep(state.cache.ttl() + Duration::from_millis(50)).await;
+    // An expired entry is a miss, not an answer.
+    let _ = get(&state, uri).await;
+    assert_eq!(state.cache.len(), 1, "the miss re-populated it");
+}
+
+#[tokio::test]
+async fn an_error_is_not_cached() {
+    let state = state();
+    let (status, _) = get(
+        &state,
+        "/xrpc/space.roomy.space.getMetadata?spaceId=did:web:absent.example",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(state.cache.is_empty());
+}
