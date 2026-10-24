@@ -264,6 +264,33 @@ create table if not exists space_stats (
 ) strict;
 create index if not exists idx_space_stats_members on space_stats(member_count desc, space_did);
 
+-- Discoverable-space registry: the two per-space settings that decide whether
+-- a space may be suggested to people who are not members
+-- (`space.roomy.space.getDiscoverableSpaces`). Both live in the per-space DB
+-- (`comp_space`), so answering it from the space DBs would open every space's
+-- DB on every request — the same O(all spaces) fan-out `space_stats` exists to
+-- avoid.
+--
+-- The columns keep the three-valued meaning of `comp_space`:
+--   - `suggest_to_others` NULL = admins have not answered (reads as suggested),
+--     0 = opted out, 1 = opted in.
+--   - `allow_public_join` NULL = unset (defaults to public), 0 = invite-only.
+-- A row exists only for spaces that have a `comp_space` row; a space with no
+-- row here is not discoverable.
+--
+-- Written by:
+--   - the boot per-space sweep (reMaterialize), so an existing dataset
+--     self-heals on the next boot, and
+--   - `applyBatch` whenever a chunk contains an event that can write
+--     `comp_space` (updateSpaceInfo, the synthetic spaceMeta).
+-- Derived data: deleting it is safe — the next boot sweep rebuilds it.
+create table if not exists space_discovery (
+  space_did          text primary key,
+  allow_public_join  integer check(allow_public_join in (0, 1)),
+  suggest_to_others  integer check(suggest_to_others in (0, 1)),
+  updated_at         integer not null default (unixepoch() * 1000)
+) strict;
+
 -- Voice: the calls the reconciler must verify against LiveKit, one row per
 -- active call across every space. Maintained by the `callStarted`/`callEnded`
 -- materialisers, which are the only writers — the reconciler reads this table
