@@ -18,7 +18,7 @@ use rusqlite::Connection;
 use space_core::change::{
     decode_row, DecodeError, FeedRow, RecordBody, RecordChange, RecordKind, RecordPatch,
 };
-use space_core::{Effect, RuleContext};
+use space_core::{Effect, PlanMode, RuleContext};
 
 use crate::DbError;
 
@@ -86,6 +86,7 @@ pub fn plan_batch(
     conn: &Connection,
     stream_id: &space_core::SpaceDid,
     entries: &[EntryChanges],
+    mode: PlanMode,
     now_ms: i64,
 ) -> Result<Vec<PlannedEntry>, DbError> {
     let needed_rooms = rooms_needed(entries);
@@ -103,7 +104,7 @@ pub fn plan_batch(
             let key = change.base().rkey.as_str().to_string();
             let mut ctx = RuleContext {
                 stream_id: stream_id.clone(),
-                is_backfill: false,
+                is_backfill: mode.is_backfill(),
                 actor: entry.actor.clone(),
                 event_id: entry.event_id.clone(),
                 prior_room: None,
