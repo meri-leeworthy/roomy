@@ -88,7 +88,7 @@ fn replay_with_crash(
                 .expect("plan");
             let last = batch.last().expect("a non-empty batch");
             let pending = db
-                .begin_batch(&planned, (last.idx, last.ord))
+                .begin_batch(&planned, (last.idx, last.ord), 1)
                 .expect("begin");
             sink.apply(pending.globals())
                 .expect("the global half applies");
@@ -122,7 +122,7 @@ fn replay_with_crash(
                 .expect("plan");
             let last = batch.last().expect("a non-empty batch");
             let pending = db
-                .begin_batch(&planned, (last.idx, last.ord))
+                .begin_batch(&planned, (last.idx, last.ord), 1)
                 .expect("begin");
             sink.apply(pending.globals())
                 .expect("the global half applies");

@@ -31,7 +31,7 @@ use space_feed::{ChangeFeed, Cursor, FeedError};
 
 use crate::cancel::Cancel;
 use crate::clock::Clock;
-use crate::lease::{Lease, LeaseError};
+use crate::lease::{Lease, LeaseError, LeaseGrant};
 use crate::signal::{SignalSink, SpaceSignal};
 use crate::sink::{GlobalSink, SinkError};
 
@@ -71,6 +71,10 @@ pub enum WorkerError {
     },
     #[error("starting an actor: {0}")]
     Spawn(String),
+    /// The lease moved to another worker while this batch was in flight, so the
+    /// batch was refused rather than written over the new owner's projection.
+    #[error("fenced out at epoch {granted} (stored {stored})")]
+    Fenced { granted: i64, stored: i64 },
 }
 
 /// What a worker is built from: the four seams, the space it owns, and the
@@ -156,8 +160,8 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> Worker<F, L, S, N> {
         self.mode = mode;
     }
 
-    /// Whether this process holds the lease right now.
-    pub fn holds_lease(&mut self) -> Result<bool, WorkerError> {
+    /// Whether this process holds the lease right now, and under which epoch.
+    pub fn holds_lease(&mut self) -> Result<LeaseGrant, WorkerError> {
         Ok(self.lease.acquire(
             &self.space,
             &self.holder,
@@ -203,12 +207,13 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> Worker<F, L, S, N> {
                 cursor: self.db.cursor()?.unwrap_or((-1, -1)),
             });
         }
-        if !self.lease.acquire(
+        let grant = self.lease.acquire(
             &self.space,
             &self.holder,
             self.clock.now_ms(),
             self.lease_ttl,
-        )? {
+        )?;
+        if !grant.held {
             return Ok(Progress::NotLeased);
         }
 
@@ -245,7 +250,13 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> Worker<F, L, S, N> {
         // space half stays uncommitted until the sink has accepted, so a sink
         // failure leaves the cursor where it was and the same changes are read
         // again.
-        let batch = self.db.begin_batch(&planned, next_cursor)?;
+        let batch = self
+            .db
+            .begin_batch(&planned, next_cursor, grant.epoch)
+            .map_err(|error| match error {
+                DbError::Fenced { granted, stored } => WorkerError::Fenced { granted, stored },
+                other => WorkerError::Db(other),
+            })?;
         self.sink.apply(batch.globals())?;
         batch.commit()?;
         // After the commit: a listener that reacts to this signal reads the
@@ -276,7 +287,7 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> Worker<F, L, S, N> {
     pub fn health(&mut self) -> crate::health::Health {
         let cursor = self.cursor().unwrap_or((-1, -1));
         let lag = self.lag().unwrap_or(-1);
-        let lease_held = self.holds_lease().unwrap_or(false);
+        let lease_held = self.holds_lease().map(|grant| grant.held).unwrap_or(false);
         crate::health::Health {
             space: self.space.as_str().to_string(),
             cursor,

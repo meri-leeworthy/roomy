@@ -182,54 +182,69 @@ fn a_second_worker_cannot_take_a_held_lease() {
     let db_path = path.path().to_path_buf();
 
     let mut first = SqliteLease::open(&db_path).expect("lease");
-    assert!(first
-        .acquire(
-            &stream,
-            "holder-a",
-            SystemClock.now_ms(),
-            Duration::from_secs(30)
-        )
-        .expect("acquire"));
+    assert!(
+        first
+            .acquire(
+                &stream,
+                "holder-a",
+                SystemClock.now_ms(),
+                Duration::from_secs(30)
+            )
+            .expect("acquire")
+            .held
+    );
     let mut second = SqliteLease::open(&db_path).expect("lease");
-    assert!(!second
-        .acquire(
-            &stream,
-            "holder-b",
-            SystemClock.now_ms(),
-            Duration::from_secs(30)
-        )
-        .expect("acquire"));
+    assert!(
+        !second
+            .acquire(
+                &stream,
+                "holder-b",
+                SystemClock.now_ms(),
+                Duration::from_secs(30)
+            )
+            .expect("acquire")
+            .held
+    );
 
     // The holder renews, and a release by a non-holder leaves the row alone.
-    assert!(first
-        .acquire(
-            &stream,
-            "holder-a",
-            SystemClock.now_ms(),
-            Duration::from_secs(30)
-        )
-        .expect("renew"));
+    assert!(
+        first
+            .acquire(
+                &stream,
+                "holder-a",
+                SystemClock.now_ms(),
+                Duration::from_secs(30)
+            )
+            .expect("renew")
+            .held
+    );
     second
         .release(&stream, "holder-b")
         .expect("release by a non-holder");
-    assert!(!second
-        .acquire(
-            &stream,
-            "holder-b",
-            SystemClock.now_ms(),
-            Duration::from_secs(30)
-        )
-        .expect("acquire after the failed release"));
+    assert!(
+        !second
+            .acquire(
+                &stream,
+                "holder-b",
+                SystemClock.now_ms(),
+                Duration::from_secs(30)
+            )
+            .expect("acquire after the failed release")
+            .held
+    );
 
     first.release(&stream, "holder-a").expect("release");
-    assert!(second
-        .acquire(
-            &stream,
-            "holder-b",
-            SystemClock.now_ms(),
-            Duration::from_secs(30)
-        )
-        .expect("acquire after the holder released"));
+    assert!(
+        second
+            .acquire(
+                &stream,
+                "holder-b",
+                SystemClock.now_ms(),
+                Duration::from_secs(30)
+            )
+            .expect("acquire after the holder released")
+            .held
+    );
 }
 
 #[test]
@@ -253,9 +268,72 @@ fn a_batch_is_applied_with_its_cursor_or_not_at_all() {
         effects: vec![broken],
     }];
     assert!(db
-        .begin_batch(&planned, (rows[0].idx, rows[0].ord))
+        .begin_batch(&planned, (rows[0].idx, rows[0].ord), 1)
         .is_err());
     assert_eq!(db.cursor().expect("cursor"), None);
+}
+
+#[test]
+fn a_batch_from_a_lost_lease_is_refused_and_leaves_the_cursor() {
+    let fixture: Fixture =
+        serde_json::from_str(&std::fs::read_to_string(fixture_path()).expect("fixture readable"))
+            .expect("fixture parses");
+    let stream = SpaceDid::parse(fixture.stream.clone()).expect("stream is a DID");
+    let feed = seeded_feed(&fixture);
+    let mut db = seeded_space(&stream);
+    let rows = feed
+        .batch(&stream, Cursor::from((-1, -1)), 1)
+        .expect("a batch from the start");
+
+    // The first batch commits under epoch 1, as the lease's first grant carries.
+    let planned = plan_batch(
+        db.connection(),
+        &stream,
+        &group_entries(&rows).expect("group"),
+        space_core::PlanMode::Live,
+    )
+    .expect("plan");
+    db.begin_batch(&planned, (rows[0].idx, rows[0].ord), 1)
+        .expect("begin")
+        .commit()
+        .expect("commit");
+    let cursor = db.cursor().expect("cursor");
+    assert_eq!(db.fence().expect("fence"), 1);
+
+    // Another worker takes the lease while this one is paused: the epoch
+    // advances, and the batch this worker had planned is now stale.
+    let planned = plan_batch(
+        db.connection(),
+        &stream,
+        &group_entries(&rows).expect("group"),
+        space_core::PlanMode::Live,
+    )
+    .expect("plan");
+    let stale = db
+        .begin_batch(&planned, (rows[0].idx, rows[0].ord), 2)
+        .expect("begin");
+    stale.commit().expect("the takeover's own batch lands");
+    let planned = plan_batch(
+        db.connection(),
+        &stream,
+        &group_entries(&rows).expect("group"),
+        space_core::PlanMode::Live,
+    )
+    .expect("plan");
+    let refused = db
+        .begin_batch(&planned, (rows[0].idx, rows[0].ord), 1)
+        .expect("begin");
+    match refused.commit() {
+        Err(space_db::DbError::Fenced { granted, stored }) => {
+            assert_eq!((granted, stored), (1, 2));
+        }
+        other => panic!("a stale batch must be fenced out, got {other:?}"),
+    }
+    assert_eq!(
+        db.cursor().expect("cursor"),
+        cursor,
+        "the cursor did not move"
+    );
 }
 
 /// The fixture, its stream, and the global tables a comparison covers.
@@ -410,7 +488,7 @@ fn a_crash_between_the_global_write_and_the_commit_replays_to_the_same_projectio
         let last = rows.last().expect("a non-empty batch");
         let mut sink = SqliteGlobalSink::open(&global_path).expect("sink");
         let batch = db
-            .begin_batch(&planned, (last.idx, last.ord))
+            .begin_batch(&planned, (last.idx, last.ord), 1)
             .expect("beginning the batch");
         sink.apply(batch.globals())
             .expect("the global half applies");
