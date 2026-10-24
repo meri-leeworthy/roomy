@@ -13,7 +13,12 @@ resolving requests through a bounded `SpaceRegistry` over many spaces — and **
 `roomy-auth` (signed, self-contained, one-shot connection tickets), `roomy-sync` (the
 sans-io session core and its axum adapter), `roomy-gateway` (health, metrics, the ticket
 endpoint, the socket plane, and the worker's reads mounted unchanged), and the
-`roomy-appserver` binary with `--role all|gateway|worker`. M3 onwards is in flight.
+`roomy-appserver` binary with `--role all|gateway|worker`. **M3** is partial: the
+read differential (84 recorded cases across the caller matrix, unknown ids,
+malformed params and pagination edges, all byte-identical) and the response cache
+(keyed by nsid, canonical params and caller; TTL-bounded; evicted by signals) are
+in, while the other sixteen per-space reads and the four cross-space endpoints are
+not. M4 onwards is not started.
 
 **Scope.** The Rust rewrite of the appserver's core: the gateway (XRPC edge,
 WebSocket connection plane, auth, user-scoped and cross-space reads, write
