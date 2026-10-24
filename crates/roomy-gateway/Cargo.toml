@@ -28,10 +28,13 @@ roomy-ingest.workspace = true
 # HTTP, so the client is part of this crate and of no worker.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "charset", "http2", "query"] }
 regex = { workspace = true }
+# The internal feed reads the event log this process owns.
+rusqlite.workspace = true
 
 [dev-dependencies]
+space-db.workspace = true
+space-feed.workspace = true
 tokio-tungstenite = "0.28"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
-rusqlite.workspace = true

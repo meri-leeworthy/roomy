@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use space_core::ids::SpaceDid;
 use space_db::SpaceDb;
 use space_feed::sqlite::SqliteChangeFeed;
+use space_feed::{ChangeFeed, FeedError};
 
 use crate::cancel::Cancel;
 use crate::clock::{Clock, SystemClock};
@@ -74,6 +75,9 @@ pub struct Supervisor {
     /// workers that feed it share one sink, so a committed batch reaches the
     /// connections without crossing a seam the split deployment does not have.
     signals: SignalFactory,
+    /// How each actor gets its feed. A worker on the log's machine reads SQLite;
+    /// a worker elsewhere asks the owner over HTTP. The loop cannot tell.
+    feed: FeedFactory,
     cancel: Cancel,
     health: Arc<Mutex<BTreeMap<String, Health>>>,
     actors: Mutex<BTreeMap<String, Actor>>,
@@ -81,6 +85,9 @@ pub struct Supervisor {
 
 /// A sink per actor, made afresh because a worker owns its sink.
 pub type SignalFactory = Arc<dyn Fn() -> Box<dyn SignalSink> + Send + Sync>;
+
+/// A feed per actor, made afresh because a feed may hold its own connection.
+pub type FeedFactory = Arc<dyn Fn() -> Result<Box<dyn ChangeFeed>, FeedError> + Send + Sync>;
 
 struct Actor {
     cancel: Cancel,
@@ -111,14 +118,24 @@ impl Supervisor {
     }
 
     pub fn new(config: SupervisorConfig) -> Self {
+        let events_db = config.events_db.clone();
         Self {
             config,
             clock: Arc::new(SystemClock),
             signals: Arc::new(|| Box::new(NoSignals) as Box<dyn SignalSink>),
+            feed: Arc::new(move || {
+                Ok(Box::new(SqliteChangeFeed::open(&events_db)?) as Box<dyn ChangeFeed>)
+            }),
             cancel: Cancel::new(),
             health: Arc::new(Mutex::new(BTreeMap::new())),
             actors: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Read the log through `factory` instead of this machine's SQLite file.
+    pub fn with_feed(mut self, factory: FeedFactory) -> Self {
+        self.feed = factory;
+        self
     }
 
     /// Send this process's post-commit signals to `factory`'s sink.
@@ -153,7 +170,7 @@ impl Supervisor {
         // Open before spawning so a missing feed or an unopenable space is
         // reported to the caller rather than logged from a thread nobody joins.
         let db = SpaceDb::open(config.space_path(&space), space.clone())?;
-        let feed = SqliteChangeFeed::open(&config.events_db)?;
+        let feed = (self.feed)()?;
         let lease = SqliteLease::open(&config.global_db)?;
         let sink = SqliteGlobalSink::open(&config.global_db)?;
         let holder = config.holder.clone();

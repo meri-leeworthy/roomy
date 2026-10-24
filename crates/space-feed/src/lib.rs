@@ -96,3 +96,18 @@ pub enum FeedError {
     #[error("the feed is behind its own cursor: asked for {cursor:?}, answered {answered:?}")]
     Rewound { cursor: Cursor, answered: Cursor },
 }
+
+impl ChangeFeed for Box<dyn ChangeFeed> {
+    fn batch(
+        &self,
+        space: &SpaceDid,
+        cursor: Cursor,
+        limit: usize,
+    ) -> Result<Vec<FeedRow>, FeedError> {
+        (**self).batch(space, cursor, limit)
+    }
+
+    fn latest_idx(&self, space: &SpaceDid) -> Result<i64, FeedError> {
+        (**self).latest_idx(space)
+    }
+}
