@@ -102,7 +102,12 @@
       const res = await t.resolvePath(src);
       if (!res.ok) return null;
       const contentType = res.headers["content-type"];
-      const blob = new Blob([res.body], contentType ? { type: contentType } : {});
+      // A `Uint8Array` view may sit on a `SharedArrayBuffer`, which `BlobPart`
+      // does not accept; a copy lands it on an ordinary one.
+      const body = res.body;
+      const part: BlobPart =
+        body instanceof Uint8Array ? body.slice().buffer : body;
+      const blob = new Blob([part], contentType ? { type: contentType } : {});
       const url = URL.createObjectURL(blob);
       blobUrls.push(url);
       return url;
