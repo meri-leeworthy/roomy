@@ -472,7 +472,7 @@ impl HomeserverClient {
             )
             .await?;
         response
-            .decode::<Uploaded>(&format!("{}/_matrix/media/v3/upload", self.base_url()))
+            .decode::<Uploaded>(|| format!("{}/_matrix/media/v3/upload", self.base_url()))
             .map(|uploaded| uploaded.content_uri)
     }
 

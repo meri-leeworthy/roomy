@@ -1,4 +1,4 @@
-//! Sending to Matrix, and reading a room's history.
+//! Sending to Matrix.
 //!
 //! Two things make sending non-obvious:
 //!

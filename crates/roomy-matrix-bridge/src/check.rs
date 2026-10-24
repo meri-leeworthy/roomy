@@ -28,7 +28,9 @@ use axum::{
     routing::put,
     Json, Router,
 };
-use matrix_adapter::{AsToken, CapabilityProbe, HomeserverClient, HsToken, TransactionObserver};
+use matrix_adapter::{
+    AsToken, CapabilityProbe, HomeserverClient, HsToken, TransactionObserver, TransportError,
+};
 
 use crate::config::Config;
 
@@ -333,8 +335,8 @@ async fn create_probe_room(homeserver: &HomeserverClient, sender: &str) -> Optio
             // A transport error is the retryable case: the homeserver is not up,
             // or its name does not resolve yet. An HTTP response — even a
             // refusal — is a measurement and is reported as one.
-            Err(error) if !error.is_permanent() && attempt + 1 < CONNECT_ATTEMPTS => {
-                tracing::debug!(%error, attempt, "homeserver not reachable yet; retrying");
+            Err(TransportError::Transport { .. }) if attempt + 1 < CONNECT_ATTEMPTS => {
+                tracing::debug!(attempt, "homeserver not reachable yet; retrying");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(error) => {
@@ -387,7 +389,7 @@ async fn queue_to_device(homeserver: &HomeserverClient, sender: &str) -> Option<
             format!("ed25519:{device_id}"): PROBE_ED25519,
         },
         "signatures": {
-            sender: {
+            (sender): {
                 format!("ed25519:{device_id}"): PROBE_SIGNATURE,
             },
         },
@@ -420,7 +422,7 @@ async fn queue_to_device(homeserver: &HomeserverClient, sender: &str) -> Option<
                 serde_json::json!({
                     "key": PROBE_CURVE25519,
                     "signatures": {
-                        sender: {
+                        (sender): {
                             format!("ed25519:{device_id}"): PROBE_SIGNATURE,
                         },
                     },
@@ -444,7 +446,7 @@ async fn queue_to_device(homeserver: &HomeserverClient, sender: &str) -> Option<
 
     let txn_id = ulid::Ulid::generate().to_string();
     let messages = serde_json::json!({
-        sender: {
+        (sender): {
             device_id.clone(): {
                 "action": "request",
                 "requesting_device_id": device_id.clone(),
@@ -508,6 +510,59 @@ async fn send_probe_message(homeserver: &HomeserverClient, sender: &str, room_id
 mod tests {
     use super::*;
     use serde_json::json;
+
+    use std::sync::Arc;
+
+    use matrix_adapter::{Body, FakeHomeserver, FakeResponse, HomeserverClient, Method};
+
+    #[tokio::test]
+    async fn the_probe_stimulus_goes_through_the_transport() {
+        let fake = FakeHomeserver::new();
+        fake.route(
+            Method::Put,
+            "/_matrix/client/v3/devices/",
+            FakeResponse::ok(json!({})),
+        );
+        fake.route(
+            Method::Post,
+            "/_matrix/client/v3/keys/upload",
+            FakeResponse::ok(json!({ "one_time_key_counts": {} })),
+        );
+        fake.route(
+            Method::Put,
+            "/_matrix/client/v3/sendToDevice/m.room_key_request/",
+            FakeResponse::ok(json!({})),
+        );
+
+        let homeserver = HomeserverClient::with_exchange(
+            "http://hs.test",
+            AsToken::parse("as-secret").unwrap(),
+            Arc::new(fake.clone()),
+        );
+        let device = queue_to_device(&homeserver, "@_roomy_bridge:hs.test")
+            .await
+            .expect("the fake accepts every stimulus call");
+
+        let requests = fake.requests();
+        assert_eq!(
+            requests.len(),
+            4,
+            "a device, its keys, its one-time keys, then the to-device message: {:?}",
+            fake.urls()
+        );
+        assert_eq!(
+            requests[1].url, requests[2].url,
+            "both key uploads go to the same endpoint, once per key kind"
+        );
+
+        let Body::Json(to_device) = requests[3].body.clone() else {
+            panic!("a to-device message carries JSON");
+        };
+        assert!(
+            to_device["messages"]["@_roomy_bridge:hs.test"][device.as_str()].is_object(),
+            "the message is addressed to the appservice user's own device: {to_device}"
+        );
+    }
 
     #[test]
     fn a_transaction_must_mention_the_probe_room() {

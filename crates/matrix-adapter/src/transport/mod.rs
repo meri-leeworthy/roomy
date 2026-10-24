@@ -86,9 +86,15 @@ pub struct Response {
 
 impl Response {
     /// Read the body as `T`, or report what about it could not be read.
-    fn decode<T: DeserializeOwned>(&self, url: &str) -> Result<T, TransportError> {
+    ///
+    /// The url is built only when it is needed: it names the failure, and a
+    /// body that parses needs no name.
+    fn decode<T: DeserializeOwned>(
+        &self,
+        url: impl FnOnce() -> String,
+    ) -> Result<T, TransportError> {
         serde_json::from_slice(&self.body).map_err(|error| TransportError::Decode {
-            url: url.to_string(),
+            url: url(),
             message: error.to_string(),
         })
     }
@@ -279,7 +285,7 @@ impl Transport {
 
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, TransportError> {
         let response = self.get(path).await?;
-        response.decode(&format!("{}{}", self.base_url, path))
+        response.decode(|| format!("{}{}", self.base_url, path))
     }
 
     pub async fn post_json<T: DeserializeOwned>(
@@ -290,7 +296,7 @@ impl Transport {
         let response = self
             .send(Method::Post, path, Body::Json(body.clone()))
             .await?;
-        response.decode(&format!("{}{}", self.base_url, path))
+        response.decode(|| format!("{}{}", self.base_url, path))
     }
 
     pub async fn put_json<T: DeserializeOwned>(
@@ -301,7 +307,7 @@ impl Transport {
         let response = self
             .send(Method::Put, path, Body::Json(body.clone()))
             .await?;
-        response.decode(&format!("{}{}", self.base_url, path))
+        response.decode(|| format!("{}{}", self.base_url, path))
     }
 
     /// Parse a successful answer with ruma's own response decoding.
