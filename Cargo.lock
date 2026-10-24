@@ -2740,6 +2740,7 @@ dependencies = [
  "regex",
  "reqwest",
  "roomy-auth",
+ "roomy-ingest",
  "roomy-readstate",
  "roomy-space-worker",
  "roomy-sync",
@@ -2755,6 +2756,23 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "roomy-ingest"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "roomy-events",
+ "roomy-readstate",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "space-core",
+ "space-xrpc",
+ "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
