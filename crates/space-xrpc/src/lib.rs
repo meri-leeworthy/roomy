@@ -1,19 +1,24 @@
 //! Per-space XRPC read serving for the Roomy space worker.
 //!
-//! The worker holds one space's materialised database and answers the
-//! space-scoped XRPC queries the gateway routes to it. It never owns read
-//! state: the caller's watermarks arrive on `x-roomy-read-positions`, and the
-//! unread counts the four board/room endpoints need are derived from them
-//! against the local `entities` table.
+//! One process serves many spaces: [`registry::SpaceResolver`] turns a request's
+//! `spaceId` — or the room or message it names — into the database that answers
+//! it, and keeps a bounded set of them open. The crate never owns read state:
+//! the caller's watermarks arrive on `x-roomy-read-positions`, and the unread
+//! counts the four board/room endpoints need are derived from them against the
+//! local `entities` table.
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use space_xrpc::{router, state::{SpaceDb, XrpcState}, verify::TestMode};
+//! use space_xrpc::registry::{SpaceRegistry, SpaceResolver};
+//! use space_xrpc::state::XrpcState;
+//! use space_xrpc::verify::TestMode;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let db = Arc::new(SpaceDb::open_readonly("data/spaces/example.sqlite")?);
-//! let state = XrpcState::new(db, Arc::new(TestMode));
-//! let app = router(state);
+//! let spaces = SpaceRegistry::new("data/spaces", Some("data/global.sqlite".into()), 256);
+//! let first = spaces.resolve_space("did:web:example").ok_or("no such space")?;
+//! let state = XrpcState::new(first, Arc::new(TestMode))
+//!     .with_spaces(Arc::new(spaces) as Arc<dyn SpaceResolver>);
+//! let app = space_xrpc::router(state);
 //! let listener = tokio::net::TcpListener::bind("127.0.0.1:8090").await?;
 //! axum::serve(listener, app).await?;
 //! # Ok(())
@@ -28,6 +33,7 @@ pub mod ids;
 pub mod params;
 pub mod queries;
 pub mod read_positions;
+pub mod registry;
 pub mod state;
 pub mod store;
 pub mod time;
@@ -43,7 +49,32 @@ use crate::error::XrpcError;
 use crate::handlers::common::context;
 use crate::ids::Nsid;
 use crate::params::Params;
-use crate::state::XrpcState;
+use crate::state::{SpaceReadDb, XrpcState};
+
+/// The space database this request is answered from.
+///
+/// `spaceId` names a space directly. The other per-space NSIDs name a room, a
+/// message or a thread, and resolve through the registry's entity→space index.
+fn resolve_space(
+    state: &XrpcState,
+    params: &Params,
+) -> Result<std::sync::Arc<SpaceReadDb>, XrpcError> {
+    if let Some(space_id) = params.optional_string("spaceId") {
+        return state.spaces.resolve_space(&space_id).ok_or_else(|| {
+            XrpcError::not_found(format!("Space not served by this worker: {space_id}"))
+        });
+    }
+    for key in ["roomId", "messageId", "threadId"] {
+        if let Some(entity_id) = params.optional_string(key) {
+            return state.spaces.resolve_entity(&entity_id).ok_or_else(|| {
+                XrpcError::not_found(format!("No space holds entity: {entity_id}"))
+            });
+        }
+    }
+    Err(XrpcError::invalid_request(
+        "the request names no space: spaceId, roomId, messageId or threadId is required",
+    ))
+}
 
 /// NSIDs served by the worker. The gateway routes exactly these; anything else
 /// is the gateway's business.
@@ -73,6 +104,9 @@ async fn dispatch(
     let nsid = Nsid::try_from(nsid.as_str())?;
     let params = Params::parse(query.as_deref());
     let ctx = context(&state, &headers, &nsid).await?;
+    // One process serves many spaces: the request names its space, or names an
+    // entity the gateway's index resolves to one.
+    let state = state.for_space(resolve_space(&state, &params)?);
 
     match nsid.as_str() {
         "space.roomy.space.getMetadata" => {

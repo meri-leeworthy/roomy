@@ -358,6 +358,7 @@ pub fn derived_steps(change: &RecordChange, ctx: &RuleContext) -> Vec<DerivedSte
                     space_id: ctx.stream_id.clone(),
                     message_id,
                     urls,
+                    decided_at_ms: ctx.decided_at_ms,
                 });
             }
         }

@@ -9,20 +9,21 @@
 //! assigned at ingest, so a worker that loses and regains the lease resumes and
 //! produces the same projection it would have produced without ever losing it.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use rusqlite::Connection;
 use space_core::ids::SpaceDid;
 
 /// Whether this process may write `space`.
 pub trait Lease {
-    /// Take or renew the lease for `space`. Returns whether `holder` holds it
-    /// afterwards; a failed write reports "not held", so a worker that cannot
-    /// reach the global DB never acts as an owner.
+    /// Take or renew the lease for `space`, as of `now_ms`. Returns whether
+    /// `holder` holds it afterwards; a failed write reports "not held", so a
+    /// worker that cannot reach the global DB never acts as an owner.
     fn acquire(
         &mut self,
         space: &SpaceDid,
         holder: &str,
+        now_ms: i64,
         ttl: Duration,
     ) -> Result<bool, LeaseError>;
 
@@ -88,21 +89,14 @@ pub fn lease_name(space: &SpaceDid) -> String {
     format!("space-worker:{}", space.as_str())
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 impl Lease for SqliteLease {
     fn acquire(
         &mut self,
         space: &SpaceDid,
         holder: &str,
+        now: i64,
         ttl: Duration,
     ) -> Result<bool, LeaseError> {
-        let now = now_ms();
         let expires_at = now + ttl.as_millis() as i64;
         let changed = self.conn.execute(
             "insert into worker_leases (name, holder, expires_at, updated_at)

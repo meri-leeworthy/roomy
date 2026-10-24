@@ -45,7 +45,8 @@ pub fn apply_step(
             space_id,
             message_id,
             urls,
-        } => store_links(conn, stream_id, space_id, message_id, urls),
+            decided_at_ms,
+        } => store_links(conn, stream_id, space_id, message_id, urls, *decided_at_ms),
         DerivedStep::SetMessageSortIdxByReorder {
             stream_id,
             message_id,
@@ -305,18 +306,19 @@ fn store_links(
     space_id: &SpaceDid,
     message_id: &str,
     urls: &[String],
+    decided_at_ms: i64,
 ) -> Result<Vec<SqlEffect>, DerivedError> {
     let mut globals: Vec<SqlEffect> = Vec::new();
     for url in urls {
         conn.execute(
-            "insert or ignore into entities (id, stream_id, room, created_at)
-             values (?, '', ?, (unixepoch() * 1000))",
-            params![url, message_id],
+            "insert or ignore into entities (id, stream_id, room, created_at, updated_at)
+             values (?, '', ?, ?, ?)",
+            params![url, message_id, decided_at_ms, decided_at_ms],
         )?;
         let inserted = conn.execute(
             "insert or ignore into comp_embed_link (entity, show_preview, created_at, updated_at)
-             values (?, 1, (unixepoch() * 1000), (unixepoch() * 1000))",
-            params![url],
+             values (?, 1, ?, ?)",
+            params![url, decided_at_ms, decided_at_ms],
         )?;
         if inserted == 0 {
             continue;

@@ -7,15 +7,18 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use roomy_space_worker::feed::{ChangeFeed, SqliteChangeFeed};
 use roomy_space_worker::lease::{Lease, SqliteLease};
+use roomy_space_worker::signal::NoSignals;
 use roomy_space_worker::sink::{GlobalSink, SqliteGlobalSink};
 use roomy_space_worker::worker::{Progress, Worker, WorkerParts};
+use roomy_space_worker::{Cancel, Clock, SystemClock};
 use serde::Deserialize;
 use space_core::change::FeedRow;
 use space_core::ids::SpaceDid;
 use space_db::plan::{group_entries, plan_batch};
 use space_db::{digest_of, snapshot_db, snapshot_tables, worker_snapshot, SpaceDb};
+use space_feed::sqlite::SqliteChangeFeed;
+use space_feed::{ChangeFeed, Cursor};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -108,7 +111,7 @@ fn seeded_space(stream: &SpaceDid) -> SpaceDb {
     db
 }
 
-fn run_to_idle<S: GlobalSink>(worker: &mut Worker<SqliteChangeFeed, SqliteLease, S>) {
+fn run_to_idle<S: GlobalSink>(worker: &mut Worker<SqliteChangeFeed, SqliteLease, S, NoSignals>) {
     for _ in 0..50 {
         match worker.step().expect("a step") {
             Progress::Applied { .. } => continue,
@@ -140,6 +143,9 @@ fn a_fixture_feed_drains_to_the_typescript_digest() {
         feed,
         lease,
         sink,
+        signals: NoSignals,
+        clock: std::sync::Arc::new(SystemClock),
+        cancel: Cancel::new(),
         db: seeded_space(&stream),
     });
 
@@ -177,27 +183,52 @@ fn a_second_worker_cannot_take_a_held_lease() {
 
     let mut first = SqliteLease::open(&db_path).expect("lease");
     assert!(first
-        .acquire(&stream, "holder-a", Duration::from_secs(30))
+        .acquire(
+            &stream,
+            "holder-a",
+            SystemClock.now_ms(),
+            Duration::from_secs(30)
+        )
         .expect("acquire"));
     let mut second = SqliteLease::open(&db_path).expect("lease");
     assert!(!second
-        .acquire(&stream, "holder-b", Duration::from_secs(30))
+        .acquire(
+            &stream,
+            "holder-b",
+            SystemClock.now_ms(),
+            Duration::from_secs(30)
+        )
         .expect("acquire"));
 
     // The holder renews, and a release by a non-holder leaves the row alone.
     assert!(first
-        .acquire(&stream, "holder-a", Duration::from_secs(30))
+        .acquire(
+            &stream,
+            "holder-a",
+            SystemClock.now_ms(),
+            Duration::from_secs(30)
+        )
         .expect("renew"));
     second
         .release(&stream, "holder-b")
         .expect("release by a non-holder");
     assert!(!second
-        .acquire(&stream, "holder-b", Duration::from_secs(30))
+        .acquire(
+            &stream,
+            "holder-b",
+            SystemClock.now_ms(),
+            Duration::from_secs(30)
+        )
         .expect("acquire after the failed release"));
 
     first.release(&stream, "holder-a").expect("release");
     assert!(second
-        .acquire(&stream, "holder-b", Duration::from_secs(30))
+        .acquire(
+            &stream,
+            "holder-b",
+            SystemClock.now_ms(),
+            Duration::from_secs(30)
+        )
         .expect("acquire after the holder released"));
 }
 
@@ -213,7 +244,7 @@ fn a_batch_is_applied_with_its_cursor_or_not_at_all() {
     // A batch that cannot be applied leaves the cursor where it was, so the
     // same changes are read again rather than skipped.
     let rows = feed
-        .batch(&stream, (-1, -1), 1)
+        .batch(&stream, Cursor::from((-1, -1)), 1)
         .expect("a batch from the start");
     let broken =
         space_core::effects::Effect::space("insert into no_such_table (x) values (1)", Vec::new());
@@ -317,6 +348,9 @@ fn drain(space: &SpaceDid, changes: &[FeedRow], space_path: &Path, global_path: 
         feed,
         lease,
         sink,
+        signals: NoSignals,
+        clock: std::sync::Arc::new(SystemClock),
+        cancel: Cancel::new(),
         db,
     });
     run_to_idle(&mut worker);
@@ -363,7 +397,7 @@ fn a_crash_between_the_global_write_and_the_commit_replays_to_the_same_projectio
         let mut db = seeded_file(&space, &space_path);
         let feed = feed_of(&fixture.changes);
         let rows = feed
-            .batch(&space, (-1, -1), 500)
+            .batch(&space, Cursor::from((-1, -1)), 500)
             .expect("a batch from the start");
         let entries = group_entries(&rows).expect("the rows group into entries");
         let planned = plan_batch(
@@ -437,7 +471,9 @@ fn a_batch_never_splits_an_entry() {
 
     // A limit of one still returns the whole of entry 2, because its changes
     // are planned together.
-    let rows = feed.batch(&space, (0, 0), 2).expect("a batch");
+    let rows = feed
+        .batch(&space, Cursor::from((0, 0)), 2)
+        .expect("a batch");
     assert_eq!(
         rows.iter()
             .map(|row| (row.idx, row.ord))
@@ -445,7 +481,9 @@ fn a_batch_never_splits_an_entry() {
         vec![(1, 0), (2, 0), (2, 1), (2, 2)]
     );
 
-    let rest = feed.batch(&space, (2, 2), 2).expect("the next batch");
+    let rest = feed
+        .batch(&space, Cursor::from((2, 2)), 2)
+        .expect("the next batch");
     assert_eq!(
         rest.iter()
             .map(|row| (row.idx, row.ord))

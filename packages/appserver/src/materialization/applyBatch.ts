@@ -164,6 +164,10 @@ export async function applyBatch(
         (effect): effect is DerivedStep => effect.effect !== "sql",
       );
 
+      // The instant the log assigns this entry: what a rule or a materialiser
+      // stamps the rows it writes with, so a replay reproduces them.
+      const decidedAt = decidedAtFor(e.event, e.idx, e.receivedAt, e.createdAt);
+
       // One entry's statements: the record rules' when it is routed, else the
       // event materialiser's.
       let statements: Array<SqlStatement & { derived?: "space" | "global" }>;
@@ -188,12 +192,7 @@ export async function applyBatch(
           {
             streamId,
             user: e.user,
-            decidedAt: decidedAtFor(
-              e.event,
-              e.idx,
-              e.receivedAt,
-              e.createdAt,
-            ),
+            decidedAt,
           },
           e.idx,
         );
@@ -688,6 +687,8 @@ async function applyEventSideEffects(
   globalDb?: DbLike,
 ): Promise<void> {
   if (e.event.$type === "space.roomy.message.createMessage.v0" && (e.event as Record<string, unknown>).room) {
+    // The instant the log assigned this entry, for the rows this writes.
+    const decidedAt = decidedAtFor(e.event, e.idx, e.receivedAt, e.createdAt);
     const bundle: StatementBundleSuccess = {
       status: "success",
       event: e.event,
@@ -724,10 +725,12 @@ async function applyEventSideEffects(
           db,
           e.event.id,
           blocks ? extractFacetUrls(blocks) : [],
+          decidedAt,
         );
       } else {
         // Legacy text/markdown bodies keep the regex extraction path.
-        detected = await detectAndStoreLinks(db, e.event.id, decodeContent(mime, buf));
+        const content = decodeContent(mime, buf);
+        detected = await detectAndStoreLinks(db, e.event.id, content, decidedAt);
       }
     }
     // A link attachment is materialised as its own entity (`uri?message=<id>`),

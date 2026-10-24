@@ -27,9 +27,12 @@ use space_core::ids::SpaceDid;
 use space_core::PlanMode;
 use space_db::plan::{group_entries, plan_batch};
 use space_db::{DbError, SpaceDb};
+use space_feed::{ChangeFeed, Cursor, FeedError};
 
-use crate::feed::{ChangeFeed, FeedError};
+use crate::cancel::Cancel;
+use crate::clock::Clock;
 use crate::lease::{Lease, LeaseError};
+use crate::signal::{SignalSink, SpaceSignal};
 use crate::sink::{GlobalSink, SinkError};
 
 /// What one iteration did.
@@ -66,11 +69,13 @@ pub enum WorkerError {
         idx: i64,
         source: space_core::RuleError,
     },
+    #[error("starting an actor: {0}")]
+    Spawn(String),
 }
 
 /// What a worker is built from: the four seams, the space it owns, and the
 /// policy of the loop itself.
-pub struct WorkerParts<F: ChangeFeed, L: Lease, S: GlobalSink> {
+pub struct WorkerParts<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> {
     pub space: SpaceDid,
     /// This process's identity on the lease row.
     pub holder: String,
@@ -84,11 +89,17 @@ pub struct WorkerParts<F: ChangeFeed, L: Lease, S: GlobalSink> {
     pub feed: F,
     pub lease: L,
     pub sink: S,
+    /// Where the post-commit signals go.
+    pub signals: N,
+    /// The lease's instants.
+    pub clock: std::sync::Arc<dyn Clock>,
+    /// The supervisor's stop signal for this space.
+    pub cancel: Cancel,
     pub db: SpaceDb,
 }
 
 /// The materialisation loop for one space.
-pub struct Worker<F: ChangeFeed, L: Lease, S: GlobalSink> {
+pub struct Worker<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> {
     space: SpaceDid,
     holder: String,
     lease_ttl: Duration,
@@ -97,14 +108,17 @@ pub struct Worker<F: ChangeFeed, L: Lease, S: GlobalSink> {
     feed: F,
     lease: L,
     sink: S,
+    signals: N,
+    clock: std::sync::Arc<dyn Clock>,
+    cancel: Cancel,
     db: SpaceDb,
     /// The last failure, for `/health`. A failed batch leaves the cursor where
     /// it was, so the next iteration retries it.
     last_error: Option<String>,
 }
 
-impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
-    pub fn new(parts: WorkerParts<F, L, S>) -> Self {
+impl<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> Worker<F, L, S, N> {
+    pub fn new(parts: WorkerParts<F, L, S, N>) -> Self {
         Self {
             space: parts.space,
             holder: parts.holder,
@@ -114,6 +128,9 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
             feed: parts.feed,
             lease: parts.lease,
             sink: parts.sink,
+            signals: parts.signals,
+            clock: parts.clock,
+            cancel: parts.cancel,
             db: parts.db,
             last_error: None,
         }
@@ -141,9 +158,17 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
 
     /// Whether this process holds the lease right now.
     pub fn holds_lease(&mut self) -> Result<bool, WorkerError> {
-        Ok(self
-            .lease
-            .acquire(&self.space, &self.holder, self.lease_ttl)?)
+        Ok(self.lease.acquire(
+            &self.space,
+            &self.holder,
+            self.clock.now_ms(),
+            self.lease_ttl,
+        )?)
+    }
+
+    /// The supervisor's stop signal for this space.
+    pub fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 
     /// The cursor the projection has been advanced to.
@@ -173,15 +198,24 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
     }
 
     fn run_step(&mut self) -> Result<Progress, WorkerError> {
-        if !self
-            .lease
-            .acquire(&self.space, &self.holder, self.lease_ttl)?
-        {
+        if self.cancel.is_cancelled() {
+            return Ok(Progress::Idle {
+                cursor: self.db.cursor()?.unwrap_or((-1, -1)),
+            });
+        }
+        if !self.lease.acquire(
+            &self.space,
+            &self.holder,
+            self.clock.now_ms(),
+            self.lease_ttl,
+        )? {
             return Ok(Progress::NotLeased);
         }
 
         let cursor = self.db.cursor()?.unwrap_or((-1, -1));
-        let rows = self.feed.batch(&self.space, cursor, self.batch_limit)?;
+        let rows = self
+            .feed
+            .batch(&self.space, Cursor::from(cursor), self.batch_limit)?;
         if rows.is_empty() {
             return Ok(Progress::Idle { cursor });
         }
@@ -214,6 +248,13 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
         let batch = self.db.begin_batch(&planned, next_cursor)?;
         self.sink.apply(batch.globals())?;
         batch.commit()?;
+        // After the commit: a listener that reacts to this signal reads the
+        // rows it is about.
+        self.signals.signal(&SpaceSignal {
+            space: self.space.clone(),
+            cursor: next_cursor,
+            entries: entries.len(),
+        });
 
         Ok(Progress::Applied {
             cursor: next_cursor,
@@ -222,11 +263,13 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
         })
     }
 
-    /// Give the lease back, if this process still holds it.
+    /// Give the lease back, if this process still holds it, and flush anything
+    /// the signal sink is holding.
     pub fn release(&mut self) {
         if let Err(error) = self.lease.release(&self.space, &self.holder) {
             tracing::warn!(%error, "releasing the lease");
         }
+        self.signals.flush();
     }
 
     /// What `/health` reports.
