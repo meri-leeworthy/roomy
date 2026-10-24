@@ -1,8 +1,13 @@
 # Provisional Plan: Rust Core Appserver
 
-**Status (2026-10-23):** Provisional, for review. Nothing in this plan is implemented
-beyond the space worker's materialisation core (PR #530) and the per-space read
-router (`crates/space-xrpc`, #531). The design questions in §7 are open.
+**Status (2026-10-24):** Provisional, in progress on `hedgehog/rust-core-appserver`.
+Implemented so far: the space worker's materialisation core (PR #530), the per-space
+read router (`crates/space-xrpc`, #531), and **M0** — global-first commit ordering with
+a crash-between-commits replay test, a real `PlanMode` for rebuilds, derivation time
+removed from materialisation (every stamp comes from the change's ordering stamp), a
+single generated exclusion manifest shared by the TypeScript oracle, the Rust digest
+and the exporter, and reproducible fixtures. The design questions in §7 are answered
+and recorded there.
 
 **Scope.** The Rust rewrite of the appserver's core: the gateway (XRPC edge,
 WebSocket connection plane, auth, user-scoped and cross-space reads, write
