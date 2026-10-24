@@ -903,6 +903,557 @@
       "body": "{\"error\":\"Forbidden\",\"message\":\"Caller has no read access to this room\"}"
     },
     {
+      "name": "banned/space.getMetadata",
+      "nsid": "space.roomy.space.getMetadata",
+      "params": {
+        "spaceId": "did:web:space.example"
+      },
+      "caller": "did:plc:banned",
+      "readPositions": [],
+      "status": 403,
+      "body": "{\"error\":\"Forbidden\",\"message\":\"Caller is banned from this space\"}"
+    },
+    {
+      "name": "banned/room.getMessages.c1",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "limit": "2"
+      },
+      "caller": "did:plc:banned",
+      "readPositions": [],
+      "status": 403,
+      "body": "{\"error\":\"Forbidden\",\"message\":\"Caller is banned from this space\"}"
+    },
+    {
+      "name": "admin/unknown-space",
+      "nsid": "space.roomy.space.getMetadata",
+      "params": {
+        "spaceId": "did:web:absent.example"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Space not found: did:web:absent.example\"}"
+    },
+    {
+      "name": "outsider/unknown-space",
+      "nsid": "space.roomy.space.getMetadata",
+      "params": {
+        "spaceId": "did:web:absent.example"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Space not found: did:web:absent.example\"}"
+    },
+    {
+      "name": "admin/unknown-room",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JRZ0R0000000000000000000"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Room not found: 01JRZ0R0000000000000000000\"}"
+    },
+    {
+      "name": "outsider/unknown-room",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JRZ0R0000000000000000000"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Room not found: 01JRZ0R0000000000000000000\"}"
+    },
+    {
+      "name": "admin/unknown-message",
+      "nsid": "space.roomy.message.getMessage",
+      "params": {
+        "messageId": "01JRZ0R0000000000000000000"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Message not found: 01JRZ0R0000000000000000000\"}"
+    },
+    {
+      "name": "outsider/unknown-message",
+      "nsid": "space.roomy.message.getMessage",
+      "params": {
+        "messageId": "01JRZ0R0000000000000000000"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Message not found: 01JRZ0R0000000000000000000\"}"
+    },
+    {
+      "name": "admin/missing-spaceId",
+      "nsid": "space.roomy.space.getMetadata",
+      "params": {},
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"space.roomy.space.getMetadata params validation failed: spaceId must be a string (was missing)\"}"
+    },
+    {
+      "name": "outsider/missing-spaceId",
+      "nsid": "space.roomy.space.getMetadata",
+      "params": {},
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"space.roomy.space.getMetadata params validation failed: spaceId must be a string (was missing)\"}"
+    },
+    {
+      "name": "admin/malformed-spaceId",
+      "nsid": "space.roomy.space.getMetadata",
+      "params": {
+        "spaceId": "not-a-did"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Space not found: not-a-did\"}"
+    },
+    {
+      "name": "outsider/malformed-spaceId",
+      "nsid": "space.roomy.space.getMetadata",
+      "params": {
+        "spaceId": "not-a-did"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Space not found: not-a-did\"}"
+    },
+    {
+      "name": "admin/malformed-roomId",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "not-a-ulid"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Room not found: not-a-ulid\"}"
+    },
+    {
+      "name": "outsider/malformed-roomId",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "not-a-ulid"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 404,
+      "body": "{\"error\":\"NotFound\",\"message\":\"Room not found: not-a-ulid\"}"
+    },
+    {
+      "name": "admin/limit-zero",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "limit": "0"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"Param limit must be ≥ 1, got: 0\"}"
+    },
+    {
+      "name": "outsider/limit-zero",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "limit": "0"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"Param limit must be ≥ 1, got: 0\"}"
+    },
+    {
+      "name": "admin/limit-negative",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "limit": "-1"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"Param limit must be ≥ 1, got: -1\"}"
+    },
+    {
+      "name": "outsider/limit-negative",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "limit": "-1"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"Param limit must be ≥ 1, got: -1\"}"
+    },
+    {
+      "name": "admin/limit-too-large",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "limit": "101"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"Param limit must be ≤ 100, got: 101\"}"
+    },
+    {
+      "name": "outsider/limit-too-large",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "limit": "101"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"Param limit must be ≤ 100, got: 101\"}"
+    },
+    {
+      "name": "admin/limit-not-a-number",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "limit": "many"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"Param limit must be an integer, got: many\"}"
+    },
+    {
+      "name": "outsider/limit-not-a-number",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "limit": "many"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 400,
+      "body": "{\"error\":\"InvalidRequest\",\"message\":\"Param limit must be an integer, got: many\"}"
+    },
+    {
+      "name": "admin/cursor-garbage",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "cursor": "not-a-cursor"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 200,
+      "body": "{\"messages\":[{\"id\":\"01HF7YAT010000000000000001\",\"sort_idx\":\"01HF7YAT010000000000000001\",\"content\":\"one\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.001Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.image.v0\",\"url\":\"01HF7YAT68000000000000000G\",\"type\":\"image/png\",\"alt\":\"a picture\",\"width\":64,\"height\":48,\"size\":1234}],\"reactions\":[{\"emoji\":\"👍\",\"count\":1},{\"emoji\":\"❤️\",\"count\":1}],\"media\":[{\"url\":\"01HF7YAT68000000000000000G\",\"type\":\"image/png\",\"alt\":\"a picture\",\"width\":64,\"height\":48,\"size\":1234}],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"},{\"id\":\"01HF7YAT020000000000000002\",\"sort_idx\":\"01HF7YAT020000000000000002\",\"content\":\"two edited\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.002Z\",\"lastEdit\":\"01HF7YATFP000000000000000C\",\"attachments\":[{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"$type\":\"space.roomy.attachment.link.v0\",\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\"}],\"reactions\":[{\"emoji\":\"👍\",\"count\":1,\"myReactionId\":\"01HF7YAT37000000000000000F\"}],\"media\":[{\"url\":\"https://example.com/a\",\"type\":\"text/uri-list\"},{\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\",\"type\":\"text/uri-list\"}],\"linkEmbeds\":[{\"url\":\"https://example.com/a\",\"embed\":{\"$type\":\"space.roomy.embed.link.v0\",\"uri\":\"https://example.com/a\",\"title\":\"Example\",\"description\":\"An example card\"}},{\"url\":\"https://example.com/a?message=01HF7YAT020000000000000002\"}],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"},{\"id\":\"01HF7YAT040000000000000004\",\"sort_idx\":\"01HF7YAT040000000000000004\",\"content\":\"four\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.004Z\",\"attachments\":[{\"$type\":\"space.roomy.attachment.reply.v0\",\"messageId\":\"01HF7YAT010000000000000001\"}],\"replyTo\":\"01HF7YAT010000000000000001\",\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01HF7YAT050000000000000005\",\"sort_idx\":\"01HF7YAT050000000000000005\",\"content\":\"five\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.005Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"},{\"id\":\"01HF7YAT060000000000000006\",\"sort_idx\":\"01HF7YAT060000000000000006\",\"content\":\"six\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authortwo\",\"authorName\":\"\",\"timestamp\":\"2023-11-14T22:13:20.006Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author2.example.com\"},{\"id\":\"01HF7YAT070000000000000007\",\"sort_idx\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"mimeType\":\"text/markdown\",\"authorDid\":\"did:plc:authorone\",\"authorName\":\"Author One\",\"timestamp\":\"2023-11-14T22:13:20.007Z\",\"attachments\":[],\"reactions\":[],\"media\":[],\"linkEmbeds\":[],\"authorHandle\":\"author1.example.com\",\"authorAvatar\":\"at://avatar/author1\"}]}"
+    },
+    {
+      "name": "outsider/cursor-garbage",
+      "nsid": "space.roomy.room.getMessages",
+      "params": {
+        "roomId": "01JC0000000000000000000C01",
+        "cursor": "not-a-cursor"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 403,
+      "body": "{\"error\":\"Forbidden\",\"message\":\"Caller has no read access to this room\"}"
+    },
+    {
+      "name": "admin/no-limit",
+      "nsid": "space.roomy.space.getThreads",
+      "params": {
+        "spaceId": "did:web:space.example"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 200,
+      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.007Z\",\"latestMessage\":{\"id\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2023-11-14T22:13:20.007Z\"}},\"unreadCount\":3,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"},{\"id\":\"01JC0000000000000000000C03\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.031Z\",\"latestMessage\":{\"id\":\"01HF7YAT0Z0000000000000009\",\"content\":\"readonly message\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.031Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"readonly\"},{\"id\":\"01JC0000000000000000000C02\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.021Z\",\"latestMessage\":{\"id\":\"01HF7YAT0N0000000000000008\",\"content\":\"secret\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2023-11-14T22:13:20.021Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"secret\"}]}"
+    },
+    {
+      "name": "outsider/no-limit",
+      "nsid": "space.roomy.space.getThreads",
+      "params": {
+        "spaceId": "did:web:space.example"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 403,
+      "body": "{\"error\":\"Forbidden\",\"message\":\"Caller is neither a member nor an admin of this space\"}"
+    },
+    {
+      "name": "admin/max-limit",
+      "nsid": "space.roomy.space.getThreads",
+      "params": {
+        "spaceId": "did:web:space.example",
+        "limit": "100"
+      },
+      "caller": "did:plc:admin",
+      "readPositions": [
+        {
+          "roomId": "01JC0000000000000000000C01",
+          "seenUpTo": "01HF7YAT040000000000000004"
+        },
+        {
+          "roomId": "01JC0000000000000000000C02",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000C03",
+          "seenUpTo": "0"
+        },
+        {
+          "roomId": "01JC0000000000000000000T01",
+          "seenUpTo": "01HF7YAT0B000000000000000A",
+          "lastActiveAt": 1699996400000
+        }
+      ],
+      "status": 200,
+      "body": "{\"rooms\":[{\"id\":\"01JC0000000000000000000C01\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.007Z\",\"latestMessage\":{\"id\":\"01HF7YAT070000000000000007\",\"content\":\"seven\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2023-11-14T22:13:20.007Z\"}},\"unreadCount\":3,\"unread\":true,\"name\":\"general\"},{\"id\":\"01JC0000000000000000000T01\",\"kind\":\"thread\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.012Z\",\"latestMessage\":{\"id\":\"01HF7YAT0C000000000000000B\",\"content\":\"thread two\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.012Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"Thread One\",\"channel\":\"01JC0000000000000000000C01\",\"channelName\":\"general\"},{\"id\":\"01JC0000000000000000000C03\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null}],\"latestTimestamp\":\"2023-11-14T22:13:20.031Z\",\"latestMessage\":{\"id\":\"01HF7YAT0Z0000000000000009\",\"content\":\"readonly message\",\"author\":{\"did\":\"did:plc:authortwo\",\"name\":null,\"avatar\":null},\"timestamp\":\"2023-11-14T22:13:20.031Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"readonly\"},{\"id\":\"01JC0000000000000000000C02\",\"kind\":\"channel\",\"activity\":{\"latestMembers\":[{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"}],\"latestTimestamp\":\"2023-11-14T22:13:20.021Z\",\"latestMessage\":{\"id\":\"01HF7YAT0N0000000000000008\",\"content\":\"secret\",\"author\":{\"did\":\"did:plc:authorone\",\"name\":\"Author One\",\"avatar\":\"at://avatar/author1\"},\"timestamp\":\"2023-11-14T22:13:20.021Z\"}},\"unreadCount\":1,\"unread\":true,\"name\":\"secret\"}]}"
+    },
+    {
+      "name": "outsider/max-limit",
+      "nsid": "space.roomy.space.getThreads",
+      "params": {
+        "spaceId": "did:web:space.example",
+        "limit": "100"
+      },
+      "caller": "did:plc:outsider",
+      "readPositions": [],
+      "status": 403,
+      "body": "{\"error\":\"Forbidden\",\"message\":\"Caller is neither a member nor an admin of this space\"}"
+    },
+    {
       "name": "admin/space.getThreads.page1",
       "nsid": "space.roomy.space.getThreads",
       "params": {

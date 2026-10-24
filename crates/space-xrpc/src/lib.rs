@@ -58,22 +58,41 @@ use crate::state::{SpaceReadDb, XrpcState};
 fn resolve_space(
     state: &XrpcState,
     params: &Params,
+    nsid: &Nsid,
 ) -> Result<std::sync::Arc<SpaceReadDb>, XrpcError> {
+    // Which id a request names is the endpoint's contract, so the missing-param
+    // error names that id the way the handler's own validation would.
+    let entity_key = match nsid.as_str() {
+        "space.roomy.space.getMetadata" | "space.roomy.space.getThreads" => "spaceId",
+        "space.roomy.room.getMetadata"
+        | "space.roomy.room.getMessages"
+        | "space.roomy.room.getThreads"
+        | "space.roomy.room.getLinks" => "roomId",
+        _ => "messageId",
+    };
     if let Some(space_id) = params.optional_string("spaceId") {
-        return state.spaces.resolve_space(&space_id).ok_or_else(|| {
-            XrpcError::not_found(format!("Space not served by this worker: {space_id}"))
-        });
+        return state
+            .spaces
+            .resolve_space(&space_id)
+            .ok_or_else(|| XrpcError::not_found(format!("Space not found: {space_id}")));
     }
-    for key in ["roomId", "messageId", "threadId"] {
-        if let Some(entity_id) = params.optional_string(key) {
-            return state.spaces.resolve_entity(&entity_id).ok_or_else(|| {
-                XrpcError::not_found(format!("No space holds entity: {entity_id}"))
-            });
-        }
+    // The gateway resolves a space by any of these; a request that names none of
+    // them is the endpoint's own missing-parameter error. An id nothing resolves
+    // is the endpoint's not-found, named for the entity it asked about.
+    if let Some(entity_id) = params.optional_string(entity_key) {
+        let what = match entity_key {
+            "roomId" => "Room",
+            _ => "Message",
+        };
+        return state
+            .spaces
+            .resolve_entity(&entity_id)
+            .ok_or_else(|| XrpcError::not_found(format!("{what} not found: {entity_id}")));
     }
-    Err(XrpcError::invalid_request(
-        "the request names no space: spaceId, roomId, messageId or threadId is required",
-    ))
+    Err(XrpcError::invalid_request(format!(
+        "{} params validation failed: {entity_key} must be a string (was missing)",
+        nsid.as_str()
+    )))
 }
 
 /// NSIDs served by the worker. The gateway routes exactly these; anything else
@@ -106,7 +125,7 @@ async fn dispatch(
     let ctx = context(&state, &headers, &nsid).await?;
     // One process serves many spaces: the request names its space, or names an
     // entity the gateway's index resolves to one.
-    let state = state.for_space(resolve_space(&state, &params)?);
+    let state = state.for_space(resolve_space(&state, &params, &nsid)?);
 
     match nsid.as_str() {
         "space.roomy.space.getMetadata" => {

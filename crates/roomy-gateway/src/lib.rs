@@ -16,11 +16,13 @@
 //! another: the embedded mode reads the same registry and the same signals as a
 //! split one.
 
+pub mod cache;
 pub mod signals;
 pub mod ws;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -48,6 +50,8 @@ pub struct GatewayState {
     /// Signals from the workers in this process.
     pub signals: GatewaySignals,
     pub counters: Arc<Counters>,
+    /// Answers to repeat, bounded by a TTL and evicted by signals.
+    pub cache: Arc<cache::ResponseCache>,
 }
 
 /// The numbers `/metrics` reports.
@@ -101,6 +105,7 @@ impl GatewayState {
             sessions: Arc::new(Mutex::new(SessionCore::new())),
             signals,
             counters: Arc::new(Counters::default()),
+            cache: Arc::new(cache::ResponseCache::new(Duration::from_millis(2000))),
         }
     }
 }
@@ -116,7 +121,14 @@ impl std::fmt::Debug for GatewayState {
 pub fn router(state: Arc<GatewayState>) -> Router {
     // The per-space reads are the worker's router, mounted as they are: the
     // gateway adds the edge, not a second implementation of the queries.
-    let reads = space_xrpc::router(state.reads.clone());
+    // The per-space reads, behind the response cache: a repeated read for the
+    // same caller and params is served from it until a signal for its space
+    // evicts it or its TTL runs out.
+    let reads =
+        space_xrpc::router(state.reads.clone()).layer(axum::middleware::from_fn_with_state(
+            std::sync::Arc::clone(&state),
+            cache::middleware::cached,
+        ));
     // The gateway's own routes first, then the worker's per-space reads. The
     // socket and ticket routes are static paths, so they win over the worker's
     // `/xrpc/{nsid}` catch-all.
