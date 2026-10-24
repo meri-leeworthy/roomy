@@ -34,3 +34,13 @@ pub struct NoSignals;
 impl SignalSink for NoSignals {
     fn signal(&mut self, _signal: &SpaceSignal) {}
 }
+
+impl SignalSink for Box<dyn SignalSink> {
+    fn signal(&mut self, signal: &SpaceSignal) {
+        (**self).signal(signal);
+    }
+
+    fn flush(&mut self) {
+        (**self).flush();
+    }
+}

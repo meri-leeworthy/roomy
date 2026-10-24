@@ -70,10 +70,17 @@ impl SupervisorConfig {
 pub struct Supervisor {
     config: SupervisorConfig,
     clock: Arc<dyn Clock>,
+    /// How each actor gets its signal sink. A process serving sockets and the
+    /// workers that feed it share one sink, so a committed batch reaches the
+    /// connections without crossing a seam the split deployment does not have.
+    signals: SignalFactory,
     cancel: Cancel,
     health: Arc<Mutex<BTreeMap<String, Health>>>,
     actors: Mutex<BTreeMap<String, Actor>>,
 }
+
+/// A sink per actor, made afresh because a worker owns its sink.
+pub type SignalFactory = Arc<dyn Fn() -> Box<dyn SignalSink> + Send + Sync>;
 
 struct Actor {
     cancel: Cancel,
@@ -87,20 +94,37 @@ impl Supervisor {
         spaces: impl IntoIterator<Item = SpaceDid>,
     ) -> Result<Self, crate::worker::WorkerError> {
         let supervisor = Self::new(config);
-        for space in spaces {
-            supervisor.rearm(space)?;
-        }
+        supervisor.start_all(spaces)?;
         Ok(supervisor)
+    }
+
+    /// Start an actor for every space in `spaces`, on a supervisor already
+    /// configured with its clock and signal sink.
+    pub fn start_all(
+        &self,
+        spaces: impl IntoIterator<Item = SpaceDid>,
+    ) -> Result<(), crate::worker::WorkerError> {
+        for space in spaces {
+            self.rearm(space)?;
+        }
+        Ok(())
     }
 
     pub fn new(config: SupervisorConfig) -> Self {
         Self {
             config,
             clock: Arc::new(SystemClock),
+            signals: Arc::new(|| Box::new(NoSignals) as Box<dyn SignalSink>),
             cancel: Cancel::new(),
             health: Arc::new(Mutex::new(BTreeMap::new())),
             actors: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Send this process's post-commit signals to `factory`'s sink.
+    pub fn with_signals(mut self, factory: SignalFactory) -> Self {
+        self.signals = factory;
+        self
     }
 
     /// Use a different clock (a test's, or a monotonic one).
@@ -139,6 +163,7 @@ impl Supervisor {
         let lease_ttl = config.lease_ttl;
         let actor_space = space.clone();
         let health_key = key.clone();
+        let signals = Arc::clone(&self.signals);
 
         let handle = std::thread::Builder::new()
             .name(format!("space-{key}"))
@@ -152,7 +177,7 @@ impl Supervisor {
                     feed,
                     lease,
                     sink,
-                    signals: NoSignals,
+                    signals: signals(),
                     clock,
                     cancel: actor_cancel,
                     db,
