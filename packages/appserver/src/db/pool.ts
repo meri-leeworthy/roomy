@@ -29,7 +29,12 @@
  */
 
 import { AsyncDatabase, WorkerLink } from "./asyncDatabase.ts";
-import type { DbLike, WorkerCacheStats } from "./types.ts";
+import type {
+  DbLike,
+  GlobalIndexProbeRow,
+  SpaceBootProbe,
+  WorkerCacheStats,
+} from "./types.ts";
 import type { DbMemoryBounds } from "./bounds.ts";
 
 /**
@@ -422,6 +427,12 @@ export class PooledDatabase implements DbLike {
   }
   checkSpaceSchema(spaceDid: string): Promise<{ current: boolean }> {
     return this.#pool.checkSpaceSchema(spaceDid);
+  }
+  bootProbe(spaceDid: string): Promise<SpaceBootProbe> {
+    return this.#pool.forSpace(spaceDid).bootProbe(spaceDid);
+  }
+  globalIndexProbe(spaceDids: readonly string[]): Promise<GlobalIndexProbeRow[]> {
+    return this.#pool.global().globalIndexProbe(spaceDids);
   }
   global(): AsyncDatabase {
     return this.#pool.global();

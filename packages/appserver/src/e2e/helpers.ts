@@ -19,7 +19,11 @@
  */
 
 import { afterEach } from "bun:test";
-import { createAppserver, type AppserverHandle } from "../appserver.ts";
+import {
+  createAppserver,
+  type AppserverHandle,
+  type AppserverOptions,
+} from "../appserver.ts";
 import { testAuthVerifier } from "../xrpc/auth.ts";
 import { closeDb, openDb } from "../db/db.ts";
 import { _resetRateLimit } from "../xrpc/rateLimit.ts";
@@ -60,7 +64,9 @@ export interface E2eContext {
  * Registers a Bun test teardown to close the server and reset singletons.
  * Call this inside `beforeEach` or at the top of a `describe` block.
  */
-export async function startAppserver(): Promise<E2eContext> {
+export async function startAppserver(
+  opts: Partial<AppserverOptions> = {},
+): Promise<E2eContext> {
   // Stop any running background sweeper/indexer loops before resetting state.
   await stopEmbedSweeper();
   await stopSearchIndexer();
@@ -100,6 +106,7 @@ export async function startAppserver(): Promise<E2eContext> {
     // Tests that exercise the loops start them explicitly (e.g.
     // search.test.ts starts the backfill sweeper itself).
     disableBackgroundWorkers: true,
+    ...opts,
   });
 
   const baseUrl = `http://localhost:${handle.port}`;
