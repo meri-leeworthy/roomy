@@ -13,17 +13,28 @@ resolving requests through a bounded `SpaceRegistry` over many spaces — and **
 `roomy-auth` (signed, self-contained, one-shot connection tickets), `roomy-sync` (the
 sans-io session core and its axum adapter), `roomy-gateway` (health, metrics, the ticket
 endpoint, the socket plane, and the worker's reads mounted unchanged), and the
-`roomy-appserver` binary with `--role all|gateway|worker`. **M3** is partial: the
-read differential (84 recorded cases across the caller matrix, unknown ids,
-malformed params and pagination edges, all byte-identical) and the response cache
-(keyed by nsid, canonical params and caller; TTL-bounded; evicted by signals) are
-in, while the other sixteen per-space reads and the four cross-space endpoints are
-not. M4 onwards is not started.
+`roomy-appserver` binary with `--role all|gateway|worker`. **M3** is complete: all
+twenty-four per-space NSIDs are served — space, room and message reads, roles and
+invites, bridge tokens, federation, voice state and search — along with the four
+gateway-owned fan-outs (activity feed, mentions, profiles, link metadata) and the
+response cache (keyed by nsid, canonical params and caller; TTL-bounded; evicted by
+signals). An absent space is answered from an empty one rather than a 404, which is
+what makes the access decisions match. The read differential covers 237 cases across
+every served NSID, the caller matrix, unknown and malformed ids, pagination edges and
+the read-state header, all byte-identical. **M4** is implemented but not yet gated:
+`roomy-ingest` validates, authorizes, adapts and appends a `sendEvents` batch in one
+transaction, and the gateway answers `sendEvents` and `roomUpdateSeen`; the write
+differential that comparison needs does not exist yet. **M5** has its fencing epoch —
+the lease's epoch advances on takeover, the batch carries it, and a commit whose
+epoch is older than the stored one is refused — with a test for the refusal; the
+remaining multi-node work (signal relay, replicated reads, the simulation harness)
+is not started. M6 and M7 are not started.
 
 Evaluation layers: **L1** (pure properties over `space-core`), **L3** (batch/replay
 equivalence, crashing after the global half at every commit point) and **L4** (the
-read differential, for the eight served NSIDs) are implemented and run in CI; **L2**
-is the parity fixture. L5–L10 are not implemented.
+read differential, for all twenty-four per-space NSIDs) are implemented and run in
+CI; **L2** is the parity fixture. L5 (write differential) is the M4 gap; L6–L10 are
+not implemented.
 
 **Scope.** The Rust rewrite of the appserver's core: the gateway (XRPC edge,
 WebSocket connection plane, auth, user-scoped and cross-space reads, write

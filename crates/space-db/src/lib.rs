@@ -46,6 +46,11 @@ pub enum DbError {
     Rule(#[from] space_core::RuleError),
     #[error("{0} is not an ordering stamp")]
     Stamp(String),
+    /// A batch carried an epoch older than the one already written: another
+    /// worker has taken the space since this one last held the lease, so this
+    /// batch must not land.
+    #[error("fenced out: epoch {granted} is older than the stored epoch {stored}")]
+    Fenced { granted: i64, stored: i64 },
 }
 
 /// A per-space database.
@@ -147,6 +152,7 @@ impl SpaceDb {
         &mut self,
         planned: &[plan::PlannedEntry],
         cursor: (i64, i64),
+        epoch: i64,
     ) -> Result<PendingBatch<'_>, DbError> {
         let (statements, steps) = plan::flatten(planned);
         let stream_id = self.stream_id.clone();
@@ -172,8 +178,22 @@ impl SpaceDb {
         Ok(PendingBatch {
             transaction,
             cursor,
+            epoch,
             globals,
         })
+    }
+
+    /// The epoch of the last batch written to this space, or 0 before the
+    /// first one. A worker compares it to its lease to learn whether it is
+    /// stale before doing any work.
+    pub fn fence(&self) -> Result<i64, DbError> {
+        let epoch: Option<i64> = self
+            .conn
+            .query_row("select epoch from worker_fence where id = 1", [], |row| {
+                row.get(0)
+            })
+            .ok();
+        Ok(epoch.unwrap_or(0))
     }
 
     /// The worker's cursor, or `None` before the first batch.
@@ -212,6 +232,8 @@ impl SpaceDb {
 pub struct PendingBatch<'db> {
     transaction: rusqlite::Transaction<'db>,
     cursor: (i64, i64),
+    /// The lease epoch this batch was planned under.
+    epoch: i64,
     globals: Vec<SqlEffect>,
 }
 
@@ -222,7 +244,24 @@ impl PendingBatch<'_> {
     }
 
     /// Advance the cursor and commit the space half.
+    ///
+    /// The fence is checked in the same transaction that writes it, so a worker
+    /// whose lease expired during the batch cannot land it: the takeover's
+    /// epoch is already stored, and this batch is older. Nothing of the batch
+    /// survives the refusal — the transaction is dropped uncommitted.
     pub fn commit(self) -> Result<(), DbError> {
+        let stored = self.fence_stored()?;
+        if self.epoch < stored {
+            return Err(DbError::Fenced {
+                granted: self.epoch,
+                stored,
+            });
+        }
+        self.transaction.execute(
+            "insert into worker_fence (id, epoch) values (1, ?)
+             on conflict (id) do update set epoch = excluded.epoch",
+            rusqlite::params![self.epoch],
+        )?;
         self.transaction.execute(
             "insert into worker_cursor (id, idx, ord) values (1, ?, ?)
              on conflict (id) do update set idx = excluded.idx, ord = excluded.ord",
@@ -230,6 +269,16 @@ impl PendingBatch<'_> {
         )?;
         self.transaction.commit()?;
         Ok(())
+    }
+
+    fn fence_stored(&self) -> Result<i64, DbError> {
+        let stored: Option<i64> = self
+            .transaction
+            .query_row("select epoch from worker_fence where id = 1", [], |row| {
+                row.get(0)
+            })
+            .ok();
+        Ok(stored.unwrap_or(0))
     }
 }
 
