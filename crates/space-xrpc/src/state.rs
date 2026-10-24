@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use roomy_readstate::{NoReadState, ReadStateStore};
 use rusqlite::Connection;
 
 use crate::registry::SpaceResolver;
@@ -78,6 +79,10 @@ pub struct XrpcState {
     pub spaces: Arc<dyn SpaceResolver>,
     pub stores: Arc<dyn GlobalStores>,
     pub verifier: Arc<dyn CallerVerifier>,
+    /// The caller-scoped state the gateway owns: watermarks, block sets, space
+    /// membership, bridge grants. A worker holds a replica of the node's store;
+    /// without one, every caller reads as having no read state.
+    pub read_state: Arc<dyn ReadStateStore>,
 }
 
 impl XrpcState {
@@ -88,6 +93,7 @@ impl XrpcState {
             spaces,
             stores: Arc::new(NoGlobalStores),
             verifier,
+            read_state: Arc::new(NoReadState),
         }
     }
 
@@ -102,6 +108,11 @@ impl XrpcState {
         self
     }
 
+    pub fn with_read_state(mut self, read_state: Arc<dyn ReadStateStore>) -> Self {
+        self.read_state = read_state;
+        self
+    }
+
     /// The same state, bound to one resolved space.
     pub fn for_space(&self, db: Arc<SpaceReadDb>) -> Self {
         Self {
@@ -109,6 +120,7 @@ impl XrpcState {
             spaces: Arc::clone(&self.spaces),
             stores: Arc::clone(&self.stores),
             verifier: Arc::clone(&self.verifier),
+            read_state: Arc::clone(&self.read_state),
         }
     }
 }

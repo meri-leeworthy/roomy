@@ -2733,6 +2733,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "roomy-readstate"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "roomy-space-worker"
 version = "0.1.0"
 dependencies = [
@@ -3470,6 +3479,7 @@ dependencies = [
  "http-body-util",
  "indexmap",
  "jsonwebtoken",
+ "roomy-readstate",
  "roomy-space-worker",
  "rusqlite",
  "serde",
