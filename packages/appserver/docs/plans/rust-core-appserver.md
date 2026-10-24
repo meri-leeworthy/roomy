@@ -42,8 +42,9 @@ simulation harness that asserts the distributed invariants (L7). M6 and M7 are n
 Evaluation layers: **L1** (pure properties over `space-core`), **L3** (batch/replay
 equivalence, crashing after the global half at every commit point), **L4** (the
 read differential, for all twenty-four per-space NSIDs) and **L5** (the write
-differential, over `sendEvents`) are implemented and run in CI; **L2** is the parity
-fixture. L6–L10 are not implemented.
+differential, over `sendEvents`) and **L7** (a two-node fault schedule over one log)
+are implemented and run in CI; **L2** is the parity fixture. L6 and L8–L10 are not
+implemented.
 
 **Scope.** The Rust rewrite of the appserver's core: the gateway (XRPC edge,
 WebSocket connection plane, auth, user-scoped and cross-space reads, write
