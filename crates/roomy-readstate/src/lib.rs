@@ -71,6 +71,11 @@ impl BlockedSet {
     pub fn len(&self) -> usize {
         self.hidden.len()
     }
+
+    /// The hidden DIDs, for a query that must exclude their rows.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.hidden.iter().map(String::as_str)
+    }
 }
 
 /// One `bridge_token_grants` row: a grantor who granted this space a token.
@@ -437,6 +442,18 @@ create table if not exists bridge_token_grants (
   granted_at        integer not null default (unixepoch() * 1000),
   spent_at          integer,
   capacity_snapshot integer not null
+) strict;
+
+create table if not exists notification_state (
+  user_did            text not null,
+  room_id             text not null,
+  first_unseen_at     integer,
+  first_unseen_msg_id text,
+  unseen_count        integer not null default 0,
+  notified            integer not null default 0 check (notified in (0, 1)),
+  pushed_at           integer,
+  updated_at          integer not null default (unixepoch() * 1000),
+  primary key (user_did, room_id)
 ) strict;
 
 create table if not exists user_blocks (

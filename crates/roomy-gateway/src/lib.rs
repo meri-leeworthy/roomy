@@ -17,6 +17,7 @@
 //! split one.
 
 pub mod cache;
+pub mod reads;
 pub mod signals;
 pub mod ws;
 
