@@ -1,0 +1,29 @@
+[package]
+name = "roomy-gateway"
+description = "The gateway's HTTP and WebSocket composition: routing, tickets, session plane, health"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+roomy-auth.workspace = true
+roomy-sync.workspace = true
+roomy-space-worker.workspace = true
+space-core.workspace = true
+space-xrpc.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures-util = "0.3"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-tungstenite = "0.28"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+rusqlite.workspace = true
