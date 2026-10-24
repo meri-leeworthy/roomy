@@ -87,7 +87,6 @@ pub fn plan_batch(
     stream_id: &space_core::SpaceDid,
     entries: &[EntryChanges],
     mode: PlanMode,
-    now_ms: i64,
 ) -> Result<Vec<PlannedEntry>, DbError> {
     let needed_rooms = rooms_needed(entries);
     let needed_parents = parents_needed(entries);
@@ -102,6 +101,10 @@ pub fn plan_batch(
         let mut effects: Vec<Effect> = Vec::new();
         for change in &entry.changes {
             let key = change.base().rkey.as_str().to_string();
+            // The change's instant comes from its entry's ordering stamp, so a
+            // replay stamps the same values the live path did.
+            let decided_at_ms = space_core::time::ulid_time_ms(&entry.order_stamp)
+                .ok_or_else(|| DbError::Stamp(entry.order_stamp.clone()))?;
             let mut ctx = RuleContext {
                 stream_id: stream_id.clone(),
                 is_backfill: mode.is_backfill(),
@@ -109,7 +112,7 @@ pub fn plan_batch(
                 event_id: entry.event_id.clone(),
                 prior_room: None,
                 prior_parent: None,
-                now_ms,
+                decided_at_ms,
             };
 
             match change {

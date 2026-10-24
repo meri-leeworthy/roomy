@@ -20,7 +20,7 @@
 //!    read from a half-replayed projection.
 //!  * **Serving reads.** The router is a separate crate; this one materialises.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use space_core::change::DecodeError;
 use space_core::ids::SpaceDid;
@@ -192,20 +192,15 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
         })?;
         let changes = rows.len();
 
-        let planned = plan_batch(
-            self.db.connection(),
-            &self.space,
-            &entries,
-            self.mode,
-            now_ms(),
-        )
-        .map_err(|source| match source {
-            DbError::Rule(source) => WorkerError::Plan {
-                idx: entries.first().map(|entry| entry.idx).unwrap_or(-1),
-                source,
+        let planned = plan_batch(self.db.connection(), &self.space, &entries, self.mode).map_err(
+            |source| match source {
+                DbError::Rule(source) => WorkerError::Plan {
+                    idx: entries.first().map(|entry| entry.idx).unwrap_or(-1),
+                    source,
+                },
+                other => WorkerError::Db(other),
             },
-            other => WorkerError::Db(other),
-        })?;
+        )?;
 
         let last = rows.last().expect("a non-empty batch has a last row");
         let next_cursor = (last.idx, last.ord);
@@ -248,11 +243,4 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
             last_error: self.last_error.clone(),
         }
     }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
 }

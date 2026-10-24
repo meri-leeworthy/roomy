@@ -283,7 +283,10 @@ fn a_membership_join_writes_both_edge_sets_and_the_announcement() {
     assert!(global.iter().any(|sql| sql.contains("'joinedSpace'")));
     assert!(global.iter().any(|sql| sql.contains("'leftSpace'")));
     // The announcement is keyed by the entry's id and lands in the first channel.
-    assert!(writes_to(&effects, "into entities (id, stream_id, room)"));
+    assert!(writes_to(
+        &effects,
+        "into entities (id, stream_id, room, created_at, updated_at)"
+    ));
     let announcement = statements(&effects)
         .into_iter()
         .find(|(sql, _, _)| sql.contains("joined the space"))
