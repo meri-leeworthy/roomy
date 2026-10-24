@@ -20,6 +20,7 @@ rusqlite = "0.40"
 indexmap = "2"
 jsonwebtoken = "9"
 async-trait = "0.1"
+roomy-readstate.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
