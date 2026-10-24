@@ -85,6 +85,19 @@ pub struct XrpcState {
     pub read_state: Arc<dyn ReadStateStore>,
 }
 
+/// The space schema, as the projection writes it.
+const SPACE_SCHEMA: &str = include_str!("../../../packages/appserver/src/db/schema-space.sql");
+
+/// An empty space database: the schema, and no rows. A space this process has
+/// not materialised is not an error — its members, roles and rooms are simply
+/// none, and every handler already answers that.
+pub static ABSENT_SPACE: std::sync::LazyLock<Arc<SpaceReadDb>> = std::sync::LazyLock::new(|| {
+    let conn = Connection::open_in_memory().expect("an in-memory database opens");
+    conn.execute_batch(SPACE_SCHEMA)
+        .expect("the space schema applies to an empty database");
+    Arc::new(SpaceReadDb::from_connection(conn))
+});
+
 impl XrpcState {
     pub fn new(db: Arc<SpaceReadDb>, verifier: Arc<dyn CallerVerifier>) -> Self {
         let spaces = Arc::new(crate::registry::FixedSpaces::new(std::iter::empty()));

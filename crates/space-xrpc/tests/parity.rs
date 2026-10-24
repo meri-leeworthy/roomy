@@ -77,6 +77,13 @@ fn state(fixture: &Fixture) -> XrpcState {
         "/tests/fixtures/global.sqlite"
     ))
     .expect("fixture global db");
+    // The caller-owned state the gateway serves from its replica: watermarks,
+    // thread activity, and the bridge-token grants a space holds.
+    let read_state = roomy_readstate::SqliteReadStateStore::open_read_only(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/readstate.sqlite"
+    ))
+    .expect("fixture read-state db");
     let spaces: Arc<dyn SpaceResolver> = Arc::new(spaces);
     XrpcState::new(
         Arc::new(SpaceReadDb::from_connection(
@@ -86,6 +93,7 @@ fn state(fixture: &Fixture) -> XrpcState {
     )
     .with_spaces(spaces)
     .with_stores(Arc::new(stores) as Arc<dyn GlobalStores>)
+    .with_read_state(Arc::new(read_state))
 }
 
 /// A 26-character Crockford id, the shape the log's entity ids have.

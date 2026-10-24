@@ -24,7 +24,7 @@
     "voice_projected_calls": ["created_at"]
   },
   "nonDerivedTables": ["space_schema_version", "space_schema_migrations"],
-  "cursorTables": ["materialization_cursor", "worker_cursor"],
+  "cursorTables": ["materialization_cursor", "worker_cursor", "worker_fence"],
   "cursorColumns": ["backfilled_to"],
   "globalTables": [
     "edges",
