@@ -20,6 +20,11 @@ malformed params and pagination edges, all byte-identical) and the response cach
 in, while the other sixteen per-space reads and the four cross-space endpoints are
 not. M4 onwards is not started.
 
+Evaluation layers: **L1** (pure properties over `space-core`), **L3** (batch/replay
+equivalence, crashing after the global half at every commit point) and **L4** (the
+read differential, for the eight served NSIDs) are implemented and run in CI; **L2**
+is the parity fixture. L5–L10 are not implemented.
+
 **Scope.** The Rust rewrite of the appserver's core: the gateway (XRPC edge,
 WebSocket connection plane, auth, user-scoped and cross-space reads, write
 ingress) plus the space worker that materialises and serves per-space data. It
