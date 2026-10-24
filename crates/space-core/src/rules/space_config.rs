@@ -93,6 +93,17 @@ pub fn space_info_effects(record: impl Into<SpaceInfoPatch>, ctx: &RuleContext) 
             ctx.decided_at_ms,
         ));
     }
+    // The space's own name and avatar are denormalised into every feed row it
+    // holds, so a space rename re-derives them.
+    if patch.name.is_some() || patch.avatar.is_some() {
+        effects.push(Effect::space(
+            "update activity_item
+                set space_name = (select name from comp_info where entity = activity_item.space_id),
+                    space_avatar = (select avatar from comp_info where entity = activity_item.space_id)",
+            Vec::new(),
+        ));
+    }
+
     if let Some(suggest) = &patch.suggest_to_others {
         effects.push(policy_effect(
             stream,

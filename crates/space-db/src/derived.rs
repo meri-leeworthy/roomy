@@ -29,6 +29,9 @@ pub fn apply_step(
     match step {
         DerivedStep::RebuildActivityWindow { room_id } => {
             rebuild_activity_window(conn, room_id)?;
+            // The window's names are the current ones: a rename rebuilds the
+            // row it renamed rather than leaving the old name in the feed.
+            refresh_activity_meta(conn, stream_id, room_id)?;
             rebuild_room_activity(conn, room_id)?;
             Ok(Vec::new())
         }
@@ -210,6 +213,7 @@ fn upsert_activity_item(
                 room_id
             ],
         )?;
+        refresh_activity_meta(conn, space_id, room_id)?;
         return Ok(());
     }
 
@@ -281,6 +285,42 @@ fn upsert_activity_item(
             space_name,
             space_avatar,
         ],
+    )?;
+    Ok(())
+}
+
+/// Refresh the rows a feed entry denormalises.
+///
+/// The window's rows are the message set; its *names* are the current room,
+/// space and parent names. Writing them only on the first insert would make the
+/// projection depend on how the log was batched — a message applied before its
+/// room's rename would keep the old name for ever — so every write to the window
+/// refreshes them, and the row is a function of the log prefix instead.
+fn refresh_activity_meta(
+    conn: &Connection,
+    space_id: &SpaceDid,
+    room_id: &str,
+) -> Result<(), DerivedError> {
+    conn.execute(
+        "update activity_item
+            set room_name = (select name from comp_info where entity = activity_item.room_id),
+                space_name = (select name from comp_info where entity = ?),
+                space_avatar = (select avatar from comp_info where entity = ?),
+                parent_channel_id = (
+                  select p.head from edges p
+                   where p.tail = activity_item.room_id
+                     and p.label = 'link'
+                     and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+                ),
+                parent_channel_name = (
+                  select pi.name from edges p
+                    join comp_info pi on pi.entity = p.head
+                   where p.tail = activity_item.room_id
+                     and p.label = 'link'
+                     and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+                )
+          where room_id = ?",
+        params![space_id.as_str(), space_id.as_str(), room_id],
     )?;
     Ok(())
 }

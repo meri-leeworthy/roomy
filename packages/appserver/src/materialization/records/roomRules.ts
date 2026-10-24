@@ -18,6 +18,36 @@ import { ensureEntity, type SqlStatement, sql } from "@roomy-space/sdk";
 import type { ChangeOf } from "./recordChange.ts";
 import { space, type RuleContext, type RuleStatement } from "./recordRules.ts";
 
+/**
+ * The statement that re-derives one room's denormalised feed names.
+ *
+ * `activity_item` denormalises the room, space and parent names so the feed
+ * needs one query; re-deriving them on every structural change is what keeps
+ * that denormalisation a function of the rows that are there.
+ */
+export function refreshActivityMetaStatement(roomId: string): SqlStatement {
+  return sql`
+    update activity_item
+        set room_name = (select name from comp_info where entity = activity_item.room_id),
+            space_name = (select name from comp_info where entity = activity_item.space_id),
+            space_avatar = (select avatar from comp_info where entity = activity_item.space_id),
+            parent_channel_id = (
+              select p.head from edges p
+               where p.tail = activity_item.room_id
+                 and p.label = 'link'
+                 and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+            ),
+            parent_channel_name = (
+              select pi.name from edges p
+                join comp_info pi on pi.entity = p.head
+               where p.tail = activity_item.room_id
+                 and p.label = 'link'
+                 and coalesce(json_extract(p.payload, '$.canonical_parent'), 0) = 1
+            )
+      where room_id = ${roomId}
+  `;
+}
+
 /** One `room` change, narrowed to the kind. */
 export type RoomChange = ChangeOf<"room">;
 
@@ -61,6 +91,10 @@ function createStatements(
       on conflict do nothing
     `,
   ];
+
+  // The feed row's names are the current ones: a rename or re-parent re-derives
+  // them, so the projection is a function of the log and not of batch order.
+  statements.push(refreshActivityMetaStatement(id));
 
   if (record.discordOrigin !== undefined) {
     statements.push(sql`
@@ -127,6 +161,7 @@ function updateStatements(
     statements.push(...parentStatements(id, patch.parent, ctx));
   }
 
+  statements.push(space(refreshActivityMetaStatement(id)));
   return statements;
 }
 

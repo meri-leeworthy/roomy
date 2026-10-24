@@ -14,6 +14,7 @@ import type { Event, StreamDid, Ulid } from "@roomy-space/sdk";
 import type { DbLike } from "../db/types.ts";
 import { upsertActivityItem } from "./activityItem.ts";
 import { rebuildRoomActivity } from "../queries/roomActivityProjection.ts";
+import { refreshActivityMeta } from "./activityItem.ts";
 import type { DerivedStep } from "./records/effects.ts";
 import { rebuildActivityWindow } from "./roomDerivedState.ts";
 import { setMessageSortIdxByReorder } from "./sortIdx.ts";
@@ -32,8 +33,11 @@ export async function applyDerivedStep(
     case "rebuildActivityWindow":
       // The `activity_item` window and the `room_activity` summary both
       // describe the room whose message set just changed, so one step keeps
-      // both in step with the rows that remain.
+      // both in step with the rows that remain. The row's names are the current
+      // ones — a rename rebuilds the row it renamed rather than leaving the old
+      // name in the feed.
       await rebuildActivityWindow(db, step.roomId);
+      await refreshActivityMeta(db, step.roomId);
       await rebuildRoomActivity(db, [step.roomId]);
       return [];
     case "upsertActivityItem":
