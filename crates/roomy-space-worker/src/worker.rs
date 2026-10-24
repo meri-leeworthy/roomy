@@ -1,8 +1,11 @@
 //! The materialisation loop.
 //!
 //! One iteration is: hold the lease, read a batch of changes from the cursor,
-//! plan it against the rows the space DB holds, apply the space half and the
-//! cursor in one transaction, then hand the global half to the sink.
+//! plan it against the rows the space DB holds, hand the global half to the
+//! sink, then commit the space half and the cursor in one transaction. The
+//! global index may be one batch ahead of the space projection after a crash —
+//! every global statement is idempotent, so the replay rewrites it — and is
+//! never behind it.
 //!
 //! Three things it deliberately does not do:
 //!
@@ -16,9 +19,9 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use space_core::change::{decode_row, DecodeError};
+use space_core::change::DecodeError;
 use space_core::ids::SpaceDid;
-use space_db::plan::{plan_batch, EntryChanges};
+use space_db::plan::{group_entries, plan_batch};
 use space_db::{DbError, SpaceDb};
 
 use crate::feed::{ChangeFeed, FeedError};
@@ -162,33 +165,11 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
             return Ok(Progress::Idle { cursor });
         }
 
-        let mut entries: Vec<EntryChanges> = Vec::new();
-        let mut changes = 0;
-        for row in &rows {
-            let change = decode_row(row).map_err(|source| WorkerError::Decode {
-                idx: row.idx,
-                source,
-            })?;
-            let actor =
-                roomy_events::Did::parse(row.actor.clone()).map_err(|_| WorkerError::Decode {
-                    idx: row.idx,
-                    source: DecodeError::Did,
-                })?;
-            changes += 1;
-
-            // Rows that share an entry are planned together: they came from one
-            // log entry, share its actor, and are applied in emission order.
-            match entries.last_mut() {
-                Some(entry) if entry.idx == row.idx => entry.changes.push(change),
-                _ => entries.push(EntryChanges {
-                    idx: row.idx,
-                    changes: vec![change],
-                    actor,
-                    event_id: row.event_id.clone(),
-                    order_stamp: row.order_stamp.clone(),
-                }),
-            }
-        }
+        let entries = group_entries(&rows).map_err(|error| WorkerError::Decode {
+            idx: error.idx,
+            source: error.source,
+        })?;
+        let changes = rows.len();
 
         let planned = plan_batch(self.db.connection(), &self.space, &entries, now_ms()).map_err(
             |source| match source {
@@ -203,11 +184,15 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink> Worker<F, L, S> {
         let last = rows.last().expect("a non-empty batch has a last row");
         let next_cursor = (last.idx, last.ord);
 
-        // The global half is written first and is idempotent, so a crash
-        // between the two databases replays harmlessly rather than leaving the
-        // space ahead of the index that resolves it.
-        let globals = self.db.apply_batch(&planned, next_cursor)?;
-        self.sink.apply(&globals)?;
+        // The global half goes first: it is idempotent, so a crash between the
+        // two databases replays harmlessly, and writing it first is what keeps
+        // the index from ever being behind a committed space projection. The
+        // space half stays uncommitted until the sink has accepted, so a sink
+        // failure leaves the cursor where it was and the same changes are read
+        // again.
+        let batch = self.db.begin_batch(&planned, next_cursor)?;
+        self.sink.apply(batch.globals())?;
+        batch.commit()?;
 
         Ok(Progress::Applied {
             cursor: next_cursor,

@@ -12,7 +12,9 @@ use roomy_space_worker::lease::{Lease, SqliteLease};
 use roomy_space_worker::sink::{GlobalSink, SqliteGlobalSink};
 use roomy_space_worker::worker::{Progress, Worker, WorkerParts};
 use serde::Deserialize;
+use space_core::change::FeedRow;
 use space_core::ids::SpaceDid;
+use space_db::plan::{group_entries, plan_batch};
 use space_db::{digest_of, snapshot_db, worker_snapshot, SpaceDb};
 
 #[derive(Deserialize)]
@@ -26,6 +28,14 @@ struct Fixture {
 struct Expected {
     #[serde(rename = "spaceDigest")]
     space_digest: String,
+}
+
+#[derive(Deserialize)]
+struct FixtureGlobal {
+    #[serde(rename = "globalTables")]
+    tables: Vec<String>,
+    #[serde(rename = "globalClockColumns")]
+    clock_columns: Vec<String>,
 }
 
 fn fixture_path() -> PathBuf {
@@ -198,9 +208,221 @@ fn a_batch_is_applied_with_its_cursor_or_not_at_all() {
         effects: vec![broken],
     }];
     assert!(db
-        .apply_batch(&planned, (rows[0].idx, rows[0].ord))
+        .begin_batch(&planned, (rows[0].idx, rows[0].ord))
         .is_err());
     assert_eq!(db.cursor().expect("cursor"), None);
+}
+
+/// The fixture, its stream, and the global tables a comparison covers.
+struct FixtureParts {
+    space: SpaceDid,
+    changes: Vec<FeedRow>,
+    space_digest: String,
+    global_tables: Vec<String>,
+    global_clock_columns: Vec<String>,
+}
+
+fn load_fixture() -> FixtureParts {
+    let path = fixture_path();
+    let text = std::fs::read_to_string(&path).expect("fixture readable");
+    let fixture: Fixture = serde_json::from_str(&text).expect("fixture parses");
+    let globals: FixtureGlobal = serde_json::from_str(&text).expect("fixture globals parse");
+    FixtureParts {
+        space: SpaceDid::parse(fixture.stream).expect("stream is a DID"),
+        changes: fixture
+            .changes
+            .iter()
+            .map(|row| serde_json::from_value(row.clone()).expect("feed row parses"))
+            .collect(),
+        space_digest: fixture.expected.space_digest,
+        global_tables: globals.tables,
+        global_clock_columns: globals.clock_columns,
+    }
+}
+
+/// A feed holding `changes`, in the order the worker reads them.
+fn feed_of(changes: &[FeedRow]) -> SqliteChangeFeed {
+    let feed = SqliteChangeFeed::in_memory().expect("feed");
+    let conn = feed.connection();
+    for row in changes {
+        conn.execute(
+            "insert into record_changes (
+               stream_id, idx, ord, kind, repo, collection, rkey, op,
+               order_stamp, actor, event_id, body
+             ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                row.stream_id,
+                row.idx,
+                row.ord,
+                row.kind,
+                row.repo,
+                row.collection,
+                row.rkey,
+                row.op,
+                row.order_stamp,
+                row.actor,
+                row.event_id,
+                row.body,
+            ],
+        )
+        .expect("inserting a feed row");
+    }
+    feed
+}
+
+/// A space database on disk, with the fixture's pre-materialisation rows.
+fn seeded_file(space: &SpaceDid, path: &Path) -> SpaceDb {
+    let db = SpaceDb::open(path, space.clone()).expect("space DB");
+    db.connection()
+        .execute(
+            "insert or ignore into entities (id, stream_id) values (?, ?)",
+            rusqlite::params![space.as_str(), space.as_str()],
+        )
+        .expect("seed entity");
+    db.connection()
+        .execute(
+            "insert or ignore into comp_space (entity) values (?)",
+            rusqlite::params![space.as_str()],
+        )
+        .expect("seed space row");
+    db
+}
+
+/// Drain `space_path`'s feed to idle, and return the digest of its projection.
+fn drain(space: &SpaceDid, changes: &[FeedRow], space_path: &Path, global_path: &Path) -> String {
+    let feed = feed_of(changes);
+    let lease = SqliteLease::open(global_path).expect("lease");
+    let sink = SqliteGlobalSink::open(global_path).expect("sink");
+    let db = seeded_file(space, space_path);
+    let mut worker = Worker::new(WorkerParts {
+        space: space.clone(),
+        holder: "test-holder".to_string(),
+        lease_ttl: Duration::from_secs(30),
+        batch_limit: 500,
+        feed,
+        lease,
+        sink,
+        db,
+    });
+    run_to_idle(&mut worker);
+    digest_of(&worker_snapshot(
+        &snapshot_db(worker.space_db().connection()).expect("snapshot"),
+    ))
+}
+
+/// The digest of the global tables the fixture's rules write, without the
+/// columns the fixture records as derivation time.
+fn global_digest(path: &Path, tables: &[String], clock_columns: &[String]) -> String {
+    let conn = rusqlite::Connection::open(path).expect("global DB");
+    let mut snapshot = snapshot_db(&conn).expect("global snapshot");
+    snapshot.retain(|table| tables.contains(&table.table));
+    for table in &mut snapshot {
+        let keep: Vec<usize> = table
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| !clock_columns.contains(*column))
+            .map(|(index, _)| index)
+            .collect();
+        if keep.len() == table.columns.len() {
+            continue;
+        }
+        table.rows = table
+            .rows
+            .iter()
+            .map(|row| keep.iter().map(|index| row[*index].clone()).collect())
+            .collect();
+        table.columns = keep
+            .iter()
+            .map(|index| table.columns[*index].clone())
+            .collect();
+    }
+    digest_of(&snapshot)
+}
+
+/// A crash after the global write and before the space commit leaves the
+/// global index ahead, the cursor unadvanced, and replay converges.
+#[test]
+fn a_crash_between_the_global_write_and_the_commit_replays_to_the_same_projection() {
+    let fixture = load_fixture();
+    let space = fixture.space.clone();
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    // What an uninterrupted worker produces from the same log.
+    let reference_space = drain(
+        &space,
+        &fixture.changes,
+        &dir.path().join("reference.sqlite"),
+        &dir.path().join("reference-global.sqlite"),
+    );
+    assert_eq!(reference_space, fixture.space_digest);
+    let reference_global = global_digest(
+        &dir.path().join("reference-global.sqlite"),
+        &fixture.global_tables,
+        &fixture.global_clock_columns,
+    );
+
+    let space_path = dir.path().join("space.sqlite");
+    let global_path = dir.path().join("global.sqlite");
+
+    // Stop a worker after the sink accepted a batch's global half and before
+    // the space transaction committed: the batch is dropped, which rolls the
+    // space half back.
+    {
+        let mut db = seeded_file(&space, &space_path);
+        let feed = feed_of(&fixture.changes);
+        let rows = feed
+            .batch(&space, (-1, -1), 500)
+            .expect("a batch from the start");
+        let entries = group_entries(&rows).expect("the rows group into entries");
+        let planned = plan_batch(db.connection(), &space, &entries, 0).expect("planning");
+        let last = rows.last().expect("a non-empty batch");
+        let mut sink = SqliteGlobalSink::open(&global_path).expect("sink");
+        let batch = db
+            .begin_batch(&planned, (last.idx, last.ord))
+            .expect("beginning the batch");
+        sink.apply(batch.globals())
+            .expect("the global half applies");
+        drop(batch);
+
+        assert_eq!(
+            db.cursor().expect("cursor"),
+            None,
+            "the cursor must not advance before the space batch commits"
+        );
+        let empty = dir.path().join("empty-global.sqlite");
+        drop(SqliteGlobalSink::open(&empty).expect("empty sink"));
+        assert_ne!(
+            global_digest(
+                &global_path,
+                &fixture.global_tables,
+                &fixture.global_clock_columns
+            ),
+            global_digest(
+                &empty,
+                &fixture.global_tables,
+                &fixture.global_clock_columns
+            ),
+            "the global half is written before the space half commits"
+        );
+    }
+
+    // A worker that starts where that one stopped replays the batch from the
+    // unadvanced cursor and lands on the same projection.
+    let replayed_space = drain(&space, &fixture.changes, &space_path, &global_path);
+    assert_eq!(
+        replayed_space, fixture.space_digest,
+        "the replay after the crash does not match the TypeScript projection"
+    );
+    assert_eq!(
+        global_digest(
+            &global_path,
+            &fixture.global_tables,
+            &fixture.global_clock_columns
+        ),
+        reference_global,
+        "replaying the global half is not idempotent"
+    );
 }
 
 #[test]

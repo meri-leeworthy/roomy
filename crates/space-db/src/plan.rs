@@ -15,7 +15,9 @@ use std::collections::HashMap;
 
 use roomy_events::Did;
 use rusqlite::Connection;
-use space_core::change::{RecordBody, RecordChange, RecordKind, RecordPatch};
+use space_core::change::{
+    decode_row, DecodeError, FeedRow, RecordBody, RecordChange, RecordKind, RecordPatch,
+};
 use space_core::{Effect, RuleContext};
 
 use crate::DbError;
@@ -38,6 +40,45 @@ pub struct EntryChanges {
     pub actor: Did,
     pub event_id: String,
     pub order_stamp: String,
+}
+
+/// A feed row that does not decode into a change.
+#[derive(Debug, thiserror::Error)]
+#[error("change at idx {idx} does not decode: {source}")]
+pub struct GroupError {
+    pub idx: i64,
+    pub source: DecodeError,
+}
+
+/// Group feed rows into the entries they came from.
+///
+/// Rows sharing an `idx` came from one log entry, share its actor, and are
+/// applied in emission order; the entry carries the id and ordering stamp the
+/// rules read. The feed returns rows already in `(idx, ord)` order, so a single
+/// pass is enough.
+pub fn group_entries(rows: &[FeedRow]) -> Result<Vec<EntryChanges>, GroupError> {
+    let mut entries: Vec<EntryChanges> = Vec::new();
+    for row in rows {
+        let change = decode_row(row).map_err(|source| GroupError {
+            idx: row.idx,
+            source,
+        })?;
+        let actor = Did::parse(row.actor.clone()).map_err(|_| GroupError {
+            idx: row.idx,
+            source: DecodeError::Did,
+        })?;
+        match entries.last_mut() {
+            Some(entry) if entry.idx == row.idx => entry.changes.push(change),
+            _ => entries.push(EntryChanges {
+                idx: row.idx,
+                changes: vec![change],
+                actor,
+                event_id: row.event_id.clone(),
+                order_stamp: row.order_stamp.clone(),
+            }),
+        }
+    }
+    Ok(entries)
 }
 
 /// Plan a batch, reading the prior state its changes need.
