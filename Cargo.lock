@@ -2670,6 +2670,7 @@ name = "roomy-appserver"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "http-body-util",
  "roomy-auth",
  "roomy-gateway",
  "roomy-space-worker",
@@ -2677,9 +2678,12 @@ dependencies = [
  "serde",
  "serde_json",
  "space-core",
+ "space-db",
  "space-feed",
  "space-xrpc",
+ "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

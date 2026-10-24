@@ -24,3 +24,20 @@ serde = { workspace = true }
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+axum = "0.8"
+http-body-util = "0.1"
+space-db.workspace = true
+space-feed.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tower = { version = "0.5", features = ["util"] }
+serde.workspace = true
+serde_json.workspace = true
+roomy-gateway.workspace = true
+roomy-auth.workspace = true
+roomy-space-worker.workspace = true
+space-xrpc.workspace = true
+space-core.workspace = true
+rusqlite.workspace = true
