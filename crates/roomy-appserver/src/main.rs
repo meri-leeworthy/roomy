@@ -29,6 +29,8 @@
 //!                                     unset reads this machine's SQLite file
 //! ROOMY_SIGNAL_URL     —               the gateway this worker's signals go to;
 //!                                     unset keeps them in this process
+//! ROOMY_OWNERSHIP      owner           `follower` replays beside the owner and
+//!                                     serves reads without taking a lease
 //! ```
 
 use std::net::SocketAddr;
@@ -41,7 +43,7 @@ use roomy_gateway::internal::{FeedService, INTERNAL_HEADER};
 use roomy_gateway::{cache, router, GatewaySignals, GatewayState};
 use roomy_space_worker::relay::RelaySignals;
 use roomy_space_worker::signal::SignalSink;
-use roomy_space_worker::supervisor::{FeedFactory, SignalFactory};
+use roomy_space_worker::supervisor::{FeedFactory, Ownership, SignalFactory};
 use roomy_space_worker::{Supervisor, SupervisorConfig};
 use space_core::ids::SpaceDid;
 use space_feed::http::{HttpChangeFeed, UreqPull};
@@ -264,6 +266,10 @@ fn supervisor_config(config: &Config) -> SupervisorConfig {
         // A process owning more spaces than it is busy with keeps them open
         // only while they have work.
         idle_unload: Some(Duration::from_secs(600)),
+        ownership: match std::env::var("ROOMY_OWNERSHIP").as_deref() {
+            Ok("follower") => Ownership::Follower,
+            _ => Ownership::Owner,
+        },
     }
 }
 

@@ -34,8 +34,10 @@ shared secret, a worker elsewhere pulls that feed and materialises the same
 projection as a worker reading the log's file, and a process's workers feed the
 same signal sink its sockets subscribe to, and a worker elsewhere relays its
 signals to the gateway's internal endpoint, which publishes them to the same
-sink. What remains is replicated reads and the simulation harness that asserts
-the distributed invariants (L7). M6 and M7 are not started.
+sink. Replicated reads are in place: a follower replays the same log into its own
+projection without taking the lease, keeps its own global copy for entity
+resolution, and answers the owner's requests identically. What remains is the
+simulation harness that asserts the distributed invariants (L7). M6 and M7 are not started.
 
 Evaluation layers: **L1** (pure properties over `space-core`), **L3** (batch/replay
 equivalence, crashing after the global half at every commit point), **L4** (the

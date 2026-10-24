@@ -178,6 +178,7 @@ async fn one_process_serves_every_space_it_materialised() {
         idle_poll: Duration::from_millis(2),
         batch_limit: 500,
         idle_unload: None,
+        ownership: roomy_space_worker::supervisor::Ownership::Owner,
     };
     build_events_db(&config.events_db, &spaces);
     let supervisor = Supervisor::start(config.clone(), spaces.clone()).expect("supervisor starts");
