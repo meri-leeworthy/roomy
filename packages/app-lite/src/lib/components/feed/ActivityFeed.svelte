@@ -14,6 +14,7 @@
   import MessageContent from "@roomy/design/components/content/thread/message/MessageContent.svelte";
   import MessageReactions from "../chat/MessageReactions.svelte";
   import { prefetchInternalLinkSummaries } from "../chat/prefetch-link-summaries";
+  import { roomIndex } from "$lib/queries/room-index";
   import {
     prefetchInternalLinkSummariesFromBlocks,
   } from "../chat/prefetch-link-summaries";
@@ -47,10 +48,15 @@
     })),
   );
 
-  // Warm badge-summary cache for internal links across the feed's messages
-  // (preceding context + last message of each activity item) so badges mount
+  // Warm badge-summary cache for the internal links across the feed's messages
+  // (preceding context + last message of each activity item), so badges mount
   // with cache hits. One pass per feed load, not per badge render.
   $effect(() => {
+    // Nothing is warmable until the room listings answer, so a pass that ran
+    // before them would warm none of the room links. Reading the index
+    // reactively re-runs this pass when they land.
+    if (!roomIndex().ready) return;
+
     const feed = visibleFeed;
     const contents: string[] = [];
     const blocksList: Block[][] = [];

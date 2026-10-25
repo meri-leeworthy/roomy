@@ -23,6 +23,11 @@
  * stale internal link) therefore costs one request per session, not one per
  * pass.
  *
+ * A room is warmed only when the room index names it — see
+ * {@link prefetchInternalLinkSummaries}. That index is this pass's precondition
+ * as well as the badge's: it is what separates "this link names a room the
+ * client holds" from "this id means nothing to the client yet".
+ *
  * Only the lightweight summary queries are prefetched (not `getMetadata`),
  * matching what {@link SpaceRoomBadge} actually reads.
  */
@@ -31,6 +36,8 @@ import { renderMarkdownSanitized } from "@roomy/design/utils";
 import { parseInternalLinkHref } from "@roomy-space/sdk";
 import { enrichInternalLinksFromBlocks, internalLinkOrigins } from "./enrich-internal-links";
 import { resolveRoomSummary, resolveSpaceSummary } from "$lib/queries/badge-summaries";
+import { readRoomIndex } from "$lib/queries/room-index";
+import { isIndexedRoom } from "$lib/queries/room-ids";
 import type { Block } from "@roomy-space/sdk";
 
 /**
@@ -98,13 +105,7 @@ export function prefetchInternalLinkSummaries(
   const targets = extractInternalLinkTargets(markdowns, origins);
   if (targets.length === 0) return;
 
-  for (const { spaceId, roomId } of targets) {
-    // The space lookup is always worth warming: the badge renders the space
-    // avatar+name unless this is the current space, which the badge decides
-    // at render time.
-    void resolveSpaceSummary(spaceId);
-    if (roomId) void resolveRoomSummary(roomId);
-  }
+  warmSummaries(targets);
 }
 
 /**
@@ -130,8 +131,32 @@ export function prefetchInternalLinkSummariesFromBlocks(
   }
   if (targets.length === 0) return;
 
+  warmSummaries(targets);
+}
+
+/**
+ * Warm the summaries a badge will read for each target.
+ *
+ * A room is warmed only when the room index names it. The prefetch runs on a
+ * link the reader has not asked about, so an id the index does not name is
+ * either a message (never a room link) or a room nothing lists — a stale link,
+ * a room of another space — and warming it buys a 404 per cold load. The index
+ * answering is the precondition: before the first listing lands, every room
+ * looks unlisted, which is the same "absent" the guard exists to read
+ * ({@link isIndexedRoom}).
+ *
+ * A space summary needs no such gate: space ids come from the link itself and
+ * are not what the room index holds.
+ */
+function warmSummaries(
+  targets: Iterable<{ spaceId: string; roomId?: string }>,
+): void {
+  const index = readRoomIndex();
   for (const { spaceId, roomId } of targets) {
+    // The space lookup is always worth warming: the badge renders the space
+    // avatar+name unless this is the current space, which the badge decides
+    // at render time.
     void resolveSpaceSummary(spaceId);
-    if (roomId) void resolveRoomSummary(roomId);
+    if (roomId && isIndexedRoom(roomId, index)) void resolveRoomSummary(roomId);
   }
 }

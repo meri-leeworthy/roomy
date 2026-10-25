@@ -99,15 +99,24 @@ export async function sendMessage(
   // non-message here instead, before any event is built or sent, so no
   // sendEvents call leaves the process.
   //
-  // The probe is best-effort: it is skipped entirely when it cannot tell (a
-  // timeout, or a message the caller cannot read → 403), because the appserver
-  // stays the authority and an inconclusive probe must not block a valid send.
+  // The room the message is going into is the one non-message target this
+  // process already knows: a thread's id is what a caller reaches for when it
+  // means "reply to this thread", and asking the appserver to classify it is a
+  // request whose answer is a 400. Classifying it here costs nothing and keeps
+  // that mistake out of the server's error log.
+  //
+  // Anything else is probed. The probe is best-effort: it is skipped when it
+  // cannot tell (a timeout, or a message the caller cannot read → 403),
+  // because the appserver stays the authority and an inconclusive probe must
+  // not block a valid send.
   if (opts.parent) {
-    let isMessage = true;
-    try {
-      isMessage = await isMessageId(xrpc, opts.parent);
-    } catch {
-      // Inconclusive — let sendEvents decide.
+    let isMessage = opts.parent !== roomId;
+    if (isMessage) {
+      try {
+        isMessage = await isMessageId(xrpc, opts.parent);
+      } catch {
+        // Inconclusive — let sendEvents decide.
+      }
     }
     if (!isMessage) {
       throw new Error(

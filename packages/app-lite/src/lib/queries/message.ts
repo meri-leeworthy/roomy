@@ -1,41 +1,14 @@
 import { createQuery } from "@tanstack/svelte-query";
 import { cache, schemas } from "@roomy-space/sdk";
-import { createSubscriber } from "svelte/reactivity";
 import { px } from "$lib/auth.svelte";
 import { queryClient } from "$lib/client";
-import {
-  collectRoomIds,
-  isNonMessageReplyTarget,
-  isRoomIndexKey,
-} from "$lib/queries/room-ids";
+import { mayAskForReplyTarget } from "$lib/queries/room-ids";
+import { roomIndex } from "$lib/queries/room-index";
 
 const { queryKey } = cache;
 
 export type Message = typeof schemas.queries.getMessage.Response.infer;
 type MessageList = typeof schemas.queries.getMessages.Message.infer[];
-
-/**
- * The room ids the client currently holds, as a reactive read.
- *
- * Reading this inside the query options subscribes the observer to the query
- * cache, so a reply whose target becomes classifiable (the room listing it
- * belongs to finishes loading) re-evaluates `enabled` and drops the request
- * without waiting for anything else. Only listing arrivals are forwarded: a
- * message diff fires far more often and cannot change which ids are rooms.
- * The subscription exists only while an effect reads it — see
- * `createSubscriber` — so it costs nothing on a page with no reply previews.
- */
-const subscribeToRoomChanges = createSubscriber((update) =>
-  queryClient.getQueryCache().subscribe((event) => {
-    const queryKey = "query" in event ? event.query.queryKey : undefined;
-    if (queryKey && isRoomIndexKey(queryKey)) update();
-  }),
-);
-
-function roomIds(): ReadonlySet<string> {
-  subscribeToRoomChanges();
-  return collectRoomIds(queryClient.getQueryCache().getAll());
-}
 
 /**
  * Single-message query. Hydrates from the room messages cache if the
@@ -68,18 +41,17 @@ export function createMessageQuery(
     // is a room asks a question whose answer can never change: a permanent 400
     // on every render of that reply.
     //
-    // The rejection rule is "not a message", not "is my own room", so the
-    // guard mirrors the rule rather than the narrower case it used to cover.
-    // The client already holds the room ids it can see (the sidebar and boards
-    // it renders), so the target is classifiable without fetching. Messages
-    // carrying such a target are historical — the writer that produced them is
-    // fixed at the appserver — so this only ever suppresses requests for data
-    // that already exists. Asking burns a round-trip and logs a 400 on every
-    // render of that reply, and the answer can never change.
-    const targetIsRoom = isNonMessageReplyTarget(target, room, roomIds());
+    // `mayAskForReplyTarget` carries the rule, including the half that was
+    // missing: before the first room listing lands the index holds nothing, and
+    // asking then is what turned a cold load into a 400 for every reply whose
+    // target is a room. Reading the index reactively means the observer
+    // re-evaluates when the listing arrives — a target that is a room is
+    // suppressed, one that is not is asked about as before. Local data still
+    // renders meanwhile, because `initialData` does not wait on `enabled`.
+    const index = roomIndex();
     return {
       queryKey: queryKey("space.roomy.message.getMessage", { messageId: target }),
-      enabled: (options?.enabled ?? true) && !targetIsRoom,
+      enabled: (options?.enabled ?? true) && mayAskForReplyTarget(target, room, index),
       queryFn: () =>
         px().query("space.roomy.message.getMessage", { messageId: target }),
       retry: false,
