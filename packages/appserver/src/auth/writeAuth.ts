@@ -10,6 +10,7 @@
  */
 
 import type { DbLike } from "../db/types.ts";
+import { log } from "../log.ts";
 import {
   spaceAccess,
   roomAccess,
@@ -556,6 +557,30 @@ async function checkExtensionAuthority(
 }
 
 /**
+ * Report a refused reply target with the identity the request error does not
+ * carry.
+ *
+ * A refusal reaches the client as a 400 naming the target id, and the XRPC
+ * router logs that message — which names neither the caller nor the space, so a
+ * producer sending room ids as reply targets cannot be found from the error
+ * alone. The refusal is the moment the id and the identity are both in hand:
+ * the event type says which client path built it, the room says where it was
+ * aimed, and the caller says who.
+ */
+function refuseReplyTarget(
+  callerDid: string,
+  spaceId: string,
+  event: { $type: string; [k: string]: unknown },
+  target: string,
+  reason: string,
+): void {
+  const room = typeof event.room === "string" ? event.room : "";
+  log.warn(
+    `[writeAuth] reply target refused (${reason}): target=${target} event=${event.$type} room=${room} space=${spaceId} caller=${callerDid}`,
+  );
+}
+
+/**
  * Authorize the reply targets attached to a message event.
  *
  * A `space.roomy.attachment.reply.v0` carries a bare `target` ULID. The
@@ -583,6 +608,8 @@ async function checkExtensionAuthority(
 async function checkReplyTargets(
   db: DbLike,
   event: { $type: string; [k: string]: unknown },
+  callerDid: string,
+  spaceId: string,
 ): Promise<WriteAuthResult> {
   if (!REPLY_TARGET_TYPES.has(event.$type)) return undefined;
 
@@ -613,6 +640,7 @@ async function checkReplyTargets(
       .query("select room from entities where id = ?")
       .get<{ room: string | null }>(target);
     if (row === null) {
+      refuseReplyTarget(callerDid, spaceId, event, target, "no such entity");
       return denied(
         400,
         "InvalidRequest",
@@ -620,6 +648,7 @@ async function checkReplyTargets(
       );
     }
     if (!row.room) {
+      refuseReplyTarget(callerDid, spaceId, event, target, "no room");
       return denied(
         400,
         "InvalidRequest",
@@ -973,7 +1002,7 @@ export async function checkWriteAuth(
       ctx,
     );
     if (extensionResult) return extensionResult;
-    return await checkReplyTargets(db, event);
+    return await checkReplyTargets(db, event, callerDid, spaceId);
   }
 
   // ── Curator actions on someone else's message (space admin) ──
@@ -1013,7 +1042,7 @@ export async function checkWriteAuth(
     }
     const authorResult = await checkMessageAuthorOrAdmin(db, messageId, callerDid, spaceId, accessMemo);
     if (authorResult) return authorResult;
-    return await checkReplyTargets(db, event);
+    return await checkReplyTargets(db, event, callerDid, spaceId);
   }
 
   // ── Room creation (split by kind) ──
