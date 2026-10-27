@@ -1,10 +1,21 @@
 <script lang="ts">
   /**
-   * LinkCard — renders a rich link preview card from enriched embed data.
+   * LinkCard — renders a link's card from enriched embed data.
    *
    * The `embed` prop is the LinkEmbedData object returned by the appserver's
-   * embed enricher (from the Lantern-chat embed-service). When embed data
-   * is still pending or unavailable, only the URL is shown.
+   * embed enricher. Two kinds of card come out of it:
+   *
+   *   - a Web Tile, when the appserver resolved one for the URL
+   *     (`embed.tile`): the record the content type maps to, loaded and drawn
+   *     by `TileEmbed` — sandboxed, no fetch from inside the tile;
+   *   - otherwise the OpenGraph/oEmbed card (`embed.t` and friends).
+   *
+   * A tile wins because it is a renderer of the record itself; the OpenGraph
+   * fields may be absent entirely for a URL whose origin refuses scrapers, and
+   * the tile is then the only thing the card has. Every surface that draws a
+   * link gets the tile through this component, so no surface has to know.
+   *
+   * When embed data is still pending or unavailable, only the URL is shown.
    *
    * When `onRemove` is provided (author's own message), a dismiss button is
    * shown so the embed preview can be removed.
@@ -13,6 +24,8 @@
   import type { schemas } from "@roomy-space/sdk";
   import Button from "@roomy/design/components/ui/button/Button.svelte";
   import { IconX } from "@roomy/design/icons";
+  import TileEmbed from "../tiles/TileEmbed.svelte";
+  import type { TileSurface } from "../tiles/tile-activity.js";
 
   type LinkEmbedData = typeof schemas.queries.getMessage.LinkEmbedData.infer;
 
@@ -20,11 +33,25 @@
     embed,
     url,
     onRemove,
+    tile = true,
+    surface = "chat",
   }: {
     embed: LinkEmbedData | null | undefined;
     url: string;
     onRemove?: () => void;
+    /**
+     * Whether this card may render the tile its embed carries. A message
+     * renders a bounded number of tiles across its body and its links (see
+     * `planMessageTiles`), so the message decides and a lone card in a list
+     * leaves this on.
+     */
+    tile?: boolean;
+    /** The surface rendering the card, handed to the tile it mounts. */
+    surface?: TileSurface;
   } = $props();
+
+  /** The tile to render on this card, if the embed carries one and it fits. */
+  const embedTile = $derived(tile ? embed?.tile : undefined);
 
   const providerName = $derived(embed?.p?.n);
   const authorName = $derived(embed?.au?.n);
@@ -77,7 +104,12 @@
   {/if}
 {/snippet}
 
-{#if hasEmbedData}
+{#if embedTile}
+<div class="group/card relative not-prose max-w-[70ch]">
+  {@render dismiss()}
+  <TileEmbed uri={embedTile.url} data={embedTile.data} {surface} />
+</div>
+{:else if hasEmbedData}
 <div class="group/card relative not-prose max-w-[70ch]">
   {@render dismiss()}
   <a
