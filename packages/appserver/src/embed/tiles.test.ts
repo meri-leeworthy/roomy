@@ -242,8 +242,8 @@ describe("resolveTileForUrl", () => {
     const resolved = await resolveTileForUrl(`https://bsky.app/profile/${DID}/post/${RKEY}`);
     expect(resolved?.status).toBe("ok");
     if (resolved?.status !== "ok") return;
-    expect(resolved.tile.url).toBe(TILE_MAPPING["app.bsky.feed.post"]);
     expect(resolved.tile.url).toBe(BLUESKY_POST_TILE_URI);
+    expect(TILE_MAPPING["app.bsky.feed.post"]).toBe(BLUESKY_POST_TILE_URI);
     expect((resolved.tile.data as BlueskyPostTileData).post.text).toBe("Hello from a post");
   });
 
