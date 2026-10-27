@@ -76,6 +76,9 @@ interface GetMetadataResult {
   /** Whether the space may be suggested to other users. Absent while the
    *  admins have not answered — an unanswered space reads as suggested. */
   suggestToOthers?: boolean;
+  /** Whether join notices render in this space's rooms. Absent while the
+   *  admins have not answered — an unanswered space shows them. */
+  showJoinNotices?: boolean;
   isMember: boolean;
   isAdmin: boolean;
   /** Number of channels with unread messages (sidebar-visible rooms only). */
@@ -148,6 +151,7 @@ export const getMetadataHandler: QueryHandler<
            cs.allow_public_join as allow_public_join,
            cs.allow_member_invites as allow_member_invites,
            cs.suggest_to_others as suggest_to_others,
+           cs.show_join_notices as show_join_notices,
            cs.sidebar_config as sidebar_config
          from comp_space cs
          left join comp_info ci on ci.entity = cs.entity
@@ -160,6 +164,7 @@ export const getMetadataHandler: QueryHandler<
       allow_public_join: number | null;
       allow_member_invites: number | null;
       suggest_to_others: number | null;
+      show_join_notices: number | null;
       sidebar_config: string;
     }>(spaceId);
 
@@ -379,6 +384,13 @@ export const getMetadataHandler: QueryHandler<
       spaceRow.suggest_to_others === null
         ? null
         : spaceRow.suggest_to_others === 1,
+    // Tri-state for the same reason: absent (unanswered) is not a decision,
+    // and the space renders join notices either way. Only an explicit false
+    // hides them.
+    showJoinNotices:
+      spaceRow.show_join_notices === null
+        ? null
+        : spaceRow.show_join_notices === 1,
     isMember: access.isMember,
     isAdmin: access.isAdmin,
     unreadRoomCount,
