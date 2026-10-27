@@ -24,6 +24,11 @@ resolution live in `packages/appserver/src/embed/tiles.ts`, the tile in
 `packages/appserver/tiles/bluesky-post/`, and `link_embeds.tile_version` makes
 the resolution retroactive — a message materialised before it renders richly on
 its next read, with no event rewritten and no backfill pass.
+**Rollout is two switches, and both default off:** `EMBED_TILE_RESOLUTION` in
+the appserver environment decides whether a recognised link is resolved and
+stored at all; the per-user `web-tiles-link` feature flag decides whether a
+resolved tile is drawn. The server switch comes first — without it the embed
+carries only its OpenGraph card, so a granted flag renders nothing different.
 **Next:** feature 2, the room-context tile (§6, §11.2 phase 2), then the
 calendar context type (§11.2 phase 3). Milestone B's payload delivery is
 complete in the host→tile direction (an attachment's `data`, and now a link
