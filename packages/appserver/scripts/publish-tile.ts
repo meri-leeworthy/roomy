@@ -26,9 +26,7 @@ import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { AtpAgent } from "@atproto/api";
 import { CidLinkWrapper, encode } from "@atcute/cbor";
-
-/** The collection a Web Tile manifest record lives in, keyed by `tid`. */
-const TILE_COLLECTION = "ing.dasl.masl";
+import { TILE_COLLECTION } from "../src/embed/tiles.ts";
 
 /** One entry of the source manifest: the file to upload and its headers. */
 interface SourceResource {
