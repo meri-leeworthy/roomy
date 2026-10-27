@@ -124,42 +124,16 @@ export type DiscordBot = Bot<
 	CompleteDesiredProperties<typeof desiredProperties>
 >;
 
-/** Channel types that represent top-level text channels. */
-export const CHANNEL_TYPES = new Set([0, 5]); // GuildText, GuildAnnouncement
-
-/** Channel types that represent threads (public, private, announcement). */
-export const THREAD_TYPES = new Set([11, 12, 10]); // PublicThread, PrivateThread, AnnouncementThread
-
-/** Private thread type — excluded from sync since Roomy can't model thread-level access. */
-export const PRIVATE_THREAD = 12;
-
-/** Any channel type that can carry messages. */
-export const MESSAGE_CHANNEL_TYPES = new Set([
-	...CHANNEL_TYPES,
-	...THREAD_TYPES,
-]);
-
-/**
- * Check if a channel is publicly visible by examining whether the @everyone
- * role (whose ID equals the guild ID) has VIEW_CHANNEL explicitly denied.
- * Channels without a matching deny overwrite are public by default.
- */
-export function isChannelPublic(
-	channel: { permissionOverwrites?: Array<{ id: bigint; deny?: string[] }> },
-	guildId: bigint | string,
-): boolean {
-	const overwrites = channel.permissionOverwrites;
-	if (!overwrites || overwrites.length === 0) return true;
-	const everyoneId = BigInt(guildId);
-	const everyoneOverwrite = overwrites.find((o) => o.id === everyoneId);
-	if (!everyoneOverwrite) return true;
-	return !everyoneOverwrite.deny?.includes("VIEW_CHANNEL");
-}
-
-/** Discord message types the bridge cares about. */
-export const MsgType = {
-	Default: 0,
-	ChannelNameChange: 4,
-	ThreadCreated: 18,
-	ThreadStarterMessage: 21,
-} as const;
+// Channel-type sets and message types live in data.ts, which is the plain-data
+// module every service reads. Re-exported here because this module is the one
+// the gateway wiring and slash commands already import for Discordeno types.
+export {
+	CATEGORY_TYPE,
+	CHANNEL_TYPES,
+	MESSAGE_CHANNEL_TYPES,
+	MsgType,
+	PRIVATE_THREAD,
+	TEXT_CHANNEL_TYPES,
+	THREAD_ONLY_PARENT_TYPES,
+	THREAD_TYPES,
+} from "./data.ts";

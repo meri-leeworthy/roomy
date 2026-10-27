@@ -183,6 +183,60 @@ function toFailedSend(row: FailedSendRow): FailedSend {
 	};
 }
 
+export type DroppedMessage = {
+	/** Why the message was not bridged (a `DroppedReason`). */
+	reason: string;
+	/** Discord channel or thread the message was posted in. */
+	channelId: string;
+	guildId: string | null;
+	/** Space the drop applies to, or "" when the drop is not per-space. */
+	spaceDid: string;
+	/** Free-form context for the reason — the channel type, the parent id. */
+	detail: string | null;
+	/** Messages dropped for this (reason, channel, space), cumulative. */
+	count: number;
+	firstSeenAt: number;
+	lastSeenAt: number;
+};
+
+/** Identity + context used to record a dropped message (counts accumulate). */
+export type DroppedMessageUpdate = {
+	reason: string;
+	channelId: string;
+	guildId?: string | null;
+	spaceDid?: string | null;
+	detail?: string | null;
+};
+
+type DroppedMessageRow = {
+	reason: string;
+	channel_id: string;
+	guild_id: string | null;
+	space_did: string;
+	detail: string | null;
+	count: number;
+	first_seen_at: number;
+	last_seen_at: number;
+};
+
+const DROPPED_MESSAGE_COLUMNS = `reason, channel_id, guild_id, space_did, detail,
+  count, first_seen_at, last_seen_at`;
+
+/** Row → domain mapping shared by every dropped_messages query, so the column
+ *  list and the object shape cannot drift apart. */
+function toDroppedMessage(row: DroppedMessageRow): DroppedMessage {
+	return {
+		reason: row.reason,
+		channelId: row.channel_id,
+		guildId: row.guild_id,
+		spaceDid: row.space_did,
+		detail: row.detail,
+		count: row.count,
+		firstSeenAt: row.first_seen_at,
+		lastSeenAt: row.last_seen_at,
+	};
+}
+
 export class BridgeRepository {
 	private constructor(private readonly db: Database) {}
 
@@ -1302,6 +1356,111 @@ export class BridgeRepository {
 			)
 			.get(...(spaceDid ? [spaceDid] : []));
 		return { pending: row?.pending ?? 0, terminal: row?.terminal ?? 0 };
+	}
+
+	// === Dropped messages ===
+
+	/**
+	 * Record one message the bridge read and did not bridge, returning the
+	 * accumulated count for its (reason, channel, space). The row is a counter,
+	 * so a channel that loses every message accumulates one row rather than one
+	 * per message — the drop stays countable, and a caller logs on the first
+	 * (`count === 1`) instead of on all of them.
+	 */
+	recordDroppedMessage(update: DroppedMessageUpdate): number {
+		const now = Date.now();
+		const row = this.db
+			.query<{ count: number }, (string | number | null)[]>(
+				`INSERT INTO dropped_messages
+				   (reason, channel_id, guild_id, space_did, detail, count, first_seen_at, last_seen_at)
+				 VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+				 ON CONFLICT(reason, channel_id, space_did) DO UPDATE SET
+				   guild_id = COALESCE(excluded.guild_id, dropped_messages.guild_id),
+				   detail = COALESCE(excluded.detail, dropped_messages.detail),
+				   count = dropped_messages.count + 1,
+				   last_seen_at = excluded.last_seen_at
+				 RETURNING count`,
+			)
+			.get(
+				update.reason,
+				update.channelId,
+				update.guildId ?? null,
+				update.spaceDid ?? "",
+				update.detail ?? null,
+				now,
+				now,
+			);
+		return row?.count ?? 1;
+	}
+
+	/**
+	 * Drop records for one channel, newest activity first. Reading the rows
+	 * before recording a drop is how a caller tells "first drop in this
+	 * channel" from "the ten-thousandth" — the log line belongs to the former.
+	 */
+	listDroppedMessagesForChannel(channelId: string): DroppedMessage[] {
+		return this.db
+			.query<DroppedMessageRow, [string]>(
+				`SELECT ${DROPPED_MESSAGE_COLUMNS} FROM dropped_messages
+				 WHERE channel_id = ? ORDER BY last_seen_at DESC`,
+			)
+			.all(channelId)
+			.map(toDroppedMessage);
+	}
+
+	/**
+	 * Drop records, most recent activity first, optionally scoped to one
+	 * space. A space filter also returns the channel-level records (stored
+	 * with an empty space), because a refusal is a property of the channel and
+	 * applies to every space the guild is bridged to.
+	 */
+	listDroppedMessages(limit = 200, spaceDid?: string): DroppedMessage[] {
+		return this.db
+			.query<DroppedMessageRow, (string | number)[]>(
+				`SELECT ${DROPPED_MESSAGE_COLUMNS} FROM dropped_messages
+				 ${spaceDid ? "WHERE space_did = ? OR space_did = ''" : ""}
+				 ORDER BY last_seen_at DESC LIMIT ?`,
+			)
+			.all(...(spaceDid ? [spaceDid, limit] : [limit]))
+			.map(toDroppedMessage);
+	}
+
+	/**
+	 * Record a channel-level refusal — a channel whose type no Roomy room can
+	 * exist for. Unlike a dropped message this is a decision about the
+	 * channel, not a count of losses: the row is written once and later calls
+	 * leave it alone, so a reconnect or a backfill re-deriving the same answer
+	 * cannot inflate it. Returns whether this call created the row.
+	 */
+	recordUnbridgedChannel(
+		channelId: string,
+		guildId: string,
+		detail: string,
+	): boolean {
+		const now = Date.now();
+		const row = this.db
+			.query<{ count: number }, [string, string, string, number, number]>(
+				`INSERT OR IGNORE INTO dropped_messages
+				   (reason, channel_id, guild_id, space_did, detail, count, first_seen_at, last_seen_at)
+				 VALUES ('unsupported_channel_type', ?, ?, '', ?, 1, ?, ?)
+				 RETURNING count`,
+			)
+			.get(channelId, guildId, detail, now, now);
+		return row !== null;
+	}
+
+	/** Messages dropped, grouped by reason (same space widening as listDroppedMessages). */
+	countDroppedMessages(spaceDid?: string): Record<string, number> {
+		const rows = this.db
+			.query<{ reason: string; total: number }, (string | number)[]>(
+				`SELECT reason, coalesce(sum(count), 0) AS total FROM dropped_messages
+				 ${spaceDid ? "WHERE space_did = ? OR space_did = ''" : ""}
+				 GROUP BY reason ORDER BY total DESC`,
+			)
+			.all(...(spaceDid ? [spaceDid] : []));
+		const totals: Record<string, number> = {};
+		for (const row of rows) totals[row.reason] = row.total;
+		return totals;
 	}
 }
 
