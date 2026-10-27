@@ -28,6 +28,7 @@ import {
   TILE_RESOLVER_VERSION,
   recogniseTileUrl,
   resolveTileForUrl,
+  tileResolutionEnabled,
   type TileResolution,
 } from "./tiles.ts";
 import { canonicalUrl } from "../queries/links.ts";
@@ -173,6 +174,9 @@ export async function filterPendingUrls(
   if (rows.length === 0) return [];
   const held = [...new Set(rows.map((r) => canonicalUrl(r.entity)))];
   const state = await selectLinkEmbedState(globalDb, held);
+  // With resolution switched off a row is the whole story again: the store's
+  // original rule, "never attempted".
+  if (!tileResolutionEnabled()) return held.filter((url) => !state.has(url));
   return held.filter((url) => {
     const known = state.get(url);
     if (!known) return true;
@@ -202,6 +206,7 @@ export async function enqueueStaleTiles(
   globalDb: DbLike,
   entries: ReadonlyArray<{ url: string; spaceDid: string; messageId: string }>,
 ): Promise<string[]> {
+  if (!tileResolutionEnabled()) return [];
   const candidates = entries.filter(
     (e) => recogniseTileUrl(canonicalUrl(e.url)) !== null,
   );
@@ -564,18 +569,24 @@ async function resolveUrl(
   url: string,
   signal?: AbortSignal,
 ): Promise<EnrichOutcome> {
-  const tileOwedByMapping = recogniseTileUrl(url) !== null;
-  const state = (await selectLinkEmbedState(db, [url])).get(url);
+  // A URL is on the tile path when a mapping claims it AND the deployment has
+  // switched resolution on. Off, this is the pre-tile pipeline exactly: the
+  // OpenGraph half is always owed and no row is consulted.
+  const onTilePath = recogniseTileUrl(url) !== null && tileResolutionEnabled();
+  const state = onTilePath ? (await selectLinkEmbedState(db, [url])).get(url) : undefined;
 
   // The OpenGraph half is owed unless the row already holds its result: no row
   // at all (never attempted), a row with a retry window (an unpaid transient
   // failure), or a row that settled with no payload — a URL the page yielded
   // nothing for, which the pending index can still ask about again. A row that
   // settled WITH data owes only a stale tile.
+  //
+  // Off the tile path there is no row in hand, which lands on "owed": a URL
+  // the sweeper selected owes its OpenGraph fetch, exactly as before tiles.
   const ogOwed =
     state === undefined || state.embedJson === null || state.retryAfter !== null;
   const tileOwed =
-    tileOwedByMapping && (state?.tileVersion ?? 0) < TILE_RESOLVER_VERSION;
+    onTilePath && (state?.tileVersion ?? 0) < TILE_RESOLVER_VERSION;
   if (!ogOwed && !tileOwed) return { status: "noop", embed: null };
 
   let embed = parseStoredEmbed(state?.embedJson ?? null);

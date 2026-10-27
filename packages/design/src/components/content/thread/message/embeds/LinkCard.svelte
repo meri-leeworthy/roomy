@@ -26,6 +26,7 @@
   import { IconX } from "@roomy/design/icons";
   import TileEmbed from "../tiles/TileEmbed.svelte";
   import type { TileSurface } from "../tiles/tile-activity.js";
+  import { chooseLinkCard } from "./link-card.js";
 
   type LinkEmbedData = typeof schemas.queries.getMessage.LinkEmbedData.infer;
 
@@ -50,8 +51,17 @@
     surface?: TileSurface;
   } = $props();
 
-  /** The tile to render on this card, if the embed carries one and it fits. */
-  const embedTile = $derived(tile ? embed?.tile : undefined);
+  /**
+   * A tile that tried to load and did not: the publisher's PDS, the loading
+   * server or the manifest was unreachable. The OpenGraph card the same embed
+   * carries is what the reader gets instead of an error box.
+   */
+  let tileFailed = $state(false);
+
+  /** Which card this link draws. See `./link-card.ts` for the rule. */
+  const card = $derived(
+    chooseLinkCard(embed, { tileAllowed: tile, tileFailed }),
+  );
 
   const providerName = $derived(embed?.p?.n);
   const authorName = $derived(embed?.au?.n);
@@ -69,9 +79,7 @@
   );
 
   /** Whether any embed metadata is present to render a rich card. */
-  const hasEmbedData = $derived(
-    !!(title || description || imageUrl || videoUrl || subtitle || footerText),
-  );
+  const hasEmbedData = $derived(card.hasMetadata);
 
   /** Hostname shown as a plain link when there's no embed metadata. */
   const hostname = $derived((() => {
@@ -104,10 +112,15 @@
   {/if}
 {/snippet}
 
-{#if embedTile}
+{#if card.tile}
 <div class="group/card relative not-prose max-w-[70ch]">
   {@render dismiss()}
-  <TileEmbed uri={embedTile.url} data={embedTile.data} {surface} />
+  <TileEmbed
+    uri={card.tile.url}
+    data={card.tile.data}
+    {surface}
+    onerror={() => (tileFailed = true)}
+  />
 </div>
 {:else if hasEmbedData}
 <div class="group/card relative not-prose max-w-[70ch]">

@@ -22,6 +22,7 @@
   } from "@roomy/design/components/content/thread/message/tiles/message-tiles.js";
   import ChatInput from "./ChatInput.svelte";
   import { createMentionSearch } from "$lib/tiptap/mentions";
+  import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
   import { editMessage, removeLinkEmbed } from "$lib/mutations/message";
   import { addReaction } from "$lib/mutations/reaction";
   import { createSpaceCard } from "$lib/mutations/space-card";
@@ -358,6 +359,20 @@
    * two blob fetches.
    */
   const bodyTileSource = $derived(original ?? message);
+
+  /**
+   * Whether this reader is shown a tile resolved from a link.
+   *
+   * A link's tile is a renderer of someone else's record, loaded at render time
+   * from a third-party loading server and the publisher's PDS, so it is behind
+   * a flag while it earns its place. Off, a post link keeps its OpenGraph card
+   * and the tile does not even count against the message's tile budget.
+   */
+  const flagsQuery = createFeatureFlagsQuery();
+  const linkTiles = $derived(
+    flagsQuery.data?.flags.includes("web-tiles-link") ?? false,
+  );
+
   const tilePlan = $derived(
     planMessageTiles(
       tileAddressesInBody(
@@ -365,9 +380,11 @@
         bodyTileSource.mimeType,
         parseRichTextContent,
       ),
-      linkItems(shownAttachments)
-        .map((link) => link.embed?.tile)
-        .filter((tile): tile is { url: string; data?: unknown } => tile != null),
+      linkTiles
+        ? linkItems(shownAttachments)
+            .map((link) => link.embed?.tile)
+            .filter((tile): tile is { url: string; data?: unknown } => tile != null)
+        : [],
     ),
   );
 
@@ -735,7 +752,7 @@
                 <LinkCard
                   url={link.url}
                   embed={link.embed}
-                  tile={link.embed?.tile != null &&
+                  tile={linkTiles && link.embed?.tile != null &&
                     tilePlan.linkTiles.has(
                       tileRenderKey(link.embed.tile.url, link.embed.tile.data),
                     )}
