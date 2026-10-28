@@ -4,7 +4,8 @@ declare global {
   // Defined in vite.config.ts. `__BUILD_ID__` is the commit the bundle was
   // built from, or the literal "unknown" when the build carried no git
   // metadata — never an empty string. Served as /build.json by
-  // src/routes/build.json/+server.ts (see src/lib/build-id.ts).
+  // src/routes/build.json/+server.ts and stamped on every telemetry record
+  // as `app_version` (see src/lib/build-id.ts, telemetry/app-meta.ts).
   declare const __APP_VERSION__: string;
   declare const __BUILD_ID__: string;
 
