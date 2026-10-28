@@ -4,7 +4,9 @@
  *
  * The bridge queries `space.roomy.admin.getSpaceMembership` (appserver) with
  * the bridged guild's current member count. The appserver answers whether
- * the space is over its token capacity.
+ * the space is over its token capacity. That count is the guild's, not the
+ * space's Roomy membership: it is the population whose messages the space
+ * receives, and the population the spend rule is defined against.
  *
  * Enforcement policy (two thresholds):
  * - Over the capacity threshold (`overLimit`, memberCount > maxMembers):
@@ -69,7 +71,12 @@ export interface SpaceMembership {
 	tokens: SpaceMembershipToken[];
 	validTokenCount: number;
 	maxMembers: number;
+	/** The bridged guild's population — the figure capacity and `overLimit`
+	 *  are defined against. Sent as the `memberCount` query parameter. */
 	memberCount: number;
+	/** The space's Roomy membership, for the dashboard. Absent when the
+	 *  space has never been swept. Never capacity-bearing. */
+	spaceMemberCount?: number;
 	overLimit: boolean;
 	stale: boolean;
 	checkedAt: number;
