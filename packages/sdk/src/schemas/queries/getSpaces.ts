@@ -27,6 +27,13 @@ export const Space = type({
   isMember: "boolean",
   isAdmin: "boolean",
   roleIds: "string[]",
+  /**
+   * Whether this space may be suggested to people who are not members.
+   * `null` while no admin has answered (which reads as suggested); absent when
+   * the space has no `comp_space` row at all, so there is no setting to answer.
+   * Mirrors `space.roomy.space.getMetadata`.
+   */
+  "suggestToOthers?": "boolean | null",
 });
 
 export const Response = type({

@@ -155,6 +155,11 @@
     "group": "Spaces"
   },
   {
+    "nsid": "space.roomy.space.getDiscoverableSpaces",
+    "kind": "query",
+    "group": "Spaces"
+  },
+  {
     "nsid": "space.roomy.space.getActivityFeed",
     "kind": "query",
     "group": "Spaces"
