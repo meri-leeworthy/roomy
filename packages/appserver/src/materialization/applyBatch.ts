@@ -28,6 +28,7 @@ import type {
 import { materialize } from "./materializer.ts";
 import { applyBundle, getSavepointMutex } from "./applyBundle.ts";
 import { messageSortIdxKey } from "./sortIdx.ts";
+import { normalizeStoredEvent } from "./normalizeEvent.ts";
 import { decidedAtFor } from "./records/recordChange.ts";
 import { applyDeleteSideEffects, collectPendingDeletes } from "./deleteMessage.ts";
 import { isGlobalDbStatement } from "./statementRouting.ts";
@@ -94,6 +95,12 @@ export interface MaterializationStats {
   applied: number;
   materializerErrors: number;
   applyErrors: number;
+  /**
+   * Skips by the kind that produced them (an entry with no kind counts under
+   * `unknown`). `materializerErrors` is the total; this says which kinds were
+   * dropped, so a replay's loss is legible from its summary line alone.
+   */
+  skippedKinds: Record<string, number>;
   failed: Array<{
     eventId: Ulid;
     type: string;
@@ -114,7 +121,7 @@ interface ChunkStep {
 export async function applyBatch(
   db: DbLike,
   streamId: StreamDid,
-  events: LoggedEvent[],
+  decodedEvents: LoggedEvent[],
   opts: ApplyBatchOpts,
   globalDb?: DbLike,
 ): Promise<MaterializationStats> {
@@ -122,9 +129,19 @@ export async function applyBatch(
     applied: 0,
     materializerErrors: 0,
     applyErrors: 0,
+    skippedKinds: {},
     failed: [],
     detectedLinks: [],
   };
+
+  // The log holds entries written before the event envelope was flattened.
+  // Normalise once, here, so the record-path routing, the materialiser and the
+  // post-apply side effects all read the same shape; an entry that already has
+  // the current shape keeps its identity, so the common path allocates nothing.
+  const events = decodedEvents.map((entry) => {
+    const event = normalizeStoredEvent(entry.event);
+    return event === entry.event ? entry : { ...entry, event };
+  });
 
   if (events.length === 0) return stats;
 
@@ -200,9 +217,11 @@ export async function applyBatch(
 
         if (materialised.status === "error") {
           stats.materializerErrors++;
+          const kind = e.event.$type ?? "unknown";
+          stats.skippedKinds[kind] = (stats.skippedKinds[kind] ?? 0) + 1;
           recordFailure(stats, {
             eventId: materialised.eventId,
-            type: e.event.$type,
+            type: kind,
             reason: "materializer",
             message: materialised.message,
           });

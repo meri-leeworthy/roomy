@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { Database } from "bun:sqlite";
 import { decodeTime, ulid } from "ulidx";
+import { decode, encode } from "@atcute/cbor";
 import {
   StreamDid,
   StreamIndex,
@@ -241,6 +242,69 @@ describe("applyBatch", () => {
         .query("select backfilled_to from comp_space where entity = ?")
         .get<{ backfilled_to: number }>(STREAM))?.backfilled_to,
     ).toBe(3);
+  })
+
+  test("materialises an entry stored under the pre-flatten envelope", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    // The Leaf-era client encoded `{ id, variant: { $type, ...body } }`, and
+    // the Leaf migration copied those payloads into the log verbatim, without
+    // the `event_type` column that would name their kind. Round-tripping the
+    // object through CBOR is the same decode the replay performs.
+    const roomId = newUlid();
+    const legacy = {
+      id: roomId,
+      variant: {
+        $type: "space.roomy.room.createRoom.v0",
+        kind: "space.roomy.channel",
+        name: "general",
+      },
+    };
+    const event = decode(
+      encode(legacy as Parameters<typeof encode>[0]),
+    ) as Event;
+
+    const stats = await applyBatch(asyncDb, STREAM, [decoded(event, 1)], {
+      isBackfill: true,
+    });
+
+    expect(stats.applied).toBe(1);
+    expect(stats.materializerErrors).toBe(0);
+    expect(stats.skippedKinds).toEqual({});
+
+    const room = await asyncDb
+      .query("select label from comp_room where entity = ?")
+      .get<{ label: string }>(roomId);
+    expect(room?.label).toBe("space.roomy.channel");
+    const info = await asyncDb
+      .query("select name from comp_info where entity = ?")
+      .get<{ name: string }>(roomId);
+    expect(info?.name).toBe("general");
+  })
+
+  test("counts a skip by kind so a summary line names what was lost", async () => {
+    const { db, asyncDb } = freshDb();
+    seedSpace(db, STREAM);
+
+    const unknownKind = {
+      $type: "space.roomy.this.does.not.exist.v0",
+      id: newUlid(),
+    } as unknown as Event;
+    const noKindAtAll = { id: newUlid() } as unknown as Event;
+
+    const stats = await applyBatch(
+      asyncDb,
+      STREAM,
+      [decoded(unknownKind, 1), decoded(noKindAtAll, 2)],
+      { isBackfill: true },
+    );
+
+    expect(stats.materializerErrors).toBe(2);
+    expect(stats.skippedKinds).toEqual({
+      "space.roomy.this.does.not.exist.v0": 1,
+      unknown: 1,
+    });
   })
 
   test("backfilled_to never moves backwards", async () => {
