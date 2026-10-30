@@ -14,9 +14,14 @@
  *   ALL sync for that (guild, space) tuple halts and resumes automatically
  *   once a later check finds the member count back under 2x capacity.
  *
- * Decision caching: one decision per (guild, space) with a 300s TTL. The
- * gate path (message ingestion, room creation, profile sync) hits the cache;
- * the sweep and member-change triggers force a refresh.
+ * Decision caching: one decision per (guild, space), reused for 300s
+ * (CAPACITY_TTL_MS). Every read path — message ingestion, room creation,
+ * profile sync — takes the cached decision and refetches only once it has
+ * expired; member-change and startup triggers force a refresh. The periodic
+ * sweep runs on a longer reuse window (CAPACITY_SWEEP_MAX_AGE_MS): it exists
+ * to catch capacity changes that arrive without a gateway event, not to
+ * serve a reader, so it neither forces a refetch nor holds a decision to the
+ * read path's freshness.
  *
  * Failure semantics (fail-safe, never fail-closed on transient errors):
  * - `stale` response (Polar unreachable, appserver served cached state):
@@ -172,10 +177,7 @@ export class CapacityService implements CapacityGate {
 	#killSwitchLogged = false;
 	#onStateChange?: CapacityServiceOptions["onStateChange"];
 	#onUsageChange?: CapacityServiceOptions["onUsageChange"];
-	#cache = new Map<
-		string,
-		{ decision: CapacityDecision; expiresAt: number }
-	>();
+	#cache = new Map<string, { decision: CapacityDecision; storedAt: number }>();
 	/** (guild, space) tuples currently in the grant-less fail-open state.
 	 *  Drives transition logging: a tuple enters on the first sweep that sees
 	 *  `overLimit && no grants` and leaves when the grant set changes (or the
@@ -201,14 +203,14 @@ export class CapacityService implements CapacityGate {
 
 	/**
 	 * Resolve the current decision for (guild, space). Returns the cached
-	 * decision when fresh; otherwise queries the appserver. `force` bypasses
-	 * the cache (used by the periodic sweep and member-change triggers).
-	 * Never throws.
+	 * decision while it is younger than `maxAgeMs` (default: the 300s TTL);
+	 * otherwise queries the appserver. `force` bypasses the cache regardless
+	 * of age. Never throws.
 	 */
 	async check(
 		guildId: string,
 		spaceDid: string,
-		opts: { force?: boolean } = {},
+		opts: { force?: boolean; maxAgeMs?: number } = {},
 	): Promise<CapacityDecision> {
 		if (this.#killSwitch) {
 			if (!this.#killSwitchLogged) {
@@ -232,7 +234,8 @@ export class CapacityService implements CapacityGate {
 
 		const key = `${guildId}:${spaceDid}`;
 		const cached = this.#cache.get(key);
-		if (!opts.force && cached && cached.expiresAt > Date.now()) {
+		const maxAgeMs = opts.maxAgeMs ?? this.#ttlMs;
+		if (!opts.force && cached && Date.now() - cached.storedAt < maxAgeMs) {
 			return cached.decision;
 		}
 
@@ -416,7 +419,7 @@ export class CapacityService implements CapacityGate {
 		const previous = this.#cache.get(key)?.decision;
 		this.#cache.set(key, {
 			decision,
-			expiresAt: Date.now() + this.#ttlMs,
+			storedAt: Date.now(),
 		});
 
 		if (!previous || previous.enabled !== decision.enabled) {
