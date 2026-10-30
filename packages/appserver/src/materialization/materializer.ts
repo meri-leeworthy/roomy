@@ -32,7 +32,19 @@ export function materialize(
   // Check if we have a materializer for this event type before attempting
   const handler = getMaterializer(kind);
   if (!handler) {
-    log.warn(`[materialize] no materializer for event ${event.id} (kind: ${kind}) — skipping`);
+    // The stream is on the line because this is the only per-event record of a
+    // skip, and a boot's worth of them arrives in one second: without it a skip
+    // cannot be attributed. `payloadKeys` names the shape the stored entry does
+    // have when it carries no kind at all, which is how an entry written under
+    // a shape this build does not know stays diagnosable.
+    const payloadKeys =
+      kind === undefined && event !== null && typeof event === "object"
+        ? Object.keys(event).join(",")
+        : undefined;
+    log.warn(
+      `[materialize] no materializer for event ${event.id} in ${opts.streamId} (kind: ${kind}) — skipping` +
+        (payloadKeys === undefined ? "" : ` [payload keys: ${payloadKeys}]`),
+    );
     return {
       status: "error",
       eventId: event.id,
