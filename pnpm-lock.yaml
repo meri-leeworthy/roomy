@@ -249,6 +249,9 @@ importers:
       '@roomy-space/sdk':
         specifier: workspace:*
         version: link:../sdk
+      '@roomy/service-auth':
+        specifier: workspace:*
+        version: link:../service-auth
       arktype:
         specifier: ^2.1.29
         version: 2.1.29
@@ -456,6 +459,9 @@ importers:
       '@roomy-space/sdk':
         specifier: workspace:*
         version: link:../sdk
+      '@roomy/service-auth':
+        specifier: workspace:*
+        version: link:../service-auth
       arktype:
         specifier: ^2.1.29
         version: 2.1.29
@@ -627,6 +633,28 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@25.9.1)(@vitest/ui@2.1.9)(lightningcss@1.32.0)
+
+  packages/service-auth:
+    dependencies:
+      '@atproto/identity':
+        specifier: ^0.4.12
+        version: 0.4.12
+      '@atproto/xrpc-server':
+        specifier: ^0.10.19
+        version: 0.10.21
+    devDependencies:
+      '@atproto/crypto':
+        specifier: ^0.4.2
+        version: 0.4.5
+      '@repo/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@types/bun':
+        specifier: latest
+        version: 1.4.3
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.2
 
   packages/tsconfig: {}
 
@@ -3289,10 +3317,6 @@ packages:
 
   has-tostringtag@1.0.2:
     resolution: {integrity: sha512-NqADB8VjPFLM2V0VvHUewwwsw0ZWBaIdgo+ieHtK3hasLz4qeCRjYcqfB6AQrBggRKppKF8L52/VqdVsO47Dlw==}
-    engines: {node: '>= 0.4'}
-
-  hasown@2.0.2:
-    resolution: {integrity: sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ==}
     engines: {node: '>= 0.4'}
 
   hasown@2.0.4:
@@ -7825,7 +7849,7 @@ snapshots:
       get-proto: 1.0.1
       gopd: 1.2.0
       has-symbols: 1.1.0
-      hasown: 2.0.2
+      hasown: 2.0.4
       math-intrinsics: 1.1.0
 
   get-proto@1.0.1:
@@ -7883,10 +7907,6 @@ snapshots:
   has-tostringtag@1.0.2:
     dependencies:
       has-symbols: 1.1.0
-
-  hasown@2.0.2:
-    dependencies:
-      function-bind: 1.1.2
 
   hasown@2.0.4:
     dependencies:
@@ -7959,7 +7979,7 @@ snapshots:
 
   is-core-module@2.16.1:
     dependencies:
-      hasown: 2.0.2
+      hasown: 2.0.4
 
   is-docker@2.2.1: {}
 

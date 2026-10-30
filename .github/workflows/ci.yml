@@ -110,6 +110,33 @@ jobs:
       - name: Check Design
         run: pnpm --filter @roomy/design check
 
+  test-service-auth:
+    name: Test Service Auth
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.16.1
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Test service-auth
+        run: bun test --cwd packages/service-auth
+      - name: Typecheck service-auth
+        run: pnpm --filter @roomy/service-auth typecheck
+
   test-appserver:
     name: Test Appserver
     needs: install
