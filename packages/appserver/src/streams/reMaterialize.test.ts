@@ -8,7 +8,7 @@
  * directly into the event-log `stream_events`, bypassing StreamManager.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { encode, decode } from "@atcute/cbor";
 import {
   createDefaultSpaceEvents,
@@ -583,6 +583,72 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(row?.space_did).toBe(streamDid);
   }, { timeout: 30_000 });
 
+
+  test("replays entries stored under the pre-flatten envelope", async () => {
+    const streamDid = StreamDid.assert("did:web:legacy-envelope.example");
+    const space = db.forSpace!(streamDid);
+    const roomId = newUlid();
+
+    // A row as the Leaf migration left it: the nested envelope the client of
+    // that era wrote, and no `event_type` (the column did not exist then).
+    await seedEvents(db, streamDid, [
+      {
+        id: roomId,
+        variant: {
+          $type: "space.roomy.room.createRoom.v0",
+          kind: "space.roomy.channel",
+          name: "legacy",
+        },
+      },
+    ]);
+
+    await reMaterializeFromLocalEvents(db);
+
+    const room = await space
+      .query("select label from comp_room where entity = ?")
+      .get<{ label: string }>(roomId);
+    expect(room?.label).toBe("space.roomy.channel");
+    const info = await space
+      .query("select name from comp_info where entity = ?")
+      .get<{ name: string }>(roomId);
+    expect(info?.name).toBe("legacy");
+
+    const cursor = await space
+      .query(
+        "select materialized_to from materialization_cursor where stream_id = ?",
+      )
+      .get<{ materialized_to: number }>(streamDid);
+    expect(cursor?.materialized_to).toBe(0);
+  }, { timeout: 30_000 });
+
+  test("stream-done names the kinds it skipped", async () => {
+    const streamDid = StreamDid.assert("did:web:skipped-kinds.example");
+    const unknownKind = "space.roomy.this.does.not.exist.v0";
+    await seedEvents(db, streamDid, [
+      { $type: unknownKind, id: newUlid() },
+      { $type: unknownKind, id: newUlid() },
+    ]);
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    let lines: string[] = [];
+    try {
+      await reMaterializeFromLocalEvents(db);
+      lines = warnSpy.mock.calls.map((c) => c[0] as string);
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    const summary = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .find(
+        (p) =>
+          typeof p.msg === "string" && p.msg.includes("stream-done"),
+      );
+    expect(summary).toBeDefined();
+    expect(summary?.streamId).toBe(streamDid);
+    expect(summary?.materializerErrors).toBe(2);
+    expect(summary?.skippedKinds).toEqual({ [unknownKind]: 2 });
+  }, { timeout: 30_000 });
   test("re-materializes streams concurrently, bounded by the concurrency cap", async () => {
     // With a pool of N workers available, boot rematerialization runs several
     // streams at once (different spaces land on different pool workers)
