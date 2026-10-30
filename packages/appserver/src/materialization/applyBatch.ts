@@ -28,6 +28,7 @@ import type {
 import { materialize } from "./materializer.ts";
 import { applyBundle, getSavepointMutex } from "./applyBundle.ts";
 import { messageSortIdxKey } from "./sortIdx.ts";
+import { normalizeStoredEvent } from "./normalizeEvent.ts";
 import { decidedAtFor } from "./records/recordChange.ts";
 import { applyDeleteSideEffects, collectPendingDeletes } from "./deleteMessage.ts";
 import { isGlobalDbStatement } from "./statementRouting.ts";
@@ -131,7 +132,7 @@ interface ChunkStep {
 export async function applyBatch(
   db: DbLike,
   streamId: StreamDid,
-  events: LoggedEvent[],
+  decodedEvents: LoggedEvent[],
   opts: ApplyBatchOpts,
   globalDb?: DbLike,
 ): Promise<MaterializationStats> {
@@ -145,6 +146,15 @@ export async function applyBatch(
     failed: [],
     detectedLinks: [],
   };
+
+  // The log holds entries written before the event envelope was flattened.
+  // Normalise once, here, so the record-path routing, the materialiser and the
+  // post-apply side effects all read the same shape; an entry that already has
+  // the current shape keeps its identity, so the common path allocates nothing.
+  const events = decodedEvents.map((entry) => {
+    const event = normalizeStoredEvent(entry.event);
+    return event === entry.event ? entry : { ...entry, event };
+  });
 
   if (events.length === 0) return stats;
 

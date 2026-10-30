@@ -96,6 +96,17 @@ describe("reduceMembershipEvents", () => {
     expect(ev.state).toBe("joined");
   });
 
+  test("a legacy variant flattened by the replay still classifies", () => {
+    // What `normalizeStoredEvent` hands the live path: the variant's fields at
+    // the top level, with its kind as `$type`.
+    const rows = [
+      { rowid: 1, stream_id: "did:web:personal.example", user: USER, payload: encode({ id: "01AAAA0000000000000000000002", $type: "space.roomy.stream.personal.joinSpace.v0", spaceDid: SPACE }) },
+    ] as any;
+    const out = reduceMembershipEvents(rows);
+    const ev = out.get(`${USER}\u0000${SPACE}`)!;
+    expect(ev.state).toBe("joined");
+  });
+
   test("non-membership events are ignored", () => {
     const rows = [
       { rowid: 1, stream_id: SPACE, user: USER, payload: encode({ $type: "space.roomy.message.createMessage.v0", id: "01AAAA0000000000000000000001" }) },

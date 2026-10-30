@@ -54,7 +54,11 @@ export function materialize(
   // Check if we have a materializer for this event type before attempting
   const handler = getMaterializer(kind as EventType);
   if (!handler) {
-    log.warn(`[materialize] no materializer for event ${eventId} (kind: ${kind}) — skipping`);
+    // A boot's worth of these arrives in one second, so the stream is on the
+    // line: without it a skip cannot be attributed.
+    log.warn(
+      `[materialize] no materializer for event ${eventId} in ${opts.streamId} (kind: ${kind}) — skipping`,
+    );
     return {
       status: "skip",
       eventId,

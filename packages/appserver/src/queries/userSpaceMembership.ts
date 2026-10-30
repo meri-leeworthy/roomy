@@ -34,33 +34,61 @@ export interface MembershipIntent {
  *
  * Current space-side events carry the space as the stream the event lives in
  * (`streamId`); deprecated personal-stream events carry it in the payload
- * (`spaceDid`); the two legacy variants nest it under `variant`.
+ * (`spaceDid`). The two legacy variants nest kind and body under `variant`;
+ * `normalizeStoredEvent` flattens those before materialisation, and this reads
+ * either shape so the raw-log scan and the normalised replay agree.
  */
+export interface MembershipEventShape {
+  $type?: string;
+  id: string;
+  spaceDid?: string;
+  spaceId?: string;
+  variant?: { $type?: string; spaceDid?: string; spaceId?: string };
+}
+
 export function classifyMembershipEvent(
-  event: any,
+  event: MembershipEventShape,
   streamId: string,
   user: string,
 ): MembershipIntent | null {
-  const $type = event?.$type;
-  const variant = event?.variant;
+  const variant = event.variant;
+  const kind = event.$type ?? variant?.$type;
+  /** The object carrying the event's own fields, whichever shape it arrived in. */
+  const body: Pick<MembershipEventShape, "spaceDid" | "spaceId"> =
+    event.$type === undefined ? variant ?? {} : event;
 
-  if ($type === "space.roomy.space.joinSpace.v0") {
+  if (kind === "space.roomy.space.joinSpace.v0") {
     return { userDid: user, spaceDid: streamId, state: "joined", eventId: event.id, source: "space.joinSpace" };
   }
-  if ($type === "space.roomy.space.leaveSpace.v0") {
+  if (kind === "space.roomy.space.leaveSpace.v0") {
     return { userDid: user, spaceDid: streamId, state: "left", eventId: event.id, source: "space.leaveSpace" };
   }
-  if ($type === "space.roomy.space.personal.joinSpace.v0") {
-    return { userDid: user, spaceDid: event.spaceDid, state: "joined", eventId: event.id, source: "personal.joinSpace" };
+  // The payload-carried space DID is what identifies the membership's space;
+  // without it the event classifies as nothing rather than writing a row with
+  // no space (which the old unchecked read allowed).
+  if (
+    kind === "space.roomy.space.personal.joinSpace.v0" &&
+    body.spaceDid !== undefined
+  ) {
+    return { userDid: user, spaceDid: body.spaceDid, state: "joined", eventId: event.id, source: "personal.joinSpace" };
   }
-  if ($type === "space.roomy.space.personal.leaveSpace.v0") {
-    return { userDid: user, spaceDid: event.spaceDid, state: "left", eventId: event.id, source: "personal.leaveSpace" };
+  if (
+    kind === "space.roomy.space.personal.leaveSpace.v0" &&
+    body.spaceDid !== undefined
+  ) {
+    return { userDid: user, spaceDid: body.spaceDid, state: "left", eventId: event.id, source: "personal.leaveSpace" };
   }
-  if (variant?.$type === "space.roomy.stream.personal.joinSpace.v0") {
-    return { userDid: user, spaceDid: variant.spaceDid, state: "joined", eventId: event.id, source: "stream.personal.joinSpace" };
+  if (
+    kind === "space.roomy.stream.personal.joinSpace.v0" &&
+    body.spaceDid !== undefined
+  ) {
+    return { userDid: user, spaceDid: body.spaceDid, state: "joined", eventId: event.id, source: "stream.personal.joinSpace" };
   }
-  if (variant?.$type === "space.roomy.personal.joinSpace.v0") {
-    return { userDid: user, spaceDid: variant.spaceId, state: "joined", eventId: event.id, source: "legacy.personal.joinSpace" };
+  if (
+    kind === "space.roomy.personal.joinSpace.v0" &&
+    body.spaceId !== undefined
+  ) {
+    return { userDid: user, spaceDid: body.spaceId, state: "joined", eventId: event.id, source: "legacy.personal.joinSpace" };
   }
   return null;
 }
