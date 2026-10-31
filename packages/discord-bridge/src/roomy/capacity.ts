@@ -91,9 +91,26 @@ export interface CapacityDecision {
 	enabled: boolean;
 }
 
+/** Why a member-count lookup produced no number. */
+export interface MemberCountFailure {
+	/** HTTP status of the failed Discord request, when the error carried one. */
+	status?: number;
+	/** Discord JSON error code (e.g. 10004 Unknown Guild), when present. */
+	code?: number;
+	/** Discord-side description, when present. Truncated for logging. */
+	message?: string;
+	/** True when retrying cannot succeed without an operator change — the
+	 *  guild is unknown (bot removed or kicked) or the bot lacks access. */
+	permanent: boolean;
+}
+
+export type MemberCountLookup =
+	| { ok: true; count: number }
+	| { ok: false; failure: MemberCountFailure };
+
 /** Supplies the bridged guild's current member count. */
 export interface MemberCountProvider {
-	getMemberCount(guildId: string): Promise<number | undefined>;
+	getMemberCount(guildId: string): Promise<MemberCountLookup>;
 }
 
 /** Queries the appserver for space membership. */
@@ -183,6 +200,13 @@ export class CapacityService implements CapacityGate {
 	#failOpen = new Map<string, { guildId: string; spaceDid: string }>();
 	/** Timestamp of the last steady-state summary line (process-wide). */
 	#lastFailOpenSummaryAt = 0;
+	/** Guilds whose member-count lookup is currently failing. Gate checks
+	 *  keep serving the cached decision and skip Discord; a forced check
+	 *  (the periodic sweep) is the only path that retries. */
+	#memberCountOutage = new Map<
+		string,
+		MemberCountFailure & { since: number }
+	>();
 
 	constructor(
 		client: MembershipClient,
@@ -201,9 +225,10 @@ export class CapacityService implements CapacityGate {
 
 	/**
 	 * Resolve the current decision for (guild, space). Returns the cached
-	 * decision when fresh; otherwise queries the appserver. `force` bypasses
-	 * the cache (used by the periodic sweep and member-change triggers).
-	 * Never throws.
+	 * decision when fresh; otherwise queries the member count and the
+	 * appserver. `force` bypasses the cache (used by the periodic sweep and
+	 * member-change triggers) and is the only path that retries a failing
+	 * member-count lookup. Never throws.
 	 */
 	async check(
 		guildId: string,
@@ -236,19 +261,44 @@ export class CapacityService implements CapacityGate {
 			return cached.decision;
 		}
 
-		const memberCount = await this.#memberCount.getMemberCount(guildId);
-		if (memberCount === undefined) {
+		// A failed lookup (Discord refusing or unreachable) is recorded per
+		// guild. Gate consultations keep the previous decision — fail-open /
+		// fail-closed semantics are unchanged — and do not re-query Discord;
+		// only the sweep's forced check retries. Re-storing the decision
+		// keeps a gate check inside the TTL off the network entirely.
+		if (!opts.force && this.#memberCountOutage.has(guildId)) {
+			return cached
+				? this.#storeDecision(guildId, spaceDid, cached.decision)
+				: this.#store(
+						guildId,
+						spaceDid,
+						fallbackDecision(guildId, spaceDid, "member count unavailable"),
+					);
+		}
+
+		const lookup = await this.#memberCount.getMemberCount(guildId);
+		if (!lookup.ok) {
+			this.#noteMemberCountFailure(guildId, lookup.failure);
 			log.warn(
 				`capacity: member count unavailable for guild ${guildId}; keeping previous decision`,
-				{ guildId, spaceDid },
+				{
+					guildId,
+					spaceDid,
+					status: lookup.failure.status,
+					discordCode: lookup.failure.code,
+					permanent: lookup.failure.permanent,
+				},
 			);
-			if (cached) return cached.decision;
-			return this.#store(
-				guildId,
-				spaceDid,
-				fallbackDecision(guildId, spaceDid, "member count unavailable"),
-			);
+			return cached
+				? this.#storeDecision(guildId, spaceDid, cached.decision)
+				: this.#store(
+						guildId,
+						spaceDid,
+						fallbackDecision(guildId, spaceDid, "member count unavailable"),
+					);
 		}
+		this.#noteMemberCountRecovered(guildId);
+		const memberCount = lookup.count;
 
 		let membership: SpaceMembership;
 		try {
@@ -261,7 +311,9 @@ export class CapacityService implements CapacityGate {
 				`capacity: getSpaceMembership failed for ${spaceDid}; keeping previous decision`,
 				{ guildId, spaceDid, error: String(err) },
 			);
-			if (cached) return cached.decision;
+			if (cached) {
+				return this.#storeDecision(guildId, spaceDid, cached.decision);
+			}
 			return this.#store(
 				guildId,
 				spaceDid,
@@ -289,7 +341,9 @@ export class CapacityService implements CapacityGate {
 				`capacity: stale membership for ${spaceDid} (Polar unreachable); keeping previous decision`,
 				{ guildId, spaceDid, memberCount: membership.memberCount },
 			);
-			if (cached) return cached.decision;
+			if (cached) {
+				return this.#storeDecision(guildId, spaceDid, cached.decision);
+			}
 			// No previous decision — the appserver's cached state is all we
 			// have; use it rather than failing open.
 			return this.#store(guildId, spaceDid, membership);
@@ -387,6 +441,66 @@ export class CapacityService implements CapacityGate {
 				failOpen: false,
 			},
 		);
+	}
+
+	/**
+	 * Record that this guild's member-count lookup is failing. Gate checks
+	 * stop probing Discord and keep serving the cached decision; the sweep's
+	 * forced check retries. A permanent refusal (unknown guild, missing
+	 * access) is reported once on entry so a kicked bot does not flood the
+	 * log per message.
+	 */
+	#noteMemberCountFailure(guildId: string, failure: MemberCountFailure): void {
+		const previous = this.#memberCountOutage.get(guildId);
+		const since = previous?.since ?? Date.now();
+		this.#memberCountOutage.set(guildId, { ...failure, since });
+		if (!failure.permanent || previous?.permanent) return;
+		log.warn(
+			`capacity: member count for guild ${guildId} is permanently unavailable (Discord status ${failure.status ?? "unknown"}${
+				failure.code === undefined ? "" : `, code ${failure.code}`
+			}); keeping previous decisions and retrying only on forced checks until the guild is reachable again`,
+			{
+				guildId,
+				status: failure.status,
+				discordCode: failure.code,
+				discordMessage: failure.message,
+				permanent: true,
+				degraded: "member-count-unavailable",
+				degradedSince: new Date(since).toISOString(),
+			},
+		);
+	}
+
+	/** Clear the guild's member-count outage after a successful lookup. */
+	#noteMemberCountRecovered(guildId: string): void {
+		const outage = this.#memberCountOutage.get(guildId);
+		if (!outage) return;
+		this.#memberCountOutage.delete(guildId);
+		if (!outage.permanent) return;
+		log.info(
+			`capacity: member count for guild ${guildId} is available again (was Discord status ${outage.status ?? "unknown"}); leaving degraded state`,
+			{
+				guildId,
+				status: outage.status,
+				discordCode: outage.code,
+				permanent: false,
+				degraded: false,
+			},
+		);
+	}
+
+	/** Re-store an unchanged decision with a fresh TTL, so a failed lookup
+	 *  cannot turn every gate consultation into a network call. */
+	#storeDecision(
+		guildId: string,
+		spaceDid: string,
+		decision: CapacityDecision,
+	): CapacityDecision {
+		this.#cache.set(`${guildId}:${spaceDid}`, {
+			decision,
+			expiresAt: Date.now() + this.#ttlMs,
+		});
+		return decision;
 	}
 
 	#store(

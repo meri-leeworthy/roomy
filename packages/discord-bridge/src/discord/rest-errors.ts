@@ -36,6 +36,27 @@ export function discordFailureDetail(err: unknown): {
 	return { status, body };
 }
 
+/** Discord's JSON error code from a discordeno REST failure, when present
+ *  (e.g. 10004 Unknown Guild, 50001 Missing Access). */
+export function discordFailureCode(err: unknown): number | undefined {
+	const { body } = discordFailureDetail(err);
+	if (!body) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(body);
+		if (
+			typeof parsed === "object" &&
+			parsed !== null &&
+			"code" in parsed &&
+			typeof parsed.code === "number"
+		) {
+			return parsed.code;
+		}
+	} catch {
+		// Not JSON — no Discord code to recover.
+	}
+	return undefined;
+}
+
 /** Max chars of a Discord error body to keep in a durable blocked reason. */
 const MAX_REASON_CHARS = 200;
 
