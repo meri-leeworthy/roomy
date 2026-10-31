@@ -8,7 +8,16 @@
  * directly into the event-log `stream_events`, bypassing StreamManager.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from "bun:test";
 import { encode, decode } from "@atcute/cbor";
 import {
   createDefaultSpaceEvents,
@@ -19,13 +28,27 @@ import {
   type DecodedStreamEvent,
   type Event,
 } from "@roomy-space/sdk";
-import { closeDb, openDb } from "../db/db.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  closeDb,
+  openDb,
+  GLOBAL_SCHEMA_VERSION,
+  SPACE_SCHEMA_VERSION,
+} from "../db/db.ts";
+import { READSTATE_SCHEMA_VERSION } from "../db/readStateDb.ts";
+import { DatabasePool } from "../db/pool.ts";
 import { _resetEmbedSweeper } from "../embed/sweeper.ts";
 import { reMaterializeFromLocalEvents } from "./reMaterialize.ts";
+import { BootReadinessTracker } from "../readiness.ts";
 import { applyBatch } from "../materialization/applyBatch.ts";
 import type { DbLike } from "../db/types.ts";
 
 const ADMIN = UserDid.assert("did:plc:test-admin");
+const THIS_DIR = dirname(fileURLToPath(import.meta.url));
+let nextRepairSpace = 0;
 let db: DbLike;
 
 beforeEach(async () => {
@@ -662,4 +685,176 @@ describe("reMaterializeFromLocalEvents", () => {
     expect(maxActive).toBeLessThanOrEqual(2);
   }, { timeout: 30_000 });
 
+
+  // ── Boot-window pressure ───────────────────────────────────────────────
+  //
+  // The pass runs while the process serves reads, so what it does *not* do is
+  // as much a contract as what it does. These pin the two shapes that made a
+  // restart expensive: a per-stream walk of the global DBs, and more than one
+  // round trip per space.
+
+  test("a caught-up boot reads each space once and repairs nothing", async () => {
+    const streams = ["did:web:caught-up-a.example", "did:web:caught-up-b.example"];
+    for (const s of streams) {
+      const streamDid = StreamDid.assert(s);
+      await seedEvents(db, streamDid, createDefaultSpaceEvents({ name: s }));
+    }
+    await reMaterializeFromLocalEvents(db);
+
+    // A sentinel the sweep would overwrite if it refreshed the aggregate.
+    const globalDb = db.global!();
+    await globalDb.run("update space_stats set updated_at = 1");
+
+    const roundTrips = { probes: 0, backfills: 0 };
+    const probeDb: DbLike = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "bootProbe") {
+          return async (spaceDid: string) => {
+            roundTrips.probes++;
+            return target.bootProbe!(spaceDid);
+          };
+        }
+        if (prop === "backfillEntitySpace") {
+          return async (spaceDid: string) => {
+            roundTrips.backfills++;
+            return target.backfillEntitySpace!(spaceDid);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await reMaterializeFromLocalEvents(probeDb);
+
+    // One space-side round trip per stream, and no global repair: the index and
+    // the aggregate both have rows, which is what `applyBatch` leaves behind.
+    expect(roundTrips.probes).toBe(streams.length);
+    expect(roundTrips.backfills).toBe(0);
+    const stats = await globalDb
+      .query("select updated_at from space_stats where space_did = ?")
+      .get<{ updated_at: number }>(streams[0]!);
+    expect(stats?.updated_at).toBe(1);
+  }, { timeout: 30_000 });
+
+  test("readiness stays false until the boot pass returns", async () => {
+    const streamDid = StreamDid.assert("did:web:readiness.example");
+    await seedEvents(db, streamDid, createDefaultSpaceEvents({ name: "Readiness" }));
+
+    const boot = new BootReadinessTracker();
+    const pass = reMaterializeFromLocalEvents(db, 1, {
+      onProgress: (progress) => boot.update(progress),
+    });
+    expect(boot.snapshot().ready).toBe(false);
+    await pass;
+
+    // The pass finishing is not the process claiming readiness: the boot
+    // sequence does that, once nothing else can fail.
+    expect(boot.snapshot().ready).toBe(false);
+    expect(boot.snapshot().streams_total).toBe(1);
+    expect(boot.snapshot().streams_scanned).toBe(1);
+
+    boot.markReady();
+    const ready = boot.snapshot();
+    expect(ready.ready).toBe(true);
+    expect(ready.phase).toBe("ready");
+  }, { timeout: 30_000 });
+
+});
+
+// ─── Global-index repair (file-backed) ────────────────────────────────────
+//
+// `entity_space` is backfilled on the global worker, from the space DB *files*,
+// so these need a real `spacesDir`: an in-memory space DB exists once per
+// worker, and the global worker's copy has no entities to index.
+describe("global-index repair", () => {
+  let repairPool: DatabasePool;
+  let spacesDir: string;
+  let repairDb: DbLike;
+  let space: string;
+
+  beforeAll(async () => {
+    spacesDir = mkdtempSync(join(tmpdir(), "roomy-sweep-repair-"));
+    repairPool = new DatabasePool(1, join(THIS_DIR, "../db/worker.ts"));
+    await repairPool.init({
+      readStateDbPath: ":memory:",
+      eventsDbPath: ":memory:",
+      globalDbPath: ":memory:",
+      spacesDir,
+      readStateSchemaVersion: READSTATE_SCHEMA_VERSION,
+      spaceSchemaVersion: SPACE_SCHEMA_VERSION,
+      globalSchemaVersion: GLOBAL_SCHEMA_VERSION,
+    });
+    repairDb = repairPool.router();
+  });
+
+  afterAll(async () => {
+    await repairPool.close();
+    rmSync(spacesDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    space = `did:web:index-repair-${nextRepairSpace++}.example`;
+  });
+
+  test("backfills entity_space for a space the index does not know", async () => {
+    const streamDid = StreamDid.assert(space);
+    await seedEvents(repairDb, streamDid, createDefaultSpaceEvents({ name: "Index Repair" }));
+    await reMaterializeFromLocalEvents(repairDb);
+
+    const globalDb = repairDb.global!();
+    const indexed = await globalDb
+      .query("select count(*) as n from entity_space where space_did = ?")
+      .get<{ n: number }>(streamDid);
+    expect(indexed!.n).toBeGreaterThan(0);
+
+    // A space materialised before the index existed: entities, no index rows.
+    await globalDb.run("delete from entity_space where space_did = ?", streamDid);
+    await reMaterializeFromLocalEvents(repairDb);
+
+    const repaired = await globalDb
+      .query("select count(*) as n from entity_space where space_did = ?")
+      .get<{ n: number }>(streamDid);
+    expect(repaired!.n).toBe(indexed!.n);
+  }, { timeout: 30_000 });
+
+  test("does not re-backfill a space the index already has rows for", async () => {
+    const streamDid = StreamDid.assert(space);
+    await seedEvents(repairDb, streamDid, createDefaultSpaceEvents({ name: "No Re-backfill" }));
+    await reMaterializeFromLocalEvents(repairDb);
+
+    // An entity the index does not know. "Indexed" means the space was
+    // backfilled once, so a later boot leaves this row missing — the sweep
+    // repairs a space the index has never seen, not one entity at a time.
+    const decoy = "01KWZ4VF1EDECOY0000000000";
+    await repairDb
+      .forSpace!(streamDid)
+      .run(
+        "insert into entities (id, stream_id, created_at) values (?, ?, 1)",
+        decoy,
+        streamDid,
+      );
+
+    await reMaterializeFromLocalEvents(repairDb);
+
+    const row = await repairDb.global!()
+      .query("select 1 as n from entity_space where entity_id = ?")
+      .get<{ n: number }>(decoy);
+    expect(row).toBeNull();
+  }, { timeout: 30_000 });
+
+  test("publishes a space_stats row for a space that has none", async () => {
+    const streamDid = StreamDid.assert(space);
+    await seedEvents(repairDb, streamDid, createDefaultSpaceEvents({ name: "Stats Repair" }));
+    await reMaterializeFromLocalEvents(repairDb);
+
+    const globalDb = repairDb.global!();
+    await globalDb.run("delete from space_stats where space_did = ?", streamDid);
+    await reMaterializeFromLocalEvents(repairDb);
+
+    const row = await globalDb
+      .query("select member_count from space_stats where space_did = ?")
+      .get<{ member_count: number }>(streamDid);
+    expect(row).not.toBeNull();
+  }, { timeout: 30_000 });
 });

@@ -1,6 +1,12 @@
 // Worker is a global in Bun — no import needed.
 
-import type { WorkerCacheStats, WorkerRequest, WorkerResponse } from "./types.ts";
+import type {
+  GlobalIndexProbeRow,
+  SpaceBootProbe,
+  WorkerCacheStats,
+  WorkerRequest,
+  WorkerResponse,
+} from "./types.ts";
 import type { DbMemoryBounds } from "./bounds.ts";
 import { metrics } from "../metrics.ts";
 import { log } from "../log.ts";
@@ -451,6 +457,10 @@ export class AsyncDatabase {
       current: boolean;
     }>;
   }
+  /** The boot sweep's four per-space facts, in one request. Read-only. */
+  bootProbe(spaceDid: string): Promise<SpaceBootProbe> {
+    return this.#link.send({ type: "bootProbe", spaceDid }) as Promise<SpaceBootProbe>;
+  }
   /** Open the in-place migration gate for `spaceDid` (idempotent). */
   spaceMigrationBegin(spaceDid: string): Promise<{ ok: boolean }> {
     return this.#link.send({ type: "spaceMigrationBegin", spaceDid }) as Promise<{
@@ -590,6 +600,17 @@ export class AsyncDatabase {
     return this.#link.send({ type: "backfillEntitySpace", spaceDid }) as Promise<{
       backfilled: number;
     }>;
+  }
+
+  /**
+   * Which of `spaceDids` the global DBs already account for — an
+   * `entity_space` row and a `space_stats` row (worker-internal). One request
+   * for a whole chunk of streams, on the worker that owns the global DB.
+   */
+  globalIndexProbe(spaceDids: readonly string[]): Promise<GlobalIndexProbeRow[]> {
+    return this.#link.send({ type: "globalIndexProbe", spaceDids }) as Promise<
+      GlobalIndexProbeRow[]
+    >;
   }
 
   /**
