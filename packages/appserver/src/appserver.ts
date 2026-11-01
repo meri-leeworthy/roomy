@@ -14,6 +14,7 @@
  * "disabled"` and a `testAuthVerifier`.
  */
 
+import { timingSafeEqual } from "node:crypto";
 import type { Server } from "bun";
 import { XrpcRouter, type AuthVerifier, type SyncHandler, type WsData } from "./xrpc/index.ts";
 import { selectAuthVerifier } from "./xrpc/auth.ts";
@@ -609,6 +610,42 @@ const LITERAL_ENDPOINTS: Readonly<Record<string, true>> = {
 };
 
 /**
+ * Routes served outside the XRPC router that publish process internals: every
+ * metric series, and the per-subsystem health detail (pool occupancy, query
+ * cache by NSID, queue depths, parked push subscriptions).
+ *
+ * Derived from `LITERAL_ENDPOINTS` rather than listed again, so a new
+ * `/health/*` route is gated by default. `/health` and the DID document are
+ * the two public surfaces: the platform health check and DID resolution have
+ * no credential to send.
+ */
+function isInternalPath(pathname: string): boolean {
+  return (
+    pathname === "/metrics" ||
+    (pathname.startsWith("/health/") && LITERAL_ENDPOINTS[pathname] === true)
+  );
+}
+
+/**
+ * Constant-time check of an `Authorization: Bearer <token>` header.
+ *
+ * A missing header, another scheme, or a token of a different length is a
+ * plain `false`: the length is not the secret, and `timingSafeEqual` throws
+ * on unequal lengths. The compared bytes are the credential, so they are
+ * compared in constant time.
+ */
+function hasBearerToken(req: Request, token: string): boolean {
+  const header = req.headers.get("authorization");
+  if (header === null) return false;
+  const space = header.indexOf(" ");
+  if (space < 0) return false;
+  if (header.slice(0, space).toLowerCase() !== "bearer") return false;
+  const presented = Buffer.from(header.slice(space + 1).trim(), "utf8");
+  const expected = Buffer.from(token, "utf8");
+  return presented.length === expected.length && timingSafeEqual(presented, expected);
+}
+
+/**
  * How many parked push subscriptions `/health/push` lists. The count beside it
  * is exact; the list is a sample so the route stays a diagnostic rather than a
  * dump of every parked device.
@@ -671,6 +708,14 @@ export async function createAppserver(
   const ownDid = opts.ownDid ?? process.env.APPSERVER_DID ?? "did:web:api.roomy.space";
   const serviceEndpoint = opts.serviceEndpoint ?? process.env.APPSERVER_ORIGIN ?? "https://api.roomy.space";
   const corsOrigin = opts.corsOrigin ?? process.env.CORS_ORIGIN ?? "*";
+
+  // The bearer token that gates /metrics and the per-subsystem /health/*
+  // routes. Read once, at construction: turning the gate on is a restart with
+  // the variable set, not a code change. An empty value counts as unset —
+  // `Bearer ` with nothing after it must not become a credential.
+  const metricsTokenEnv = process.env.ROOMY_METRICS_TOKEN;
+  const metricsToken =
+    metricsTokenEnv !== undefined && metricsTokenEnv !== "" ? metricsTokenEnv : null;
   const quiet = opts.quiet ?? false;
 
   // ─── Tracing ────────────────────────────────────────────────────────
@@ -1135,6 +1180,26 @@ export async function createAppserver(
 
     const url = new URL(req.url);
 
+      // ─── Metrics gate ─────────────────────────────────────────────
+      // The two non-XRPC internal surfaces are gated together: both describe
+      // topology and capacity headroom, and both are reachable from the
+      // public origin. Unset leaves them open, so enabling the gate is an
+      // env change rather than a code change.
+      if (
+        metricsToken !== null &&
+        isInternalPath(url.pathname) &&
+        !hasBearerToken(req, metricsToken)
+      ) {
+        return new Response(JSON.stringify({ error: "unauthorized" }), {
+          status: 401,
+          headers: {
+            "content-type": "application/json",
+            "www-authenticate": "Bearer",
+            ...corsHeaders,
+          },
+        });
+      }
+
       if (url.pathname === "/.well-known/did.json") {
         return new Response(JSON.stringify(DID_DOCUMENT), {
           headers: { "content-type": "application/json", ...corsHeaders },
@@ -1405,6 +1470,9 @@ export async function createAppserver(
   }
 
   if (!quiet) log.info(`Appserver listening on port ${port} (DID: ${ownDid})`);
+  if (metricsToken === null && !quiet) {
+    log.warn("[metrics] ROOMY_METRICS_TOKEN is unset — /metrics and /health/* are public");
+  }
 
   return {
     server,

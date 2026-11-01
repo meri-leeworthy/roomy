@@ -27,6 +27,7 @@ The config is **baked into the image** so no Railway volume is required.
    | `GRAFANA_CLOUD_TEMPO_ID` | Grafana Cloud instance ID (OTLP basic-auth user). Required *with* `_URL`/`_TOKEN` to ship spans. |
    | `GRAFANA_CLOUD_TEMPO_TOKEN` | Grafana Cloud access policy token (OTLP basic-auth pass). |
    | `APPSERVER_METRICS_URL` | appserver scrape target as **host:port** (no scheme/path). On Railway this must be `<service-name>.railway.internal:8080` — Railway's private DNS uses the `.railway.internal` suffix, so the Dockerfile default `appserver:8080` does **not** resolve there. Short/bare names only work in the dev compose network (where the container is actually named `alloy`/`appserver`). Scheme is http, path is `/metrics`. An empty value drops the target (`discovery.relabel`), so the collector scrapes nothing instead of reporting a dead `up == 0` for a deployment that does not exist. |
+   | `ROOMY_METRICS_TOKEN` | Bearer token for the appserver's `/metrics`. Set the **same value** on the appserver service, whose `/metrics` and `/health/*` routes then answer `401` without it. Unset on both leaves those routes open on the private address; an empty value sends no `Authorization` header at all (not an empty `Bearer `). |
    | `ALLOY_ENV` | This collector's environment — the `env` label on scraped metrics and on browser records. Default `production`; set it to `staging` on the staging collector. Trimmed and lowercased, and an empty or whitespace-only value counts as unset. |
    | `FARO_CORS_ORIGINS` | Comma-separated browser origins allowed to POST Faro telemetry (default `https://roomy.space` — the SPA origin) |
    | `FARO_API_KEY` | Optional Faro API key (default unset) |
@@ -226,6 +227,15 @@ Alloy scrapes it (`prometheus.scrape "appserver"`) and remote-writes to
 Grafana Cloud Mimir. Build Grafana dashboards + alerts on these, e.g. alert
 when any `roomy_pool_worker_pending` > threshold or `roomy_db_timeouts_total`
 rate > 0.
+
+The scrape authenticates when the appserver does: set `ROOMY_METRICS_TOKEN` on
+both services to the same value and the collector sends it as
+`Authorization: Bearer`. The appserver applies the same value to `/metrics` and
+to the per-subsystem health routes (`/health/embed`, `/health/push`,
+`/health/search`, `/health/cache`, `/health/pool`), answering `401` without it;
+`/health` and `/.well-known/did.json` stay public for the platform health check
+and DID resolution. Unset on both, those routes are open on the address they
+are served on.
 
 The appserver also emits a **periodic metrics snapshot** to Loki every 60s
 (`[metrics] snapshot` log line) so saturation trends are visible in Grafana

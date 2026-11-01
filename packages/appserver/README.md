@@ -76,6 +76,35 @@ explicitly opted in:
   (or `false`) on all subsequent deploys so a backup failure fails loudly
   rather than wiping data.
 
+### Metrics and health endpoints (`ROOMY_METRICS_TOKEN`)
+
+Beside the XRPC interface the service serves two non-XRPC surfaces: `/metrics`
+(the Prometheus exposition) and the per-subsystem health routes (`/health/embed`,
+`/health/push`, `/health/search`, `/health/cache`, `/health/pool`). Both
+publish topology and capacity headroom — per-route traffic, query-cache
+counters by NSID, per-worker pool occupancy against its ceilings, queue
+depths — so they are closed by default to callers holding no credential.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ROOMY_METRICS_TOKEN` | unset | Bearer token required on `/metrics` and `/health/*` (not `/health`). Unset leaves them open. |
+
+`/health` and `/.well-known/did.json` are always public: the platform health
+check and the deploy digest read the former, and DID resolution cannot depend
+on a secret. With the variable set, a gated route without
+`Authorization: Bearer <token>` answers `401 {"error":"unauthorized"}` with
+`WWW-Authenticate: Bearer`; the comparison is constant-time. An empty value
+counts as unset.
+
+A process started without the token says so once at boot:
+
+```text
+[metrics] ROOMY_METRICS_TOKEN is unset — /metrics and /health/* are public
+```
+
+The collector must send the same value (see `deploy/alloy/README.md`); turning
+the gate on is a change to both services' environment, not to this code.
+
 ### Shadow follower (`ROOMY_SHADOW`)
 
 The image carries the Rust core (`roomy-appserver`) as well as the Bun service.

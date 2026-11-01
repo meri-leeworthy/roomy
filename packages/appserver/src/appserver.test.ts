@@ -28,6 +28,9 @@ beforeEach(() => {
   // Use a temp data dir so the DID-doc test's signing key lands in /tmp,
   // not the real data dir.
   process.env.DATA_DIR = "/tmp/appserver-test-data";
+  // The metrics gate is env-driven; a test that sets it must not leak into
+  // the next appserver this file starts.
+  delete process.env.ROOMY_METRICS_TOKEN;
 });
 
 afterEach(async () => {
@@ -36,6 +39,9 @@ afterEach(async () => {
     handle = null;
   }
   _setTestFetchBlockRecords(null);
+  // Same reason as in `beforeEach`: whatever a test set must not outlive it,
+  // including for the files that share this process.
+  delete process.env.ROOMY_METRICS_TOKEN;
 });
 
 describe("createAppserver factory", () => {
@@ -747,3 +753,105 @@ describe("query response cache", () => {
     expect(typeof body.readStateWorker.preparedStmts).toBe("number");
   });
 });
+
+// ─── Metrics token gate ─────────────────────────────────────────────────
+
+describe("metrics token gate", () => {
+  // Every route that publishes process internals. `/health` and the DID
+  // document are deliberately absent: they are the two public surfaces.
+  const GATED = [
+    "/metrics",
+    "/health/embed",
+    "/health/push",
+    "/health/search",
+    "/health/cache",
+    "/health/pool",
+  ];
+
+  async function start(): Promise<string> {
+    handle = await createAppserver({
+      port: ephemeralPort(),
+      authVerifier: testAuthVerifier,
+      dbPath: ":memory:",
+      readStateDbPath: ":memory:",
+      quiet: true,
+      ownDid: "did:web:test.example",
+      serviceEndpoint: "http://test.example",
+      disableBackgroundWorkers: true,
+    });
+    return `http://localhost:${handle.port}`;
+  }
+
+  test("with the token set, every internal route needs it", async () => {
+    process.env.ROOMY_METRICS_TOKEN = "s3cret";
+    const base = await start();
+
+    for (const path of GATED) {
+      const anon = await fetch(`${base}${path}`);
+      expect(anon.status).toBe(401);
+      expect(anon.headers.get("www-authenticate")).toBe("Bearer");
+      expect(await anon.json()).toEqual({ error: "unauthorized" });
+
+      const wrong = await fetch(`${base}${path}`, {
+        headers: { authorization: "Bearer nope" },
+      });
+      expect(wrong.status).toBe(401);
+
+      // Same length as the real token, different bytes: the compare runs on
+      // the token itself rather than bailing out on length alone.
+      const sameLength = await fetch(`${base}${path}`, {
+        headers: { authorization: "Bearer s3crat" },
+      });
+      expect(sameLength.status).toBe(401);
+
+      // Another scheme is not a bearer token.
+      const basic = await fetch(`${base}${path}`, {
+        headers: { authorization: "Basic s3cret" },
+      });
+      expect(basic.status).toBe(401);
+
+      const ok = await fetch(`${base}${path}`, {
+        headers: { authorization: "Bearer s3cret" },
+      });
+      expect(ok.status).toBe(200);
+
+      // The scheme is case-insensitive (RFC 7235).
+      const lower = await fetch(`${base}${path}`, {
+        headers: { authorization: "bearer s3cret" },
+      });
+      expect(lower.status).toBe(200);
+    }
+  });
+
+  test("with the token set, /health and the DID document stay public", async () => {
+    process.env.ROOMY_METRICS_TOKEN = "s3cret";
+    const base = await start();
+
+    const health = await fetch(`${base}/health`);
+    expect(health.status).toBe(200);
+    expect((await health.json()).status).toBe("ok");
+
+    const didDoc = await fetch(`${base}/.well-known/did.json`);
+    expect(didDoc.status).toBe(200);
+    expect((await didDoc.json()).id).toBe("did:web:test.example");
+  });
+
+  test("unset token leaves every internal route open", async () => {
+    delete process.env.ROOMY_METRICS_TOKEN;
+    const base = await start();
+
+    for (const path of GATED) {
+      const res = await fetch(`${base}${path}`);
+      expect(res.status).toBe(200);
+    }
+  });
+
+  test("an empty token counts as unset", async () => {
+    process.env.ROOMY_METRICS_TOKEN = "";
+    const base = await start();
+
+    const res = await fetch(`${base}/metrics`);
+    expect(res.status).toBe(200);
+  });
+});
+
