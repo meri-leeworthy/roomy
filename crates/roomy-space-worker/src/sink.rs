@@ -101,3 +101,9 @@ impl GlobalSink for SqliteGlobalSink {
         Ok(())
     }
 }
+
+impl GlobalSink for Box<dyn GlobalSink> {
+    fn apply(&mut self, statements: &[SqlEffect]) -> Result<(), SinkError> {
+        (**self).apply(statements)
+    }
+}
