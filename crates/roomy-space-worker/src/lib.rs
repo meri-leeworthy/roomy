@@ -31,9 +31,12 @@ pub mod worker;
 
 pub use cancel::Cancel;
 pub use clock::{Clock, SystemClock};
-pub use health::{DiscoveryState, Health};
+pub use health::{DiscoveryState, Health, Poison};
 pub use lease::Lease;
 pub use signal::{NoSignals, SignalSink, SpaceSignal};
 pub use sink::GlobalSink;
 pub use supervisor::{Discovery, Supervisor, SupervisorConfig};
-pub use worker::{Progress, Worker, WorkerError, WorkerParts};
+pub use worker::{
+    ApplyError, ApplyFailure, BatchEvent, BatchIdentity, Progress, Retry, Worker, WorkerError,
+    WorkerParts,
+};

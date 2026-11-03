@@ -23,7 +23,12 @@
 //!  * **A failing space waits, and says what failed.** A step that returns an
 //!    error retries under an exponential backoff, so one space that cannot make
 //!    progress costs neither a core nor a log flood; the warning names the
-//!    space, the cursor it is stuck at, and the error.
+//!    space, the batch it was applying, and the error.
+//!  * **A batch the data refuses is given up on.** A constraint violation is
+//!    the data's answer, not a condition that clears, so the actor attempts it
+//!    [`PERMANENT_ATTEMPT_LIMIT`] times and then records the batch as poison on
+//!    its health row and stops. The space is then a state an operator can see
+//!    instead of a retry that never ends; a restart attempts the batch again.
 //!
 //! The supervisor binds no socket and reads no environment; the binary that
 //! hosts it does both.
@@ -42,11 +47,11 @@ use space_feed::{ChangeFeed, FeedError};
 
 use crate::cancel::Cancel;
 use crate::clock::{Clock, SystemClock};
-use crate::health::{DiscoveryState, Health};
+use crate::health::{DiscoveryState, Health, Poison};
 use crate::lease::{FollowOnly, Lease, SqliteLease};
 use crate::signal::{NoSignals, SignalSink};
-use crate::sink::{GlobalSink, SqliteGlobalSink};
-use crate::worker::{Progress, Worker, WorkerError, WorkerParts};
+use crate::sink::{GlobalSink, SinkError, SqliteGlobalSink};
+use crate::worker::{Progress, Retry, Worker, WorkerError, WorkerParts};
 
 /// What this process is to the spaces it opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -113,6 +118,9 @@ pub struct Supervisor {
     /// How each actor gets its feed. A worker on the log's machine reads SQLite;
     /// a worker elsewhere asks the owner over HTTP. The loop cannot tell.
     feed: FeedFactory,
+    /// How each actor gets its sink: the global database this process writes,
+    /// unless the host supplies another.
+    sink: SinkFactory,
     cancel: Cancel,
     health: Arc<Mutex<BTreeMap<String, Health>>>,
     actors: Mutex<BTreeMap<String, Actor>>,
@@ -148,11 +156,20 @@ const DISCOVERY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// feed in a loop.
 const DISCOVERY_SLICE: Duration = Duration::from_millis(100);
 
+/// How many times a batch the data refuses is attempted before its actor gives
+/// up on it. A constraint violation is the same rows failing the same way, so
+/// the bound is small: enough for a failure that turns out to clear, few enough
+/// that a broken space stops costing work.
+pub const PERMANENT_ATTEMPT_LIMIT: u32 = 3;
+
 /// A sink per actor, made afresh because a worker owns its sink.
 pub type SignalFactory = Arc<dyn Fn() -> Box<dyn SignalSink> + Send + Sync>;
 
 /// A feed per actor, made afresh because a feed may hold its own connection.
 pub type FeedFactory = Arc<dyn Fn() -> Result<Box<dyn ChangeFeed>, FeedError> + Send + Sync>;
+
+/// A sink per actor, made afresh because a worker owns its sink.
+pub type SinkFactory = Arc<dyn Fn() -> Result<Box<dyn GlobalSink>, SinkError> + Send + Sync>;
 
 struct Actor {
     cancel: Cancel,
@@ -184,6 +201,7 @@ impl Supervisor {
     #[must_use]
     pub fn new(config: SupervisorConfig) -> Self {
         let events_db = config.events_db.clone();
+        let global_db = config.global_db.clone();
         Self {
             config,
             clock: Arc::new(SystemClock),
@@ -191,12 +209,23 @@ impl Supervisor {
             feed: Arc::new(move || {
                 Ok(Box::new(SqliteChangeFeed::open(&events_db)?) as Box<dyn ChangeFeed>)
             }),
+            sink: Arc::new(move || {
+                Ok(Box::new(SqliteGlobalSink::open(&global_db)?) as Box<dyn GlobalSink>)
+            }),
             cancel: Cancel::new(),
             health: Arc::new(Mutex::new(BTreeMap::new())),
             actors: Mutex::new(BTreeMap::new()),
             discovered: Mutex::new(None),
             discovery: Mutex::new(None),
         }
+    }
+
+    /// Write each actor's global statements to `factory`'s sink instead of this
+    /// process's global database.
+    #[must_use]
+    pub fn with_sink(mut self, factory: SinkFactory) -> Self {
+        self.sink = factory;
+        self
     }
 
     /// Read the log through `factory` instead of this machine's SQLite file.
@@ -253,7 +282,7 @@ impl Supervisor {
         };
         // Both roles write the global half; a follower writes it to its own copy,
         // which is what makes its entity index usable for reads it serves alone.
-        let sink = SqliteGlobalSink::open(&config.global_db)?;
+        let sink = (self.sink)()?;
         let holder = config.holder.clone();
         let idle_poll = config.idle_poll;
         let idle_unload = config.idle_unload;
@@ -483,18 +512,35 @@ fn run_actor<F, L, S, N>(
     // The last failure this actor reported, and when. `None` after a batch that
     // applied, so the next failure is always logged.
     let mut reported: Option<(String, Instant)> = None;
+    // How many times in a row the batch at the cursor has been refused by the
+    // data, and the batch this actor gave up on once that count reached its
+    // limit. A batch that applies clears the count and there is nothing left to
+    // retry, so the poison itself only ends with the actor.
+    let mut refused: u32 = 0;
+    let mut poisoned: Option<Poison> = None;
 
     loop {
         if worker.is_cancelled() {
             return;
         }
-        let progress = worker.step();
-        let wait = match &progress {
-            Ok(Progress::Applied {
+        // A poisoned actor attempts nothing: the batch it gave up on fails the
+        // same way every time it is read. It stays up — holding and renewing its
+        // lease, publishing its health row, leaving the other spaces' actors
+        // alone — until the supervisor stops it, and a restart reads the batch
+        // again. It polls at the idle cadence for exactly that reason: the lease
+        // is renewed by the health snapshot.
+        let stepped = if poisoned.is_some() {
+            None
+        } else {
+            Some(worker.step())
+        };
+        let wait = match &stepped {
+            None => Some(idle_poll),
+            Some(Ok(Progress::Applied {
                 cursor: applied,
                 entries,
                 changes,
-            }) => {
+            })) => {
                 tracing::info!(
                     idx = applied.0,
                     ord = applied.1,
@@ -506,28 +552,75 @@ fn run_actor<F, L, S, N>(
                 last_progress = Instant::now();
                 backoff = ERROR_BACKOFF_INITIAL;
                 reported = None;
+                refused = 0;
                 Some(idle_poll)
             }
-            Ok(Progress::NotLeased) => {
+            Some(Ok(Progress::NotLeased)) => {
                 tracing::debug!(space = key, "another process holds the lease");
                 Some(idle_poll)
             }
-            Ok(Progress::Idle { .. }) => Some(idle_poll),
-            Err(error) => {
+            Some(Ok(Progress::Idle { .. })) => Some(idle_poll),
+            Some(Err(error)) => {
                 let text = error.to_string();
                 let quiet = reported.as_ref().is_some_and(|(seen, at)| {
                     *seen == text && at.elapsed() < ERROR_REPORT_INTERVAL
                 });
+                // A failure while applying names the batch, not the cursor it
+                // was read from: on a space that has applied nothing the cursor
+                // is `(-1, -1)` for every batch it will ever fail on.
+                let failure = match &error {
+                    WorkerError::Apply(failure) => {
+                        if !quiet {
+                            tracing::warn!(
+                                space = key,
+                                batch = %failure.batch,
+                                permanent = failure.retry == Retry::Permanent,
+                                %error,
+                                "batch failed; retrying"
+                            );
+                        }
+                        Some(failure.as_ref())
+                    }
+                    _ => {
+                        if !quiet {
+                            tracing::warn!(
+                                space = key,
+                                idx = cursor.0,
+                                ord = cursor.1,
+                                %error,
+                                "batch failed; retrying"
+                            );
+                        }
+                        None
+                    }
+                };
                 if !quiet {
-                    tracing::warn!(
-                        space = key,
-                        idx = cursor.0,
-                        ord = cursor.1,
-                        %error,
-                        "batch failed; retrying"
-                    );
                     reported = Some((text, Instant::now()));
                 }
+
+                // Only the data's refusal is counted: a transient failure in
+                // between means the batch is not what is wrong.
+                if failure.is_some_and(|failure| failure.retry == Retry::Permanent) {
+                    refused += 1;
+                } else {
+                    refused = 0;
+                }
+                if refused >= PERMANENT_ATTEMPT_LIMIT {
+                    if let Some(failure) = failure {
+                        tracing::error!(
+                            space = key,
+                            batch = %failure.batch,
+                            attempts = refused,
+                            %error,
+                            "batch cannot be applied; space poisoned until restart"
+                        );
+                        poisoned = Some(Poison {
+                            batch: failure.batch.clone(),
+                            attempts: refused,
+                        });
+                    }
+                }
+
                 let wait = backoff;
                 backoff = (backoff * 2).min(ERROR_BACKOFF_MAX);
                 Some(wait)
@@ -535,12 +628,14 @@ fn run_actor<F, L, S, N>(
         };
 
         if let Ok(mut snapshot) = health.lock() {
-            snapshot.insert(key.to_string(), worker.health());
+            let mut row = worker.health();
+            row.poisoned = poisoned.clone();
+            snapshot.insert(key.to_string(), row);
         }
 
         let idle = matches!(
-            progress,
-            Ok(Progress::Idle { .. }) | Ok(Progress::NotLeased)
+            stepped,
+            Some(Ok(Progress::Idle { .. })) | Some(Ok(Progress::NotLeased))
         );
         if idle {
             if let Some(idle_unload) = idle_unload {

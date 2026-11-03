@@ -172,7 +172,19 @@ about itself.
 A space whose step fails is not retried immediately: the actor waits 250 ms, then
 doubles to 30 s, and resets on the next applied batch. A space that cannot make
 progress therefore costs neither a core nor a log flood, and its warning names the
-space, the cursor it is stuck at, and the error.
+space, the batch it was applying — its `(idx, ord)` range, its entry and change
+counts, and its entries' event ids, collections and rkeys — and the error.
+
+A batch the data refuses is not retried forever. A constraint violation
+(`FOREIGN KEY`, `CHECK`, `NOT NULL`, `UNIQUE`) is the data's answer rather than a
+condition that clears, so the actor attempts it three times and then stops: no
+further read, no further log line, and the space's `/health` row carries
+`"poisoned": true` with the batch's identity and the attempt count under
+`"poison"`. The process stays up and the other spaces are untouched. Nothing is
+persisted: a restart attempts the batch again, so a fixed record is picked up
+without clearing state by hand, and a broken one is not blacklisted. Locks and
+busy files (`SQLITE_BUSY`, `SQLITE_LOCKED`) are not this class and keep retrying
+under the backoff.
 
 ## The three deployment shapes
 
@@ -196,7 +208,7 @@ file's writer.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /health` | Sessions held and signal subscribers (the gateway); with `ROOMY_HEALTH_ADDR`, each space's cursor, lag, lease and `following`, and the log sink's counters (a supervisor) |
+| `GET /health` | Sessions held and signal subscribers (the gateway); with `ROOMY_HEALTH_ADDR`, each space's cursor, lag, lease, `following` and poisoned state, and the log sink's counters (a supervisor) |
 | `GET /metrics` | Prometheus counters, including the shadow's comparison and divergence counts |
 | `POST /xrpc/space.roomy.auth.getConnectionTicket` | A signed, single-use ticket for the socket plane |
 | `GET /xrpc/space.roomy.sync.subscribe` | The WebSocket |
