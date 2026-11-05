@@ -142,7 +142,7 @@ Its health, from inside the container:
 
 ```bash
 docker exec <container> curl -s 127.0.0.1:8089/health
-# {"status":"ok","spaces":[{"space":"did:plc:…","cursor":{"idx":…,"ord":…},"lag":0,"leaseHeld":false,"following":true,"holder":"…","lastError":null}],"loki":{"sent":1234,"failed":0,"dropped":0,"retrying":false}}
+# {"status":"ok","spaces":[{"space":"did:plc:…","cursor":{"idx":…,"ord":…},"lag":0,"leaseHeld":false,"following":true,"holder":"…","lastError":null,"poisoned":false,"poison":null}],"loki":{"sent":1234,"failed":0,"dropped":0,"retrying":false}}
 ```
 
 `following: true` with `leaseHeld: false` is the honest pair for a follower: it

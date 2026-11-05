@@ -23,7 +23,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use space_core::change::DecodeError;
+use serde::{Deserialize, Serialize};
+use space_core::change::{DecodeError, FeedRow};
 use space_core::ids::SpaceDid;
 use space_core::{PlanMode, RuleError};
 use space_db::plan;
@@ -53,6 +54,182 @@ pub enum Progress {
     },
 }
 
+/// One entry of a batch, as the feed described it.
+///
+/// Carried into a failure so the line an operator reads names the event rather
+/// than the position the cursor had when the batch was read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchEvent {
+    /// The log entry the change came from.
+    pub idx: i64,
+    /// The entry's event id.
+    pub event_id: String,
+    /// The collection the change's record lives in.
+    pub collection: String,
+    /// The record's key within that collection.
+    pub rkey: String,
+}
+
+impl std::fmt::Display for BatchEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} at idx {} ({}/{})",
+            self.event_id, self.idx, self.collection, self.rkey
+        )
+    }
+}
+
+/// The batch a failure happened on: what was being applied, in the terms the
+/// log and the feed share.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatchIdentity {
+    /// The `(idx, ord)` of the batch's first row.
+    pub first: (i64, i64),
+    /// The `(idx, ord)` of its last row.
+    pub last: (i64, i64),
+    /// How many log entries the batch holds.
+    pub entries: usize,
+    /// How many changes it carries.
+    pub changes: usize,
+    /// One entry per log entry, in application order.
+    pub events: Vec<BatchEvent>,
+}
+
+impl BatchIdentity {
+    /// The identity of the batch read from `rows`, which must not be empty.
+    ///
+    /// Rows sharing an `idx` are one entry, so the events are deduplicated the
+    /// same way [`space_db::plan::group_entries`] groups them.
+    #[must_use]
+    pub fn of(rows: &[FeedRow], entries: usize) -> Self {
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            return Self {
+                first: (-1, -1),
+                last: (-1, -1),
+                entries: 0,
+                changes: 0,
+                events: Vec::new(),
+            };
+        };
+        let mut events: Vec<BatchEvent> = Vec::new();
+        for row in rows {
+            if events.last().is_some_and(|seen| seen.idx == row.idx) {
+                continue;
+            }
+            events.push(BatchEvent {
+                idx: row.idx,
+                event_id: row.event_id.clone(),
+                collection: row.collection.clone(),
+                rkey: row.rkey.clone(),
+            });
+        }
+        Self {
+            first: (first.idx, first.ord),
+            last: (last.idx, last.ord),
+            entries,
+            changes: rows.len(),
+            events,
+        }
+    }
+}
+
+/// How many of a batch's events the human-readable form names. A batch may be
+/// the whole of a space's backlog, and a line naming five hundred events is a
+/// line an operator cannot read and a log cannot afford once a minute. The full
+/// list stays in the identity itself, which `/health` serves.
+const EVENTS_NAMED: usize = 8;
+
+impl std::fmt::Display for BatchIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "idx {}-{} (ord {}-{}), {} entries, {} changes",
+            self.first.0, self.last.0, self.first.1, self.last.1, self.entries, self.changes
+        )?;
+        for event in self.events.iter().take(EVENTS_NAMED) {
+            write!(f, "; {event}")?;
+        }
+        match self.events.len().saturating_sub(EVENTS_NAMED) {
+            0 => Ok(()),
+            rest => write!(f, "; and {rest} more"),
+        }
+    }
+}
+
+/// Whether applying a batch can succeed on a later attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Retry {
+    /// The batch may apply once whatever refused it clears — a lock, a busy
+    /// file, a lease that moved.
+    Transient,
+    /// The data refuses the batch. The same rows fail the same way however
+    /// often they are read again.
+    Permanent,
+}
+
+/// Where a batch failed to apply.
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyError {
+    #[error("{0}")]
+    Sink(#[from] SinkError),
+    #[error("{0}")]
+    Db(#[from] DbError),
+}
+
+/// A failure raised while applying one batch, carrying that batch's identity.
+#[derive(Debug, thiserror::Error)]
+#[error("applying the batch at {batch}: {source}")]
+pub struct ApplyFailure {
+    /// The batch that was being applied.
+    pub batch: BatchIdentity,
+    /// Whether trying it again can ever succeed.
+    pub retry: Retry,
+    /// What went wrong.
+    #[source]
+    pub source: ApplyError,
+}
+
+impl ApplyFailure {
+    /// A sink failure on `batch`.
+    #[must_use]
+    pub fn sink(error: SinkError, batch: BatchIdentity) -> Self {
+        let SinkError::Sqlite(source) = &error;
+        let retry = retry_of_sqlite(source);
+        Self {
+            batch,
+            retry,
+            source: ApplyError::Sink(error),
+        }
+    }
+
+    /// A space-database failure on `batch`.
+    #[must_use]
+    pub fn db(error: DbError, batch: BatchIdentity) -> Self {
+        let retry = error.sqlite().map_or(Retry::Transient, retry_of_sqlite);
+        Self {
+            batch,
+            retry,
+            source: ApplyError::Db(error),
+        }
+    }
+}
+
+/// A constraint is the data's answer, not a condition that clears: the same
+/// batch rewrites the same rows and violates the same constraint. Everything
+/// else — busy, locked, a full disk — may pass on the next attempt.
+fn retry_of_sqlite(error: &rusqlite::Error) -> Retry {
+    match error {
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            Retry::Permanent
+        }
+        _ => Retry::Transient,
+    }
+}
+
 /// A loop failure.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {
@@ -64,6 +241,11 @@ pub enum WorkerError {
     Sink(#[from] SinkError),
     #[error("{0}")]
     Db(#[from] DbError),
+    /// The batch identity is carried by box: it holds the entries' events, and
+    /// an error variant that costs a batch's worth of memory on every `Result`
+    /// is paid for by the success path too.
+    #[error("{0}")]
+    Apply(Box<ApplyFailure>),
     #[error("change at idx {idx} does not decode: {source}")]
     Decode { idx: i64, source: DecodeError },
     #[error("planning batch at idx {idx}: {source}")]
@@ -258,6 +440,10 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> Worker<F, L, S, N> {
 
         let last = rows.last().expect("a non-empty batch has a last row");
         let next_cursor = (last.idx, last.ord);
+        // What every failure past this point names: the batch, not the cursor
+        // it was read from, which on a space that has never applied anything is
+        // the same `(-1, -1)` for every batch it will ever fail on.
+        let batch_id = BatchIdentity::of(&rows, entries.len());
 
         // The global half goes first: it is idempotent, so a crash between the
         // two databases replays harmlessly, and writing it first is what keeps
@@ -270,10 +456,14 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> Worker<F, L, S, N> {
             .begin_batch(&planned, next_cursor, grant.epoch)
             .map_err(|error| match error {
                 DbError::Fenced { granted, stored } => WorkerError::Fenced { granted, stored },
-                other => WorkerError::Db(other),
+                other => WorkerError::Apply(Box::new(ApplyFailure::db(other, batch_id.clone()))),
             })?;
-        self.sink.apply(batch.globals())?;
-        batch.commit()?;
+        self.sink.apply(batch.globals()).map_err(|error| {
+            WorkerError::Apply(Box::new(ApplyFailure::sink(error, batch_id.clone())))
+        })?;
+        batch
+            .commit()
+            .map_err(|error| WorkerError::Apply(Box::new(ApplyFailure::db(error, batch_id))))?;
         // After the commit: a listener that reacts to this signal reads the
         // rows it is about.
         self.signals.signal(&SpaceSignal {
@@ -317,6 +507,9 @@ impl<F: ChangeFeed, L: Lease, S: GlobalSink, N: SignalSink> Worker<F, L, S, N> {
             following: self.following,
             holder: self.holder.clone(),
             last_error: self.last_error.clone(),
+            // Whether a batch was given up on is the retry loop's fact, not the
+            // worker's: it is set by the supervisor that owns the attempts.
+            poisoned: None,
         }
     }
 }

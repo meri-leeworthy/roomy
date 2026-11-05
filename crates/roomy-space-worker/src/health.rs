@@ -12,6 +12,25 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::worker::BatchIdentity;
+
+/// The batch an actor has stopped retrying, and why it gave up.
+///
+/// A batch the data refuses — a foreign-key or check constraint that the rows
+/// themselves violate — fails identically however often it is read again. Once
+/// the actor has tried it the permitted number of times it records this instead
+/// of looping, so the space is a state an operator can see rather than a
+/// warning once a minute. Nothing is persisted: a restart reads the batch
+/// again, which is the point — the actor stops burning work, the data is not
+/// blacklisted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Poison {
+    /// The batch that cannot be applied.
+    pub batch: BatchIdentity,
+    /// How many times it was attempted before the actor gave up.
+    pub attempts: u32,
+}
+
 /// One worker's state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Health {
@@ -31,6 +50,9 @@ pub struct Health {
     pub holder: String,
     /// The last failure, cleared by the next batch that succeeds.
     pub last_error: Option<String>,
+    /// The batch this actor has given up on, if it has. Cleared by a batch that
+    /// applies, and never by a retry: there is no retry to clear it.
+    pub poisoned: Option<Poison>,
 }
 
 impl Health {
@@ -46,6 +68,8 @@ impl Health {
             "following": self.following,
             "holder": self.holder,
             "lastError": self.last_error,
+            "poisoned": self.poisoned.is_some(),
+            "poison": self.poisoned,
         })
     }
 
@@ -55,11 +79,12 @@ impl Health {
         self.to_value().to_string()
     }
 
-    /// Whether the worker is doing its job: nothing failed, and either it holds
-    /// the lease or it is a follower, which is not supposed to have one.
+    /// Whether the worker is doing its job: nothing failed, no batch was given
+    /// up on, and either it holds the lease or it is a follower, which is not
+    /// supposed to have one.
     #[must_use]
     pub fn is_healthy(&self) -> bool {
-        self.last_error.is_none() && (self.lease_held || self.following)
+        self.last_error.is_none() && self.poisoned.is_none() && (self.lease_held || self.following)
     }
 }
 

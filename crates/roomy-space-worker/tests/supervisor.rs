@@ -10,9 +10,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use roomy_space_worker::health::Health;
+use roomy_space_worker::sink::{GlobalSink, SinkError, SqliteGlobalSink};
+use roomy_space_worker::supervisor::PERMANENT_ATTEMPT_LIMIT;
 use roomy_space_worker::{Supervisor, SupervisorConfig};
 use serde::Deserialize;
 use space_core::change::FeedRow;
+use space_core::effects::SqlEffect;
 use space_core::ids::SpaceDid;
 use space_db::{digest_of, snapshot_db, worker_snapshot, SpaceDb};
 use space_feed::{ChangeFeed, Cursor, FeedError};
@@ -316,4 +320,350 @@ fn a_failing_space_retries_under_a_backoff_and_reports_the_error() {
         "the health snapshot names the error, got {error:?}"
     );
     assert!(!health[0].is_healthy());
+}
+
+/// The error SQLite raises for a foreign key a batch violates, built from the
+/// extended code SQLite itself reports, so the classifier sees the shape
+/// production sees.
+fn constraint_violation() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(787),
+        Some("FOREIGN KEY constraint failed".to_string()),
+    )
+}
+
+/// The error SQLite raises when another writer holds the file: the class that
+/// must keep retrying.
+fn database_busy() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(5),
+        Some("database is locked".to_string()),
+    )
+}
+
+/// A sink whose every apply fails the way `error` says, counting the attempts.
+struct RefusingSink {
+    attempts: Arc<AtomicUsize>,
+    error: fn() -> rusqlite::Error,
+}
+
+impl GlobalSink for RefusingSink {
+    fn apply(&mut self, _statements: &[SqlEffect]) -> Result<(), SinkError> {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+        Err(SinkError::Sqlite((self.error)()))
+    }
+}
+
+/// A sink that refuses its first `failures` batches and then writes to the
+/// global database: a failure the data recovers from.
+struct RecoveringSink {
+    failures: usize,
+    attempts: Arc<AtomicUsize>,
+    inner: SqliteGlobalSink,
+}
+
+impl GlobalSink for RecoveringSink {
+    fn apply(&mut self, statements: &[SqlEffect]) -> Result<(), SinkError> {
+        let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+        if attempt < self.failures {
+            return Err(SinkError::Sqlite(constraint_violation()));
+        }
+        self.inner.apply(statements)
+    }
+}
+
+/// The process's log lines, as the format layer wrote them.
+#[derive(Clone, Default)]
+struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Captured {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+    }
+}
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn corpus() -> Fixture {
+    serde_json::from_str(&std::fs::read_to_string(fixture_path()).expect("fixture readable"))
+        .expect("fixture parses")
+}
+
+/// Wait for the space's health row to say it was poisoned.
+fn wait_for_poison(supervisor: &Supervisor, space: &SpaceDid) -> Health {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let health = supervisor
+            .health()
+            .into_iter()
+            .find(|health| health.space == space.as_str());
+        if let Some(health) = health {
+            if health.poisoned.is_some() {
+                return health;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the actor never gave up on the batch it cannot apply"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A constraint violation is the data's answer: the same batch violates it
+/// every time. The actor attempts it the permitted number of times, then
+/// records what it could not apply and stops — instead of retrying a batch that
+/// can never land, once a minute, forever.
+#[test]
+fn a_batch_the_data_refuses_poisons_the_space_and_names_its_events() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let space = SpaceDid::parse("did:web:poisoned.example".to_string()).expect("space DID");
+    let config = config(dir.path());
+    build_events_db(&config.events_db, std::slice::from_ref(&space));
+    // The batch limit is the whole corpus, so the failing batch is every entry
+    // the corpus holds and its identity is what `/health` reports.
+    let corpus = corpus();
+    let first = corpus.changes.first().expect("the corpus has changes");
+
+    let captured = Captured::default();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .with_writer(captured.clone())
+        .try_init();
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&attempts);
+    let supervisor = Supervisor::new(config.clone()).with_sink(Arc::new(move || {
+        Ok(Box::new(RefusingSink {
+            attempts: Arc::clone(&counted),
+            error: constraint_violation,
+        }) as Box<dyn GlobalSink>)
+    }));
+    supervisor
+        .start_all([space.clone()])
+        .expect("the actor starts");
+
+    let health = wait_for_poison(&supervisor, &space);
+
+    let poison = health.poisoned.clone().expect("the health row is poisoned");
+    assert_eq!(
+        poison.attempts, PERMANENT_ATTEMPT_LIMIT,
+        "the actor gave up after a different number of attempts than its bound"
+    );
+    assert_eq!(
+        attempts.load(Ordering::Relaxed) as u32,
+        PERMANENT_ATTEMPT_LIMIT,
+        "every attempt is one apply"
+    );
+    let event = poison
+        .batch
+        .events
+        .first()
+        .expect("the batch names its entries");
+    assert_eq!(event.event_id, first["eventId"].as_str().expect("event id"));
+    assert_eq!(
+        event.collection,
+        first["collection"].as_str().expect("collection")
+    );
+    assert_eq!(event.rkey, first["rkey"].as_str().expect("rkey"));
+    assert_eq!(
+        poison.batch.first,
+        (
+            first["idx"].as_i64().expect("idx"),
+            first["ord"].as_i64().expect("ord")
+        )
+    );
+    assert_eq!(
+        poison.batch.changes,
+        corpus.changes.len(),
+        "the batch that failed is the whole corpus"
+    );
+    assert_eq!(health.cursor, (-1, -1), "no batch was ever applied");
+    assert!(!health.is_healthy(), "a poisoned space is not healthy");
+    assert!(
+        health
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains(&event.event_id)),
+        "the health error names the event: {:?}",
+        health.last_error
+    );
+
+    // The object `/health` serves, not just the struct.
+    let body = health.to_value();
+    assert_eq!(body["poisoned"], serde_json::json!(true));
+    assert_eq!(
+        body["poison"]["attempts"],
+        serde_json::json!(PERMANENT_ATTEMPT_LIMIT)
+    );
+    assert_eq!(
+        body["poison"]["batch"]["events"][0]["eventId"],
+        serde_json::json!(event.event_id)
+    );
+
+    // The line an operator reads names the event, not the cursor the batch was
+    // read from: `(-1, -1)` is every position this space will ever be stuck at.
+    // The subscriber is the process's, so it holds the other tests' spaces too.
+    let log = captured.text();
+    let event_id = first["eventId"].as_str().expect("event id");
+    let failure_lines: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("batch failed") && line.contains(space.as_str()))
+        .collect();
+    assert!(!failure_lines.is_empty(), "no failure line: {log}");
+    assert!(
+        failure_lines.iter().all(|line| line.contains(event_id)
+            && line.contains(first["collection"].as_str().expect("collection"))
+            && line.contains(first["rkey"].as_str().expect("rkey"))),
+        "a failure line does not name the event: {failure_lines:?}"
+    );
+    assert!(
+        failure_lines.iter().all(|line| line.len() < 4096),
+        "a failure line is batch-sized: {} bytes",
+        failure_lines
+            .iter()
+            .map(|line| line.len())
+            .max()
+            .unwrap_or(0)
+    );
+    assert!(
+        log.lines()
+            .any(|line| line.contains("poisoned until restart") && line.contains(space.as_str())),
+        "giving up is its own line: {log}"
+    );
+
+    // Given up means given up: no further attempt reaches the sink.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        attempts.load(Ordering::Relaxed) as u32,
+        PERMANENT_ATTEMPT_LIMIT,
+        "the poisoned space is still retrying"
+    );
+
+    // And stopping it is not held up by a wait it no longer needs.
+    let stopping = Instant::now();
+    supervisor.stop();
+    assert!(
+        stopping.elapsed() < Duration::from_secs(1),
+        "stopping took {:?}",
+        stopping.elapsed()
+    );
+}
+
+/// A busy database is not the data's answer: it can clear, so the space keeps
+/// attempting it under the backoff and is never poisoned.
+#[test]
+fn a_busy_database_keeps_retrying_and_never_poisons() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let space = SpaceDid::parse("did:web:busy.example".to_string()).expect("space DID");
+    let config = config(dir.path());
+    build_events_db(&config.events_db, std::slice::from_ref(&space));
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&attempts);
+    let supervisor = Supervisor::new(config.clone()).with_sink(Arc::new(move || {
+        Ok(Box::new(RefusingSink {
+            attempts: Arc::clone(&counted),
+            error: database_busy,
+        }) as Box<dyn GlobalSink>)
+    }));
+    supervisor
+        .start_all([space.clone()])
+        .expect("the actor starts");
+
+    let window = Duration::from_secs(4);
+    std::thread::sleep(window);
+    let made = attempts.load(Ordering::Relaxed);
+    assert!(
+        made > PERMANENT_ATTEMPT_LIMIT as usize,
+        "a transient failure stopped the attempts: {made} in {window:?}"
+    );
+
+    let health = supervisor
+        .health()
+        .into_iter()
+        .find(|health| health.space == space.as_str())
+        .expect("a health row for the space");
+    assert!(
+        health.poisoned.is_none(),
+        "a lock the next attempt may find clear was treated as permanent"
+    );
+    assert_eq!(health.to_value()["poisoned"], serde_json::json!(false));
+    assert!(health.last_error.is_some(), "the failure is still reported");
+    assert!(!health.is_healthy());
+
+    supervisor.stop();
+}
+
+/// A batch that applies after a failure leaves both the error and any poison
+/// behind, and the projection carries on from it.
+#[test]
+fn a_batch_that_applies_clears_the_failure() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let space = SpaceDid::parse("did:web:recovers.example".to_string()).expect("space DID");
+    let config = config(dir.path());
+    build_events_db(&config.events_db, std::slice::from_ref(&space));
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&attempts);
+    let global_db = config.global_db.clone();
+    let supervisor = Supervisor::new(config.clone()).with_sink(Arc::new(move || {
+        Ok(Box::new(RecoveringSink {
+            // Below the bound: the actor is still retrying when the data stops
+            // refusing the batch, which is the case a poisoned space cannot
+            // reach — a poisoned actor has no attempt left to recover with.
+            failures: (PERMANENT_ATTEMPT_LIMIT - 1) as usize,
+            attempts: Arc::clone(&counted),
+            inner: SqliteGlobalSink::open(&global_db)?,
+        }) as Box<dyn GlobalSink>)
+    }));
+    supervisor
+        .start_all([space.clone()])
+        .expect("the actor starts");
+
+    wait_for_catch_up(
+        &config,
+        std::slice::from_ref(&space),
+        Duration::from_secs(20),
+    );
+
+    assert!(
+        attempts.load(Ordering::Relaxed) >= PERMANENT_ATTEMPT_LIMIT as usize,
+        "the space never failed before it applied"
+    );
+    let health = supervisor
+        .health()
+        .into_iter()
+        .find(|health| health.space == space.as_str())
+        .expect("a health row for the space");
+    assert_eq!(
+        health.last_error, None,
+        "the applied batch cleared the error"
+    );
+    assert_eq!(health.poisoned, None, "and left no poison behind");
+    assert!(health.is_healthy());
+    assert!(
+        health.cursor.0 >= 0,
+        "the projection advanced past the failure"
+    );
+
+    supervisor.stop();
 }

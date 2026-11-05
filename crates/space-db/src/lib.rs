@@ -56,6 +56,26 @@ pub enum DbError {
     Fenced { granted: i64, stored: i64 },
 }
 
+impl DbError {
+    /// The SQLite error underneath, when the database raised one.
+    ///
+    /// A caller that has to decide whether a failure can clear reads it: a
+    /// constraint is the data's answer, a busy file is not.
+    #[must_use]
+    pub fn sqlite(&self) -> Option<&rusqlite::Error> {
+        match self {
+            Self::Sqlite(error) | Self::Derived(derived::DerivedError::Sqlite(error)) => {
+                Some(error)
+            }
+            Self::Derived(derived::DerivedError::Json(_))
+            | Self::Step(_)
+            | Self::Rule(_)
+            | Self::Stamp(_)
+            | Self::Fenced { .. } => None,
+        }
+    }
+}
+
 /// A per-space database.
 pub struct SpaceDb {
     conn: Connection,
