@@ -238,7 +238,7 @@ prints the account it resolved.
 
 ## Capacity enforcement (Roomy Pro)
 
-Bridged (guild, space) tuples are checked against `space.roomy.admin.getSpaceMembership`, which reports the space's member count vs its token capacity (`maxMembers`). Decisions are cached for 300s per tuple; the bridge re-checks at startup, every 5 minutes, and on `guildMemberAdd`/`guildMemberRemove`.
+Bridged (guild, space) tuples are checked against `space.roomy.admin.getSpaceMembership`, which reports the guild's member count vs the space's token capacity (`maxMembers`). The count it enforces against is the **guild's**, sent as the `memberCount` parameter — the population whose messages the space receives, and the population the spend rule is defined against. The space's Roomy membership travels back as `spaceMemberCount` for information only. Decisions are cached for 300s per tuple; the bridge re-checks at startup, every 5 minutes, and on `guildMemberAdd`/`guildMemberRemove`.
 
 Two thresholds drive the policy:
 

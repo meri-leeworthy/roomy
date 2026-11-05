@@ -30,6 +30,16 @@ export function optionalString(
 	return value;
 }
 
+/**
+ * Parse an integer param. With a `default`, a missing param yields it; with
+ * none, a missing param yields `undefined` so the caller states what absence
+ * means for it. A present-but-malformed value is always a 400.
+ */
+export function optionalInt(
+	params: QueryParams,
+	key: string,
+	opts?: { min?: number; max?: number },
+): number | undefined;
 export function optionalInt(
 	params: QueryParams,
 	key: string,

@@ -66,6 +66,30 @@ describe("XrpcMembershipClient", () => {
 		expect(result.tokens[0]?.grantorDid).toBe("did:plc:grantor");
 	});
 
+	test("carries the space's Roomy count alongside the guild's", async () => {
+		const xrpc = new StubXrpc();
+		xrpc.response = { ...validResponse(), memberCount: 5000, spaceMemberCount: 12 };
+		const client = new XrpcMembershipClient(xrpc as never);
+
+		const result = await client.getSpaceMembership(SPACE, 5000);
+
+		// Two populations, reported separately: the guild's is what capacity
+		// is measured against, the space's is informational.
+		expect(result.memberCount).toBe(5000);
+		expect(result.spaceMemberCount).toBe(12);
+	});
+
+	test("accepts a response with no spaceMemberCount (space never swept)", async () => {
+		const xrpc = new StubXrpc();
+		xrpc.response = validResponse();
+		const client = new XrpcMembershipClient(xrpc as never);
+
+		const result = await client.getSpaceMembership(SPACE, 5);
+
+		expect(result.spaceMemberCount).toBeUndefined();
+		expect(result.memberCount).toBe(5);
+	});
+
 	test("maps an XRPC error with status to XrpcMembershipError", async () => {
 		const xrpc = new StubXrpc();
 		xrpc.error = Object.assign(new Error("Forbidden"), {

@@ -59,6 +59,24 @@ export async function selectMemberCount(
   return row?.member_count ?? 0;
 }
 
+/**
+ * Read one space's precomputed member count from the global aggregate.
+ *
+ * `null` means the space has no `space_stats` row — it has never been swept,
+ * so its member count is UNKNOWN, not zero. Callers that need a number for a
+ * space whose row is missing must decide what unknown means for them
+ * (`admin.listSpaces` repairs it, then re-reads).
+ */
+export async function selectSpaceMemberCount(
+  globalDb: DbLike,
+  spaceDid: string,
+): Promise<number | null> {
+  const row = await globalDb
+    .query("select member_count from space_stats where space_did = ?")
+    .get<{ member_count: number }>(spaceDid);
+  return row?.member_count ?? null;
+}
+
 /** Upsert a space's aggregate row in the global DB. */
 export async function recordSpaceStats(
   globalDb: DbLike,

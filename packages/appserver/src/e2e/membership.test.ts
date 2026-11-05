@@ -12,7 +12,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { startAppserver, seedSpace, seedUser, spaceDb as routedSpaceDb, type E2eContext } from "./helpers.ts";
+import { startAppserver, globalDb, seedSpace, seedUser, spaceDb as routedSpaceDb, type E2eContext } from "./helpers.ts";
 import { _setAdminDids } from "../admin.ts";
 import { _clearPolarCache, setPolar, type PolarConfig } from "../billing/polar.ts";
 
@@ -122,8 +122,15 @@ function tokensUrl(ctx: E2eContext, spaceId: string): string {
   return `${ctx.baseUrl}/xrpc/space.roomy.space.getBridgeTokens?spaceId=${encodeURIComponent(spaceId)}`;
 }
 
-function membershipUrl(ctx: E2eContext, spaceId: string): string {
-  return `${ctx.baseUrl}/xrpc/space.roomy.admin.getSpaceMembership?spaceId=${encodeURIComponent(spaceId)}`;
+function membershipUrl(
+  ctx: E2eContext,
+  spaceId: string,
+  guildMemberCount?: number,
+): string {
+  const base = `${ctx.baseUrl}/xrpc/space.roomy.admin.getSpaceMembership?spaceId=${encodeURIComponent(spaceId)}`;
+  return guildMemberCount === undefined
+    ? base
+    : `${base}&memberCount=${guildMemberCount}`;
 }
 
 function grantBody(spaceId: string) {
@@ -291,11 +298,11 @@ describe("space.roomy.admin.getSpaceMembership", () => {
 
     await ctx.authedFetch(GRANTOR)(grantUrl(ctx), grantBody(SPACE));
 
-    const res = await ctx.authedFetch(ADMIN)(membershipUrl(ctx, SPACE));
+    const res = await ctx.authedFetch(ADMIN)(membershipUrl(ctx, SPACE, 2));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.spaceDid).toBe(SPACE);
-    // Grantor + MEMBER are both members.
+    // The guild's population, as the bridge reported it.
     expect(body.memberCount).toBe(2);
     expect(body.tokens).toHaveLength(1);
     expect(body.tokens[0]).toEqual({
@@ -311,18 +318,47 @@ describe("space.roomy.admin.getSpaceMembership", () => {
     expect(body.checkedAt).toBeTypeOf("number");
   });
 
-  test("spend at 101 members: >100 marks the token spent permanently", async () => {
+  test("the Roomy member count comes from the aggregate and never replaces the guild's", async () => {
     stubPolarState(proState());
     const ctx = await startTest();
     seedSpaceWithMember(ctx);
     await ctx.authedFetch(GRANTOR)(grantUrl(ctx), grantBody(SPACE));
 
-    // 99 more members → 101 total (grantor + MEMBER + 99 extras).
-    for (let i = 0; i < 99; i++) {
-      addMember(ctx, SPACE, `did:plc:e2e-extra-${i}`);
-    }
+    // Two Roomy members (grantor + MEMBER), a 5000-member guild.
+    await globalDb(ctx.db).run(
+      `insert into space_stats (space_did, member_count, updated_at)
+       values (?, ?, ?)
+       on conflict (space_did) do update set member_count = excluded.member_count`,
+      [SPACE, 2, Date.now()],
+    );
+
+    const res = await ctx.authedFetch(ADMIN)(membershipUrl(ctx, SPACE, 5000));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.memberCount).toBe(5000);
+    expect(body.spaceMemberCount).toBe(2);
+    expect(body.overLimit).toBe(true);
+  });
+
+  test("omitting memberCount → 400", async () => {
+    stubPolarState(proState());
+    const ctx = await startTest();
+    seedSpaceWithMember(ctx);
+    await ctx.authedFetch(GRANTOR)(grantUrl(ctx), grantBody(SPACE));
 
     const res = await ctx.authedFetch(ADMIN)(membershipUrl(ctx, SPACE));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("InvalidRequest");
+  });
+
+  test("spend at 101 guild members: >100 marks the token spent permanently", async () => {
+    stubPolarState(proState());
+    const ctx = await startTest();
+    seedSpaceWithMember(ctx);
+    await ctx.authedFetch(GRANTOR)(grantUrl(ctx), grantBody(SPACE));
+
+    const res = await ctx.authedFetch(ADMIN)(membershipUrl(ctx, SPACE, 101));
     const body = await res.json();
     expect(body.memberCount).toBe(101);
     expect(body.tokens[0]).toEqual({
