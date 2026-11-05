@@ -32,7 +32,11 @@ import type { Event } from "@roomy-space/sdk";
 import { deserializeBody, fromBytes, RICHTEXT_MIME } from "@roomy-space/sdk";
 import type { BridgeRepository } from "../db/repository.ts";
 import type { DiscordSender } from "../discord/sender.ts";
-import type { WebhookManager } from "../discord/webhook-manager.ts";
+import {
+	type WebhookInfo,
+	type WebhookManager,
+	WebhookUnavailableError,
+} from "../discord/webhook-manager.ts";
 import { BRIDGE_RECONNECT_BASE_MS, BRIDGE_RECONNECT_MAX_MS } from "../env.ts";
 import { createLogger } from "../logger.ts";
 import type {
@@ -61,6 +65,16 @@ const ROOMY_BACKFILL_PAGE_SIZE = 100;
 function describeError(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
+
+/**
+ * What a channel's webhook was needed for, and which Roomy messages are lost
+ * without it. One drop record is emitted per message id.
+ */
+type WebhookDrop = {
+	action: "send" | "edit" | "delete" | "forward" | "backfill";
+	messageIds: readonly string[];
+	discordChannelId: string;
+};
 
 /**
  * Resolve an attachment URI to a fetchable HTTP URL.
@@ -505,7 +519,12 @@ export class RoomyEventRouter {
 		}
 		if (sendContent === "" && files.length === 0) return false;
 
-		const webhook = await this.#webhooks.ensureWebhook(webhookChannelId);
+		const webhook = await this.#webhookOrDrop(webhookChannelId, {
+			action: "backfill",
+			messageIds: [msg.id],
+			discordChannelId,
+		});
+		if (!webhook) return false;
 		const discordMessageId = await this.#discord.sendMessage(
 			discordChannelId,
 			sendContent,
@@ -702,6 +721,45 @@ export class RoomyEventRouter {
 		}
 	}
 
+	/**
+	 * The webhook a channel needs, or undefined when Discord will not create
+	 * one and the caller's event cannot be delivered.
+	 *
+	 * A permanent refusal (missing permission, deleted channel, tokenless
+	 * response) cannot succeed however often it is tried, so the event is
+	 * dropped with one record per lost message naming Discord's status and
+	 * reason — the answer retrying cannot change. A transient failure is
+	 * rethrown instead, so the gateway holds its cursor and replays the event.
+	 */
+	async #webhookOrDrop(
+		webhookChannelId: string,
+		drop: WebhookDrop,
+	): Promise<WebhookInfo | undefined> {
+		try {
+			return await this.#webhooks.ensureWebhook(webhookChannelId);
+		} catch (err) {
+			if (!(err instanceof WebhookUnavailableError) || !err.permanent) {
+				throw err;
+			}
+			// Stable text on purpose: the log pipeline groups series by the
+			// message line, so the ids ride in the fields.
+			for (const messageId of drop.messageIds) {
+				log.error(
+					"Dropped Roomy event: Discord will not create a webhook for its channel",
+					{
+						action: drop.action,
+						messageId,
+						discordChannelId: drop.discordChannelId,
+						webhookChannelId,
+						discordStatus: err.status,
+						reason: err.reason,
+					},
+				);
+			}
+			return undefined;
+		}
+	}
+
 	async #handleCreateMessage(
 		spaceDid: string,
 		event: Event & { $type: "space.roomy.message.createMessage.v0" },
@@ -845,7 +903,12 @@ export class RoomyEventRouter {
 		}
 
 		// Get webhook for the target channel (or parent channel if thread)
-		const webhook = await this.#webhooks.ensureWebhook(webhookChannelId);
+		const webhook = await this.#webhookOrDrop(webhookChannelId, {
+			action: "send",
+			messageIds: [event.id],
+			discordChannelId,
+		});
+		if (!webhook) return;
 
 		// Send to Discord
 		try {
@@ -1113,7 +1176,12 @@ export class RoomyEventRouter {
 			webhookChannelId = parentId;
 		}
 
-		const webhook = await this.#webhooks.ensureWebhook(webhookChannelId);
+		const webhook = await this.#webhookOrDrop(webhookChannelId, {
+			action: "edit",
+			messageIds: [event.messageId],
+			discordChannelId,
+		});
+		if (!webhook) return;
 
 		try {
 			await this.#discord.editMessage(
@@ -1198,7 +1266,12 @@ export class RoomyEventRouter {
 			return;
 		}
 
-		const webhook = await this.#webhooks.ensureWebhook(webhookChannelId);
+		const webhook = await this.#webhookOrDrop(webhookChannelId, {
+			action: "delete",
+			messageIds: [event.messageId],
+			discordChannelId,
+		});
+		if (!webhook) return;
 		// Bridged messages are sent via the channel's webhook, so delete them via
 		// the webhook's own endpoint — the bot can't delete webhook-authored
 		// messages without the Manage Messages permission.
@@ -1477,7 +1550,12 @@ export class RoomyEventRouter {
 			webhookChannelId = parentId;
 			threadId = targetChannelId;
 		}
-		const webhook = await this.#webhooks.ensureWebhook(webhookChannelId);
+		const webhook = await this.#webhookOrDrop(webhookChannelId, {
+			action: "forward",
+			messageIds: event.messageIds,
+			discordChannelId: targetChannelId,
+		});
+		if (!webhook) return;
 
 		// The webhook user is the person who did the forward, so the forwarded
 		// message is attributed to them (not the bridge bot).
