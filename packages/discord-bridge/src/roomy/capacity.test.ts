@@ -15,6 +15,8 @@ import {
 	getCapacityGate,
 	setCapacityGate,
 	type CapacityDecision,
+	type MemberCountFailure,
+	type MemberCountLookup,
 	type MemberCountProvider,
 	type MembershipClient,
 	type SpaceMembership,
@@ -67,15 +69,16 @@ function makeClient(responses: SpaceMembership[] = []): MembershipClient & {
 function makeMemberCount(count: number | undefined): MemberCountProvider & {
 	calls: number;
 } {
-	let calls = 0;
-	return {
+	const provider = {
 		calls: 0,
 		async getMemberCount() {
-			calls++;
-			(this as { calls: number }).calls = calls;
-			return count;
+			provider.calls++;
+			return count === undefined
+				? ({ ok: false, failure: { permanent: false } } as const)
+				: ({ ok: true, count } as const);
 		},
 	};
+	return provider;
 }
 
 function makeService(
@@ -380,7 +383,9 @@ describe("CapacityService failure handling", () => {
 		let count: number | undefined = 50;
 		const memberCount: MemberCountProvider = {
 			async getMemberCount() {
-				return count;
+				return count === undefined
+					? { ok: false, failure: { permanent: false } }
+					: { ok: true, count };
 			},
 		};
 		const service = makeService(client, memberCount);
@@ -436,6 +441,177 @@ describe("CapacityService failure handling", () => {
 
 		expect(decision.enabled).toBe(true);
 	});
+
+	test("a failed lookup re-stores the decision, so gate checks stay off the network", async () => {
+		vi.useFakeTimers();
+		try {
+			const client = makeClient([
+				membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
+			]);
+			let lookup: MemberCountLookup = { ok: true, count: 50 };
+			let calls = 0;
+			const memberCount: MemberCountProvider = {
+				async getMemberCount() {
+					calls++;
+					return lookup;
+				},
+			};
+			const service = new CapacityService(client, memberCount, { ttlMs: 5 });
+
+			const first = await service.check(GUILD, SPACE);
+			expect(first.enabled).toBe(true);
+			expect(calls).toBe(1);
+
+			// The cached decision expires; the next check finds Discord failing.
+			vi.advanceTimersByTime(10);
+			lookup = { ok: false, failure: { status: 503, permanent: false } };
+			const second = await service.check(GUILD, SPACE);
+			expect(second).toMatchObject({ enabled: true, memberCount: 50 });
+			expect(calls).toBe(2);
+
+			// The failure branch re-stored the decision with a fresh TTL: an
+			// immediate gate check performs no provider call…
+			await service.check(GUILD, SPACE);
+			expect(calls).toBe(2);
+
+			// …and neither does one after the pre-failure entry would have expired.
+			vi.advanceTimersByTime(10);
+			const later = await service.check(GUILD, SPACE);
+			expect(later).toMatchObject({ enabled: true, memberCount: 50 });
+			expect(calls).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("a transient failure is retried by forced checks, not by gate calls", async () => {
+		const client = makeClient([
+			membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
+			membership({ memberCount: 60, maxMembers: 100, overLimit: false }),
+		]);
+		let lookup: MemberCountLookup = { ok: true, count: 50 };
+		let calls = 0;
+		const memberCount: MemberCountProvider = {
+			async getMemberCount() {
+				calls++;
+				return lookup;
+			},
+		};
+		const service = makeService(client, memberCount);
+
+		await service.check(GUILD, SPACE);
+		expect(calls).toBe(1);
+
+		lookup = { ok: false, failure: { status: 503, permanent: false } };
+		await service.check(GUILD, SPACE, { force: true }); // sweep fails
+		expect(calls).toBe(2);
+
+		await service.check(GUILD, SPACE); // gate calls are served from cache
+		await service.check(GUILD, SPACE);
+		expect(calls).toBe(2);
+
+		lookup = { ok: true, count: 60 };
+		await service.check(GUILD, SPACE, { force: true }); // next sweep retries
+		expect(calls).toBe(3);
+		expect(client.calls.length).toBe(2);
+	});
+
+	test("a permanent refusal is logged once with its status and not retried per message", async () => {
+		startLogCapture();
+		vi.useFakeTimers();
+		try {
+			const client = makeClient([]);
+			let calls = 0;
+			const memberCount: MemberCountProvider = {
+				async getMemberCount() {
+					calls++;
+					return {
+						ok: false,
+						failure: {
+							status: 404,
+							code: 10004,
+							message: "Unknown Guild",
+							permanent: true,
+						},
+					};
+				},
+			};
+			const service = new CapacityService(client, memberCount, { ttlMs: 1 });
+
+			// Gate traffic: many consultations, only one provider call.
+			for (let i = 0; i < 25; i++) {
+				const decision = await service.check(GUILD, SPACE);
+				expect(decision.enabled).toBe(true);
+			}
+			vi.advanceTimersByTime(5);
+			await service.check(GUILD, SPACE);
+			expect(calls).toBe(1);
+			expect(client.calls.length).toBe(0);
+
+			const degraded = captured.filter(
+				(line) => line.degraded === "member-count-unavailable",
+			);
+			expect(degraded.length).toBe(1);
+			expect(degraded[0]).toMatchObject({
+				guildId: GUILD,
+				status: 404,
+				discordCode: 10004,
+				permanent: true,
+			});
+
+			// The sweep's forced check is the retry path.
+			await service.check(GUILD, SPACE, { force: true });
+			expect(calls).toBe(2);
+			expect(
+				captured.filter(
+					(line) => line.degraded === "member-count-unavailable",
+				).length,
+			).toBe(1);
+		} finally {
+			vi.useRealTimers();
+			stopLogCapture();
+		}
+	});
+
+	test("recovery from a permanent refusal leaves the degraded state once", async () => {
+		startLogCapture();
+		try {
+			let failure: MemberCountFailure | undefined = {
+				status: 403,
+				code: 50001,
+				permanent: true,
+			};
+			const client = makeClient([
+				membership({ memberCount: 50, maxMembers: 100, overLimit: false }),
+			]);
+			const memberCount: MemberCountProvider = {
+				async getMemberCount() {
+					return failure
+						? { ok: false, failure }
+						: { ok: true, count: 50 };
+				},
+			};
+			const service = makeService(client, memberCount);
+
+			await service.check(GUILD, SPACE); // enters degraded state
+			failure = undefined;
+			await service.check(GUILD, SPACE); // gate check does not retry
+			expect(client.calls.length).toBe(0);
+
+			await service.check(GUILD, SPACE, { force: true }); // sweep recovers
+			const recovered = captured.filter((line) => line.degraded === false);
+			expect(recovered.length).toBe(1);
+			expect(recovered[0]).toMatchObject({
+				guildId: GUILD,
+				status: 403,
+				discordCode: 50001,
+				permanent: false,
+			});
+		} finally {
+			stopLogCapture();
+		}
+	});
+
 });
 
 describe("CapacityService state-change callback", () => {
