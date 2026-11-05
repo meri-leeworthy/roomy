@@ -145,13 +145,14 @@ export const prose: Record<string, EndpointProse> = {
       properties: {
         spaces: {
           type: "Array<SpaceRow>",
-          description: "List of spaces the caller has access to. Each SpaceRow has: id, name, avatar, description, handle, hasUnreads, isMember, isAdmin, roleIds.",
+          description: "List of spaces the caller has access to. Each SpaceRow has: id, name, avatar, description, handle, hasUnreads, isMember, isAdmin, roleIds, suggestToOthers.",
         },
       },
     },
     notes: [
       "isMember and isAdmin are independent — both, either, or neither may be true.",
       "hasUnreads is computed only over rooms the caller has read access to. It is a level, not a count — the per-room unread badges come from space.getMetadata's sidebar.",
+      "suggestToOthers is null while no admin has answered the suggestion setting (which reads as suggested), and absent when the space has no comp_space row to answer.",
       "Hydrates the caller's membership (joinedSpace edges), then queries local SQLite for the union.",
     ],
     invalidation: [
@@ -160,6 +161,25 @@ export const prose: Record<string, EndpointProse> = {
       "Caller's role assignments change",
       "hasUnreads flips: a message makes a previously-unread-free space unread, or a read drains its last unread room",
       "A role's room permissions change affecting reachable rooms",
+    ],
+  },
+  "space.roomy.space.getDiscoverableSpaces": {
+    description:
+      "Returns spaces that may be suggested to people who are not members: public to join (allow_public_join unset or 1) and not opted out of being suggested (suggest_to_others unset or 1). Backs the homepage's Discover Spaces section. Ordered by member count, then space DID.",
+    auth: "UNAUTHENTICATED. The response carries nothing per-caller, and both settings it filters on are public space policy.",
+    params: [
+      { name: "limit", type: "int", required: false, default: "20", description: "Spaces per page (1-50)." },
+    ],
+    outputSchema: {
+      type: "object",
+      properties: {
+        spaces: { type: "Array<{ id: string }>", description: "Discoverable space DIDs, most populated first." },
+      },
+    },
+    notes: [
+      "Both settings live in each space's comp_space, so the answer comes from the global space_discovery projection (written by materialisation and reconciled by the boot sweep) — the read opens no per-space DB.",
+      "Display fields are not returned; a card fetches them from space.getMetadata.",
+      "Explicitly opted-out spaces (suggest_to_others=0) and invite-only spaces can never appear, because the filter is applied server-side.",
     ],
   },
   "space.roomy.space.getMetadata": {

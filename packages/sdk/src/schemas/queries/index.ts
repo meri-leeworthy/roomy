@@ -5,6 +5,7 @@
  *   queries.getSpaces.Response(json);
  */
 export * as getSpaces from "./getSpaces";
+export * as getDiscoverableSpaces from "./getDiscoverableSpaces";
 export * as getActivityFeed from "./getActivityFeed";
 export * as getSpaceMetadata from "./getSpaceMetadata";
 export * as getSpaceSummary from "./getSpaceSummary";

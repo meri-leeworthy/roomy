@@ -25,6 +25,7 @@ import { applyBatch } from "../materialization/applyBatch.ts";
 import { log } from "../log.ts";
 import { runPendingGlobalMigrations } from "../db/globalMigrations.ts";
 import { refreshSpaceStats } from "../queries/spaceStats.ts";
+import { refreshSpaceDiscovery } from "../queries/spaceDiscovery.ts";
 import { upgradeSpaceInPlace, carrySpaceHandleToGlobal, carryLinkEmbedsToGlobal } from "../db/spaceMigrations.ts";
 import { sweepReadStateWatermarks } from "../db/readStateWatermarks.ts";
 import { isTransientDbError } from "../db/transient.ts";
@@ -320,6 +321,20 @@ export async function reMaterializeFromLocalEvents(
         );
       }
 
+      // Publish this space's `space_discovery` row from the same sweep. The
+      // discovery read filters on settings that live only in the space's own
+      // DB, so a per-request read would open every space; like `space_stats`,
+      // running it here on every boot self-heals every existing dataset.
+      // Idempotent.
+      try {
+        await refreshSpaceDiscovery(db, stream_id as StreamDid);
+      } catch (err) {
+        log.warn(
+          "startup",
+          `space_discovery refresh failed for ${stream_id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       // The materialization_cursor lives in the per-space DB (each
       // space DB is self-describing about its own re-materialization state),
       // not the event-log DB. Read it from the per-space handle. Streams
@@ -415,6 +430,14 @@ export async function reMaterializeFromLocalEvents(
         log.warn(
           "startup",
           `space_stats refresh failed for ${streamId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      try {
+        await refreshSpaceDiscovery(db, streamId as StreamDid);
+      } catch (err) {
+        log.warn(
+          "startup",
+          `space_discovery refresh failed for ${streamId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
 
