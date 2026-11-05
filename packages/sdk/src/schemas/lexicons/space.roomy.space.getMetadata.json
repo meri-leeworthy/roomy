@@ -615,6 +615,9 @@
             "name": {
               "type": "string"
             },
+            "showJoinNotices": {
+              "type": "boolean"
+            },
             "suggestToOthers": {
               "type": "boolean"
             }

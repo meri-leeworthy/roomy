@@ -166,6 +166,8 @@ export interface SpaceInfoRecord {
   readonly allowMemberInvites: boolean | null;
   /** `null` = admins have not answered; reads as suggested. */
   readonly suggestToOthers: boolean | null;
+  /** `null` = admins have not answered; reads as shown. */
+  readonly showJoinNotices: boolean | null;
 }
 
 /**

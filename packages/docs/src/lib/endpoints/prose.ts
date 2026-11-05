@@ -177,6 +177,7 @@ export const prose: Record<string, EndpointProse> = {
         description: { type: "string | null", description: "Space description." },
         joinPolicy: { type: "object", description: "allowPublicJoin (default true), allowMemberInvites (default false)." },
         suggestToOthers: { type: "boolean", description: "Whether the space may be suggested to other users. Absent while an admin has not answered (which reads as yes); false is an explicit opt-out." },
+        showJoinNotices: { type: "boolean", description: "Whether join notices (\"X joined the space.\") appear in this space's rooms. Absent while an admin has not answered (which reads as shown); false hides them at the query, without deleting the stored events." },
         isMember: { type: "boolean", description: "Caller has 'member' edge." },
         isAdmin: { type: "boolean", description: "Caller has 'admin' edge (orthogonal to membership)." },
         sidebar: { type: "object", description: "Sidebar tree with categories, channels, orphans. Each channel has: id, name, defaultAccess, canRead, canWrite, unreadCount, lastRead." },

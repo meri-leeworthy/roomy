@@ -153,4 +153,58 @@ describe("materialize", () => {
       expect(s.sql as string).not.toContain("suggest_to_others");
     }
   });
+
+  test("updateSpaceInfo maps showJoinNotices onto the comp_space column", () => {
+    // Three-valued like `suggest_to_others`: an explicit false is stored as 0,
+    // an explicit true as 1, and an event that never mentions the field leaves
+    // the column alone so an unanswered space stays unanswered.
+    const off = materialize(
+      {
+        $type: "space.roomy.space.updateSpaceInfo.v0",
+        id: newUlid(),
+        showJoinNotices: false,
+      } as unknown as Event,
+      { streamId: STREAM, user: USER },
+      6 as StreamIndex,
+    );
+    expect(off.status).toBe("success");
+    if (off.status !== "success") return;
+    const upsert = off.statements.find((s) =>
+      (s.sql as string).includes("show_join_notices"),
+    );
+    expect(upsert).toBeDefined();
+    expect(upsert!.sql).toContain("insert into comp_space");
+    expect(upsert!.params).toMatchObject({ ":show_join_notices": 0 });
+
+    const on = materialize(
+      {
+        $type: "space.roomy.space.updateSpaceInfo.v0",
+        id: newUlid(),
+        showJoinNotices: true,
+      } as unknown as Event,
+      { streamId: STREAM, user: USER },
+      7 as StreamIndex,
+    );
+    expect(on.status).toBe("success");
+    if (on.status !== "success") return;
+    const onUpsert = on.statements.find((s) =>
+      (s.sql as string).includes("show_join_notices"),
+    );
+    expect(onUpsert!.params).toMatchObject({ ":show_join_notices": 1 });
+
+    const silent = materialize(
+      {
+        $type: "space.roomy.space.updateSpaceInfo.v0",
+        id: newUlid(),
+        name: "Renamed",
+      } as unknown as Event,
+      { streamId: STREAM, user: USER },
+      8 as StreamIndex,
+    );
+    expect(silent.status).toBe("success");
+    if (silent.status !== "success") return;
+    for (const s of silent.statements) {
+      expect(s.sql as string).not.toContain("show_join_notices");
+    }
+  });
 });

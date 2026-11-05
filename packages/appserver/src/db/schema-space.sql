@@ -140,6 +140,14 @@ create table if not exists comp_space (
   -- table cannot be added by re-exec'ing this file, so the worker heals
   -- pre-existing DBs with an idempotent ALTER (no SPACE_SCHEMA_VERSION bump).
   suggest_to_others integer check(suggest_to_others in (0, 1)),
+  -- Whether join notices ("X joined the space.") render in this space's
+  -- rooms. null = admins have not answered (reads as shown, the behaviour
+  -- every space had before the setting existed); 0 = hidden. Three-valued for
+  -- the same reason as `suggest_to_others`: an unanswered space must keep
+  -- rendering notices, and a migration over spaces whose admins never
+  -- answered must not turn a default into a decision. Read at query time by
+  -- selectMessages; the notice rows themselves are never deleted.
+  show_join_notices integer check(show_join_notices in (0, 1)),
   created_at integer not null default (unixepoch() * 1000),
   updated_at integer not null default (unixepoch() * 1000)
 ) strict;

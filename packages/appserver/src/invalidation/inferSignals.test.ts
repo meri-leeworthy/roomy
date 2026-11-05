@@ -1247,6 +1247,62 @@ describe("inferSignals: space events", () => {
     expect(nsids).toHaveLength(1);
   });
 
+  it("updateSpaceInfo invalidates each channel's message page only when the join-notice answer changes", async () => {
+    const { db, asyncDb } = seedMessageDb({
+      id: EVENT_ID,
+      roomId: ROOM_ID,
+      authorDid: USER_DID,
+      authorName: "Alice",
+      content: "hello",
+    });
+    const CHANNEL = "01HXSXKBQ4TESTCHAN0000000001";
+    const THREAD = "01HXSXKBQ4TESTTHRD0000000001";
+    for (const id of [CHANNEL, THREAD]) {
+      db.run("insert into entities (id, stream_id) values (?, ?)", [id, STREAM_DID]);
+    }
+    db.run("insert into comp_room (entity, label) values (?, ?)", [
+      CHANNEL,
+      "space.roomy.channel",
+    ]);
+    db.run("insert into comp_room (entity, label) values (?, ?)", [
+      THREAD,
+      "space.roomy.thread",
+    ]);
+
+    const changedRooms = (await inferSignals(
+      makeEvent({
+        type: "space.roomy.space.updateSpaceInfo.v0",
+        details: { showJoinNotices: false },
+      }),
+      asyncDb,
+    ))
+      .filter(
+        (s): s is { kind: "queryInvalidation"; signal: QueryInvalidation } =>
+          s.kind === "queryInvalidation" &&
+          s.signal.nsid === "space.roomy.room.getMessages",
+      )
+      .map((s) => s.signal.params["roomId"]);
+    // The answer changes what a mounted timeline returns, so it is invalidated
+    // in every channel — a thread has no join notices of its own.
+    expect(changedRooms).toEqual([CHANNEL]);
+
+    // A rename renders outside the timeline: no per-channel frames.
+    const renamedRooms = (await inferSignals(
+      makeEvent({
+        type: "space.roomy.space.updateSpaceInfo.v0",
+        details: { showJoinNotices: undefined },
+      }),
+      asyncDb,
+    ))
+      .filter(
+        (s): s is { kind: "queryInvalidation"; signal: QueryInvalidation } =>
+          s.kind === "queryInvalidation" &&
+          s.signal.nsid === "space.roomy.room.getMessages",
+      )
+      .map((s) => s.signal.params["roomId"]);
+    expect(renamedRooms).toEqual([]);
+  });
+
   it("joinSpace invalidates space queries + the joining user's space list", async () => {
     const signals = await inferSignals(
       makeEvent({
@@ -1266,6 +1322,14 @@ describe("inferSignals: space events", () => {
     expect(userScoped.some((s) => s.signal.affectedUser === USER_DID)).toBe(
       true,
     );
+
+    // A join is announced by a row the materialiser writes, not by a message
+    // event, so the live path never pushes a `#messageDiff` for it. That row
+    // is on the room's next read when the space shows join notices and is
+    // filtered out by the query when it does not; a diff would have to be
+    // right for every viewer of the room at once, which is why there is none.
+    expect(findMessageDiff(signals)).toBeUndefined();
+    expect(findMentionDiffs(signals)).toEqual([]);
   });
 
   it("addAdmin invalidates space queries + target user's view", async () => {

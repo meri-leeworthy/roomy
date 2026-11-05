@@ -579,6 +579,9 @@ export function toRecordChanges(
           ...(event.suggestToOthers === undefined
             ? {}
             : { suggestToOthers: event.suggestToOthers }),
+          ...(event.showJoinNotices === undefined
+            ? {}
+            : { showJoinNotices: event.showJoinNotices }),
         }),
       ];
 
