@@ -41,6 +41,11 @@ import {
 	setCapacityGate,
 	type CapacityDecision,
 } from "./roomy/capacity.ts";
+import {
+	CAPACITY_SWEEP_TICK_MS,
+	CapacitySweep,
+	forceCheckTuples,
+} from "./roomy/capacity-sweep.ts";
 import type { RoomyGateway } from "./roomy/gateway.ts";
 import { LiveRoomyGateway } from "./roomy/live-gateway.ts";
 import { LiveProfileResolver } from "./roomy/live-profile-resolver.ts";
@@ -147,14 +152,6 @@ function notifyAdmins(
 	}
 }
 
-/** Force a capacity check for every (guild, space) bridge config. */
-function checkAllBridges(repo: BridgeRepository): void {
-	if (!capacity) return;
-	for (const config of repo.listAllBridgeConfigs()) {
-		void capacity.check(config.guildId, config.spaceDid, { force: true });
-	}
-}
-
 async function main() {
 	log.info("bridge starting");
 	await mkdir(BRIDGE_DATA_DIR(), { recursive: true });
@@ -213,7 +210,7 @@ async function main() {
 					// a member count reaches 2x the space's capacity and
 					// resumes automatically once it drops below that; admins
 					// are notified (system channel) on threshold crossings.
-					capacity = new CapacityService(
+					const capacityService = new CapacityService(
 						new XrpcMembershipClient(spaceManager.xrpc),
 						new DiscordMemberCountProvider(bot),
 						{
@@ -228,26 +225,33 @@ async function main() {
 							},
 						},
 					);
-					setCapacityGate(capacity);
+					capacity = capacityService;
+					setCapacityGate(capacityService);
 					log.info(
 						systemMessagesConfigured()
 							? "capacity: system-message notifications enabled (SYSTEM_SPACE/SYSTEM_CHANNEL set)"
 							: "capacity: system-message notifications disabled (set SYSTEM_SPACE/SYSTEM_CHANNEL to enable)",
 					);
 
-					// Startup: check every bridged (guild, space) tuple.
-					checkAllBridges(repo);
+					// Startup: force a check for every bridged (guild, space)
+					// tuple, a few at a time.
+					void forceCheckTuples(
+						capacityService,
+						repo.listAllBridgeConfigs(),
+					).catch((err) => log.error("Capacity startup check failed", err));
 
-					// Periodic sweep: every 5 minutes, force-refresh all
-					// bridged tuples so capacity changes are picked up even
-					// without member add/remove events.
+					// Periodic sweep: visit the bridged tuples in slices, so a
+					// capacity change that arrives without a member add/remove
+					// event is picked up without a periodic burst of requests.
+					// The sweep revalidates on its own reuse window rather than
+					// forcing, so it never refetches a decision a read path has
+					// already refreshed.
+					const capacitySweep = new CapacitySweep(capacityService, repo);
 					setInterval(() => {
-						try {
-							checkAllBridges(repo);
-						} catch (err) {
-							log.error("Capacity sweep failed", err);
-						}
-					}, 5 * 60 * 1000);
+						capacitySweep
+							.tick()
+							.catch((err) => log.error("Capacity sweep failed", err));
+					}, CAPACITY_SWEEP_TICK_MS);
 
 					// Create adapters and run backfill. The sender is created
 					// first so runBackfill can install it for the
@@ -453,10 +457,10 @@ async function main() {
 					// Capacity trigger: a member joined — force a re-check so
 					// a guild that just crossed its space's capacity halts sync
 					// promptly (and DMs the owner).
-					for (const config of configs) {
-						void capacity?.check(config.guildId, config.spaceDid, {
-							force: true,
-						});
+					if (capacity) {
+						void forceCheckTuples(capacity, configs).catch((err) =>
+							log.error("Capacity check on member join failed", err),
+						);
 					}
 
 					if (targetSpaces.length === 0) return;
@@ -481,10 +485,10 @@ async function main() {
 					// Capacity trigger: a member left — force a re-check so a
 					// guild that dropped back under its space's capacity
 					// resumes sync automatically.
-					for (const config of configs) {
-						void capacity?.check(config.guildId, config.spaceDid, {
-							force: true,
-						});
+					if (capacity) {
+						void forceCheckTuples(capacity, configs).catch((err) =>
+							log.error("Capacity check on member leave failed", err),
+						);
 					}
 				},
 			},
