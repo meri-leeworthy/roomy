@@ -14,7 +14,7 @@
   import SyncStatusBanner from "./SyncStatusBanner.svelte";
   import SearchBar from "./SearchBar.svelte";
   import ServerBar from "$lib/components/sidebar/ServerBar.svelte";
-  import EnableNotificationsBanner from "./EnableNotificationsBanner.svelte";
+  import PushBanner from "./PushBanner.svelte";
   import {
     isSoftKeyboardOpen,
     mayStartSidebarSwipe,
@@ -115,7 +115,7 @@
   ontouchmove={handleTouchMove}
   ontouchend={handleTouchEnd}
 >
-  <EnableNotificationsBanner />
+  <PushBanner />
   <Navbar {compact} class={compact ? "h-11 dark:bg-base-900/20" : "dark:bg-base-900/20"}>
     <!-- Page-provided navbar content is visually hidden while the mobile
          searchbar is expanded (the searchbar takes over the whole navbar in

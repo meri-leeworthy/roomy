@@ -42,6 +42,7 @@ import {
 import { trackMeasurement } from "./telemetry/faro";
 import { setAppserverOrigin } from "./appserver-origin";
 import { subscribeIfAlreadyPermitted, clearPushSubscription } from "./push.svelte";
+import { noteLoginPushOutcome } from "./push-notice.svelte";
 import { saveLastLogin } from "./last-login.svelte";
 import {
   consumeReturnUrl,
@@ -296,7 +297,9 @@ export async function init() {
       // Re-register this device's push subscription in case the browser
       // rotated the endpoint (Chrome/FCM does this periodically). No-op if
       // push is unsupported/unconfigured or permission was never granted.
-      void subscribeIfAlreadyPermitted();
+      // Detached: the outcome is counted and, if real, shown once as a
+      // notice; login never waits for it.
+      void subscribeIfAlreadyPermitted().then(noteLoginPushOutcome);
       return;
     }
 
@@ -341,7 +344,9 @@ export async function init() {
       // Re-register this device's push subscription in case the browser
       // rotated the endpoint (Chrome/FCM does this periodically). No-op if
       // push is unsupported/unconfigured or permission was never granted.
-      void subscribeIfAlreadyPermitted();
+      // Detached: the outcome is counted and, if real, shown once as a
+      // notice; login never waits for it.
+      void subscribeIfAlreadyPermitted().then(noteLoginPushOutcome);
     }
   };
 

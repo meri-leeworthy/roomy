@@ -11,6 +11,7 @@
     clearPushSubscription,
     pushOutcomeMessage,
   } from "$lib/push.svelte";
+  import { notePushAttempt, pushNotice } from "$lib/push-notice.svelte";
   import {
     PUSH_UNAVAILABLE_MESSAGES,
     classifyPushUnavailable,
@@ -54,6 +55,22 @@
   let disabling = $state(false);
   let enableError = $state<string | null>(null);
 
+  /**
+   * What the last subscribe attempt on this device actually did. A
+   * subscription can outlive a broken push service, so "a subscription
+   * exists" is not the same state as "notifications arrive" — the attempt's
+   * outcome is the honest one, and it is what the user was shown as a notice.
+   */
+  const statusMessage = $derived.by(() => {
+    const outcome = pushNotice.lastOutcome;
+    // The blocked-permission note below already says this.
+    if (outcome === null) {
+      return endpoint ? "Notifications are on for this device." : null;
+    }
+    if (outcome.status === "denied" && permission === "denied") return null;
+    return pushOutcomeMessage(outcome);
+  });
+
   async function refreshStatus(): Promise<void> {
     if (isNative) {
       pushSupported = true;
@@ -94,14 +111,13 @@
     enabling = true;
     try {
       const outcome = await ensurePushSubscription();
+      notePushAttempt(outcome);
       if (outcome.status === "ok") {
         toast.success("Notifications enabled");
         // Suppress the enable-notifications banner on other pages
         localStorage.setItem("roomy.push.bannerDismissed", "1");
       } else {
-        const msg = pushOutcomeMessage(outcome);
-        enableError = msg;
-        toast.error(msg);
+        toast.error(pushOutcomeMessage(outcome));
       }
       await refreshStatus();
     } catch (e) {
@@ -119,6 +135,9 @@
     try {
       const outcome = await clearPushSubscription();
       if (outcome.status === "ok") {
+        // Turning notifications off is not a subscribe outcome; the row should
+        // stop claiming the last subscribe left this device enabled.
+        pushNotice.forgetOutcome();
         toast.success("Notifications disabled on this device");
       } else if (outcome.status !== "unsupported") {
         toast.error(pushOutcomeMessage(outcome));
@@ -153,6 +172,9 @@
       </p>
     {:else}
       <div class="flex flex-col gap-3">
+        {#if statusMessage !== null}
+          <p class="text-sm text-base-400">{statusMessage}</p>
+        {/if}
         {#if permission === "denied"}
           <p class="text-sm text-base-400">
             Notifications are blocked in your browser settings. Re-enable them

@@ -23,7 +23,8 @@
  * Everything is guarded and best-effort: push is a progressive enhancement.
  * If the browser lacks service workers / Push API / Notifications, or the
  * user denies permission, or the appserver has no VAPID key configured, we
- * silently skip — never breaking login.
+ * skip without breaking login. A login-time re-subscribe that genuinely fails
+ * is reported rather than swallowed — see `push-failure.ts`.
  */
 
 import { goto } from "$app/navigation";
@@ -228,44 +229,62 @@ export async function ensurePushSubscription(): Promise<PushOutcome> {
  * Re-register on login. Never prompts — there's no user gesture at login time,
  * and prompting unprompted on page load is poor UX (and blocked on Safari).
  * The settings page's "Enable notifications" button is the one place we
- * prompt. Outcome is logged but not surfaced (no toast at login).
+ * prompt.
+ *
+ * Returns the outcome it produced so the caller can count it and, for a real
+ * failure, tell the user (see `noteLoginPushOutcome`), and `null` when there
+ * was nothing to re-subscribe. Best-effort by contract: it never throws and
+ * never blocks login.
  *
  * Web: only when notification permission was already granted. Native: only
  * when a token was registered before, re-registered in case the platform
  * rotated it while we were signed out.
  */
-export async function subscribeIfAlreadyPermitted(): Promise<void> {
+export async function subscribeIfAlreadyPermitted(): Promise<PushOutcome | null> {
   console.debug("[push:login] subscribeIfAlreadyPermitted starting");
   if (nativePushSupported()) {
     const token = lastNativeToken();
     if (token === null) {
       console.debug("[push:login] no remembered native token, skipping");
-      return;
+      return null;
     }
     try {
       await registerNativeToken(token);
       console.info("[push:login] re-registered native device token");
+      return { status: "ok" };
     } catch (e) {
       // The login-time re-register is best-effort; the next login retries.
+      const message = e instanceof Error ? e.message : String(e);
       console.warn("[push:login] native re-register failed:", e);
+      return { status: "failed", message };
     }
-    return;
   }
   if (!supportsPush()) {
     console.debug("[push:login] push not supported, skipping");
-    return;
+    return { status: "unsupported" };
   }
   if (typeof Notification !== "undefined" && Notification.permission !== "granted") {
     console.debug("[push:login] permission not granted (", Notification.permission, "), skipping");
-    return;
+    return { status: "denied" };
   }
   console.debug("[push:login] calling subscribeAndRegister…");
-  const outcome = await subscribeAndRegister();
+  let outcome: PushOutcome;
+  try {
+    outcome = await subscribeAndRegister();
+  } catch (e) {
+    // `subscribeAndRegister` guards its own steps; this catch only keeps the
+    // "never throws" contract if it ever stops doing so, because the callers
+    // attach `.then` and nothing else.
+    const message = e instanceof Error ? e.message : String(e);
+    console.warn("[push:login] background re-subscribe threw:", e);
+    return { status: "failed", message };
+  }
   if (outcome.status !== "ok") {
     console.warn("[push:login] background re-subscribe failed:", outcome.status, "message" in outcome ? outcome.message : "");
   } else {
     console.info("[push:login] re-subscribe OK");
   }
+  return outcome;
 }
 
 /** Shared: fetch VAPID key → subscribe the SW push manager → register with appserver. */
