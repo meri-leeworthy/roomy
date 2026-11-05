@@ -7,7 +7,10 @@
  * first only recognised "the target is the room the reply lives in", which
  * missed the targets that are *other* rooms — the shape production actually
  * carried (a lobby reply targeting a thread id). These cases pin the wider
- * rule, so a regression back to the own-room-only comparison fails here.
+ * rule, so a regression back to the own-room-only comparison fails here. They
+ * also pin the second half: an index that has not answered yet makes the
+ * preview wait instead of ask, because "nothing has loaded" is not "nothing is
+ * a room".
  *
  * Written against `node:test` + `node:assert` (app-lite ships no test runner of
  * its own) so the file runs under `node --test --experimental-strip-types`.
@@ -15,7 +18,11 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { collectRoomIds, isNonMessageReplyTarget } from "./room-ids.ts";
+import {
+  isIndexedRoom,
+  mayAskForReplyTarget,
+  scanRoomIndex,
+} from "./room-ids.ts";
 
 const LOBBY = "01KZBRQMEP2FTE079YRVDFKGTA";
 const BRAMBLE = "01M2EX4PQYW94DBCX6PJVDDS7X";
@@ -81,51 +88,67 @@ function entry(nsid: string, data: unknown, params?: Record<string, unknown>) {
   return { queryKey: params ? [nsid, params] : [nsid], state: { data } };
 }
 
-describe("isNonMessageReplyTarget", () => {
+describe("mayAskForReplyTarget", () => {
   // The case the first guard covered, kept honest: a reply whose target is the
   // room it lives in needs no cache at all.
-  test("a target that IS the reply's own room is not a message", () => {
+  test("a target that IS the reply's own room is not asked about", () => {
     assert.equal(
-      isNonMessageReplyTarget(BRAMBLE, BRAMBLE, new Set()),
-      true,
+      mayAskForReplyTarget(BRAMBLE, BRAMBLE, scanRoomIndex([])),
+      false,
     );
   });
 
   // The defect: the target is a room, but not the reply's own. Knowable only
   // from the room listings the client holds — and under the own-room-only
-  // comparison this returned false, so the request went out and 400'd.
-  test("a target that is ANOTHER room is not a message", () => {
-    const ids = collectRoomIds([
-      entry(NSIDS.spaceMetadata, spaceMetadata),
-    ]);
-    assert.equal(isNonMessageReplyTarget(SORREL, LOBBY, ids), true);
+  // comparison this asked, and the request 400'd.
+  test("a target that is ANOTHER room is not asked about", () => {
+    const index = scanRoomIndex([entry(NSIDS.spaceMetadata, spaceMetadata)]);
+    assert.equal(mayAskForReplyTarget(SORREL, LOBBY, index), false);
   });
 
   // The exact production shape: a lobby reply whose target is a thread of
   // lobby. The sidebar does not list it; the channel's board does.
-  test("a lobby reply targeting a lobby thread is not a message", () => {
-    const ids = collectRoomIds([
+  test("a lobby reply targeting a lobby thread is not asked about", () => {
+    const index = scanRoomIndex([
       entry(NSIDS.spaceMetadata, spaceMetadata),
       entry(NSIDS.roomThreads, roomThreads, { roomId: LOBBY }),
     ]);
-    assert.equal(isNonMessageReplyTarget(LOBBY_THREAD, LOBBY, ids), true);
+    assert.equal(mayAskForReplyTarget(LOBBY_THREAD, LOBBY, index), false);
   });
 
-  // …and the same target is unrecognised without that listing, which is why
-  // this guard depends on the cache rather than the own-room comparison alone.
-  test("a thread target is unknown when no listing names it", () => {
-    const ids = collectRoomIds([
+  // …and the same target is unknown once the index has answered without naming
+  // it, which is why this guard depends on the cache rather than the own-room
+  // comparison alone.
+  test("a target no listing names is asked about once the index has answered", () => {
+    const index = scanRoomIndex([
       entry(NSIDS.spaceMetadata, spaceMetadata),
       entry(NSIDS.messages, [{ id: MESSAGE, replyTo: LOBBY_THREAD }], {
         roomId: LOBBY,
       }),
     ]);
-    assert.equal(isNonMessageReplyTarget(LOBBY_THREAD, LOBBY, ids), false);
+    assert.equal(mayAskForReplyTarget(LOBBY_THREAD, LOBBY, index), true);
+  });
+
+  // A cold load holds no listing at all. Asking then is what turned every
+  // replay of a room into a 400 for replies whose target is a room: the index
+  // was empty because nothing had arrived, not because nothing is a room.
+  test("nothing is asked about before the first listing arrives", () => {
+    const index = scanRoomIndex([
+      entry(NSIDS.messages, [{ id: MESSAGE, replyTo: LOBBY_THREAD }], {
+        roomId: LOBBY,
+      }),
+    ]);
+    assert.equal(index.ready, false);
+    assert.equal(mayAskForReplyTarget(LOBBY_THREAD, LOBBY, index), false);
+    assert.equal(
+      mayAskForReplyTarget("01UNKNOWN000000000000000000", LOBBY, index),
+      false,
+    );
   });
 
   // The guard must never suppress a lookup that could have succeeded.
   test("a real message target is asked about", () => {
-    const ids = collectRoomIds([
+    const index = scanRoomIndex([
       entry(NSIDS.spaceMetadata, spaceMetadata),
       entry(NSIDS.spaceThreads, spaceThreads),
       // The message list holds the message itself; a message id is not a room.
@@ -133,57 +156,94 @@ describe("isNonMessageReplyTarget", () => {
         roomId: LOBBY,
       }),
     ]);
-    assert.equal(isNonMessageReplyTarget(MESSAGE, LOBBY, ids), false);
+    assert.equal(mayAskForReplyTarget(MESSAGE, LOBBY, index), true);
   });
 
   test("an id in no listing at all is still asked about", () => {
-    const ids = collectRoomIds([entry(NSIDS.spaceMetadata, spaceMetadata)]);
-    assert.equal(isNonMessageReplyTarget("01UNKNOWN000000000000000000", LOBBY, ids), false);
+    const index = scanRoomIndex([entry(NSIDS.spaceMetadata, spaceMetadata)]);
+    assert.equal(
+      mayAskForReplyTarget("01UNKNOWN000000000000000000", LOBBY, index),
+      true,
+    );
   });
 
-  test("an empty target is not treated as a room", () => {
-    assert.equal(isNonMessageReplyTarget("", LOBBY, new Set([""])), false);
+  test("an empty target is not asked about", () => {
+    const index = scanRoomIndex([entry(NSIDS.spaceMetadata, spaceMetadata)]);
+    assert.equal(mayAskForReplyTarget("", LOBBY, index), false);
   });
 });
 
-describe("collectRoomIds", () => {
+describe("isIndexedRoom", () => {
+  // The link-summary prefetch warms a room only when the index names it.
+  test("a room the listing names is warmable", () => {
+    const index = scanRoomIndex([entry(NSIDS.spaceMetadata, spaceMetadata)]);
+    assert.equal(isIndexedRoom(LOBBY, index), true);
+  });
+
+  test("a room no listing names is not warmable", () => {
+    const index = scanRoomIndex([entry(NSIDS.spaceMetadata, spaceMetadata)]);
+    assert.equal(isIndexedRoom(LOBBY_THREAD, index), false);
+  });
+
+  // An index that holds a room-keyed query but no listing has not answered:
+  // its ids are this session's rooms, not the space's. Warming on that basis is
+  // the cold-load mistake in the other direction.
+  test("nothing is warmable before the first listing arrives", () => {
+    const index = scanRoomIndex([
+      entry(NSIDS.messages, [{ id: MESSAGE }], { roomId: LOBBY }),
+    ]);
+    assert.equal(index.rooms.has(LOBBY), true);
+    assert.equal(isIndexedRoom(LOBBY, index), false);
+  });
+
+  // A listing that never resolved has no data: it is not an answer.
+  test("a listing without data does not make the index ready", () => {
+    const index = scanRoomIndex([
+      { queryKey: [NSIDS.spaceMetadata], state: { data: undefined } },
+    ]);
+    assert.equal(index.ready, false);
+    assert.equal(isIndexedRoom(LOBBY, index), false);
+  });
+});
+
+describe("scanRoomIndex", () => {
   test("reads channels, their active threads, and orphans from the sidebar", () => {
-    const ids = collectRoomIds([entry(NSIDS.spaceMetadata, spaceMetadata)]);
-    assert.equal(ids.has(LOBBY), true);
-    assert.equal(ids.has("01M32SC092DNJS14N2H2XYVBJP"), true);
-    assert.equal(ids.has(SORREL), true);
+    const { rooms } = scanRoomIndex([entry(NSIDS.spaceMetadata, spaceMetadata)]);
+    assert.equal(rooms.has(LOBBY), true);
+    assert.equal(rooms.has("01M32SC092DNJS14N2H2XYVBJP"), true);
+    assert.equal(rooms.has(SORREL), true);
   });
 
   // A deleted room is still a room entity, so a reply targeting one fails the
   // same way; the sidebar lists them for the restore flow.
   test("reads deleted rooms", () => {
-    const ids = collectRoomIds([entry(NSIDS.spaceMetadata, spaceMetadata)]);
-    assert.equal(ids.has("01DELETEDROOM0000000000000"), true);
+    const { rooms } = scanRoomIndex([entry(NSIDS.spaceMetadata, spaceMetadata)]);
+    assert.equal(rooms.has("01DELETEDROOM0000000000000"), true);
   });
 
   test("reads both board shapes: space rooms and channel threads", () => {
-    const ids = collectRoomIds([
+    const { rooms } = scanRoomIndex([
       entry(NSIDS.spaceThreads, spaceThreads),
       entry(NSIDS.roomThreads, roomThreads),
     ]);
-    assert.equal(ids.has("01SPACETHREAD0000000000000"), true);
-    assert.equal(ids.has("01CHANNELTHREAD00000000000"), true);
+    assert.equal(rooms.has("01SPACETHREAD0000000000000"), true);
+    assert.equal(rooms.has("01CHANNELTHREAD00000000000"), true);
   });
 
   // Every query keyed by a room id is a room by construction — including the
   // message list, whose key is the room even though its data is messages.
   test("reads the roomId of every cached key", () => {
-    const ids = collectRoomIds([
+    const { rooms } = scanRoomIndex([
       entry(NSIDS.messages, [{ id: MESSAGE }], { roomId: BRAMBLE }),
     ]);
-    assert.equal(ids.has(BRAMBLE), true);
-    assert.equal(ids.has(MESSAGE), false);
+    assert.equal(rooms.has(BRAMBLE), true);
+    assert.equal(rooms.has(MESSAGE), false);
   });
 
   // Payloads are per-NSID responses, so a shape change must narrow the guard
   // back to asking rather than throwing.
   test("an unexpected payload shape yields no ids instead of throwing", () => {
-    const ids = collectRoomIds([
+    const { rooms } = scanRoomIndex([
       entry(NSIDS.spaceMetadata, null),
       // A room-metadata entry is keyed by a room id: the index reads the
       // param, so a malformed body still yields that room.
@@ -191,6 +251,16 @@ describe("collectRoomIds", () => {
       entry(NSIDS.spaceThreads, { pages: [{ rooms: [null, 7, { id: 42 }] }] }),
       entry(NSIDS.roomThreads, { pages: null }),
     ]);
-    assert.deepEqual([...ids], [LOBBY]);
+    assert.deepEqual([...rooms], [LOBBY]);
+  });
+
+  // A listing that resolved is an answer even when it lists nothing: the
+  // index has spoken, so an absent id may be asked about.
+  test("an empty listing still makes the index ready", () => {
+    const index = scanRoomIndex([
+      entry(NSIDS.spaceMetadata, { sidebar: { categories: [], orphans: [] } }),
+    ]);
+    assert.equal(index.ready, true);
+    assert.equal(index.rooms.size, 0);
   });
 });

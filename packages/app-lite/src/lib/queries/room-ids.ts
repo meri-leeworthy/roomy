@@ -77,7 +77,7 @@ export function isRoomListingKey(queryKey: readonly unknown[]): boolean {
 
 /**
  * Whether a query key can affect the room index: a room *listing* response
- * (the payloads {@link collectRoomIds} reads), or any query keyed by a
+ * (the payloads {@link scanRoomIndex} reads), or any query keyed by a
  * `roomId` param. Callers watching the cache filter on this so changes that
  * cannot change the index — a message diff, an observer result update — do not
  * recompute it.
@@ -113,44 +113,96 @@ function collectIds(payload: unknown, path: IdPath, into: Set<string>): void {
 }
 
 /**
- * Every room id the cached entries name: the ids listed by each
- * room-listing response, plus the `roomId` param of every cached key — a query
- * keyed by a room id (the room page, its board, its message list) is keyed by
- * a room by construction.
+ * What the cache says about rooms: the ids it names, and whether it has
+ * answered at all.
+ *
+ * The two facts are separate on purpose. A cold load holds an empty index
+ * because nothing has arrived yet, not because nothing is a room, so a caller
+ * that reads an empty {@link rooms} as "this id is not a room" asks the very
+ * question the index exists to answer — once per cold load, per id.
  */
-export function collectRoomIds(entries: Iterable<RoomIndexEntry>): Set<string> {
-  const ids = new Set<string>();
+export interface RoomIndex {
+  /** Room ids named by the cached listings and by room-keyed cache keys. */
+  readonly rooms: ReadonlySet<string>;
+  /**
+   * Whether at least one room-listing response has been cached. Until then
+   * nothing follows from an id's absence.
+   */
+  readonly ready: boolean;
+}
+
+/**
+ * Read the room index out of cache entries.
+ *
+ * Every room id the entries name: the ids listed by each room-listing
+ * response, plus the `roomId` param of every cached key — a query keyed by a
+ * room id (the room page, its board, its message list) is keyed by a room by
+ * construction. `ready` is the second half: whether any listing response has
+ * been cached at all.
+ */
+export function scanRoomIndex(entries: Iterable<RoomIndexEntry>): RoomIndex {
+  const rooms = new Set<string>();
+  let ready = false;
   for (const entry of entries) {
     const nsid = entry.queryKey[0];
     if (typeof nsid !== "string") continue;
 
+    if (!ready && isRoomListingKey(entry.queryKey) && entry.state.data != null) {
+      ready = true;
+    }
+
     const keyed = fieldOf(entry.queryKey[1], "roomId");
-    if (typeof keyed === "string" && keyed !== "") ids.add(keyed);
+    if (typeof keyed === "string" && keyed !== "") rooms.add(keyed);
 
     for (const path of ROOM_ID_PATHS[nsid] ?? []) {
-      collectIds(entry.state.data, path, ids);
+      collectIds(entry.state.data, path, rooms);
     }
   }
-  return ids;
+  return { rooms, ready };
 }
 
 /**
- * Whether a reply `target` names something `getMessage` can only reject.
+ * Whether the client can name `roomId` as one of its rooms: the index has
+ * answered, and it names the id.
  *
- * `ownRoomId` is the room the reply is rendered in — a reply whose target is
- * its own room is not a message, knowable with no cache at all. `roomIds` is
- * {@link collectRoomIds}' output, which covers the targets that are rooms
- * *other* than the reply's own: a cross-room channel, or a thread of the room
- * the client is reading.
+ * This is the precondition for touching a room through the network on the
+ * client's own initiative — a link-card summary, say — rather than because the
+ * reader asked. An id the index does not name is either a message or a room
+ * the client has never listed; only the reader's own navigation should spend a
+ * request finding out which.
  */
-export function isNonMessageReplyTarget(
+export function isIndexedRoom(roomId: string, index: RoomIndex): boolean {
+  return index.ready && index.rooms.has(roomId);
+}
+
+/**
+ * Whether the reply preview may ask `getMessage` about `target`.
+ *
+ * Three ways the answer is no:
+ *
+ *  - the target is empty: there is nothing to ask about;
+ *  - the target is the room the reply lives in — not a message, knowable with
+ *    no cache at all;
+ *  - the room index names the target: it is a room, and `getMessage` rejects
+ *    every entity that is not a message. The index covers the rooms *other*
+ *    than the reply's own — a cross-room channel, a thread of the room being
+ *    read — which is the shape an own-room-only comparison missed.
+ *
+ * The fourth case is why this takes the whole {@link RoomIndex} rather than its
+ * set: before any listing has been cached the index is empty because nothing
+ * has arrived, and asking then turns a cold load into a 400 for every reply
+ * whose target is a room. The answer is knowable a moment later, so the query
+ * waits for it — an effect reading this re-runs when the listing lands, and
+ * only then does an id's absence mean the target might be a message.
+ */
+export function mayAskForReplyTarget(
   target: string,
   ownRoomId: string | undefined,
-  roomIds: ReadonlySet<string>,
+  index: RoomIndex,
 ): boolean {
   if (target === "") return false;
   if (ownRoomId !== undefined && ownRoomId !== "" && target === ownRoomId) {
-    return true;
+    return false;
   }
-  return roomIds.has(target);
+  return index.ready && !index.rooms.has(target);
 }

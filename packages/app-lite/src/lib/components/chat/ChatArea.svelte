@@ -10,6 +10,7 @@
   import { createMessagesQuery, messagesKey, type Message } from "$lib/queries/messages";
   import { createSpaceMetadataQuery } from "$lib/queries/space-metadata";
   import { createFeatureFlagsQuery } from "$lib/queries/feature-flags";
+  import { roomIndex } from "$lib/queries/room-index";
   import { auth } from "$lib/auth.svelte";
   import { queryClient } from "$lib/client";
   import { px } from "$lib/auth.svelte";
@@ -177,6 +178,14 @@
       scannedLinkMessageIds = new Set();
       scannedLinkRoomId = roomId;
     }
+
+    // Readiness is read before the scan below marks anything scanned. The
+    // prefetch warms room summaries only for rooms the index names, and before
+    // the listings land nothing is named — so a pass that ran now would scan
+    // the window, find no warmable room, and never look at those messages
+    // again. Reading the index reactively means the pass runs once the
+    // listings arrive, and the messages it then sees are still unscanned.
+    if (!roomIndex().ready) return;
 
     const msgs = timeline;
     const fresh: TimelineMessage[] = [];
