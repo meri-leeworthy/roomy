@@ -26,6 +26,12 @@
  * Deliberately free of `__BUILD_ID__` so it is importable (and unit-testable)
  * outside a Vite build, where that define does not exist.
  */
+/**
+ * What a build with no git metadata reports. Not an identity — a consumer
+ * that needs one (`telemetryAppVersion`) falls back to another value rather
+ * than report this in its place.
+ */
+export const UNKNOWN_BUILD_ID = "unknown";
 
 /** The `/build.json` payload — the wire contract for "what is deployed". */
 export interface BuildManifest {
@@ -53,5 +59,5 @@ export function resolveBuildId(
   if (baked) return baked;
   const sha = env.RAILWAY_GIT_COMMIT_SHA?.trim();
   if (sha) return sha;
-  return "unknown";
+  return UNKNOWN_BUILD_ID;
 }
