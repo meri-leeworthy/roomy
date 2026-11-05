@@ -126,6 +126,7 @@ import { proxyBlob } from "./blob.ts";
 import { log } from "./log.ts";
 import { metrics } from "./metrics.ts";
 import { resolveBuildId } from "./telemetry/build.ts";
+import { READY, type ReadinessProvider } from "./readiness.ts";
 import { initTracing, shutdownTracing } from "./telemetry/tracing.ts";
 import {
   CACHEABLE_NSIDS,
@@ -179,6 +180,11 @@ export interface AppserverOptions {
    *  `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`). When `null`, voice is
    *  disabled: every voice RPC degrades to empty/null and no reconciler runs. */
   liveKit?: LiveKitConfig | null;
+  /** Boot readiness for `/health`. Defaults to the permanently-ready snapshot:
+   *  a server constructed without a boot sweep (tests) is ready on arrival.
+   *  The process entry point passes a tracker driven by the sweep, so a restart
+   *  reports not-ready until the materialised views are current. */
+  readiness?: ReadinessProvider;
 }
 
 
@@ -672,6 +678,7 @@ export async function createAppserver(
   const serviceEndpoint = opts.serviceEndpoint ?? process.env.APPSERVER_ORIGIN ?? "https://api.roomy.space";
   const corsOrigin = opts.corsOrigin ?? process.env.CORS_ORIGIN ?? "*";
   const quiet = opts.quiet ?? false;
+  const readiness: ReadinessProvider = opts.readiness ?? (() => READY);
 
   // ─── Tracing ────────────────────────────────────────────────────────
   // Install the OTLP tracer provider before any request is served, so every
@@ -1142,15 +1149,26 @@ export async function createAppserver(
       }
 
       if (url.pathname === "/health") {
+        // Readiness, not liveness: the socket is up and answering from the
+        // first moment, but the boot sweep is still catching the materialised
+        // views up until it has walked every stream. Reporting 200 through
+        // that window is what routes requests into a pool that is mid-sweep,
+        // so the status here is the answer a platform health check reads
+        // before it starts sending traffic.
+        const boot = readiness();
         return new Response(
           JSON.stringify({
-            status: "ok",
+            status: boot.ready ? "ok" : "starting",
             uptime: process.uptime(),
             did: ownDid,
             port,
             build_id: resolveBuildId(),
+            boot,
           }),
-          { headers: { "content-type": "application/json", ...corsHeaders } },
+          {
+            status: boot.ready ? 200 : 503,
+            headers: { "content-type": "application/json", ...corsHeaders },
+          },
         );
       }
       if (url.pathname === "/health/embed") {

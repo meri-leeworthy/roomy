@@ -6,27 +6,30 @@ single-column index it happens to walk (`idx_entities_stream_room`) below the
 table's rowid index — so a point lookup becomes a scan of the space's entire
 `stream_id` partition.
 
-Statistics are refreshed in three places, all of them `PRAGMA optimize`:
+Statistics are refreshed in two places, both `PRAGMA optimize` on the worker
+that owns the space:
 
 | where | covers | cadence |
 |---|---|---|
 | `openSpaceDb` (worker) | the DB being opened, before it serves a request | once per open |
 | LRU eviction (worker) | the handle being closed | per eviction |
-| `reMaterializeFromLocalEvents` (boot) | every stream, caught up or not | per boot |
 
-The open-time refresh is what makes the guarantee hold for a space created or
-first-visited after the boot sweep has already passed it. The boot sweep is
-what re-measures growth for every space on each deploy, and the eviction
-refresh is the bound for a handle that stays open and keeps taking writes.
+A space's statistics only matter when the space is queried, and a query cannot
+reach the file without opening it, so the open-time refresh is the guarantee.
+The eviction refresh bounds a handle that stays open and keeps taking writes
+(a space's data changes only through the materialiser, which uses that handle).
+The boot sweep deliberately does not analyze: it reads each space's boot facts
+from a read-only connection so a restart does not rewrite the WAL of every
+space, and its replay path opens the handle normally — and therefore analyzes —
+for every stream it actually re-materializes.
 
-## Why the boot sweep alone was not enough
+## Why open-time alone is the right cadence
 
-The sweep visits every stream that has events, so it covers every space that
-existed when the process started. A space created mid-uptime, or whose DB file
-is first opened after the sweep passes, had no statistics until the next
-restart — and the mis-plan is not confined to large spaces. Measured on DBs
-built from the real `schema-space.sql`, `select id from entities where id in
-(?, …) and stream_id = ?` with eight ids:
+A space created mid-uptime, or whose DB file is first opened after the boot
+sweep has passed it, has no statistics until it is opened — which is the moment
+before its first query. The mis-plan is not confined to large spaces. Measured
+on DBs built from the real `schema-space.sql`, `select id from entities where
+id in (?, …) and stream_id = ?` with eight ids:
 
 | entities | with statistics | without |
 |---|---|---|
@@ -70,8 +73,10 @@ every later call on the same file takes ~0.01 ms. The shared DBs took 43 ms
 (read-state) on their first pass.
 
 Statistics live in the DB file, so they persist. Every refresh is wrapped so a
-failure leaves the previous plan in place and the boot continues rather than
-failing the sweep.
+failure leaves the previous plan in place rather than failing the work that
+opened the DB. The one refresh the boot sweep still issues is
+`analyzeShared` — the global, read-state and event-log DBs, whose size is
+event-driven rather than per-space — and it is wrapped the same way.
 
 ## What is deliberately not forced
 
