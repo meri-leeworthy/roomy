@@ -182,9 +182,21 @@ export type DiscordGuildData = typeof DiscordGuildData.infer;
 // ─── Helpers ───────────────────────────────────────────────────────────
 
 /**
- * Channel types that represent top-level text channels.
+ * Top-level channel types that get a Roomy room.
+ *
+ * The thread-only parents are here because their threads are their content:
+ * Discord refuses a message in a `GuildForum`/`GuildMedia` channel itself, so
+ * the room the bridge creates for one exists to be the room its threads link
+ * under (`handleThreadCreate` needs a parent room to link a thread to). The
+ * parent room carries no messages of its own.
  */
-export const CHANNEL_TYPES = new Set([0, 5]); // GuildText, GuildAnnouncement
+export const CHANNEL_TYPES = new Set([0, 5, 15, 16]); // GuildText, GuildAnnouncement, GuildForum, GuildMedia
+
+/** Top-level channel types that carry their own message timeline. */
+export const TEXT_CHANNEL_TYPES = new Set([0, 5]); // GuildText, GuildAnnouncement
+
+/** Channel types whose content is the threads created in them, not messages. */
+export const THREAD_ONLY_PARENT_TYPES = new Set([15, 16]); // GuildForum, GuildMedia
 
 /**
  * Channel types that represent threads (public, private, announcement).
@@ -202,9 +214,40 @@ export const CATEGORY_TYPE = 4;
 
 /** Any channel type that can carry messages. */
 export const MESSAGE_CHANNEL_TYPES = new Set([
-	...CHANNEL_TYPES,
+	...TEXT_CHANNEL_TYPES,
 	...THREAD_TYPES,
 ]);
+
+/** Discord's name for a channel type, for log lines and durable reasons. */
+export const CHANNEL_TYPE_NAMES: Record<number, string> = {
+	0: "GuildText",
+	2: "GuildVoice",
+	4: "GuildCategory",
+	5: "GuildAnnouncement",
+	13: "GuildStageVoice",
+	14: "GuildDirectory",
+	15: "GuildForum",
+	16: "GuildMedia",
+};
+
+/**
+ * Why a channel type can never have a Roomy room, or null when it can.
+ *
+ * Threads return null: they are bridged as rooms under their parent, and a
+ * category returns null because it is sidebar structure the initial sync
+ * reads, never a channel. Every type that does come back non-null has no
+ * timeline Roomy can model — a stage or directory channel, a voice channel's
+ * side chat — so the bridge refuses it once, by this text, rather than
+ * rediscovering the same answer for every message it carries.
+ */
+export function unbridgedChannelReason(type: number): string | null {
+	if (CHANNEL_TYPES.has(type) || THREAD_TYPES.has(type)) return null;
+	if (type === CATEGORY_TYPE) return null;
+	return (
+		`channel type ${type} (${CHANNEL_TYPE_NAMES[type] ?? "unknown"}) has no Roomy equivalent; ` +
+		"only text, announcement, forum and media channels are bridged, so every message in it is dropped"
+	);
+}
 
 /**
  * Check if a channel is publicly visible by examining whether the @everyone

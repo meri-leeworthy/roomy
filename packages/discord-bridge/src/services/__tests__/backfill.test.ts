@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { faker } from "@faker-js/faker";
-import { newUlid } from "@roomy-space/sdk";
+import { newUlid, Ulid } from "@roomy-space/sdk";
 import { BridgeRepository } from "../../db/repository.ts";
 import { startApi } from "../../api.ts";
 import type {
@@ -253,6 +253,9 @@ function makeMockDiscordSender() {
 		async addReaction() {},
 		async removeReaction() {},
 		async getParentChannelId() {
+			return undefined;
+		},
+		async getChannelType() {
 			return undefined;
 		},
 		async getGuildId() {
@@ -3155,5 +3158,230 @@ describe("terminal outcomes are recorded, not re-derived", () => {
 		// A later pass reads the durable answer, not Discord.
 		await runBackfill(discord, repo, roomy);
 		expect(reads).toBe(1);
+	});
+});
+
+/**
+ * A forum channel's content is its threads: Discord refuses a message posted
+ * to the channel itself, so the bridge gives the forum a room only so its
+ * threads have a parent to link under, and walks the threads rather than the
+ * parent.
+ */
+describe("forum and media channels", () => {
+	const FORUM = "400000000000000001";
+	const FORUM_THREAD = "410000000000000001";
+
+	function forumGuild() {
+		const forum: DiscordChannelData = {
+			id: FORUM,
+			type: 15, // GuildForum
+			name: "questions",
+			guildId: GUILD,
+		};
+		const thread: DiscordChannelData = {
+			id: FORUM_THREAD,
+			type: 11, // PublicThread
+			name: "how do I",
+			parentId: FORUM,
+			guildId: GUILD,
+		};
+		const threadMessages: DiscordMessageData[] = [
+			"500000000000000001",
+			"500000000000000002",
+		].map((id, i) => ({
+			id,
+			channelId: FORUM_THREAD,
+			guildId: GUILD,
+			type: 0,
+			content: `Post reply ${i + 1}`,
+			timestamp: Date.now() - (2 - i) * 60000,
+			editedTimestamp: undefined,
+			author: {
+				id: "500000000000000009",
+				name: "testuser",
+				discriminator: "0000",
+				globalName: "Test User",
+				avatar: null,
+			},
+			attachments: [],
+			embeds: [],
+			reactions: [],
+			mentions: [],
+			mentionChannelIds: [],
+			stickerItems: [],
+		}));
+		return FileDiscordDataSource.fromData({
+			guild: { id: GUILD, channels: [forum] },
+			channels: [forum, thread],
+			messages: { [FORUM_THREAD]: threadMessages },
+			activeThreads: [thread],
+		});
+	}
+
+	test("runBackfill gives the forum a room and bridges its threads", async () => {
+		const repo = setupRepo();
+		const roomy = new MockRoomyGateway();
+
+		await runBackfill(forumGuild(), repo, roomy);
+
+		const forumRoomId = repo.getRoomyId(SPACE, "channel", FORUM);
+		expectToBeDefined(forumRoomId);
+
+		// The post is a Roomy thread linked under the forum's room.
+		const threadRoomId = repo.getRoomyId(SPACE, "thread", FORUM_THREAD);
+		expectToBeDefined(threadRoomId);
+		const link = roomy.findEvent(
+			SPACE,
+			"space.roomy.link.createRoomLink.v0",
+		);
+		expectToBeDefined(link);
+		expect(link.linkToRoom).toBe(Ulid.assert(threadRoomId));
+		expect(link.room).toBe(Ulid.assert(forumRoomId));
+
+		// The thread's messages reached the forum, in the thread's room.
+		const messageRooms = roomy
+			.eventsFor(SPACE)
+			.flatMap((e) =>
+				e.$type === "space.roomy.message.createMessage.v0" ? [e.room] : [],
+			);
+		const threadUlid = Ulid.assert(threadRoomId);
+		expect(messageRooms).toEqual([threadUlid, threadUlid]);
+
+		// The parent row is complete, not pending work no run can do.
+		expect(repo.getBackfillProgress(SPACE, FORUM)?.phase).toBe("complete");
+	});
+
+	test("the forum parent's own timeline is never paged", async () => {
+		const repo = setupRepo();
+		const roomy = new MockRoomyGateway();
+		const discord = forumGuild();
+		const paged: string[] = [];
+		const getMessages = discord.getMessages.bind(discord);
+		discord.getMessages = async (channelId, opts) => {
+			paged.push(channelId);
+			return getMessages(channelId, opts);
+		};
+
+		await backfillChannel(discord, repo, roomy, FORUM, SPACE);
+
+		expect(paged).toEqual([]);
+	});
+
+	test("an unsupported channel type is recorded once with its type", async () => {
+		const stage: DiscordChannelData = {
+			id: "420000000000000001",
+			type: 13, // GuildStageVoice
+			name: "town hall",
+			guildId: GUILD,
+		};
+		const general: DiscordChannelData = {
+			id: "420000000000000002",
+			type: 0,
+			name: "general",
+			guildId: GUILD,
+		};
+		const discord = FileDiscordDataSource.fromData({
+			guild: { id: GUILD, channels: [general, stage] },
+			channels: [general, stage],
+			messages: { [general.id]: [] },
+		});
+		const repo = setupRepo();
+		const roomy = new MockRoomyGateway();
+
+		await runBackfill(discord, repo, roomy);
+		await runBackfill(discord, repo, roomy);
+
+		expect(repo.getRoomyId(SPACE, "channel", general.id)).toBeDefined();
+		expect(repo.getRoomyId(SPACE, "channel", stage.id)).toBeUndefined();
+
+		const rows = repo.listDroppedMessagesForChannel(stage.id);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.reason).toBe("unsupported_channel_type");
+		expect(rows[0]?.detail).toContain("GuildStageVoice");
+	});
+
+	test("/messages/dropped reports the refusal and the per-channel drops", async () => {
+		const general: DiscordChannelData = {
+			id: "430000000000000002",
+			type: 0,
+			name: "general",
+			guildId: GUILD,
+		};
+		const stage: DiscordChannelData = {
+			id: "430000000000000001",
+			type: 13, // GuildStageVoice
+			name: "town hall",
+			guildId: GUILD,
+		};
+		const discord = FileDiscordDataSource.fromData({
+			guild: { id: GUILD, channels: [general, stage] },
+			channels: [general, stage],
+			messages: { [general.id]: [] },
+		});
+		const repo = setupRepo();
+		const roomy = new MockRoomyGateway();
+		await runBackfill(discord, repo, roomy);
+
+		// The stage channel's messages have nowhere to go; ingest what a
+		// gateway event would deliver.
+		repo.upsertBridgeConfig(GUILD, SPACE, "full");
+		for (const id of ["440000000000000001", "440000000000000002"]) {
+			await ingestDiscordMessage(
+				{
+					id,
+					channelId: stage.id,
+					guildId: GUILD,
+					type: 0,
+					content: `live ${id}`,
+					timestamp: Date.now(),
+					editedTimestamp: undefined,
+					author: {
+						id: "111111111111111111",
+						name: "testuser",
+						discriminator: "0000",
+						globalName: "Test User",
+						avatar: null,
+					},
+					attachments: [],
+					embeds: [],
+					reactions: [],
+					mentions: [],
+					mentionChannelIds: [],
+					stickerItems: [],
+				},
+				repo,
+				roomy,
+			);
+		}
+
+		const prevPort = process.env.PORT;
+		process.env.PORT = "0";
+		let server: { port: number | undefined; stop(close?: boolean): void } | undefined;
+		try {
+			server = startApi(repo, () => "app-id");
+			const res = await fetch(
+				`http://127.0.0.1:${server.port}/messages/dropped?spaceDid=${encodeURIComponent(SPACE)}`,
+			);
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as {
+				totals: Record<string, number>;
+				dropped: Array<{
+					reason: string;
+					channelId: string;
+					count: number;
+					detail: string | null;
+				}>;
+			};
+			expect(body.totals.no_room_mapping).toBe(2);
+			const refusal = body.dropped.find(
+				(d) => d.reason === "unsupported_channel_type",
+			);
+			if (!refusal) throw new Error("expected the refusal record");
+			expect(refusal.channelId).toBe(stage.id);
+			expect(refusal.detail).toContain("GuildStageVoice");
+		} finally {
+			server?.stop(true);
+			process.env.PORT = prevPort;
+		}
 	});
 });

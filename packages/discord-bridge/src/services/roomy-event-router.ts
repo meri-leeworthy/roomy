@@ -32,6 +32,7 @@ import type { Event } from "@roomy-space/sdk";
 import { deserializeBody, fromBytes, RICHTEXT_MIME } from "@roomy-space/sdk";
 import type { BridgeRepository } from "../db/repository.ts";
 import type { DiscordSender } from "../discord/sender.ts";
+import { THREAD_ONLY_PARENT_TYPES } from "../discord/data.ts";
 import type { WebhookManager } from "../discord/webhook-manager.ts";
 import { BRIDGE_RECONNECT_BASE_MS, BRIDGE_RECONNECT_MAX_MS } from "../env.ts";
 import { createLogger } from "../logger.ts";
@@ -750,6 +751,32 @@ export class RoomyEventRouter {
 			threadId = discordChannelId;
 		}
 
+		// A forum or media channel only accepts messages inside its threads —
+		// Discord has no timeline on the channel itself, and the bridge's room
+		// for it exists so threads have something to link under. A message
+		// written in that room has nowhere to land; record it rather than
+		// handing Discord a request it answers with 400, which would freeze
+		// the space's cursor and replay the same failure on every restart.
+		if (!isThread) {
+			const channelType = await this.#discord.getChannelType(discordChannelId);
+			if (
+				channelType !== undefined &&
+				THREAD_ONLY_PARENT_TYPES.has(channelType)
+			) {
+				this.#repo.recordDroppedMessage({
+					reason: "forum_parent_has_no_timeline",
+					channelId: discordChannelId,
+					spaceDid,
+					detail: `roomy message ${event.id}`,
+				});
+				log.warn(
+					`Not posting Roomy message ${event.id} to Discord channel ${discordChannelId}: it is a forum/media channel, which only accepts messages inside its threads`,
+					{ channelId: discordChannelId, channelType, spaceDid },
+				);
+				return;
+			}
+		}
+
 		// Decode the message body
 		const content = decodeBody(event.body);
 
@@ -1345,6 +1372,25 @@ export class RoomyEventRouter {
 
 		// Already mapped? Skip (prevents duplicates on restart/re-backfill)
 		if (this.#repo.getDiscordId(spaceDid, "thread", event.linkToRoom)) {
+			return;
+		}
+
+		// A forum or media channel holds no messages of its own: a thread in
+		// it is a post, created together with its first message. Discord's
+		// "start thread without message" endpoint refuses those channels, and
+		// the post's first message would have to carry the thread's opening
+		// content, which a Roomy thread has no equivalent of.
+		const parentType = await this.#discord.getChannelType(discordChannelId);
+		if (parentType !== undefined && THREAD_ONLY_PARENT_TYPES.has(parentType)) {
+			this.#repo.recordDroppedMessage({
+				reason: "forum_thread_creation_unsupported",
+				channelId: discordChannelId,
+				detail: `roomy thread ${event.linkToRoom}`,
+			});
+			log.warn(
+				`Not creating a thread in Discord channel ${discordChannelId}: it is a forum/media channel, and a post there is created with its first message. Roomy thread ${event.linkToRoom} stays unbridged.`,
+				{ channelId: discordChannelId, roomyThreadId: event.linkToRoom },
+			);
 			return;
 		}
 

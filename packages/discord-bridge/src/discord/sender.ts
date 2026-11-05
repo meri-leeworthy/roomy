@@ -77,6 +77,15 @@ export interface DiscordSender {
 	getParentChannelId(channelId: string): Promise<string | undefined>;
 
 	/**
+	 * Get a channel's Discord type, or undefined when it cannot be read.
+	 *
+	 * The Roomy→Discord direction needs it to tell a channel with a message
+	 * timeline from a forum or media channel, which accepts messages only
+	 * inside its threads.
+	 */
+	getChannelType(channelId: string): Promise<number | undefined>;
+
+	/**
 	 * Get the guild ID a channel belongs to, or undefined if unknown.
 	 */
 	getGuildId(channelId: string): Promise<string | undefined>;
