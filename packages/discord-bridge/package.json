@@ -27,6 +27,7 @@
 		"@atproto/api": "^0.14.22",
 		"@discordeno/bot": "^21.0.0",
 		"@roomy-space/sdk": "workspace:*",
+		"@roomy/service-auth": "workspace:*",
 		"arktype": "^2.1.29",
 		"dd-cache-proxy": "^2.7.0"
 	},

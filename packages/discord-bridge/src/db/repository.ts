@@ -1291,6 +1291,16 @@ export class BridgeRepository {
 			.map(toFailedSend);
 	}
 
+	/** Spaces that have at least one failed send, for scoped API access checks. */
+	listFailedSendSpaceDids(): string[] {
+		return this.db
+			.query<{ space_did: string }, []>(
+				"SELECT DISTINCT space_did FROM failed_sends ORDER BY space_did",
+			)
+			.all()
+			.map((row) => row.space_did);
+	}
+
 	/** Queue depth, split by whether the entry is still being re-offered. */
 	countFailedSends(spaceDid?: string): { pending: number; terminal: number } {
 		const row = this.db

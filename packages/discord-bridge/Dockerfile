@@ -7,6 +7,7 @@ WORKDIR /build
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY packages/discord-bridge packages/discord-bridge
 COPY packages/sdk packages/sdk
+COPY packages/service-auth packages/service-auth
 COPY packages/tsconfig packages/tsconfig
 COPY patches patches
 

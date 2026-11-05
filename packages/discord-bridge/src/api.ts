@@ -8,22 +8,46 @@ const log = createLogger("api");
 /** A running status API server, as returned by `startApi`. */
 export type ApiServer = Bun.Server<undefined>;
 
+/**
+ * Authentication and standing for the status API.
+ *
+ * `verifyRequest` turns the request's service-auth JWT into a caller DID
+ * (`null` when absent or invalid). `isSpaceAdmin` answers the per-space
+ * standing question for every route whose response contains space data.
+ */
+export interface ApiAuth {
+	/** Resolve the caller from its service-auth JWT; null when unauthenticated. */
+	verifyRequest(req: Request): Promise<{ did: string | null }>;
+	/** Whether `did` administers `spaceDid`, per the appserver's member list. */
+	isSpaceAdmin(spaceDid: string, did: string): Promise<boolean>;
+}
+
 export function startApi(
 	repo: BridgeRepository,
 	getAppId: () => string | undefined,
+	auth: ApiAuth,
 ): ApiServer {
 	const server = Bun.serve({
 		port: PORT(),
 		async fetch(req) {
 			const url = new URL(req.url);
 
+			// CORS preflight carries no credentials by definition, and the
+			// browser will not send the request it authorizes until this
+			// answer is a 2xx.
 			if (req.method === "OPTIONS") {
 				return new Response(null, { status: 204, headers: corsHeaders() });
 			}
 
 			let response: Response;
 			try {
-				response = route(req, url, repo, getAppId);
+				// The gate lives here, before routing, so a route added later
+				// cannot be served unauthenticated by omission.
+				const callerDid = (await auth.verifyRequest(req)).did;
+				response =
+					callerDid === null
+						? jsonResponse({ error: "Authentication required" }, 401)
+						: await route(req, url, repo, getAppId, auth, callerDid);
 			} catch (err) {
 				log.error("API error", err);
 				response = jsonResponse({ error: "Internal server error" }, 500);
@@ -40,13 +64,44 @@ export function startApi(
 	return server;
 }
 
-function route(
+/**
+ * 403 unless `callerDid` administers every space the response would cover.
+ *
+ * The rule is uniform across routes: a response is served only when the
+ * caller has standing in every space it describes. A named space therefore
+ * needs one admin edge; a guild- or unfiltered query needs admin in each
+ * space it would return. For `/bridges` with no filter that makes the
+ * unfiltered form operator-only — a caller administering every bridged space
+ * — rather than refusing it outright, so the operator's existing call keeps
+ * working and no route needs a special "unfiltered is forbidden" case.
+ */
+async function requireAdmin(
+	auth: ApiAuth,
+	callerDid: string,
+	spaceDids: readonly string[],
+): Promise<Response | null> {
+	for (const spaceDid of new Set(spaceDids)) {
+		if (!(await auth.isSpaceAdmin(spaceDid, callerDid))) {
+			return jsonResponse(
+				{ error: "Caller is not an admin of this space" },
+				403,
+			);
+		}
+	}
+	return null;
+}
+
+async function route(
 	req: Request,
 	url: URL,
 	repo: BridgeRepository,
 	getAppId: () => string | undefined,
-): Response {
+	auth: ApiAuth,
+	callerDid: string,
+): Promise<Response> {
 	switch (url.pathname) {
+		// Identity of the bridge itself, not space data: any authenticated
+		// service caller may read it.
 		case "/info": {
 			const appId = getAppId();
 			if (!appId)
@@ -61,6 +116,10 @@ function route(
 			const spaceId = url.searchParams.get("spaceId");
 			if (!spaceId)
 				return jsonResponse({ error: "spaceId query parameter required" }, 400);
+			// Check standing before revealing whether the space is bridged, so
+			// a non-admin caller cannot probe the bridge's space list.
+			const denial = await requireAdmin(auth, callerDid, [spaceId]);
+			if (denial) return denial;
 			const configs = repo.listAllBridgeConfigs();
 			const match = configs.find((c) => c.spaceDid === spaceId);
 			if (match) return jsonResponse({ guildId: match.guildId });
@@ -72,9 +131,18 @@ function route(
 			if (!guildId)
 				return jsonResponse({ error: "guildId query parameter required" }, 400);
 			const configs = repo.listBridgeConfigsForGuild(guildId);
-			if (configs.length > 0)
-				return jsonResponse({ spaceIds: configs.map((c) => c.spaceDid) });
-			return jsonResponse({ error: "Space not found for provided guild" }, 404);
+			if (configs.length === 0)
+				return jsonResponse(
+					{ error: "Space not found for provided guild" },
+					404,
+				);
+			const denial = await requireAdmin(
+				auth,
+				callerDid,
+				configs.map((c) => c.spaceDid),
+			);
+			if (denial) return denial;
+			return jsonResponse({ spaceIds: configs.map((c) => c.spaceDid) });
 		}
 
 		case "/bridges": {
@@ -82,6 +150,12 @@ function route(
 			const bridges = guildId
 				? repo.listBridgeConfigsForGuild(guildId)
 				: repo.listAllBridgeConfigs();
+			const denial = await requireAdmin(
+				auth,
+				callerDid,
+				bridges.map((b) => b.spaceDid),
+			);
+			if (denial) return denial;
 			return jsonResponse({ bridges });
 		}
 
@@ -92,6 +166,16 @@ function route(
 				spaceDid: spaceDid ?? undefined,
 				guildId: guildId ?? undefined,
 			});
+			// A named space is checked even when it has no rows — otherwise an
+			// empty reply would be readable without standing. Unscoped coverage
+			// comes from the payload, so the check covers exactly the spaces
+			// whose rows would be returned.
+			const denial = await requireAdmin(
+				auth,
+				callerDid,
+				spaceDid ? [spaceDid] : channels.map((c) => c.spaceDid),
+			);
+			if (denial) return denial;
 			return jsonResponse({ channels });
 		}
 
@@ -101,6 +185,12 @@ function route(
 		// `id` is the handle `/sends/replay` takes.
 		case "/sends/failed": {
 			const spaceDid = url.searchParams.get("spaceDid") ?? undefined;
+			const denial = await requireAdmin(
+				auth,
+				callerDid,
+				spaceDid ? [spaceDid] : repo.listFailedSendSpaceDids(),
+			);
+			if (denial) return denial;
 			return jsonResponse({
 				...repo.countFailedSends(spaceDid),
 				sends: repo.listFailedSends(50, spaceDid).map(sendStatus),
@@ -122,6 +212,14 @@ function route(
 			if (!Number.isInteger(id) || id <= 0) {
 				return jsonResponse({ error: "id query parameter required" }, 400);
 			}
+			// The entry's space is checked before the row is reset, so a caller
+			// without standing cannot cause a replay it will not be told about.
+			const existing = repo.getFailedSend(id);
+			if (!existing) {
+				return jsonResponse({ error: "No queued send with that id" }, 404);
+			}
+			const denial = await requireAdmin(auth, callerDid, [existing.spaceDid]);
+			if (denial) return denial;
 			const replayed = repo.replayFailedSend(id);
 			if (!replayed) {
 				return jsonResponse({ error: "No queued send with that id" }, 404);
@@ -225,7 +323,9 @@ function corsHeaders(): Record<string, string> {
 	return {
 		"Access-Control-Allow-Origin": "*",
 		"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-		"Access-Control-Allow-Headers": "Content-Type",
+		// `Authorization` is required: browser dashboards send the service-auth
+		// JWT on every call, and preflight fails without it.
+		"Access-Control-Allow-Headers": "Content-Type, Authorization",
 	};
 }
 

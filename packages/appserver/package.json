@@ -27,6 +27,7 @@
     "@opentelemetry/sdk-trace-base": "^2.11.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "@qdrant/js-client-rest": "^1.19.0",
+    "@roomy/service-auth": "workspace:*",
     "@roomy-space/sdk": "workspace:*",
     "arktype": "^2.1.29",
     "rate-limiter-flexible": "^11.2.0",

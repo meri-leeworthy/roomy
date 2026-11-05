@@ -1,0 +1,24 @@
+{
+	"name": "@roomy/service-auth",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"description": "Service-auth JWT verification shared by Roomy services",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@atproto/identity": "^0.4.12",
+		"@atproto/xrpc-server": "^0.10.19"
+	},
+	"devDependencies": {
+		"@atproto/crypto": "^0.4.2",
+		"@repo/tsconfig": "workspace:*",
+		"@types/bun": "latest",
+		"typescript": "^5.8.3"
+	}
+}
