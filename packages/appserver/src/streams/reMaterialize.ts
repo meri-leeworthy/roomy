@@ -528,22 +528,22 @@ export async function reMaterializeFromLocalEvents(
             globalDb,
           );
 
+          // One line per stream, whether it applied cleanly or not. The skip
+          // counts are by kind, so a stream that lost entries says what it lost
+          // without needing the per-event warns (which an operator sees only if
+          // the boot's warn flood survives the platform's log rate limit).
+          const summary = {
+            streamId: streamDid,
+            applied: stats.applied,
+            materializerErrors: stats.materializerErrors,
+            applyErrors: stats.applyErrors,
+            skippedKinds: stats.skippedKinds,
+            rebuild,
+          };
           if (stats.materializerErrors > 0 || stats.applyErrors > 0) {
-            log.warn("[re-materialize] stream-done", {
-              streamId: streamDid,
-              applied: stats.applied,
-              materializerErrors: stats.materializerErrors,
-              applyErrors: stats.applyErrors,
-              rebuild,
-            });
+            log.warn("[re-materialize] stream-done", summary);
           } else {
-            log.info("[re-materialize] stream-done", {
-              streamId: streamDid,
-              applied: stats.applied,
-              materializerErrors: 0,
-              applyErrors: 0,
-              rebuild,
-            });
+            log.info("[re-materialize] stream-done", summary);
           }
         }
 
