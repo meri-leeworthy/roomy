@@ -23,6 +23,7 @@ import {
   DEFAULT_MAX_PREPARED_STMTS,
   DEFAULT_MAX_SPACE_DBS,
   DEFAULT_SPACE_DB_CACHE_KIB,
+  workerGcHeapBytesFromEnv,
   type DbMemoryBounds,
 } from "./bounds.ts";
 import {
@@ -36,7 +37,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { WorkerRequest, WorkerResponse } from "./types.ts";
+import type {
+  WorkerCacheStats,
+  WorkerRequest,
+  WorkerResponse,
+} from "./types.ts";
 import {
   READSTATE_MIGRATIONS,
   readStateMigrationEntry,
@@ -114,6 +119,7 @@ let bounds: DbMemoryBounds = {
   maxSpaceDbs: DEFAULT_MAX_SPACE_DBS,
   maxPreparedStmts: DEFAULT_MAX_PREPARED_STMTS,
   spaceDbCacheKib: DEFAULT_SPACE_DB_CACHE_KIB,
+  workerGcHeapBytes: workerGcHeapBytesFromEnv(),
 };
 /**
  * Worker role. "space" workers only open per-space DBs; "global", "readstate"
@@ -149,6 +155,49 @@ let role:
  * the call does not return until the lock frees.
  */
 const SLOW_REQUEST_MS = 50;
+
+/**
+ * Requests between heap checks. `process.memoryUsage()` costs a few
+ * microseconds, which is not worth paying per request on a worker that serves
+ * thousands a second, and is negligible against a hundred-request batch.
+ */
+const GC_CHECK_EVERY = 64;
+
+/**
+ * The worker's own heap ceiling, above which it collects (see bounds.ts). The
+ * process-start environment is the fallback; a pool that inits with explicit
+ * bounds (tests, an operator's per-pool configuration) replaces it, because a
+ * `Bun.Worker` does not see `process.env` writes made after the process
+ * started.
+ */
+let gcHeapBytes = workerGcHeapBytesFromEnv();
+let requestsSinceGcCheck = 0;
+/** Collections this worker has forced. Reported so a ceiling that is too low
+ *  (constant collection) is as visible as one that never fires. */
+let gcCollections = 0;
+
+/**
+ * Collect this worker's heap once it has grown past its ceiling.
+ *
+ * Bun's worker threads do not run the collector on their own while they are
+ * busy: the heap grows with the garbage every request allocates (SQL strings,
+ * binding arrays, result rows) and RSS grows with it, with no plateau, until an
+ * allocation fails. Collecting here bounds the worker's heap the same way the
+ * connection and statement caches are bounded — on the axis the memory is
+ * actually held on.
+ *
+ * A full collection rather than a scheduled incremental one: the incremental
+ * form leaves the heap to drift up between checks (measured 40 → 103 MiB over
+ * 30 minutes), while the full form holds it at 37–50 MiB with no measurable
+ * cost to read latency (p50 18–23 ms, p95 33–44 ms either way).
+ */
+function maybeCollectWorkerHeap(): void {
+  if (++requestsSinceGcCheck < GC_CHECK_EVERY) return;
+  requestsSinceGcCheck = 0;
+  if (process.memoryUsage().heapUsed <= gcHeapBytes) return;
+  Bun.gc(true);
+  gcCollections++;
+}
 
 // ─── Schema paths ─────────────────────────────────────────────────────────
 
@@ -549,10 +598,10 @@ function applySpacePragmas(db: Database): void {
   db.exec("pragma busy_timeout = 5000");
   // Bound the connection's native page cache. SQLite's default is 2 MiB
   // (`DEFAULT_CACHE_SIZE=-2000`) of NATIVE memory per connection that the JS
-  // GC cannot reclaim; with up to `maxSpaceDbs` connections per worker and one
-  // worker per pool slot that is the pool's dominant memory term. Set
-  // explicitly so the ceiling is `maxSpaceDbs × spaceDbCacheKib` and an
-  // operator can move it with `APPSERVER_SPACE_DB_CACHE_KIB`.
+  // GC cannot reclaim. This is one of two per-connection terms: the other is
+  // the fixed overhead `cache_size` does not address, which is why the number
+  // of connections is derived from a byte budget in `bounds.ts` — raising this
+  // value lowers that count.
   db.exec(`pragma cache_size = -${bounds.spaceDbCacheKib}`);
   // Pin memory mapping off rather than inherit it from the SQLite build. This
   // build defaults `DEFAULT_MMAP_SIZE` to 0, but the bound must not depend on a
@@ -884,6 +933,7 @@ self.onmessage = (event: MessageEvent) => {
   // round-trip, so this only ever carries a stall.
   if (selfMs >= SLOW_REQUEST_MS) response.slowMs = Math.round(selfMs);
   self.postMessage(response);
+  maybeCollectWorkerHeap();
 };
 
 /** Require a spaceDid on a worker request, throwing a clear error if absent. */
@@ -1104,6 +1154,7 @@ function handleInit(req: WorkerRequest): {
   spaceSchemaVersion = opts.spaceSchemaVersion ?? "";
   globalSchemaVersion = opts.globalSchemaVersion ?? "";
   bounds = { ...bounds, ...opts.bounds };
+  gcHeapBytes = bounds.workerGcHeapBytes;
   role = opts.role ?? "system";
 
   // Per-space DB access is only available on roles that own (or assist the
@@ -1351,19 +1402,20 @@ function handleTransaction(req: WorkerRequest): unknown {
  * connection cache's actual size against its ceiling — `pending` alone cannot
  * tell an operator whether native memory is at its bound or still climbing.
  */
-function cacheStats(): {
-  openSpaceDbs: number;
-  preparedStmts: number;
-  cacheKib: number;
-  maxSpaceDbs: number;
-  maxPreparedStmts: number;
-} {
+function cacheStats(): WorkerCacheStats {
+  const memory = process.memoryUsage();
   return {
     openSpaceDbs: spaceDbs.size,
     preparedStmts: preparedStmts.size,
     cacheKib: bounds.spaceDbCacheKib,
     maxSpaceDbs: bounds.maxSpaceDbs,
     maxPreparedStmts: bounds.maxPreparedStmts,
+    heapUsed: memory.heapUsed,
+    heapTotal: memory.heapTotal,
+    external: memory.external,
+    arrayBuffers: memory.arrayBuffers,
+    heapCeilingBytes: gcHeapBytes,
+    gcCollections,
   };
 }
 

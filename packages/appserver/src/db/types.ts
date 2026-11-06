@@ -246,4 +246,18 @@ export interface WorkerCacheStats {
   maxSpaceDbs: number;
   /** Live prepared-statement ceiling before LRU finalize. */
   maxPreparedStmts: number;
+  /**
+   * This worker thread's own JS heap and external bytes. Each `Bun.Worker` has
+   * a separate heap, so the main thread's `process.memoryUsage()` reports none
+   * of it: without these, RSS growth can be measured but not attributed to a
+   * thread.
+   */
+  heapUsed: number;
+  heapTotal: number;
+  external: number;
+  arrayBuffers: number;
+  /** Heap size above which the worker collects its own garbage. */
+  heapCeilingBytes: number;
+  /** Collections this worker has forced since it started. */
+  gcCollections: number;
 }
