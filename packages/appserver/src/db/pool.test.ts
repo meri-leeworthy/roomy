@@ -537,7 +537,10 @@ describe("cache bounds from the environment", () => {
       closeDb();
 
       // A malformed value falls back to the default rather than a NaN/0 bound
-      // (which would close every connection or evict every statement).
+      // (which would close every connection or evict every statement). The
+      // count default is derived from the page-cache bound, so that override
+      // has to be back at its default for the two to be comparable.
+      delete process.env.APPSERVER_SPACE_DB_CACHE_KIB;
       process.env.APPSERVER_MAX_SPACE_DBS = "not-a-number";
       openDb({ path: ":memory:" });
       const stats2 = (await poolStats())!;
