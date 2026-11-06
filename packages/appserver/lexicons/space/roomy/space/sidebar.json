@@ -1,0 +1,41 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.sidebar",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A space's sidebar: the categories, in order, and the rooms each holds. One record per space, written to the space's repo.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["categories", "createdAt"],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "children"],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "A stable id for the category. Absent in the older shape, where a category was only its name."
+                },
+                "name": { "type": "string", "maxGraphemes": 128, "maxLength": 1280 },
+                "children": {
+                  "type": "array",
+                  "description": "The rooms in the category, in order: record keys of `space.roomy.space.room` records.",
+                  "items": { "type": "string" }
+                }
+              }
+            }
+          },
+          "extensions": {
+            "type": "unknown",
+            "description": "The sidebar's extensions, unopened."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

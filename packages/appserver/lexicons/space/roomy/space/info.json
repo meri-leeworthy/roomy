@@ -1,0 +1,36 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.info",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A space's profile and join policy — one record per space. Written to the space's repo.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["createdAt"],
+        "properties": {
+          "name": { "type": "string", "maxGraphemes": 128, "maxLength": 1280 },
+          "avatar": {
+            "type": "string",
+            "description": "The space's avatar reference, as the space holds it: a blob ref string (`atblob://<did>/<cid>`) or a plain URL."
+          },
+          "description": { "type": "string", "maxGraphemes": 512, "maxLength": 5120 },
+          "allowPublicJoin": {
+            "type": "boolean",
+            "description": "Whether anyone who finds the space may join. Absent reads as open."
+          },
+          "allowMemberInvites": {
+            "type": "boolean",
+            "description": "Whether a member may invite another account. Absent reads as allowed."
+          },
+          "suggestToOthers": {
+            "type": "boolean",
+            "description": "Whether the space is suggested to people outside it. Absent reads as suggested."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.calendarLink",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "The calendar group a space is connected to — one record per space, written to the space's repo. Disconnecting deletes it.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["groupSlug", "tenantId", "apiUrl", "createdAt"],
+        "properties": {
+          "groupSlug": {
+            "type": "string",
+            "description": "The calendar group's slug on its host.",
+            "maxLength": 256
+          },
+          "tenantId": {
+            "type": "string",
+            "description": "The tenant the group belongs to.",
+            "maxLength": 256
+          },
+          "apiUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "The calendar host's API base URL."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

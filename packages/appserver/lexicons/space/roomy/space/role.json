@@ -1,0 +1,24 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.role",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A role — one record per role, written to the space's repo. Deleting the role deletes the record.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["createdAt"],
+        "properties": {
+          "name": { "type": "string", "maxGraphemes": 128, "maxLength": 1280 },
+          "avatar": {
+            "type": "string",
+            "description": "The role's avatar reference, as the space holds it: a blob ref string (`atblob://<did>/<cid>`) or a plain URL."
+          },
+          "description": { "type": "string", "maxGraphemes": 512, "maxLength": 5120 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

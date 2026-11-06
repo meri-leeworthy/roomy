@@ -1,0 +1,36 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.room.reaction",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A reaction to a message. Written to the reacting user's repo; removing the reaction deletes the record.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["target", "user", "reaction", "createdAt"],
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The reacted-to message: the record key of a `space.roomy.room.message` record."
+          },
+          "user": {
+            "type": "string",
+            "format": "did",
+            "description": "The reacting user. For a bridged reaction this is the reacting user the bridge names, not the account that relayed it."
+          },
+          "reaction": {
+            "type": "string",
+            "description": "The emoji, or a URI describing one.",
+            "maxLength": 256
+          },
+          "bridged": {
+            "type": "boolean",
+            "description": "Set when the reaction arrived through a bridge, whose user may be an external account."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

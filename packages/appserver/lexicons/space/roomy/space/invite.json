@@ -1,0 +1,28 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.invite",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A live invite token — one record per token, written to the space's repo and keyed by the token itself. Revoking the invite deletes it.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["token", "createdBy", "createdAt"],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The invite token. The same string the record key is.",
+            "maxLength": 512
+          },
+          "createdBy": {
+            "type": "string",
+            "format": "did",
+            "description": "The member who minted the invite."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

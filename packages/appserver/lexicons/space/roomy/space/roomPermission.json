@@ -1,0 +1,30 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.roomPermission",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "The access level a role holds in one room — one record per (role, room) pair, written to the space's repo. Clearing the level deletes it.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["role", "room", "permission", "createdAt"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "description": "The role: the record key of a `space.roomy.space.role` record. The record key is `<role>~<room>`."
+          },
+          "room": {
+            "type": "string",
+            "description": "The room: the record key of a `space.roomy.space.room` record."
+          },
+          "permission": {
+            "type": "string",
+            "knownValues": ["read", "readwrite"]
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}
