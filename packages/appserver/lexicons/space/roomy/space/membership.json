@@ -1,0 +1,28 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.membership",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A space's membership list entry: one record per member, written to the space's repo and keyed by the member's DID. Leaving the space deletes it.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["user", "can", "createdAt"],
+        "properties": {
+          "user": {
+            "type": "string",
+            "format": "did",
+            "description": "The member. The same DID the record key names."
+          },
+          "can": {
+            "type": "string",
+            "knownValues": ["post", "admin"],
+            "description": "What the member may do: post, or post and administer."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

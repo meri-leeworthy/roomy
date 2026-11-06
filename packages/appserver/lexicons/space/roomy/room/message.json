@@ -1,0 +1,73 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.room.message",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A message in a room. Written to the author's repo.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["room", "author", "createdAt"],
+        "properties": {
+          "room": {
+            "type": "string",
+            "description": "The room the message lives in: the record key of a `space.roomy.space.room` record in the space's repo."
+          },
+          "author": {
+            "type": "string",
+            "format": "did",
+            "description": "Who the message is from. The space's own DID for a system message."
+          },
+          "actor": {
+            "type": "string",
+            "format": "did",
+            "description": "Who performed the action, when that is not the author — the acting DID of a system message, which the author is the space for."
+          },
+          "content": {
+            "type": "object",
+            "description": "The message body. A message carries content, a `system` fact, or a `forwardOf` reference, never more than one.",
+            "required": ["mimeType", "data"],
+            "properties": {
+              "mimeType": {
+                "type": "string",
+                "description": "The media type of `data`, e.g. `text/markdown`.",
+                "maxLength": 256
+              },
+              "data": {
+                "type": "bytes",
+                "description": "The body bytes. A record exported from the change feed carries them as a `$bytes` marker; the same bytes are what a publish step uploads as a blob."
+              }
+            }
+          },
+          "system": {
+            "type": "object",
+            "description": "A message whose text a rule derives rather than the log carrying it. The record states the fact; the reader renders it.",
+            "required": ["kind", "linkToRoom", "isCreationLink"],
+            "properties": {
+              "kind": { "type": "string", "knownValues": ["roomLink"] },
+              "linkToRoom": {
+                "type": "string",
+                "description": "The linked room: the record key of the room this message announces."
+              },
+              "isCreationLink": {
+                "type": "boolean",
+                "description": "True when the message announces a room's creation, false when it links an existing room into another."
+              }
+            }
+          },
+          "forwardOf": {
+            "type": "array",
+            "description": "Message keys this message forwards. A forward carries no body of its own.",
+            "items": { "type": "string" }
+          },
+          "extensions": {
+            "type": "unknown",
+            "description": "The message's extensions, unopened: `space.roomy.extension.discordMessageOrigin.v0` and its siblings."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.federation.request",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A federation relationship a space has been asked for — one record per federating space, written to the receiving space's repo. Removing the relationship deletes it.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["federatingSpace", "createdAt"],
+        "properties": {
+          "federatingSpace": {
+            "type": "string",
+            "format": "did",
+            "description": "The space that asked. The same DID the record key names."
+          },
+          "requestedBy": {
+            "type": "string",
+            "format": "did",
+            "description": "The admin who sent the request."
+          },
+          "status": {
+            "type": "string",
+            "knownValues": ["active", "rejected"],
+            "description": "The receiving space's answer. Absent while the request is unanswered."
+          },
+          "decidedBy": {
+            "type": "string",
+            "format": "did",
+            "description": "The admin who answered."
+          },
+          "message": {
+            "type": "string",
+            "description": "The note sent with the request or the answer.",
+            "maxGraphemes": 512,
+            "maxLength": 5120
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

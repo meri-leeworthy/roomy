@@ -7,12 +7,12 @@
  * in `toRecordChanges.ts` maps events onto these; the projection rules (S2 and
  * S3) are written per kind rather than per event.
  *
- * **The NSIDs are provisional.** They are proposed here so the adapter has one
- * stable name per kind; no lexicon JSON is generated from them and nothing
- * outside this directory consumes them. `space.roomy.user.profile` is the one
- * collection that already exists (`lexicons/space/roomy/user/profile.json`);
- * every other entry is a proposal, and `space.roomy.record.*` may win over the
- * area-based names below once the lexicon workstream settles them.
+ * **Each collection has a lexicon.** `lexicons/` holds one record lexicon per
+ * collection below — written from the fold's bodies, validated against them by
+ * `toRecordJson.test.ts` — so an NSID names a published shape rather than a
+ * proposal. `space.roomy.user.profile` is the exception in the other direction:
+ * users' clients already write it, so its lexicon is the one deployed and
+ * `toRecordJson.ts` maps the fold onto it.
  *
  * Three shapes are fixed by the plan and not negotiable here: a room is
  * soft-deleted so `op: delete` is never used for one, a room link is a `parent`
@@ -422,7 +422,7 @@ export interface RecordPatchTypes {
 
 /** One kind's definition: where it lives and what keys it. */
 export interface RecordKindSpec {
-  /** The collection NSID — provisional except `profile`, which exists. */
+  /** The collection NSID — the id of its lexicon under `lexicons/`. */
   readonly collection: string;
   /**
    * What the rkey is made of, in order; parts are joined with `:`. Empty for a

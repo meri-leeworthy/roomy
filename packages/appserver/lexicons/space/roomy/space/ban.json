@@ -1,0 +1,23 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.ban",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A banned account — one record per ban, written to the space's repo and keyed by the banned DID. Unbanning deletes it.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["user", "createdAt"],
+        "properties": {
+          "user": {
+            "type": "string",
+            "format": "did",
+            "description": "The banned account."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.voice.call",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A voice call in a room — one record per call, written to the space's repo and keyed by the call's id. The call ending deletes it.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["room", "source", "startedAt", "createdAt"],
+        "properties": {
+          "room": {
+            "type": "string",
+            "description": "The room the call is in: the record key of a `space.roomy.space.room` record."
+          },
+          "source": {
+            "type": "string",
+            "knownValues": ["user", "livekit", "reconciliation"],
+            "description": "Which path produced this call fact."
+          },
+          "startedAt": {
+            "type": "integer",
+            "description": "When the call started, in epoch milliseconds."
+          },
+          "joined": {
+            "type": "string",
+            "format": "did",
+            "description": "The participant the last join fact named."
+          },
+          "left": {
+            "type": "string",
+            "format": "did",
+            "description": "The participant the last leave fact named."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}
