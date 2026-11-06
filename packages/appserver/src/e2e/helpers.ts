@@ -31,6 +31,7 @@ import { _resetProfileStoreCache, _setTestGetProfiles } from "../queries/profile
 import { _setTestGetRoomyProfileRecord } from "../materialization/roomyProfile.ts";
 import { _setTestFetchBlockRecords } from "../materialization/blocks.ts";
 import { _resetProfileNegativeCache } from "../materialization/profiles.ts";
+import { _resetSpaceRecordFolds } from "../queries/spaceRecords.ts";
 import { newUlid } from "@roomy-space/sdk";
 import { ulid } from "ulidx";
 import type { Database } from "bun:sqlite";
@@ -74,6 +75,9 @@ export async function startAppserver(): Promise<E2eContext> {
   _resetMessagesCollection();
   _resetProfileStoreCache();
   _resetProfileNegativeCache();
+  // A fold is cached per (space, latest_event); two tests reusing a DID over
+  // different in-memory DBs would otherwise share one.
+  _resetSpaceRecordFolds();
   // Hermetic: without stubs, profile hydration falls back to live
   // api.bsky.app fetches, which pile up under parallel load and blow the
   // 5s per-test timeout. Tests don't assert on profile materialization, so
@@ -137,6 +141,7 @@ export async function startAppserver(): Promise<E2eContext> {
     _resetProfileNegativeCache();
     _setTestGetProfiles(null);
     _setTestGetRoomyProfileRecord(null);
+    _resetSpaceRecordFolds();
     _setTestFetchBlockRecords(null);
   });
 
