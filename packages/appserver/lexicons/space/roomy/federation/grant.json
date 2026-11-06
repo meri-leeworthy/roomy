@@ -1,0 +1,58 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.federation.grant",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Everything one receiving space may see of this space: the origin grants are the rooms it may see, the receiver grants are which of its members may see them, capped by the origin grant. One record per receiving space, written to the origin space's repo.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["federatingSpace", "origin", "receiver", "createdAt"],
+        "properties": {
+          "federatingSpace": {
+            "type": "string",
+            "format": "did",
+            "description": "The receiving space. The same DID the record key names."
+          },
+          "origin": {
+            "type": "array",
+            "description": "The rooms of this space the receiving space may see.",
+            "items": {
+              "type": "object",
+              "required": ["room", "permission"],
+              "properties": {
+                "room": {
+                  "type": "string",
+                  "description": "The room: the record key of a `space.roomy.space.room` record. Absent an entry, the room is invisible."
+                },
+                "permission": { "type": "string", "knownValues": ["read", "readwrite"] }
+              }
+            }
+          },
+          "receiver": {
+            "type": "array",
+            "description": "Which of the receiving space's members may see which of those rooms.",
+            "items": {
+              "type": "object",
+              "required": ["room", "permission", "grantee", "granteeKind"],
+              "properties": {
+                "room": { "type": "string" },
+                "permission": { "type": "string", "knownValues": ["read", "readwrite"] },
+                "grantee": {
+                  "type": "string",
+                  "description": "The account or role the grant names, or the receiving space itself for a grant to all of its members."
+                },
+                "granteeKind": {
+                  "type": "string",
+                  "knownValues": ["members", "user", "role"]
+                }
+              }
+            }
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

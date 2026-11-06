@@ -1,0 +1,56 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.room",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A room in a space: a channel, category, thread, page or voice call room. Written to the space's repo.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["kind", "createdAt"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "knownValues": [
+              "space.roomy.channel",
+              "space.roomy.category",
+              "space.roomy.thread",
+              "space.roomy.page",
+              "space.roomy.voice"
+            ]
+          },
+          "name": { "type": "string", "maxGraphemes": 128, "maxLength": 1280 },
+          "avatar": {
+            "type": "string",
+            "description": "The room's avatar reference, as the space holds it: a blob ref string (`atblob://<did>/<cid>`) or a plain URL."
+          },
+          "description": { "type": "string", "maxGraphemes": 512, "maxLength": 5120 },
+          "defaultAccess": {
+            "type": "string",
+            "knownValues": ["readwrite", "read", "none"],
+            "description": "The access level a member has to the room by default. Absent for a thread, which inherits its parent's."
+          },
+          "deleted": {
+            "type": "boolean",
+            "description": "A deleted room stays in the set, marked: restoring it is a second write, not a second record."
+          },
+          "parent": {
+            "type": "string",
+            "description": "The room this one hangs off in the sidebar, and the room whose access a thread inherits: the record key of a `space.roomy.space.room` record."
+          },
+          "discordOrigin": {
+            "type": "object",
+            "description": "Set for a room the Discord bridge created.",
+            "required": ["snowflake", "guildId"],
+            "properties": {
+              "snowflake": { "type": "string" },
+              "guildId": { "type": "string" }
+            }
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

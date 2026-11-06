@@ -1,0 +1,27 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.space.roleGrant",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A role held by a member — one record per (member, role) pair, written to the space's repo. Withdrawing the role deletes it.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["user", "role", "createdAt"],
+        "properties": {
+          "user": {
+            "type": "string",
+            "format": "did",
+            "description": "The member who holds the role. The record key is `<user>~<role>`."
+          },
+          "role": {
+            "type": "string",
+            "description": "The role: the record key of a `space.roomy.space.role` record."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}
