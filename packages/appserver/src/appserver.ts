@@ -994,6 +994,11 @@ export async function createAppserver(
     "Per-space DB connections held open by a worker's LRU cache.",
     ["worker"],
   );
+  const poolWorkerHeapUsed = metrics.gauge(
+    "roomy_db_worker_heap_used_bytes",
+    "JS heap used by a pool worker thread. The main thread's process.memoryUsage() does not include worker heaps.",
+    ["worker"],
+  );
   const poolDbCacheKib = metrics.gauge(
     "roomy_db_space_cache_kib",
     "Page cache per per-space DB connection, in KiB.",
@@ -1281,10 +1286,14 @@ export async function createAppserver(
           pool.spaceWorkers.forEach((w, i) => {
             poolWorkerPending.set({ worker: `space-${i}` }, w.pending);
             poolWorkerOpenDbs.set({ worker: `space-${i}` }, w.openSpaceDbs);
+            poolWorkerHeapUsed.set({ worker: `space-${i}` }, w.heapUsed);
           });
           poolWorkerPending.set({ worker: "global" }, pool.globalWorker.pending);
           poolWorkerPending.set({ worker: "readstate" }, pool.readStateWorker.pending);
           poolWorkerPending.set({ worker: "events" }, pool.eventsWorker.pending);
+          poolWorkerHeapUsed.set({ worker: "global" }, pool.globalWorker.heapUsed);
+          poolWorkerHeapUsed.set({ worker: "readstate" }, pool.readStateWorker.heapUsed);
+          poolWorkerHeapUsed.set({ worker: "events" }, pool.eventsWorker.heapUsed);
           // The connection cache's own size and ceiling as exported gauges:
           // `roomy_db_open_space_dbs` × `roomy_db_space_cache_kib` is the
           // native-memory term the per-space connection cache contributes.

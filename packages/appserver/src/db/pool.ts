@@ -346,6 +346,12 @@ async function workerStats(
       cacheKib: 0,
       maxSpaceDbs: 0,
       maxPreparedStmts: 0,
+      heapUsed: 0,
+      heapTotal: 0,
+      external: 0,
+      arrayBuffers: 0,
+      heapCeilingBytes: 0,
+      gcCollections: 0,
     };
   }
   return { pending, ...cache };
