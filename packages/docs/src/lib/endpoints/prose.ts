@@ -963,6 +963,44 @@ export const prose: Record<string, EndpointProse> = {
       "Per-grant processing (read-time validity): Polar validity check per grantor (300s TTL cache).",
     ],
   },
+  "space.roomy.admin.getSpaceRecords": {
+    description:
+      "One page of the records a space's change feed currently describes, in lexicon shape. The feed is a log of ops and is folded on read, so an edited message holds its edit, a deleted record is gone, and a kind the feed only ever updates appears once. Folded records are cached per (space, latest_event).",
+    auth: "Admin allowlist (APPSERVER_ADMIN_DIDS).",
+    params: [
+      { name: "space", type: "string", required: true, description: "DID of the space whose change feed to read." },
+      { name: "repo", type: "string", required: false, description: "Only records whose folded repo is this DID." },
+      { name: "collection", type: "string", required: false, description: "Only records of this collection." },
+      { name: "cursor", type: "string", required: false, description: "Opaque cursor from the previous page; replay it with the same repo and collection. It carries the snapshot the page was folded under, so pagination is stable while the space is written to." },
+      { name: "limit", type: "int", required: false, default: "100", description: "Records per page (max 1000)." },
+    ],
+    outputSchema: {
+      type: "object",
+      properties: {
+        records: { type: "Array<{repo, collection, rkey, record, op}>", description: "Folded records, ordered by repo, collection, then rkey. record is the lexicon record; op is 'create' when one change produced it and 'update' when it has been rewritten since." },
+        cursor: { type: "string | undefined", description: "Present when more records follow." },
+      },
+    },
+  },
+  "space.roomy.admin.getSpaceRecordCounts": {
+    description:
+      "Counts a space's folded records per kind and per repo for the record browser's tree, plus the folded records no lexicon can state, grouped by collection and reason — the tally a migration format has to answer for.",
+    auth: "Admin allowlist (APPSERVER_ADMIN_DIDS).",
+    params: [
+      { name: "space", type: "string", required: true, description: "DID of the space whose change feed to count." },
+    ],
+    outputSchema: {
+      type: "object",
+      properties: {
+        space: { type: "string", description: "The space DID counted." },
+        snapshot: { type: "number", description: "The stream's latest_event these counts describe." },
+        total: { type: "number", description: "Expressible records: the sum of byKind and of byRepo." },
+        byKind: { type: "Array<{kind, collection, count}>", description: "Records per kind, largest first." },
+        byRepo: { type: "Array<{repo, count}>", description: "Records per folded repo, largest first." },
+        unexpressible: { type: "object", description: "{total, entries: [{collection, reason, count}]} — records toRecordJson cannot state as a lexicon record." },
+      },
+    },
+  },
   "space.roomy.admin.reconcileProMembers": {
     description:
       "On-demand Roomy Pro members-role reconciliation: sweeps the Roomy Space's 'Members' role against Polar's live Pro-subscriber set — adding paying subscribers and removing lapsed tracked ones — then reports what changed. This is the operator-triggered companion to the periodic sweep; both share the same fail-safe semantics (a Polar outage aborts with no role mutation rather than guessing a subscriber set).",

@@ -39,7 +39,7 @@
 import { decodeTime } from "ulidx";
 
 import type { FoldedRecord } from "./foldChanges.ts";
-import { RECORD_KINDS, type RecordKind } from "./recordKinds.ts";
+import { KIND_BY_COLLECTION } from "./recordKinds.ts";
 
 /** A record as it appears in a repo: the fields, plus its type. */
 export interface JsonRecord {
@@ -56,15 +56,6 @@ export interface JsonRecord {
 export type RecordJson =
   | { readonly ok: true; readonly record: JsonRecord }
   | { readonly ok: false; readonly reason: string };
-
-/** The kind a collection belongs to — the fold carries the NSID, not the kind. */
-const KIND_BY_COLLECTION: Readonly<Record<string, RecordKind>> =
-  Object.fromEntries(
-    (Object.keys(RECORD_KINDS) as RecordKind[]).map((kind) => [
-      RECORD_KINDS[kind].collection,
-      kind,
-    ]),
-  );
 
 /**
  * The profile record's field for each folded profile field, and nothing for the

@@ -1,0 +1,72 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.admin.getSpaceRecords",
+  "defs": {
+    "record": {
+      "type": "object",
+      "description": "One record the space's change feed currently describes, with its repo and the op the fold applied.",
+      "required": ["repo", "collection", "rkey", "record", "op"],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "format": "at-identifier",
+          "description": "The repo the folded record belongs to. An edit of an author's record resolves to the author's repo, not the space's."
+        },
+        "collection": { "type": "string", "format": "nsid" },
+        "rkey": { "type": "string", "format": "record-key" },
+        "record": {
+          "type": "unknown",
+          "description": "The lexicon record: its $type, its createdAt from the log's ordering stamp, and its fields."
+        },
+        "op": {
+          "type": "string",
+          "knownValues": ["create", "update"],
+          "description": "Whether one change produced the record (create) or it has been rewritten since (update)."
+        }
+      }
+    },
+    "main": {
+      "type": "query",
+      "description": "Page a space's change feed as the current records it describes. Admin-only. The feed is partitioned by the space's stream in the event-log DB and folded on read; the cursor carries the snapshot the page was folded under, so pagination is stable while the space is written to.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": {
+          "space": { "type": "string", "format": "at-identifier" },
+          "repo": {
+            "type": "string",
+            "format": "at-identifier",
+            "description": "Return only records whose folded repo is this DID."
+          },
+          "collection": {
+            "type": "string",
+            "format": "nsid",
+            "description": "Return only records of this collection."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "The cursor returned by the previous page. Replay it with the same repo and collection."
+          },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["records"],
+          "properties": {
+            "records": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "#record" }
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Present when more records follow; absent on the last page."
+            }
+          }
+        }
+      }
+    }
+  }
+}

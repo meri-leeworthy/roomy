@@ -501,6 +501,18 @@ export const RECORD_KINDS = {
 /** The name of a record kind. */
 export type RecordKind = keyof typeof RECORD_KINDS;
 
+/**
+ * The kind that owns a collection NSID, for a reader holding only the NSID a
+ * fold row carries. Every kind's collection is distinct.
+ */
+export const KIND_BY_COLLECTION: Readonly<Record<string, RecordKind>> =
+  Object.fromEntries(
+    (Object.keys(RECORD_KINDS) as RecordKind[]).map((kind) => [
+      RECORD_KINDS[kind].collection,
+      kind,
+    ]),
+  );
+
 /** One kind's collection NSID. */
 export type Nsid<K extends RecordKind> = (typeof RECORD_KINDS)[K]["collection"];
 

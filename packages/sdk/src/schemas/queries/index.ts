@@ -42,3 +42,5 @@ export * as getScopeSettings from "./getScopeSettings";
 export * as getVoiceToken from "./getVoiceToken";
 export * as getVoiceParticipants from "./getVoiceParticipants";
 export * as getVoiceActiveCalls from "./getVoiceActiveCalls";
+export * as getSpaceRecords from "./getSpaceRecords";
+export * as getSpaceRecordCounts from "./getSpaceRecordCounts";
