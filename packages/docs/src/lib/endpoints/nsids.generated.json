@@ -145,6 +145,16 @@
     "group": "Admin"
   },
   {
+    "nsid": "space.roomy.admin.getSpaceRecords",
+    "kind": "query",
+    "group": "Admin"
+  },
+  {
+    "nsid": "space.roomy.admin.getSpaceRecordCounts",
+    "kind": "query",
+    "group": "Admin"
+  },
+  {
     "nsid": "space.roomy.sync.getEvents",
     "kind": "query",
     "group": "Sync"
