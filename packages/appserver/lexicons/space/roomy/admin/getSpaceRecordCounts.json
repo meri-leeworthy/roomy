@@ -1,0 +1,83 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.admin.getSpaceRecordCounts",
+  "defs": {
+    "kindCount": {
+      "type": "object",
+      "required": ["kind", "collection", "count"],
+      "properties": {
+        "kind": { "type": "string", "description": "The record kind, e.g. message or room." },
+        "collection": { "type": "string", "format": "nsid" },
+        "count": { "type": "integer" }
+      }
+    },
+    "repoCount": {
+      "type": "object",
+      "required": ["repo", "count"],
+      "properties": {
+        "repo": { "type": "string", "format": "at-identifier" },
+        "count": { "type": "integer" }
+      }
+    },
+    "unexpressibleCount": {
+      "type": "object",
+      "description": "Folded records a lexicon cannot state, grouped by collection and reason.",
+      "required": ["collection", "reason", "count"],
+      "properties": {
+        "collection": { "type": "string", "format": "nsid" },
+        "reason": { "type": "string" },
+        "count": { "type": "integer" }
+      }
+    },
+    "unexpressibleTally": {
+      "type": "object",
+      "description": "The folded records no lexicon can state.",
+      "required": ["total", "entries"],
+      "properties": {
+        "total": { "type": "integer" },
+        "entries": {
+          "type": "array",
+          "items": { "type": "ref", "ref": "#unexpressibleCount" }
+        }
+      }
+    },
+    "main": {
+      "type": "query",
+      "description": "Counts for a space's folded records: per kind and per repo for the record browser's tree, plus the records no lexicon can state. Admin-only.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": {
+          "space": { "type": "string", "format": "at-identifier" }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space", "snapshot", "total", "byKind", "byRepo", "unexpressible"],
+          "properties": {
+            "space": { "type": "string", "format": "at-identifier" },
+            "snapshot": {
+              "type": "integer",
+              "description": "The stream's latest_event these counts describe."
+            },
+            "total": {
+              "type": "integer",
+              "description": "Expressible records: the sum of byKind and of byRepo."
+            },
+            "byKind": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "#kindCount" }
+            },
+            "byRepo": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "#repoCount" }
+            },
+            "unexpressible": { "type": "ref", "ref": "#unexpressibleTally" }
+          }
+        }
+      }
+    }
+  }
+}

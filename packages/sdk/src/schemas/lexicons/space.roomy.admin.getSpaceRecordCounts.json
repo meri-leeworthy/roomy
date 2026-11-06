@@ -1,0 +1,135 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.admin.getSpaceRecordCounts",
+  "defs": {
+    "byKind": {
+      "type": "object",
+      "required": [
+        "collection",
+        "count",
+        "kind"
+      ],
+      "properties": {
+        "collection": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        }
+      }
+    },
+    "byRepo": {
+      "type": "object",
+      "required": [
+        "count",
+        "repo"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "repo": {
+          "type": "string"
+        }
+      }
+    },
+    "entries": {
+      "type": "object",
+      "required": [
+        "collection",
+        "count",
+        "reason"
+      ],
+      "properties": {
+        "collection": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "unexpressible": {
+      "type": "object",
+      "required": [
+        "entries",
+        "total"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#entries"
+          }
+        },
+        "total": {
+          "type": "integer"
+        }
+      }
+    },
+    "main": {
+      "type": "query",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "space"
+        ],
+        "properties": {
+          "space": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "byKind",
+            "byRepo",
+            "snapshot",
+            "space",
+            "total",
+            "unexpressible"
+          ],
+          "properties": {
+            "byKind": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#byKind"
+              }
+            },
+            "byRepo": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#byRepo"
+              }
+            },
+            "snapshot": {
+              "type": "integer"
+            },
+            "space": {
+              "type": "string"
+            },
+            "total": {
+              "type": "integer"
+            },
+            "unexpressible": {
+              "type": "ref",
+              "ref": "#unexpressible"
+            }
+          }
+        }
+      }
+    }
+  }
+}

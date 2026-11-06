@@ -88,6 +88,8 @@ import { getBridgeTokensHandler } from "./handlers/space.roomy.space.getBridgeTo
 import { createProCheckoutHandler } from "./handlers/space.roomy.pro.createCheckout.ts";
 import { adminGetSpaceMembershipHandler } from "./handlers/space.roomy.admin.getSpaceMembership.ts";
 import { adminReconcileProMembersHandler } from "./handlers/space.roomy.admin.reconcileProMembers.ts";
+import { adminGetSpaceRecordsHandler } from "./handlers/space.roomy.admin.getSpaceRecords.ts";
+import { adminGetSpaceRecordCountsHandler } from "./handlers/space.roomy.admin.getSpaceRecordCounts.ts";
 import { getVapidPublicKeyHandler } from "./handlers/space.roomy.push.getVapidPublicKey.ts";
 import { getPreferencesHandler } from "./handlers/space.roomy.push.getPreferences.ts";
 import { registerSubscriptionHandler } from "./handlers/space.roomy.push.registerSubscription.ts";
@@ -338,6 +340,14 @@ export function buildRouter(
     })
     .procedure("space.roomy.admin.reconcileProMembers", {
       handler: adminReconcileProMembersHandler,
+    })
+    // Admin record reads: the space's change feed folded to current records
+    // (no arktype schemas — internal/admin, matching the block above).
+    .query("space.roomy.admin.getSpaceRecords", {
+      handler: adminGetSpaceRecordsHandler,
+    })
+    .query("space.roomy.admin.getSpaceRecordCounts", {
+      handler: adminGetSpaceRecordCountsHandler,
     })
     .query("space.roomy.sync.getEvents", {
       handler: getEventsHandler,
