@@ -27,7 +27,7 @@ The config is **baked into the image** so no Railway volume is required.
    | `GRAFANA_CLOUD_TEMPO_ID` | Grafana Cloud instance ID (OTLP basic-auth user). Required *with* `_URL`/`_TOKEN` to ship spans. |
    | `GRAFANA_CLOUD_TEMPO_TOKEN` | Grafana Cloud access policy token (OTLP basic-auth pass). |
    | `APPSERVER_METRICS_URL` | appserver scrape target as **host:port** (no scheme/path). On Railway this must be `<service-name>.railway.internal:8080` — Railway's private DNS uses the `.railway.internal` suffix, so the Dockerfile default `appserver:8080` does **not** resolve there. Short/bare names only work in the dev compose network (where the container is actually named `alloy`/`appserver`). Scheme is http, path is `/metrics`. An empty value drops the target (`discovery.relabel`), so the collector scrapes nothing instead of reporting a dead `up == 0` for a deployment that does not exist. |
-   | `ALLOY_ENV` | This collector's environment — the `env` label on scraped metrics and on browser records. Default `production`; set it to `staging` on the staging collector. Trimmed and lowercased, and an empty or whitespace-only value counts as unset. |
+   | `ALLOY_ENV` | This collector's environment — the `env` label on scraped metrics and on browser records. **Required for metrics: there is no default.** Trimmed and lowercased, and an empty or whitespace-only value counts as unset; an unset value drops the scrape target, so the collector publishes **no metrics series at all**, and browser records carry no `env` label. Set it to `staging` on the staging collector. |
    | `FARO_CORS_ORIGINS` | Comma-separated browser origins allowed to POST Faro telemetry (default `https://roomy.space` — the SPA origin) |
    | `FARO_API_KEY` | Optional Faro API key (default unset) |
 3. **Networking → Private networking** — ensure this service is on the
@@ -44,6 +44,17 @@ The config is **baked into the image** so no Railway volume is required.
 > token for the password; use the instance ID as the user. The same token
 > works for Loki, Mimir, and Tempo if the policy grants all three signals.
 
+## Validating the config
+
+`node deploy/alloy/check-config.mjs` asserts the `env` invariant below instead
+of leaving it to review: every `env` label derives from `ALLOY_ENV` with no
+fallback, the scrape target is dropped when that value is empty, the Faro stage
+drops the label instead, and the image bakes no `ALLOY_ENV`. It reads
+`deploy/alloy/config.alloy` and `deploy/alloy/Dockerfile` by default, accepts a
+config path as its only argument, and runs in CI. The repo has no Alloy parser,
+so it is a structural check over the config text that fails as soon as a
+default is reintroduced — not an evaluation of the config.
+
 ## Environments
 
 Every signal carries `env`. **Logs and traces** carry the application's own
@@ -52,7 +63,7 @@ value: a stream label and a field on the JSON line, and the
 from `APP_ENV`, then `RAILWAY_ENVIRONMENT_NAME`, then `unknown`.
 
 **Metrics and browser records** carry the **collector's** environment instead,
-from `ALLOY_ENV` (default `production`): `env` is a target label on the scrape
+from `ALLOY_ENV`, with **no default**: `env` is a target label on the scrape
 (so a label on every series) and a constant stream label on the Faro path.
 Neither signal has an application value to inherit — the collector scrapes a
 host it was pointed at, and the SPA is one build serving several deployments,
@@ -60,6 +71,17 @@ so the collector's identity is the only thing that knows which environment
 produced them. Normalization is the same on both sides (trim; empty or
 whitespace-only counts as unset; lowercase), so `env` is one dimension across
 all four signals.
+
+There is deliberately no fallback value. A default is a guess about which
+deployment the collector is, and a wrong guess is indistinguishable from a
+right one: two processes scraped under one label set interleave onto the same
+series, which reads as a restart on every other scrape and as a counter reset
+whenever the scrape lands on the smaller process. So an unset `ALLOY_ENV`
+publishes nothing rather than guessing — **an absent `env` shows up as a
+missing scrape target, not as production.** The collector drops the target
+(`discovery.relabel`) and, on the browser path where a dropped record would be
+the loss of the telemetry itself, stamps no `env` label. Both cases are fixed
+by setting the variable on that collector.
 
 It exists so that "which deployment produced this?" is answered by the
 telemetry rather than inferred from a Railway service name: without it, two
@@ -72,7 +94,9 @@ Staging therefore needs **its own Alloy, in its own Railway project**, with
 `ALLOY_ENV=staging` and `APPSERVER_METRICS_URL` pointed at the staging
 appserver. The image and the config are shared between the two collectors;
 only those two variables differ, which is what keeps staging metrics from
-being labelled — or a staging target reported — as production. The
+being labelled — or a staging target reported — as production. A collector
+deployed without `ALLOY_ENV` now scrapes nothing at all: the staging numbers
+are visibly missing instead of silently counted as production's. The
 Loki push receiver on port 3100 has no authentication and is reachable only on
 the project's private network, so it is per-project by construction — a
 staging app pointing at production's collector would be both a telemetry merge
@@ -207,6 +231,21 @@ The appserver exposes a Prometheus `/metrics` endpoint (see
   process booted (`src/fatal.ts`). The value changes with every restart, so a
   restart is visible on the **first scrape after it happens**:
   **Alert:** `changes(roomy_process_boot_timestamp_seconds[1h]) > 0`.
+  - The alert counts changes of the *series*, so it holds only while one label
+    set (`env`, `instance`, `job`) belongs to exactly one process — which is
+    what a required `ALLOY_ENV` and one target per collector give you. Two
+    processes scraped under one label set interleave their values, and every
+    scrape that lands on the other process's boot timestamp counts as a
+    restart: the alert then fires continuously on a process that has not
+    restarted, and `increase(roomy_cache_hits_total[1h])` on that same label
+    set reads as a reset whenever the smaller process answers.
+  - **Guard:** a collector whose target was dropped for an unset `ALLOY_ENV`
+    has no series and no `up` at all, so `up == 0` cannot report it — there is
+    nothing to be zero. Watch for the series going absent:
+    `absent(roomy_process_boot_timestamp_seconds{env="production"})` fires when
+    that environment's series stop arriving, and
+    `up{job="prometheus.scrape.appserver"} == 0` separately covers a target
+    that exists but cannot be scraped.
 - `roomy_process_starts_total` — boots counted *within* the running process
   (`1` after a clean boot). Read it as the in-process boot count, **not** as a
   restart signal: the counter is created fresh in each process and incremented

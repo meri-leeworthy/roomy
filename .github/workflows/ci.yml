@@ -381,6 +381,25 @@ jobs:
           echo "AASA generator writes $(tr -d '\n' < "$tmp/.well-known/apple-app-site-association")"
           echo "and refuses a build with no team id."
 
+  # `env` on the scraped metrics names the deployment that produced them, so it
+  # must come from ALLOY_ENV and never from a default: two collectors sharing a
+  # label set interleave onto the same series, which reads as a restart on every
+  # other scrape and as a counter reset whenever the smaller process answers.
+  # The check is a structural assertion over deploy/alloy/config.alloy — no
+  # install, no network.
+  check-alloy-config:
+    name: Check Alloy Config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Check the collector never defaults env
+        run: node deploy/alloy/check-config.mjs
+
   check-sdk:
     name: Check SDK Lexicons
     needs: install
