@@ -26,9 +26,14 @@
 //                               `discovery.relabel "appserver"` block.
 //   - ALLOY_ENV                 this collector's environment: the `env`
 //                               label on scraped metrics and on browser
-//                               records. Default `production`; trimmed and
-//                               lowercased, and an empty or whitespace-only
-//                               value counts as unset. Same normalization
+//                               records. Required for the scrape — there is
+//                               no default. Trimmed and lowercased; an empty
+//                               or whitespace-only value counts as unset, and
+//                               an unset env drops the scrape target (see
+//                               `discovery.relabel "appserver"`) and leaves
+//                               browser records unlabelled rather than
+//                               publishing them as an environment this
+//                               collector never declared. Same normalization
 //                               as the app's `env` (see
 //                               packages/appserver/src/telemetry/build.ts)
 //                               so both halves share one dimension.
@@ -129,22 +134,39 @@ loki.source.api "apps" {
 // reclaimed, and the build identity stays in the log line and the trace
 // resource where it costs no cardinality.
 //
-// The relabel stage exists to drop an empty address. The Dockerfile sets
-// APPSERVER_METRICS_URL, so this only fires if someone overrides it with
-// ""; a target with no address would otherwise be reported as `up == 0`
-// for a deployment that does not exist, erroring on every scrape interval.
-// The regex is fully anchored, so `^$` matches only the empty address.
+// `env` has no default. A default here is a guess about which deployment this
+// collector is, and a wrong one is indistinguishable from a right one: two
+// collectors sharing the label set interleave their scrapes onto the same
+// series, so `changes(roomy_process_boot_timestamp_seconds[1h])` counts their
+// two processes as restarts, and a counter read from the smaller process looks
+// like a reset. The environment is therefore a value the collector was told
+// and never one it assumed; unset drops the target below instead.
+//
+// The two relabel stages drop a target the collector cannot label or reach. A
+// target with no address would otherwise be reported as `up == 0` for a
+// deployment that does not exist, erroring on every scrape interval; the
+// Dockerfile sets APPSERVER_METRICS_URL, so that stage only fires if someone
+// overrides it with "". The regexes are fully anchored, so `^$` matches only
+// an empty value — an unset or whitespace-only ALLOY_ENV leaves `env` empty
+// after trimming, which drops the target rather than publishing it as some
+// environment this collector never declared.
 discovery.relabel "appserver" {
 	// __address__ must be host:port only (no scheme or path) — Prometheus
 	// rejects a full URL here. The scheme defaults to http and the path is
 	// set via metrics_path below.
 	targets = [{
 		__address__ = sys.env("APPSERVER_METRICS_URL"),
-		env         = coalesce(string.to_lower(string.trim_space(sys.env("ALLOY_ENV"))), "production"),
+		env         = string.to_lower(string.trim_space(sys.env("ALLOY_ENV"))),
 	}]
 
 	rule {
 		source_labels = ["__address__"]
+		regex         = "^$"
+		action        = "drop"
+	}
+
+	rule {
+		source_labels = ["env"]
 		regex         = "^$"
 		action        = "drop"
 	}
@@ -205,9 +227,22 @@ loki.process "frontend" {
 	// identifies the deployment. The collector knows which one it is, so
 	// `env` is stamped here as a constant. Same normalization as the scrape
 	// target above, and as the app's `env`.
+	//
+	// No default: an unset ALLOY_ENV leaves the label empty and the stage
+	// below drops it, so a record is never stamped with an environment this
+	// collector did not declare. Unlike the scrape there is no target to
+	// drop — the record itself is the telemetry — so the label is what goes.
 	stage.static_labels {
 		values = {
-			env = coalesce(string.to_lower(string.trim_space(sys.env("ALLOY_ENV"))), "production"),
+			env = string.to_lower(string.trim_space(sys.env("ALLOY_ENV"))),
+		}
+	}
+
+	stage.match {
+		selector = "{env=\"\"}"
+
+		stage.label_drop {
+			values = ["env"]
 		}
 	}
 

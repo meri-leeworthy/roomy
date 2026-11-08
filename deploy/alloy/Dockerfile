@@ -14,8 +14,8 @@
 #   - GRAFANA_CLOUD_TEMPO_URL / _ID / _TOKEN   (optional; unset → no traces)
 #   - APPSERVER_METRICS_URL  (scrape target; default below)
 #   - ALLOY_ENV              (this collector's environment, the `env` label
-#                             on metrics + browser records; the config
-#                             defaults it to `production`)
+#                             on metrics + browser records; required — with no
+#                             value the scrape target is dropped)
 #   - FARO_CORS_ORIGINS      (comma-separated browser origins; default below)
 #   - FARO_API_KEY           (optional; default empty)
 #
