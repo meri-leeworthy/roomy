@@ -10,14 +10,15 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { createBot, Intents } from "@discordeno/bot";
 import { Did, newUlid } from "@roomy-space/sdk";
+import { BridgeRepository } from "../../db/repository.ts";
 import { normalizeMessage } from "../../discord/normalizers.ts";
 import { desiredProperties } from "../../discord/types.ts";
-import { BridgeRepository } from "../../db/repository.ts";
+import { resetCapacityGate, setCapacityGate } from "../../roomy/capacity.ts";
 import { MockRoomyGateway } from "../../roomy/mock-gateway.ts";
 import {
-	resetCapacityGate,
-	setCapacityGate,
-} from "../../roomy/capacity.ts";
+	ingestSkipSnapshot,
+	resetIngestSkips,
+} from "../../telemetry/ingest-skips.ts";
 import { ingestDiscordMessage } from "../message-ingestion.ts";
 import {
 	CHANNEL,
@@ -418,6 +419,9 @@ describe("ingestDiscordMessage — embeds", () => {
 		expectToBe(attachments[0]?.$type, "space.roomy.attachment.link.v0");
 		expect(attachments[0].uri).toBe("https://example.com/article");
 		expect(attachments[0].showPreview).toBe(true);
+		// The embed's title is the message text; the url travels in the
+		// link attachment above.
+		expect(bodyText(roomy, SPACE_A)).toContain("An article");
 	});
 
 	// EC06: An embed without a url (e.g. a bot's image-only card) has no link
@@ -481,6 +485,36 @@ describe("ingestDiscordMessage — embeds", () => {
 		expectToBe(attachments[1]?.$type, "space.roomy.attachment.link.v0");
 		expect(attachments[0].uri).toBe("https://example.com/one");
 		expect(attachments[1].uri).toBe("https://example.com/two");
+	});
+
+	// EC09: An embed title with no url is still a body: nothing to attach,
+	// but the message must not arrive empty.
+	test("EC09: an embed title without a url becomes body text", async () => {
+		const msg = makeMessage({
+			id: MSG_ID,
+			content: "",
+			embeds: [{ title: "An article" }],
+		});
+
+		const result = await ingestDiscordMessage(msg, repo, roomy);
+		expect(result).toEqual({ synced: 1, skipped: 0 });
+		expect(bodyText(roomy, SPACE_A)).toBe("An article");
+	});
+
+	// EC10: Repeated titles collapse; distinct titles each get a block.
+	test("EC10: emits one body block per distinct embed title", async () => {
+		const msg = makeMessage({
+			id: MSG_ID,
+			content: "",
+			embeds: [
+				{ url: "https://example.com/one", title: "One" },
+				{ url: "https://example.com/two", title: "Two" },
+				{ url: "https://example.com/three", title: "One" },
+			],
+		});
+
+		await ingestDiscordMessage(msg, repo, roomy);
+		expect(bodyText(roomy, SPACE_A)).toBe("One\nTwo");
 	});
 });
 
@@ -1101,8 +1135,7 @@ describe("ingestDiscordMessage — messages with no content", () => {
 			const event = createMessageEvent(roomy, SPACE_A);
 			expectToBeDefined(event);
 			expect(
-				event.extensions?.["space.roomy.extension.attachments.v0"]
-					?.attachments,
+				event.extensions?.["space.roomy.extension.attachments.v0"]?.attachments,
 			).toEqual([
 				{
 					$type: "space.roomy.attachment.link.v0",
@@ -1144,5 +1177,59 @@ describe("ingestDiscordMessage — messages with no content", () => {
 		} finally {
 			warnSpy.mockRestore();
 		}
+	});
+});
+
+describe("ingestDiscordMessage — skip counters", () => {
+	let repo: BridgeRepository;
+	let roomy: MockRoomyGateway;
+
+	beforeEach(() => {
+		resetIngestSkips();
+		repo = setupRepo();
+		roomy = new MockRoomyGateway();
+		mapChannel(repo);
+	});
+
+	// SC01: The counter names each reason that fired and sums to exactly the
+	// `skipped` total ingest returned over the run.
+	test("SC01: reasons sum to the skipped messages over a run", async () => {
+		const unbridgedGuild = "999999999999999999";
+		const messages = [
+			makeMessage({ id: "1", content: "", attachments: [], embeds: [] }),
+			makeMessage({ id: "2", guildId: unbridgedGuild }),
+			makeMessage({ id: "3", type: 18 }),
+			makeMessage({ id: "4" }),
+			// Already synced from the run above → one more skip.
+			makeMessage({ id: "4" }),
+		];
+
+		let skipped = 0;
+		for (const message of messages) {
+			skipped += (await ingestDiscordMessage(message, repo, roomy)).skipped;
+		}
+
+		const snapshot = ingestSkipSnapshot();
+		expect(snapshot.metric).toBe("bridge_ingest_skipped_total");
+		expect(snapshot.total).toBe(skipped);
+		expect(snapshot.total).toBe(4);
+		expect(snapshot.reasons).toEqual({
+			empty_message: 1,
+			channel_not_bridged: 1,
+			system_message: 1,
+			already_synced: 1,
+		});
+	});
+
+	// SC02: A genuinely contentless system row still skips (and is counted);
+	// the counter is the record of it.
+	test("SC02: an empty system message is skipped and counted", async () => {
+		const result = await ingestDiscordMessage(
+			makeMessage({ id: "7", content: "", type: 18 }),
+			repo,
+			roomy,
+		);
+		expect(result).toEqual({ synced: 0, skipped: 1 });
+		expect(ingestSkipSnapshot().reasons.system_message).toBe(1);
 	});
 });
