@@ -2,6 +2,7 @@ import type { BridgeRepository, FailedSend } from "./db/repository.ts";
 import { ATPROTO_BRIDGE_DID, PORT } from "./env.ts";
 import { createLogger } from "./logger.ts";
 import { isBackfillRunning } from "./services/backfill.ts";
+import { ingestSkipSnapshot } from "./telemetry/ingest-skips.ts";
 
 const log = createLogger("api");
 
@@ -129,6 +130,13 @@ function route(
 			return jsonResponse({ replayed: sendStatus(replayed) });
 		}
 
+		// Messages (or one target space of a message) ingest declined to sync,
+		// counted by reason since process start. The JSONL skip ledger is
+		// opt-in and unset in most deployments; this is the always-on record.
+		case "/ingest/skips": {
+			return jsonResponse(ingestSkipSnapshot());
+		}
+
 		default:
 			return jsonResponse({ error: "Not found" }, 404);
 	}
@@ -181,7 +189,8 @@ export function buildBackfillProgressPayload(
 		phase: p.phase,
 		messagesSynced: p.messagesSynced,
 		messagesSkipped: p.messagesSkipped,
-		cursor: repo.getChannelCursor(p.spaceDid, p.channelId)?.lastMessageId ?? null,
+		cursor:
+			repo.getChannelCursor(p.spaceDid, p.channelId)?.lastMessageId ?? null,
 		parentId: p.parentId,
 		windowSynced: p.windowSynced,
 		blockedReason: p.blockedReason,

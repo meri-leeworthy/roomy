@@ -32,7 +32,7 @@ Discord Gateway ──► Bot event handlers
 src/
 ├── index.ts                   # Entry point, gateway wiring, graceful shutdown
 ├── env.ts                     # Environment variable validation
-├── api.ts                     # HTTP API server (/info, /get-guild-id, /get-space-id, /bridges)
+├── api.ts                     # HTTP API server (/info, /get-guild-id, /get-space-id, /bridges, /ingest/skips)
 ├── logger.ts                  # Structured logging
 ├── db/
 │   ├── schema.ts              # SQLite migrations
@@ -68,6 +68,33 @@ src/
 | MESSAGE_REACTION_ADD    | `addBridgedReaction.v0`         |                                                  |
 | MESSAGE_REACTION_REMOVE | `removeBridgedReaction.v0`      |                                                  |
 | (per-message)           | `updateProfile.v0`              | Hash-based change detection on author profile    |
+
+### Ingest skip counters
+
+Every message ingest declines to sync increments an in-process counter by
+reason. `GET /ingest/skips` returns the `bridge_ingest_skipped_total` counter
+as it stands in this process:
+
+```json
+{
+  "metric": "bridge_ingest_skipped_total",
+  "total": 4,
+  "reasons": {
+    "already_synced": 1,
+    "channel_not_bridged": 1,
+    "empty_message": 1,
+    "system_message": 1
+  }
+}
+```
+
+Counts are per (message, target space), so summing the reasons equals the
+`skipped` total ingest reported over the same run. Only reasons that fired are
+listed; the counter resets when the process restarts. Setting
+`ROOMY_SKIP_LOG` additionally writes one JSON line per skipped message — id,
+channel, author, and the payload shape (`type`, `contentLen`, `poll`,
+`components`, `stickers`, `embeds`, `attachments`) — which is the record of
+what was in a message the counters only classify.
 
 ## Initial structure sync (one-shot)
 
@@ -228,13 +255,14 @@ prints the account it resolved.
 | `STREAM_HANDLE_NSID` | `space.roomy.space.handle.dev`     | Handle NSID                                                                      |
 | `BRIDGE_DATA_DIR`    | `./data`                           | Directory for SQLite database                                                    |
 | `BRIDGE_DB_PATH`     | `${BRIDGE_DATA_DIR}/bridge.sqlite` | Path to SQLite database                                                          |
-| `PORT`               | `3301`                             | HTTP port for bridge API (`/info`, `/get-guild-id`, `/get-space-id`, `/bridges`) |
+| `PORT`               | `3301`                             | HTTP port for bridge API (`/info`, `/get-guild-id`, `/get-space-id`, `/bridges`, `/ingest/skips`) |
 | `LOG_LEVEL`          | `info`                             | Log level                                                                        |
 | `BRIDGE_RECONNECT_BASE_MS` | `5000`                       | Base delay (ms) for the shared reconnect backoff to a failing appserver          |
 | `BRIDGE_RECONNECT_MAX_MS`  | `300000`                     | Max delay (ms) cap for the shared reconnect backoff                              |
 | `SYSTEM_SPACE`             | *(unset)*                    | Space DID for admin system messages (capacity alerts)                            |
 | `SYSTEM_CHANNEL`           | *(unset)*                    | Channel ULID for admin system messages; both must be set to enable               |
 | `BRIDGE_CAPACITY_KILL_SWITCH` | `false`                   | `true`/`1` disables per-guild capacity checks globally (emergency re-enable)      |
+| `ROOMY_SKIP_LOG`     | *(unset)*                          | Path to append a JSONL record of each skipped message (id, payload shape)        |
 
 ## Capacity enforcement (Roomy Pro)
 

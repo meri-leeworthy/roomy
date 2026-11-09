@@ -16,6 +16,10 @@ import { createLogger } from "../logger.ts";
 import { getCapacityGate } from "../roomy/capacity.ts";
 import type { RoomyGateway } from "../roomy/gateway.ts";
 import {
+	type IngestSkipReason,
+	recordIngestSkip,
+} from "../telemetry/ingest-skips.ts";
+import {
 	type MentionContext,
 	resolveMentionsToBlocks,
 } from "./mention-resolver.ts";
@@ -28,7 +32,11 @@ const log = createLogger("ingest");
 
 const SKIP_LOG_PATH = process.env.ROOMY_SKIP_LOG;
 
-/** Append one JSON line recording a skipped message. No-op if ROOMY_SKIP_LOG is unset. */
+/**
+ * Append one JSON line recording a skipped message. No-op if ROOMY_SKIP_LOG is
+ * unset. `shape` records which payload classes were present, so the ledger says
+ * what was dropped without replaying the log line.
+ */
 function writeSkipRecord(
 	reason: string,
 	message: DiscordMessageData,
@@ -44,10 +52,21 @@ function writeSkipRecord(
 		type: message.type,
 		content: message.content?.slice(0, 200),
 		authorId: message.author.id,
+		shape: messageShape(message),
 		detail,
 	};
 	// Fire-and-forget — never throw from ingest.
 	appendFile(SKIP_LOG_PATH, `${JSON.stringify(record)}\n`).catch(() => {});
+}
+
+/** Record a skip in both the optional JSONL ledger and the status counters. */
+function recordSkip(
+	reason: IngestSkipReason,
+	message: DiscordMessageData,
+	detail?: string,
+): void {
+	writeSkipRecord(reason, message, detail);
+	recordIngestSkip(reason);
 }
 
 /**
@@ -93,7 +112,7 @@ export async function ingestDiscordMessage(
 
 	if (!guildId) {
 		log.debug(`Skipping message ${messageId}: no guildId`);
-		writeSkipRecord("no_guild_id", message);
+		recordSkip("no_guild_id", message);
 		return { synced: 0, skipped: 1 };
 	}
 
@@ -115,7 +134,7 @@ export async function ingestDiscordMessage(
 	// reaches it.
 	if (!backfill && message.webhookId && repo.isOurWebhook(message.webhookId)) {
 		log.debug(`Skipping own webhook message ${messageId}`);
-		writeSkipRecord("own_webhook_message", message);
+		recordSkip("own_webhook_message", message);
 		return { synced: 0, skipped: 1 };
 	}
 
@@ -133,7 +152,7 @@ export async function ingestDiscordMessage(
 		log.debug(
 			`Skipping message ${messageId}: channel ${channelId} not bridged`,
 		);
-		writeSkipRecord("channel_not_bridged", message, `channel ${channelId}`);
+		recordSkip("channel_not_bridged", message, `channel ${channelId}`);
 		return { synced: 0, skipped: 1 };
 	}
 
@@ -165,7 +184,7 @@ export async function ingestDiscordMessage(
 		log.info(
 			`Skipping message ${messageId}: system message (type ${message.type})`,
 		);
-		writeSkipRecord("system_message", message, `type ${message.type}`);
+		recordSkip("system_message", message, `type ${message.type}`);
 		return { synced: 0, skipped: 1 };
 	}
 
@@ -192,8 +211,12 @@ export async function ingestDiscordMessage(
 	}
 
 	// Blocks for message classes that have no `content` of their own (polls,
-	// component labels, Lottie sticker names). They are space-independent.
-	const classBlocks = buildMessageClassBlocks(message);
+	// component labels, Lottie sticker names) and for embed titles. They are
+	// space-independent.
+	const classBlocks = [
+		...buildMessageClassBlocks(message),
+		...buildEmbedBlocks(message),
+	];
 
 	let synced = 0;
 
@@ -202,7 +225,7 @@ export async function ingestDiscordMessage(
 		const existing = repo.getRoomyId(spaceDid, "message", messageId);
 		if (existing) {
 			log.debug(`Skipping message ${messageId}: already synced to ${spaceDid}`);
-			writeSkipRecord("already_synced", message, spaceDid);
+			recordSkip("already_synced", message, spaceDid);
 			continue;
 		}
 
@@ -213,7 +236,7 @@ export async function ingestDiscordMessage(
 				`capacity: sync halted for ${spaceDid} (guild ${guildId}); skipping message ${messageId}`,
 				{ guildId, spaceDid, messageId },
 			);
-			writeSkipRecord("capacity_over_limit", message, spaceDid);
+			recordSkip("capacity_over_limit", message, spaceDid);
 			continue;
 		}
 
@@ -223,7 +246,7 @@ export async function ingestDiscordMessage(
 			log.warn(
 				`No Roomy room mapping for channel ${channelId} in ${spaceDid}, skipping message`,
 			);
-			writeSkipRecord(
+			recordSkip(
 				"no_room_mapping",
 				message,
 				`channel ${channelId} in ${spaceDid}`,
@@ -250,7 +273,7 @@ export async function ingestDiscordMessage(
 			log.warn(
 				`Skipping message ${messageId} in ${spaceDid}: no content and no attachments (${messageShape(message)})`,
 			);
-			writeSkipRecord("empty_message", message, spaceDid);
+			recordSkip("empty_message", message, spaceDid);
 			continue;
 		}
 
@@ -330,7 +353,7 @@ export async function ingestDiscordMessage(
 		if (!landed) {
 			// The event is queued in the repository and re-offered by the send
 			// sweep; the JSONL record keeps the skip ledger complete.
-			writeSkipRecord("send_failed", message, spaceDid);
+			recordSkip("send_failed", message, spaceDid);
 			continue;
 		}
 		repo.registerMapping(spaceDid, "message", messageId, eventUlid);
@@ -388,6 +411,27 @@ function buildMessageClassBlocks(message: DiscordMessageData): Block[] {
 		});
 	}
 
+	return blocks;
+}
+
+/**
+ * Body blocks for an embed's title. The embed's url already travels as a
+ * `link.v0` attachment (buildAttachments); the title belongs in the message
+ * text, so a link preview does not arrive as a card with an empty body.
+ * Repeated titles collapse to one block.
+ */
+function buildEmbedBlocks(message: DiscordMessageData): Block[] {
+	const blocks: Block[] = [];
+	const seen = new Set<string>();
+	for (const embed of message.embeds ?? []) {
+		const title = embed.title?.trim();
+		if (!title || seen.has(title)) continue;
+		seen.add(title);
+		blocks.push({
+			$type: "space.roomy.richtext.blocks#text",
+			text: title,
+		});
+	}
 	return blocks;
 }
 
@@ -526,7 +570,7 @@ async function handleThreadStarterMessage(
 		!message.messageReference?.messageId ||
 		!message.messageReference?.channelId
 	) {
-		writeSkipRecord("thread_starter_missing_ref", message);
+		recordSkip("thread_starter_missing_ref", message);
 		return { synced: 0, skipped: 1 };
 	}
 
@@ -538,11 +582,7 @@ async function handleThreadStarterMessage(
 		log.debug(
 			`Skipping thread starter ${messageId}: thread ${threadId} not bridged`,
 		);
-		writeSkipRecord(
-			"thread_starter_not_bridged",
-			message,
-			`thread ${threadId}`,
-		);
+		recordSkip("thread_starter_not_bridged", message, `thread ${threadId}`);
 		return { synced: 0, skipped: 1 };
 	}
 
@@ -554,7 +594,7 @@ async function handleThreadStarterMessage(
 			log.debug(
 				`Skipping thread starter ${messageId}: already synced to ${spaceDid}`,
 			);
-			writeSkipRecord("thread_starter_already_synced", message, spaceDid);
+			recordSkip("thread_starter_already_synced", message, spaceDid);
 			continue;
 		}
 
@@ -565,7 +605,7 @@ async function handleThreadStarterMessage(
 				`capacity: sync halted for ${spaceDid} (guild ${guildId}); skipping thread starter ${messageId}`,
 				{ guildId, spaceDid, messageId },
 			);
-			writeSkipRecord("capacity_over_limit", message, spaceDid);
+			recordSkip("capacity_over_limit", message, spaceDid);
 			continue;
 		}
 
@@ -574,7 +614,7 @@ async function handleThreadStarterMessage(
 			log.debug(
 				`No Roomy room for thread ${threadId} in ${spaceDid}, skipping forward`,
 			);
-			writeSkipRecord(
+			recordSkip(
 				"thread_starter_no_thread_room",
 				message,
 				`thread ${threadId} in ${spaceDid}`,
@@ -587,7 +627,7 @@ async function handleThreadStarterMessage(
 			log.debug(
 				`Original message ${originalMsgId} not synced to ${spaceDid}, skipping forward`,
 			);
-			writeSkipRecord(
+			recordSkip(
 				"thread_starter_no_original",
 				message,
 				`original ${originalMsgId} in ${spaceDid}`,
@@ -600,7 +640,7 @@ async function handleThreadStarterMessage(
 			log.debug(
 				`No Roomy room for parent channel ${parentChannelId} in ${spaceDid}, skipping forward`,
 			);
-			writeSkipRecord(
+			recordSkip(
 				"thread_starter_no_parent",
 				message,
 				`parent ${parentChannelId} in ${spaceDid}`,
@@ -641,7 +681,7 @@ async function handleThreadStarterMessage(
 				`Failed to forward message to thread ${threadId} in ${spaceDid}`,
 				err,
 			);
-			writeSkipRecord("thread_starter_send_failed", message, spaceDid);
+			recordSkip("thread_starter_send_failed", message, spaceDid);
 		}
 	}
 
@@ -673,7 +713,7 @@ async function handleForwardMessage(
 		!message.messageReference?.messageId ||
 		!message.messageReference?.channelId
 	) {
-		writeSkipRecord("forward_missing_ref", message);
+		recordSkip("forward_missing_ref", message);
 		return { synced: 0, skipped: 1 };
 	}
 
@@ -685,11 +725,7 @@ async function handleForwardMessage(
 		log.debug(
 			`Skipping forward ${messageId}: channel ${targetChannelId} not bridged`,
 		);
-		writeSkipRecord(
-			"forward_not_bridged",
-			message,
-			`channel ${targetChannelId}`,
-		);
+		recordSkip("forward_not_bridged", message, `channel ${targetChannelId}`);
 		return { synced: 0, skipped: 1 };
 	}
 
@@ -699,7 +735,7 @@ async function handleForwardMessage(
 		const existing = repo.getRoomyId(spaceDid, "message", messageId);
 		if (existing) {
 			log.debug(`Skipping forward ${messageId}: already synced to ${spaceDid}`);
-			writeSkipRecord("forward_already_synced", message, spaceDid);
+			recordSkip("forward_already_synced", message, spaceDid);
 			continue;
 		}
 
@@ -710,7 +746,7 @@ async function handleForwardMessage(
 				`capacity: sync halted for ${spaceDid} (guild ${guildId}); skipping forward ${messageId}`,
 				{ guildId, spaceDid, messageId },
 			);
-			writeSkipRecord("capacity_over_limit", message, spaceDid);
+			recordSkip("capacity_over_limit", message, spaceDid);
 			continue;
 		}
 
@@ -719,7 +755,7 @@ async function handleForwardMessage(
 			log.debug(
 				`No Roomy room for target channel ${targetChannelId} in ${spaceDid}, skipping forward`,
 			);
-			writeSkipRecord(
+			recordSkip(
 				"forward_no_target_room",
 				message,
 				`channel ${targetChannelId} in ${spaceDid}`,
@@ -732,7 +768,7 @@ async function handleForwardMessage(
 			log.debug(
 				`Original message ${originalMsgId} not synced to ${spaceDid}, skipping forward`,
 			);
-			writeSkipRecord(
+			recordSkip(
 				"forward_no_original",
 				message,
 				`original ${originalMsgId} in ${spaceDid}`,
@@ -745,7 +781,7 @@ async function handleForwardMessage(
 			log.debug(
 				`No Roomy room for source channel ${sourceChannelId} in ${spaceDid}, skipping forward`,
 			);
-			writeSkipRecord(
+			recordSkip(
 				"forward_no_source_room",
 				message,
 				`source ${sourceChannelId} in ${spaceDid}`,
@@ -786,7 +822,7 @@ async function handleForwardMessage(
 				`Failed to forward message to channel ${targetChannelId} in ${spaceDid}`,
 				err,
 			);
-			writeSkipRecord("forward_send_failed", message, spaceDid);
+			recordSkip("forward_send_failed", message, spaceDid);
 		}
 	}
 
