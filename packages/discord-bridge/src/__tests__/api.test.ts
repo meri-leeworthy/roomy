@@ -10,6 +10,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { type ApiServer, startApi } from "../api.ts";
 import { BridgeRepository } from "../db/repository.ts";
 import { SPACE_A, SPACE_B } from "../services/__tests__/helpers/test-data.ts";
+import {
+	recordIngestSkip,
+	resetIngestSkips,
+} from "../telemetry/ingest-skips.ts";
 
 let repo: BridgeRepository;
 let server: ApiServer;
@@ -162,5 +166,52 @@ describe("/sends/replay", () => {
 		expect((await replaySend("")).status).toBe(400);
 		expect((await replaySend("?id=abc")).status).toBe(400);
 		expect((await replaySend("?id=1", { method: "GET" })).status).toBe(405);
+	});
+});
+
+/** The /ingest/skips response body. */
+type IngestSkipsPayload = {
+	metric: string;
+	total: number;
+	reasons: Record<string, number>;
+};
+
+function isIngestSkipsPayload(value: unknown): value is IngestSkipsPayload {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"metric" in value &&
+		typeof value.metric === "string" &&
+		"total" in value &&
+		typeof value.total === "number" &&
+		"reasons" in value &&
+		typeof value.reasons === "object" &&
+		value.reasons !== null
+	);
+}
+
+describe("/ingest/skips", () => {
+	// APIS05
+	test("APIS05: reports each skip reason and the total since process start", async () => {
+		resetIngestSkips();
+		recordIngestSkip("empty_message");
+		recordIngestSkip("empty_message");
+		recordIngestSkip("system_message");
+
+		const res = await fetch(`http://127.0.0.1:${server.port}/ingest/skips`);
+		expect(res.status).toBe(200);
+		const body: unknown = await res.json();
+		if (!isIngestSkipsPayload(body)) {
+			throw new Error(
+				`unexpected /ingest/skips payload: ${JSON.stringify(body)}`,
+			);
+		}
+
+		expect(body.metric).toBe("bridge_ingest_skipped_total");
+		expect(body.total).toBe(3);
+		expect(body.reasons).toEqual({
+			empty_message: 2,
+			system_message: 1,
+		});
 	});
 });
