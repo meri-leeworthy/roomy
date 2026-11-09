@@ -609,9 +609,10 @@ export async function applyBatch(
  * `room_access` and `room_activity` are the denormalised read projections.
  * Live events upsert them; replay invalidates them, so a replayed structural
  * change cannot leave a stale row behind and the read path warms the row from
- * the replayed data on first access. The delete and move paths rebuild the
- * rooms whose windows they invalidate in the chunk's side-effect stage (see
- * `roomDerivedState.ts`).
+ * the replayed data on first access. The move path rebuilds the rooms whose
+ * windows it invalidates in the chunk's side-effect stage (see
+ * `roomDerivedState.ts`); a delete leaves `room_activity` to the read path's
+ * warm, so its write cost does not grow with the room's history.
  */
 function eventProjectionSteps(
   e: LoggedEvent,

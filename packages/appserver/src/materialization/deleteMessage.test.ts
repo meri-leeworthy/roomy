@@ -22,6 +22,11 @@ import type { DbLike } from "../db/types.ts";
 import type { DecodedStreamEvent } from "@roomy-space/sdk";
 import { applyDeleteSideEffects, collectPendingDeletes } from "./deleteMessage.ts";
 import { deriveUnreadCounts } from "../queries/readPositions.ts";
+import {
+  maintainRoomActivity,
+  readRoomActivityProjection,
+  rebuildRoomActivity,
+} from "../queries/roomActivityProjection.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = join(__dirname, "..", "db", "schema-space.sql");
@@ -129,6 +134,25 @@ function readPositionRows(db: Database): Array<{ user_did: string; seen_up_to: s
     .all() as Array<{ user_did: string; seen_up_to: string }>;
 }
 
+/** Wrap a DB, recording every statement it is asked to execute. */
+function recordStatements(db: DbLike): { db: DbLike; statements: string[] } {
+  const statements: string[] = [];
+  return {
+    statements,
+    db: {
+      ...db,
+      query(sql: string) {
+        statements.push(sql);
+        return db.query(sql);
+      },
+      run(sql: string, ...params: unknown[]) {
+        statements.push(sql);
+        return db.run(sql, ...params);
+      },
+    },
+  };
+}
+
 /** The window timestamp of the newest remaining message (S2's ULID time). */
 const S2_TIME = 1700000001000;
 
@@ -234,6 +258,52 @@ describe("deleteMessage side-effects", () => {
     expect(readWindow(spaceDb)!.map((e) => e.id)).toEqual([S2]);
     // Replaying history must not touch appserver-owned read-state.
     expect(readPositionRows(readDb)).toEqual([{ user_did: ALICE, seen_up_to: S1 }]);
+  });
+
+  test("a delete leaves the board projection invalidated instead of rebuilding it", async () => {
+    const { db, asyncDb } = freshDb();
+    seedFixtures(db);
+    seedMessage(db, S1, S1);
+    seedMessage(db, S2, S2);
+    seedActivityItem(db, [{ id: S2, ts: S2_TIME }]);
+    await rebuildRoomActivity(asyncDb, [ROOM]);
+
+    // The delete's maintenance step removes the row inside the chunk
+    // transaction; the side-effect stage must not restore it by scanning the
+    // room on the write path.
+    const invalidate = maintainRoomActivity(
+      { $type: "space.roomy.message.deleteMessage.v0", room: ROOM },
+      false,
+    )!;
+    await asyncDb.run(invalidate.sql, ...invalidate.params);
+    db.run("delete from entities where id = ?", [S2]);
+
+    const { db: recording, statements } = recordStatements(asyncDb);
+    await applyDeleteSideEffects(recording, [{ roomId: ROOM }]);
+
+    expect(await readRoomActivityProjection(asyncDb, [ROOM])).toBeNull();
+    expect(statements.filter((sql) => sql.includes("insert into room_activity"))).toEqual([]);
+    // The feed window still follows the remaining messages — a bounded seek,
+    // not a scan of the room.
+    expect(readWindow(db)!.map((e) => e.id)).toEqual([S1]);
+  });
+
+  test("a thousand deletes in one room touch the derived rows once", async () => {
+    const { db, asyncDb } = freshDb();
+    seedFixtures(db);
+    seedMessage(db, S1, S1);
+    seedActivityItem(db, [{ id: S1, ts: 1700000000000 }]);
+    const { db: recording, statements } = recordStatements(asyncDb);
+
+    const started = performance.now();
+    await applyDeleteSideEffects(
+      recording,
+      Array.from({ length: 1000 }, () => ({ roomId: ROOM })),
+    );
+
+    expect(statements.filter((sql) => sql.includes("insert into room_activity"))).toEqual([]);
+    expect(statements.filter((sql) => sql.includes("update activity_item"))).toHaveLength(1);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 });
 
