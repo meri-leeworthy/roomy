@@ -44,10 +44,13 @@
  *
  * "Invalidate" is a row DELETE, following the same rule as `room_access`: a
  * projection is never *populated* during rematerialisation, but a replayed
- * change must not leave a stale row behind. The live delete/move paths then
- * rebuild the affected rows from the post-event tables in the materialiser's
- * side-effect stage, which bounds the invalidation window to the few statements
- * between the chunk transaction and that stage.
+ * change must not leave a stale row behind. The live move path then rebuilds
+ * the affected rows from the post-event tables in the materialiser's
+ * side-effect stage. The live delete path does not: re-deriving one room's
+ * summary is a scan of every message in it, and a delete carried on a
+ * sendEvents call must not pay for the room's whole history. The row stays
+ * missing, exactly as a replayed create leaves it, and
+ * `readRoomActivityProjectionFor` re-derives it on the next read.
  *
  * A create is merged in place rather than rebuilt because folding one author
  * into the existing list is O(1) in room size while a rebuild is O(room size) —
@@ -282,9 +285,10 @@ function mergeRoomActivityFromMessageSql(messageId: string): {
  * Invalidate (delete) rows for a set of rooms.
  *
  * Used for replay (see the maintenance table in the file header) and for the
- * live delete/move paths, where the row is dropped before the chunk's
- * side-effects rebuild it from the post-event tables. A dropped row only ever
- * costs a read its fallback, never its correctness.
+ * live delete/move paths, where the row is dropped inside the chunk
+ * transaction. A move rebuilds the affected rows in the chunk's side-effect
+ * stage; a delete leaves them for the read path's warm. A dropped row only
+ * ever costs a read its fallback or a warm, never its correctness.
  */
 function invalidateRoomActivitySql(roomIds: readonly string[]): {
   sql: string;
