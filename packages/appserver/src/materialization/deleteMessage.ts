@@ -15,19 +15,28 @@
  * room's message set, so removing a message from that set lowers every
  * affected count. The delete path and the move path share
  * `rebuildActivityWindow`, so the two cannot drift apart.
+ *
+ * `room_activity` is left invalidated, not rebuilt. The delete's own
+ * maintenance step already removed the room's row inside the chunk
+ * transaction, and the read path re-derives a missing row from the live tables
+ * on first access (`readRoomActivityProjectionFor`). A rebuild here would put a
+ * scan of every message in the room on the write path, so the sendEvents call
+ * that carried one bridged delete would pay for the room's whole history. A
+ * missing row is the same state a replayed create leaves behind, and the read
+ * path treats both identically.
  */
 
 import type { DbLike } from "../db/types.ts";
 import type { DecodedStreamEvent } from "@roomy-space/sdk";
 import { rebuildActivityWindow } from "./roomDerivedState.ts";
-import { rebuildRoomActivity } from "../queries/roomActivityProjection.ts";
 
 /**
  * Apply a chunk's deletes.
  *
  * `db` is the per-space DB. Everything this does is per-space derived state,
- * so it runs on backfill too — a replay must leave the projections matching
- * the room's contents.
+ * so it runs on backfill too — a replay must leave the activity window
+ * matching the room's contents. The board projection needs no rebuild: its
+ * row was invalidated by the delete itself, and a read re-derives it.
  */
 export async function applyDeleteSideEffects(
   db: DbLike,
@@ -40,11 +49,6 @@ export async function applyDeleteSideEffects(
   const rooms = new Set<string>();
   for (const d of deletes) if (d.roomId) rooms.add(d.roomId);
   for (const roomId of rooms) await rebuildActivityWindow(db, roomId);
-
-  // `room_activity` was invalidated by the delete's own maintenance step
-  // (applyBatch), so restore it here, from the rows that now remain. A rebuild
-  // is not population — it describes data the replay just wrote.
-  await rebuildRoomActivity(db, [...rooms]);
 }
 
 /**
