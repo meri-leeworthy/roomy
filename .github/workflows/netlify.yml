@@ -136,3 +136,40 @@ jobs:
           --build
           --context "${{ inputs.context }}"
           --message "${{ inputs.ref }}"
+
+      # The deploy is only as good as what the origin ended up serving. A run
+      # that builds from a stale worktree, or uploads a directory the build did
+      # not write, looks exactly like a successful deploy from the outside — the
+      # site answers either way. `/build-id.json` is the bundle's own statement
+      # of the commit inside it, so reading it back from the deploy URL is what
+      # turns "we deployed" into "the origin serves this commit".
+      #
+      # The URL of the deploy that was just made comes from the API rather than
+      # from the CLI's output: `netlify deploy --build` streams the build log on
+      # stdout, so parsing a URL out of it is guesswork, while the deploy list is
+      # ordered newest first and the `concurrency` group above rules out a second
+      # dispatch racing this one.
+      - name: Resolve the URL of the deploy just made
+        id: deployed
+        run: |
+          deploy_url="$(
+            npx --yes netlify-cli@27.12.0 api listSiteDeploys \
+              --data "{\"site_id\":\"${NETLIFY_SITE_ID}\"}" \
+              | jq -r '.[0].deploy_url // empty'
+          )"
+          if [ -z "$deploy_url" ]; then
+            echo "::error::could not resolve the deploy URL for site ${NETLIFY_SITE_ID}"
+            exit 1
+          fi
+          echo "Deployed to ${deploy_url}"
+          echo "url=${deploy_url}" >> "$GITHUB_OUTPUT"
+
+      # `git rev-parse HEAD` is the commit this run checked out, which is the one
+      # the build stamped into the bundle (scripts/build-prod.sh falls back to it
+      # when BUILD_ID is unset, as scripts/netlify_build.sh arranges). The
+      # bundle carries the abbreviated form; the check compares by prefix.
+      - name: Verify the deployed origin serves the build that was deployed
+        run: >
+          node packages/app-lite/scripts/check-deployed-build.mjs
+          --origin "${{ steps.deployed.outputs.url }}"
+          --expected "$(git rev-parse HEAD)"

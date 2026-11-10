@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 # ── Build identity ───────────────────────────────────────────────────────
 # The served bundle must be able to name its commit (it is exposed as
-# /build.json and inlined as __BUILD_ID__; see src/lib/build-id.ts). In the
+# /build-id.json and inlined as __BUILD_ID__; see src/lib/build-id.ts). In the
 # Docker build `Dockerfile.app-lite` already sets BUILD_ID from
 # RAILWAY_GIT_COMMIT_SHA, so this only fills the gap for builds run outside
 # that image — a local `scripts/build-prod.sh`, where nothing supplies it yet.
@@ -27,7 +27,7 @@ if [ -z "${BUILD_ID:-}" ]; then
   # named afterwards. Report it loudly rather than serving a bundle whose
   # commit no one can recover.
   echo "WARNING: BUILD_ID is unset and no git commit could be resolved;" >&2
-  echo "         /build.json will report commit \"unknown\" for this build." >&2
+  echo "         /build-id.json will report commit \"unknown\" for this build." >&2
 fi
 
 # The web build needs its client_id URL baked in — used by BOTH OAuth modes
@@ -202,17 +202,39 @@ fi
 # deploy whose bundle carries no id cannot be tied to a revision afterwards,
 # so fail the build here rather than publish an unnameable bundle (same
 # contract as the OAuth-scope verification above: test the artifact that ships,
-# not the intention). `build.json` is a prerendered route, so its absence means
-# the route did not make it into the output at all.
-if [ ! -f build-staging/build.json ]; then
-  echo "ERROR: build-staging/build.json is missing — the deployed bundle would" >&2
-  echo "       carry no build identity. Is src/routes/build.json/+server.ts present?" >&2
+# not the intention). `build-id.json` is a prerendered route, so its absence
+# means the route did not make it into the output at all.
+#
+# The file is what `scripts/check-deployed-build.mjs` reads back from the
+# deployed origin, so its three fields are the contract that check compares
+# against: a manifest missing `builtAt` or `version` is unreadable by whoever
+# has to work out later what is live.
+if [ ! -f build-staging/build-id.json ]; then
+  echo "ERROR: build-staging/build-id.json is missing — the deployed bundle would" >&2
+  echo "       carry no build identity. Is src/routes/build-id.json/+server.ts present?" >&2
   exit 1
 fi
-built_commit="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("build-staging/build.json","utf8")).commit)')"
+built_commit="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("build-staging/build-id.json","utf8")).commit)')"
 if [ -z "$built_commit" ]; then
-  echo "ERROR: build-staging/build.json has an empty commit — present but" >&2
+  echo "ERROR: build-staging/build-id.json has an empty commit — present but" >&2
   echo "       meaningless, indistinguishable from a real id downstream." >&2
+  exit 1
+fi
+# `builtAt` must be a timestamp, not merely present: the deploy audit orders
+# builds by it when a build legitimately carries no commit. `version` is the
+# package version and must always be there.
+identity_problem="$(
+  node -e '
+    const m = JSON.parse(require("fs").readFileSync("build-staging/build-id.json", "utf8"));
+    if (typeof m.builtAt !== "string" || Number.isNaN(Date.parse(m.builtAt))) {
+      process.stdout.write("builtAt is not an ISO-8601 timestamp");
+    } else if (typeof m.version !== "string" || m.version === "") {
+      process.stdout.write("version is missing");
+    }
+  '
+)"
+if [ -n "$identity_problem" ]; then
+  echo "ERROR: build-staging/build-id.json is incomplete: ${identity_problem}." >&2
   exit 1
 fi
 if [ "$built_commit" = "unknown" ]; then
@@ -221,7 +243,7 @@ if [ "$built_commit" = "unknown" ]; then
   echo "WARNING: this build reports commit \"unknown\" — the bundle cannot name" >&2
   echo "         its commit, so a later deploy-revision audit cannot either." >&2
 else
-  echo "Build identity: commit ${built_commit} (served as /build.json)"
+  echo "Build identity: commit ${built_commit} (served as /build-id.json)"
 fi
 
 # ── App Site Association verification ────────────────────────────────────
