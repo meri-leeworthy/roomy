@@ -8,7 +8,7 @@ import { resolveBuildId } from "./src/lib/build-id.ts";
 import { IOS_BUILD } from "./scripts/build-target.mjs";
 
 // Resolved once, here, so the value inlined into the bundle (`__BUILD_ID__`)
-// and the value served as `/build.json` by src/routes/build.json/+server.ts
+// and the value served as `/build-id.json` by src/routes/build-id.json/+server.ts
 // cannot diverge — both come from this one call.
 const BUILD_ID = resolveBuildId(process.env);
 
