@@ -172,6 +172,89 @@ const dbQueueDepth = metrics.histogram(
   DB_DEPTH_BUCKETS,
 );
 
+// ─── Statement stalls ─────────────────────────────────────────────────────
+//
+// `[db-slow]` marks every request over 50 ms, which is a diagnostic, not an
+// event: a host stall lands on every worker at once and produces one warn line
+// per statement in it, with nothing in the logs tying them together. These two
+// counters collapse a stalled interval into per-worker totals — how much
+// statement time ran past the threshold, and how many statements did — so
+// "workers 0, 3, 5, the global, readstate and events worker all blocked inside
+// one interval" is one increment on each series rather than fifteen lines.
+//
+// The threshold sits well above the slow line so ordinary slow queries do not
+// count; a stall is the shape that is orders of magnitude past it.
+const DEFAULT_DB_STALL_MS = 500;
+
+/**
+ * The worker reports `selfMs` only once a request passes its own 50 ms slow
+ * line, so a lower threshold has nothing to measure. Clamped rather than
+ * silently ignored.
+ */
+const MIN_REPORTABLE_SELF_MS = 50;
+
+const dbStalls = metrics.counter(
+  "roomy_db_stalls_total",
+  "DB statements whose service time on a worker exceeded the stall threshold.",
+  ["worker"],
+);
+
+const dbStallSeconds = metrics.counter(
+  "roomy_db_stall_seconds_total",
+  "Statement service time beyond the stall threshold, in seconds. The magnitude of a stall, by the worker that served it.",
+  ["worker"],
+);
+
+/** Per-worker totals behind the two counters, for `/health/pool`. */
+const stallTotals = new Map<string, { stalls: number; seconds: number }>();
+
+/**
+ * The stall threshold in milliseconds, from `APPSERVER_DB_STALL_MS`. Read per
+ * slow reply rather than at import: the value is consulted only on a request
+ * already known to be slow, and reading it lazily keeps the env var effective
+ * for a process that had already loaded this module.
+ */
+function stallThresholdMs(): number {
+  const configured = Number(process.env.APPSERVER_DB_STALL_MS);
+  if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_DB_STALL_MS;
+  return Math.max(configured, MIN_REPORTABLE_SELF_MS);
+}
+
+/**
+ * Count a statement that spent `selfMs` inside its worker. Only the time past
+ * the threshold is accumulated, so the series answers "how much of this window
+ * was a stall" rather than restating the statement's own duration.
+ */
+function recordStatementServiceTime(worker: string, selfMs: number): void {
+  const excessMs = selfMs - stallThresholdMs();
+  if (excessMs <= 0) return;
+  dbStalls.inc({ worker });
+  dbStallSeconds.inc({ worker }, excessMs / 1000);
+  const total = stallTotals.get(worker);
+  if (total) {
+    total.stalls += 1;
+    total.seconds += excessMs / 1000;
+  } else {
+    stallTotals.set(worker, { stalls: 1, seconds: excessMs / 1000 });
+  }
+}
+
+/**
+ * Stall totals per worker, for `/health/pool`: one row per worker that has
+ * stalled since this process started, so a single stalled interval reads as a
+ * handful of named workers instead of a wall of warn lines.
+ */
+export function dbStallStats(): Array<{ worker: string; stalls: number; seconds: number }> {
+  return [...stallTotals.entries()]
+    .map(([worker, total]) => ({
+      worker,
+      stalls: total.stalls,
+      // Rounded to the millisecond the series is accumulated from.
+      seconds: Math.round(total.seconds * 1000) / 1000,
+    }))
+    .sort((a, b) => a.worker.localeCompare(b.worker));
+}
+
 /**
  * Owns one Bun.Worker thread and the request/response correlation for it.
  * Multiple `AsyncDatabase` handles can share one link; each handle stamps a
@@ -208,8 +291,10 @@ export class WorkerLink {
       // HERE because the worker thread cannot reach the log sink (see
       // `slowMs` on WorkerResponse): without this the worker's own service
       // time is unobservable, and `roomy_db_wait_seconds` cannot say whether
-      // the request ahead was slow or the queue was long.
+      // the request ahead was slow or the queue was long. The same reply feeds
+      // the stall counters, which is where a stalled interval is read from.
       if (slowMs !== undefined) {
+        recordStatementServiceTime(this.#name, slowMs);
         log.warn("[db-slow] request", {
           worker: this.#name,
           type: entry.type,

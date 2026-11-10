@@ -14,8 +14,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { join } from "node:path";
 import { _setLokiSink } from "../log.ts";
+import { metrics } from "../metrics.ts";
+import { closeDb, openDb } from "./db.ts";
 import type { LokiSink } from "../telemetry/loki.ts";
-import { WorkerLink } from "./asyncDatabase.ts";
+import { WorkerLink, dbStallStats } from "./asyncDatabase.ts";
 import type { DbRoute } from "./asyncDatabase.ts";
 import type { WorkerRequest } from "./types.ts";
 
@@ -166,5 +168,43 @@ describe("WorkerLink request shape", () => {
     expect(received.spaceDid).toBe("did:plc:routed");
     expect(received.sql).toBe("select 1");
     expect(typeof received.id).toBe("string");
+  });
+});
+
+describe("WorkerLink statement stalls", () => {
+  /** This worker's accumulated stall totals, absent-means-zero. */
+  function stallsFor(worker: string): { stalls: number; seconds: number } {
+    const row = dbStallStats().find((entry) => entry.worker === worker);
+    return row ?? { stalls: 0, seconds: 0 };
+  }
+
+  test("a reply past the stall threshold counts one stall and its excess time", async () => {
+    // A worker name of its own, so the totals are this test's alone despite the
+    // registry being process-wide.
+    const link = new WorkerLink(WORKER_PATH, "space-stalls");
+    links.push(link);
+
+    await sendThrough(link, { type: "query", sql: "select 1", mode: "get" });
+
+    // The fixture reports 5000 ms inside the worker against the 500 ms default
+    // threshold, so the stall is the 4.5 s past it.
+    const totals = stallsFor("space-stalls");
+    expect(totals.stalls).toBe(1);
+    expect(totals.seconds).toBeCloseTo(4.5, 3);
+
+    const scrape = metrics.render();
+    expect(scrape).toContain('roomy_db_stalls_total{worker="space-stalls"} 1');
+    expect(scrape).toContain('roomy_db_stall_seconds_total{worker="space-stalls"} 4.5');
+  });
+
+  test("a statement inside the threshold counts nothing", async () => {
+    const db = openDb({ path: ":memory:" });
+    try {
+      const before = dbStallStats();
+      await db.query("select 1 as one").get();
+      expect(dbStallStats()).toEqual(before);
+    } finally {
+      closeDb();
+    }
   });
 });

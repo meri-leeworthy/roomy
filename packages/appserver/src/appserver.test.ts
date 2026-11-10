@@ -16,6 +16,13 @@ function ephemeralPort(): number {
 
 let handle: AppserverHandle | null = null;
 
+/** Let an already-due timer callback run: no "long enough" delay involved. */
+function afterLoopTick(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 0);
+  return promise;
+}
+
 beforeEach(() => {
   // Reset all process-wide singletons so each test gets a clean appserver.
   closeDb();
@@ -169,6 +176,39 @@ describe("createAppserver factory", () => {
     const rss = Number(body.match(/^roomy_process_rss_bytes (\d+)$/m)?.[1]);
     expect(rss).toBeGreaterThan(1024 * 1024);
     expect(rss).toBeLessThan(1024 ** 4);
+  });
+
+  test("/metrics exposes the event-loop lag histogram", async () => {
+    handle = await createAppserver({
+      port: ephemeralPort(),
+      authVerifier: testAuthVerifier,
+      dbPath: ":memory:",
+      readStateDbPath: ":memory:",
+      quiet: true,
+      disableBackgroundWorkers: true,
+      eventLoopLag: true,
+    });
+
+    const base = `http://localhost:${handle.port}`;
+    // Close windows until one carries a tick: the monitor starts measuring
+    // after its first tick, and the interval runs on the platform clock, so
+    // the window is closed by hand rather than waited for.
+    let observed = 0;
+    for (let attempt = 0; attempt < 100 && observed === 0; attempt++) {
+      await afterLoopTick();
+      observed = handle.eventLoopLag?.sample() ?? 0;
+    }
+    expect(observed).toBeGreaterThan(0);
+
+    const body = await (await fetch(`${base}/metrics`)).text();
+    expect(body).toContain("# TYPE roomy_event_loop_delay_seconds histogram");
+    const count = Number(body.match(/^roomy_event_loop_delay_seconds_count (\d+)$/m)?.[1]);
+    expect(count).toBeGreaterThanOrEqual(1);
+    // Cumulative buckets: the open-ended one holds every observation.
+    const overflow = Number(
+      body.match(/^roomy_event_loop_delay_seconds_bucket\{le="\+Inf"\} (\d+)$/m)?.[1],
+    );
+    expect(overflow).toBe(count);
   });
 
   test("path-parameterised routes collapse to one bounded endpoint label", async () => {
@@ -745,5 +785,8 @@ describe("query response cache", () => {
     }
     expect(typeof body.globalWorker.openSpaceDbs).toBe("number");
     expect(typeof body.readStateWorker.preparedStmts).toBe("number");
+    // Statement-stall totals per worker: a stalled interval reads here as the
+    // few workers it held, not as one warn line per statement inside it.
+    expect(Array.isArray(body.stalls)).toBe(true);
   });
 });
