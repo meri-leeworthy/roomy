@@ -12,6 +12,7 @@ import { type Event, sync, transport } from "@roomy-space/sdk";
 import type { BridgeRepository } from "../db/repository.ts";
 import { BRIDGE_RECONNECT_BASE_MS, BRIDGE_RECONNECT_MAX_MS } from "../env.ts";
 import { createLogger } from "../logger.ts";
+import { observeRateLimit } from "../rate-limits.ts";
 import { reconnectDelayMs } from "../utils/backoff.ts";
 import type {
 	BridgeSidebar,
@@ -147,11 +148,30 @@ export class LiveRoomyGateway implements RoomyGateway {
 
 		const connection = new sync.SyncConnection({
 			fetchTicket: async () => {
-				const { ticket } = await this.#xrpc.procedure(
-					"space.roomy.auth.getConnectionTicket",
-					{},
-				);
-				return ticket;
+				try {
+					const { ticket } = await this.#xrpc.procedure(
+						"space.roomy.auth.getConnectionTicket",
+						{},
+					);
+					return ticket;
+				} catch (err) {
+					// Every sync connection depends on this ticket, so a 429 here
+					// drops the connection. The SDK's own logger is at debug (a
+					// healthy reconnect is noise); a rejection is not — name the
+					// layer that refused it and count it for /rate-limits.
+					const rateLimit = observeRateLimit(
+						err,
+						"space.roomy.auth.getConnectionTicket",
+					);
+					if (rateLimit) {
+						log.warn("Connection ticket fetch rate limited", {
+							spaceDid,
+							attempt: this.#reconnectFailures,
+							...rateLimit,
+						});
+					}
+					throw err;
+				}
 			},
 			wsUrl: this.#appserverWsUrl,
 			logger: log.debug,

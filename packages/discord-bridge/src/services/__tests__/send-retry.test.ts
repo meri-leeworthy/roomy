@@ -9,7 +9,7 @@
  * sweep, and an overlapping sweep is dropped rather than run twice.
  */
 
-import type { Event } from "@roomy-space/sdk";
+import { transport } from "@roomy-space/sdk";
 import { beforeEach, describe, expect, test, vi } from "bun:test";
 import { BridgeRepository } from "../../db/repository.ts";
 import { resetCapacityGate, setCapacityGate } from "../../roomy/capacity.ts";
@@ -117,6 +117,10 @@ function logLine(line: unknown): {
 	msg?: string;
 	op?: string;
 	discordId?: string;
+	layer?: string;
+	host?: string;
+	cfRay?: string;
+	server?: string;
 } {
 	let fields: Record<string, unknown> = {};
 	try {
@@ -128,7 +132,30 @@ function logLine(line: unknown): {
 		const found = fields[key];
 		return typeof found === "string" ? found : undefined;
 	};
-	return { msg: read("msg"), op: read("op"), discordId: read("discordId") };
+	return {
+		msg: read("msg"),
+		op: read("op"),
+		discordId: read("discordId"),
+		layer: read("layer"),
+		host: read("host"),
+		cfRay: read("cfRay"),
+		server: read("server"),
+	};
+}
+
+/** A 429 as the transport builds it: provenance from the rejecting response. */
+function rateLimitedError(cfRay: string): transport.RateLimitError {
+	const err = new transport.RateLimitError(30, undefined, {
+		host: "api.roomy.space",
+		server: "cloudflare",
+		cfRay,
+		cfMitigated: null,
+		retryAfterSec: 30,
+		contentType: "text/html; charset=utf-8",
+		bodyPrefix: "<!DOCTYPE html>",
+	});
+	Object.assign(err, { nsid: "space.roomy.space.sendEvents" });
+	return err;
 }
 
 /** The edit event for SPACE_A, once it has landed. */
@@ -521,5 +548,38 @@ describe("send-retry", () => {
 		expect(gateway.sends).toBe(1);
 		expectToBeDefined(createMessageEvent(gateway));
 		expect(repo.countFailedSends()).toEqual({ pending: 0, terminal: 0 });
+	});
+
+	// SR14
+	test("SR14: a 429 names the rejecting layer on the queued row and the log line", async () => {
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			roomy.failSends({
+				$type: CREATE_TYPE,
+				error: rateLimitedError("8f2c1e9d2e3a4b5c-AMS"),
+			});
+			await ingestDiscordMessage(makeMessage({ id: MSG_ID }), repo, roomy);
+
+			const queued = repo.listFailedSends()[0];
+			expectToBeDefined(queued);
+			expect(queued.lastError).toContain("layer=cloudflare");
+			expect(queued.lastError).toContain("host=api.roomy.space");
+			expect(queued.lastError).toContain("cf-ray=8f2c1e9d2e3a4b5c-AMS");
+			expect(queued.lastError).toContain("server=cloudflare");
+
+			const line = errorSpy.mock.calls
+				.map((call) => logLine(call[0]))
+				.find(
+					(fields) =>
+						fields.msg === "Discord→Roomy send failed; queued for re-offer",
+				);
+			expectToBeDefined(line);
+			expectToBe(line.layer, "cloudflare");
+			expectToBe(line.host, "api.roomy.space");
+			expectToBe(line.cfRay, "8f2c1e9d2e3a4b5c-AMS");
+			expectToBe(line.server, "cloudflare");
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 });

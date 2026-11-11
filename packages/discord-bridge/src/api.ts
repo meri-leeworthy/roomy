@@ -1,6 +1,7 @@
 import type { BridgeRepository, FailedSend } from "./db/repository.ts";
 import { ATPROTO_BRIDGE_DID, PORT } from "./env.ts";
 import { createLogger } from "./logger.ts";
+import { getRateLimitSnapshot } from "./rate-limits.ts";
 import { isBackfillRunning } from "./services/backfill.ts";
 
 const log = createLogger("api");
@@ -128,6 +129,12 @@ function route(
 			}
 			return jsonResponse({ replayed: sendStatus(replayed) });
 		}
+
+		// Per-layer counts of every 429 the bridge has observed, and the most
+		// recent one: the rejecting layer is not otherwise readable from the
+		// bridge's own state.
+		case "/rate-limits":
+			return jsonResponse(getRateLimitSnapshot());
 
 		default:
 			return jsonResponse({ error: "Not found" }, 404);
