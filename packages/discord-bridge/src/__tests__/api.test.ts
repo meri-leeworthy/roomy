@@ -7,8 +7,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { transport } from "@roomy-space/sdk";
 import { type ApiServer, startApi } from "../api.ts";
 import { BridgeRepository } from "../db/repository.ts";
+import {
+	observeRateLimit,
+	resetRateLimits,
+	type RateLimitSnapshot,
+} from "../rate-limits.ts";
 import { SPACE_A, SPACE_B } from "../services/__tests__/helpers/test-data.ts";
 
 let repo: BridgeRepository;
@@ -162,5 +168,64 @@ describe("/sends/replay", () => {
 		expect((await replaySend("")).status).toBe(400);
 		expect((await replaySend("?id=abc")).status).toBe(400);
 		expect((await replaySend("?id=1", { method: "GET" })).status).toBe(405);
+	});
+});
+
+/** A 429 carrying the given provenance, as the transport builds it. */
+function rateLimited(
+	rejection: Partial<transport.RateLimitRejection>,
+): transport.RateLimitError {
+	const err = new transport.RateLimitError(30, undefined, {
+		host: "api.roomy.space",
+		server: null,
+		cfRay: null,
+		cfMitigated: null,
+		retryAfterSec: 30,
+		contentType: null,
+		bodyPrefix: null,
+		...rejection,
+	});
+	Object.assign(err, { nsid: "space.roomy.space.sendEvents" });
+	return err;
+}
+
+describe("/rate-limits", () => {
+	beforeEach(() => {
+		resetRateLimits();
+	});
+
+	// APIS05
+	test("APIS05: reports per-layer counts and the most recent rejection", async () => {
+		observeRateLimit(
+			rateLimited({ cfRay: "8f2c1e9d2e3a4b5c-AMS", server: "cloudflare" }),
+		);
+		observeRateLimit(rateLimited({ server: "railway" }));
+		observeRateLimit(rateLimited({ server: "railway" }));
+
+		const res = await fetch(`http://127.0.0.1:${server.port}/rate-limits`);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as RateLimitSnapshot;
+
+		expect(body.byLayer).toEqual({
+			cloudflare: 1,
+			railway: 2,
+			edge: 0,
+			unknown: 0,
+		});
+		expect(body.last?.layer).toBe("railway");
+		expect(body.last?.host).toBe("api.roomy.space");
+		expect(body.last?.nsid).toBe("space.roomy.space.sendEvents");
+		expect(typeof body.last?.at).toBe("string");
+	});
+
+	// APIS06
+	test("APIS06: is empty until a 429 is observed", async () => {
+		const res = await fetch(`http://127.0.0.1:${server.port}/rate-limits`);
+		const body = (await res.json()) as RateLimitSnapshot;
+
+		expect(body).toEqual({
+			byLayer: { cloudflare: 0, railway: 0, edge: 0, unknown: 0 },
+			last: null,
+		});
 	});
 });

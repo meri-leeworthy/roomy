@@ -703,4 +703,45 @@ describe("LiveRoomyGateway", () => {
 			expect(lastReconnectDelay()).toBe(500);
 		});
 	});
+
+	describe("connection-ticket rate limits", () => {
+		test("a 429 from the ticket fetch is logged with its layer", async () => {
+			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				const rateLimit = new transport.RateLimitError(30, undefined, {
+					host: "api.roomy.space",
+					server: "cloudflare",
+					cfRay: "8f2c1e9d2e3a4b5c-AMS",
+					cfMitigated: null,
+					retryAfterSec: 30,
+					contentType: "text/html; charset=utf-8",
+					bodyPrefix: "<!DOCTYPE html>",
+				});
+				Object.assign(rateLimit, {
+					nsid: "space.roomy.auth.getConnectionTicket",
+				});
+				procedure.mockRejectedValueOnce(rateLimit);
+
+				await expect(
+					gateway.subscribe(
+						SPACE_DID,
+						vi.fn() as unknown as RoomyEventCallback,
+					),
+				).rejects.toBe(rateLimit);
+
+				const line = warnSpy.mock.calls
+					.map((call: unknown[]) => JSON.parse(String(call[0])))
+					.find(
+						(rec: { msg?: string }) =>
+							rec.msg === "Connection ticket fetch rate limited",
+					);
+				expect(line?.layer).toBe("cloudflare");
+				expect(line?.spaceDid).toBe(SPACE_DID);
+				expect(line?.host).toBe("api.roomy.space");
+				expect(line?.cfRay).toBe("8f2c1e9d2e3a4b5c-AMS");
+			} finally {
+				warnSpy.mockRestore();
+			}
+		});
+	});
 });
