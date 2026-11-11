@@ -39,20 +39,83 @@ export class XrpcTimeoutError extends Error {
   }
 }
 
+/** The hop that answered a 429, as far as its response headers say. */
+export type RateLimitRejectionLayer =
+  | "cloudflare"
+  | "railway"
+  | "edge"
+  | "unknown";
+
+/**
+ * Provenance captured from the `Response` that carried a 429: which host was
+ * asked, what the rejecting hop called itself, and the start of its body.
+ * Each field is null when the response did not carry it.
+ */
+export interface RateLimitRejection {
+  /** Host of the response URL, e.g. `api.roomy.space`. */
+  readonly host: string | null;
+  /** `server` response header, e.g. `cloudflare` or `railway`. */
+  readonly server: string | null;
+  /** `cf-ray` response header: set by Cloudflare on every response it serves. */
+  readonly cfRay: string | null;
+  /** `cf-mitigated` response header: Cloudflare marking its own rejection. */
+  readonly cfMitigated: string | null;
+  /** Retry-After in seconds, the same value the error carries. */
+  readonly retryAfterSec: number | null;
+  /** `content-type` response header. */
+  readonly contentType: string | null;
+  /** First 200 bytes of the body; null when it could not be read. */
+  readonly bodyPrefix: string | null;
+}
+
+/**
+ * Name the layer that answered a 429 from the response's own headers.
+ *
+ * `cf-ray` is present on every Cloudflare-served response, including the 429
+ * it generates itself, so it wins over everything else. `server: railway` is
+ * Railway's edge answering before the app server does. `cf-mitigated` or an
+ * HTML body is an edge rejection that names no vendor. Anything else — the
+ * appserver's own limiter, or a hop that exposes nothing — is `unknown`.
+ */
+export function classifyRateLimitRejection(
+  rejection: RateLimitRejection | null | undefined,
+): RateLimitRejectionLayer {
+  if (!rejection) return "unknown";
+  if (rejection.cfRay) return "cloudflare";
+  if (rejection.server?.toLowerCase().includes("railway")) return "railway";
+  const body = rejection.bodyPrefix?.trimStart() ?? "";
+  if (
+    rejection.cfMitigated ||
+    rejection.contentType?.toLowerCase().includes("text/html") ||
+    body.startsWith("<")
+  ) {
+    return "edge";
+  }
+  return "unknown";
+}
+
 /**
  * Raised when the server returns an HTTP 429 (Too Many Requests) response.
- * Carries the `Retry-After` header value (in seconds) when available.
+ * Carries the `Retry-After` header value (in seconds) when available, and the
+ * provenance of the response that rejected the request.
  */
 export class RateLimitError extends Error {
   /** HTTP status code (always 429). */
   readonly status = 429;
   /** Retry-After value in seconds, if the server provided one. */
   readonly retryAfterSec: number | null;
+  /** The rejecting hop's own headers, or null when not built from a Response. */
+  readonly rejection: RateLimitRejection | null;
 
-  constructor(retryAfterSec: number | null, message?: string) {
+  constructor(
+    retryAfterSec: number | null,
+    message?: string,
+    rejection: RateLimitRejection | null = null,
+  ) {
     super(message ?? "Rate limited by server (429)");
     this.name = "RateLimitError";
     this.retryAfterSec = retryAfterSec;
+    this.rejection = rejection;
   }
 }
 

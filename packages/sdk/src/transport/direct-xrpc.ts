@@ -41,6 +41,7 @@ import {
   XrpcResponseValidationError,
   RateLimitError,
   XrpcTimeoutError,
+  type RateLimitRejection,
 } from "./errors";
 import { withRateLimitRetry, type RateLimitRetryOptions } from "./retry";
 import { ServiceAuthClient } from "./service-auth";
@@ -325,14 +326,25 @@ async function toXrpcError(resp: Response, nsid: string): Promise<Error> {
   // 429: surface as a RateLimitError so the transport's retry wrapper can
   // read the Retry-After header and back off. The appserver's rate limiter
   // (and any reverse proxy) sets Retry-After in seconds; absent it, the
-  // wrapper falls back to exponential jitter.
+  // wrapper falls back to exponential jitter. The response is still in hand
+  // only here, so its headers and body start are captured now: they are what
+  // names the layer that rejected the request.
   if (resp.status === 429) {
     const retryAfterHdr = resp.headers.get("retry-after");
     const retryAfterSec =
       retryAfterHdr != null && /^\d+$/.test(retryAfterHdr)
         ? Number(retryAfterHdr)
         : null;
-    const err = new RateLimitError(retryAfterSec);
+    const rejection: RateLimitRejection = {
+      host: requestHost(resp.url),
+      server: resp.headers.get("server"),
+      cfRay: resp.headers.get("cf-ray"),
+      cfMitigated: resp.headers.get("cf-mitigated"),
+      retryAfterSec,
+      contentType: resp.headers.get("content-type"),
+      bodyPrefix: await readBodyPrefix(resp),
+    };
+    const err = new RateLimitError(retryAfterSec, undefined, rejection);
     Object.assign(err, { nsid, errorType: "RateLimitExceeded" });
     return err;
   }
@@ -358,4 +370,41 @@ async function toXrpcError(resp: Response, nsid: string): Promise<Error> {
   const err = new Error(msg);
   Object.assign(err, { status: resp.status, errorType, nsid });
   return err;
+}
+
+/** How much of a 429 body is kept as provenance. */
+const BODY_PREFIX_BYTES = 200;
+/**
+ * Upper bound on reading a 429 body. A proxy that stalls its body must not
+ * hold the request path; the retry wrapper already has what it needs.
+ */
+const BODY_READ_TIMEOUT_MS = 1000;
+
+function requestHost(url: string): string | null {
+  try {
+    return new URL(url).host || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the start of a 429 body without letting the read fail or stall the
+ * caller: an unreadable or stalled body is simply no provenance.
+ */
+async function readBodyPrefix(resp: Response): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const text = await Promise.race([
+      resp.text(),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), BODY_READ_TIMEOUT_MS);
+      }),
+    ]);
+    return text === null ? null : text.slice(0, BODY_PREFIX_BYTES);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
