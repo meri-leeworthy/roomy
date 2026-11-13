@@ -93,6 +93,15 @@ create table if not exists user_thread_activity (
 create index if not exists idx_user_thread_activity_user
   on user_thread_activity(user_did, last_active_at desc);
 
+-- Serves the hourly purge `delete from user_thread_activity where
+-- last_active_at < ?` (`queries/userActiveThreads.ts:purgeStaleThreadActivity`).
+-- The index above leads with `user_did`, so a predicate on `last_active_at`
+-- alone cannot use it and the purge scans the whole table. Purely additive on
+-- a column present since this table was introduced, so it is safe to declare
+-- here for every version.
+create index if not exists idx_user_thread_activity_last_active
+  on user_thread_activity(last_active_at);
+
 -- NOTE: the per-space index idx_user_thread_activity_user_space
 -- (user_did, space_did, last_active_at desc) is intentionally NOT declared
 -- here. It references the `space_did` column, which does not exist on
@@ -125,6 +134,13 @@ create table if not exists user_thread_backfill (
   completed_at integer not null,   -- unix epoch milliseconds
   primary key (user_did, space_did)
 ) strict;
+
+-- Serves the hourly purge `delete from user_thread_backfill where
+-- completed_at < ?` (`queries/userActiveThreads.ts:purgeStaleThreadBackfill`).
+-- The primary key is `(user_did, space_did)`, so a predicate on `completed_at`
+-- alone scanned the whole table.
+create index if not exists idx_user_thread_backfill_completed
+  on user_thread_backfill(completed_at);
 
 -- ── Web push (schema v3) ────────────────────────────────────────────────
 -- A delivery destination for a user. A user may have many (one per browser or
