@@ -599,4 +599,84 @@ describe("read-state schema", () => {
         .get()?.version,
     ).toBe(READSTATE_SCHEMA_VERSION);
   });
+
+  /**
+   * Regression: the hourly maintenance tick purges two read-state tables by a
+   * timestamp that is not part of any primary key or index prefix —
+   * `purgeStaleThreadActivity` (`last_active_at`) and
+   * `purgeStaleThreadBackfill` (`completed_at`). Both statements then scan
+   * their whole table, which on a large table turns an ordinary hour into a
+   * multi-second stall that every queued read-state request waits behind.
+   *
+   * Asserts the plan, not just index presence: an index SQLite declines to
+   * use would leave the scan in place.
+   */
+  test("both hourly purges search an index instead of scanning", () => {
+    const db = new Database(":memory:");
+    db.exec("pragma foreign_keys = on");
+    db.exec(readFileSync(SCHEMA_PATH, "utf8"));
+
+    const purgeQueries = [
+      "delete from user_thread_activity where last_active_at < ?",
+      "delete from user_thread_backfill where completed_at < ?",
+    ];
+    for (const sql of purgeQueries) {
+      const plan = db
+        .query<{ detail: string }, []>(`explain query plan ${sql}`)
+        .all()
+        .map((r) => r.detail)
+        .join(" | ");
+      expect(plan).not.toMatch(/\bSCAN (user_thread_activity|user_thread_backfill)\b/);
+      expect(plan).toMatch(/SEARCH user_thread_(activity|backfill) USING INDEX/);
+      expect(plan).toMatch(/idx_user_thread_(activity_last_active|backfill_completed)/);
+    }
+  });
+
+  /**
+   * Both indexes must reach EXISTING databases: `initializeReadStateSchema`
+   * execs the schema file on every open regardless of version, so a DB that
+   * predates them gains them at next boot. The DB below is already at the
+   * current version, `user_thread_backfill` does not exist yet (it predates
+   * that table), and neither index is present — the state of a deployed
+   * database before this change.
+   */
+  test("purge indexes are added to an existing database on open", () => {
+    const db = new Database(":memory:");
+    db.exec("pragma foreign_keys = on");
+    db.exec(`
+      create table readstate_schema_version (
+        id integer primary key check (id = 1),
+        version text not null
+      ) strict;
+      insert into readstate_schema_version (id, version) values (1, '${READSTATE_SCHEMA_VERSION}');
+      create table user_thread_activity (
+        user_did      text not null,
+        thread_id     text not null,
+        space_did     text not null default '',
+        last_active_at integer not null,
+        updated_at    integer not null default (unixepoch() * 1000),
+        primary key (user_did, thread_id)
+      ) strict;
+    `);
+
+    // What the worker does on every open, at any version.
+    db.exec(readFileSync(SCHEMA_PATH, "utf8"));
+
+    const indexes = db
+      .query<{ name: string }, []>(
+        "select name from sqlite_master where type = 'index'",
+      )
+      .all()
+      .map((r) => r.name);
+    expect(indexes).toContain("idx_user_thread_activity_last_active");
+    expect(indexes).toContain("idx_user_thread_backfill_completed");
+    // No version bump was needed, so the stamp is untouched.
+    expect(
+      db
+        .query<{ version: string }, []>(
+          "select version from readstate_schema_version where id = 1",
+        )
+        .get()?.version,
+    ).toBe(READSTATE_SCHEMA_VERSION);
+  });
 });
