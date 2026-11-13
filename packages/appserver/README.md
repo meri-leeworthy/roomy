@@ -10,6 +10,10 @@ The appserver owns its event store locally; no external event-stream server (Lea
 
 The event log (`roomy-events.sqlite`) is the append-only source of truth, and the read-state DB (`roomy-readstate.sqlite`) holds unread counts that cannot be reconstructed from it. Everything else is derived: the global DB and the per-space views both regenerate from the event log. The Deployment section below lists each DB and its kind.
 
+## Metrics
+
+`GET /metrics` renders the Prometheus text exposition, and every sample carries the replica it came from (`replica` from `RAILWAY_REPLICA_ID`), so a two-replica service is two series per metric, not one flapping series.
+
 ## Deployment
 
 Deployed on Railway from `Dockerfile.appserver` (build context is the repo root).
