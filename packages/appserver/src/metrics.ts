@@ -10,6 +10,11 @@
  *
  * Deliberately dependency-free and synchronous: `render()` is a pure string
  * build, so the scrape path never touches a DB worker or the event loop.
+ *
+ * A registry may be given constant labels that every sample carries. They name
+ * the process, not the series, so they are merged at render time and never
+ * part of a sample's key: two samples that differ only in their declared
+ * labels stay distinct samples that share the constant ones.
  */
 
 export type LabelSet = Record<string, string>;
@@ -51,9 +56,10 @@ function escapeLabel(v: string): string {
   return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
-function formatLabels(labelNames: string[], labels: LabelSet): string {
-  if (labelNames.length === 0) return "";
-  return labelNames.map((n) => `${n}="${escapeLabel(labels[n] ?? "")}"`).join(",");
+/** `{name="value",…}`, or "" when there are no labels at all. */
+function formatPairs(pairs: Array<[string, string]>): string {
+  if (pairs.length === 0) return "";
+  return `{${pairs.map(([n, v]) => `${n}="${v}"`).join(",")}}`;
 }
 
 export interface CounterHandle {
@@ -69,6 +75,24 @@ export interface HistogramHandle {
 
 export class Metrics {
   private families = new Map<string, AnyFamily>();
+  /** Escaped once: constant for the lifetime of this process. */
+  private readonly constantLabels: Array<[string, string]>;
+
+  constructor(constantLabels: LabelSet = {}) {
+    this.constantLabels = Object.entries(constantLabels).map(([n, v]) => [n, escapeLabel(v)]);
+  }
+
+  /**
+   * The rendered labels of one sample: declared labels in declaration order,
+   * then constant labels the family does not already declare.
+   */
+  private labelPairs(labelNames: string[], labels: LabelSet): Array<[string, string]> {
+    const pairs: Array<[string, string]> = labelNames.map((n) => [n, escapeLabel(labels[n] ?? "")]);
+    for (const [n, v] of this.constantLabels) {
+      if (!labelNames.includes(n)) pairs.push([n, v]);
+    }
+    return pairs;
+  }
 
   counter(name: string, help: string, labelNames: string[] = []): CounterHandle {
     const fam: CounterFamily = { name, help, type: "counter", labelNames, values: new Map() };
@@ -134,19 +158,18 @@ export class Metrics {
       lines.push(`# TYPE ${fam.name} ${fam.type}`);
       if (fam.type === "histogram") {
         for (const h of fam.values.values()) {
-          const base = formatLabels(fam.labelNames, h.labels);
-          const prefix = base === "" ? "{" : `{${base},`;
+          const pairs = this.labelPairs(fam.labelNames, h.labels);
           for (let i = 0; i < fam.buckets.length; i++) {
-            lines.push(`${fam.name}_bucket${prefix}le="${fam.buckets[i]}"} ${h.counts[i]}`);
+            const le = escapeLabel(String(fam.buckets[i]));
+            lines.push(`${fam.name}_bucket${formatPairs([...pairs, ["le", le]])} ${h.counts[i]}`);
           }
-          lines.push(`${fam.name}_bucket${prefix}le="+Inf"} ${h.count}`);
-          lines.push(`${fam.name}_sum${base === "" ? "" : `{${base}}`} ${h.sum}`);
-          lines.push(`${fam.name}_count${base === "" ? "" : `{${base}}`} ${h.count}`);
+          lines.push(`${fam.name}_bucket${formatPairs([...pairs, ["le", "+Inf"]])} ${h.count}`);
+          lines.push(`${fam.name}_sum${formatPairs(pairs)} ${h.sum}`);
+          lines.push(`${fam.name}_count${formatPairs(pairs)} ${h.count}`);
         }
       } else {
         for (const v of fam.values.values()) {
-          const labels = formatLabels(fam.labelNames, v.labels);
-          lines.push(`${fam.name}${labels === "" ? "" : `{${labels}}`} ${v.value}`);
+          lines.push(`${fam.name}${formatPairs(this.labelPairs(fam.labelNames, v.labels))} ${v.value}`);
         }
       }
     }
@@ -159,5 +182,10 @@ export class Metrics {
   }
 }
 
-/** Process-wide singleton used by the appserver. */
-export const metrics = new Metrics();
+/**
+ * Process-wide singleton used by the appserver. Each sample names the replica
+ * it came from, so a two-replica service exposes two series per metric instead
+ * of one series that flaps between them.
+ */
+const replicaId = process.env.RAILWAY_REPLICA_ID;
+export const metrics = new Metrics(replicaId ? { replica: replicaId } : {});
