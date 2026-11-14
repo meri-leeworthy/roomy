@@ -32,7 +32,8 @@ Discord Gateway ──► Bot event handlers
 src/
 ├── index.ts                   # Entry point, gateway wiring, graceful shutdown
 ├── env.ts                     # Environment variable validation
-├── api.ts                     # HTTP API server (/info, /get-guild-id, /get-space-id, /bridges)
+├── api.ts                     # HTTP API server (/health, /info, /get-guild-id, /get-space-id, /bridges)
+├── health.ts                  # Worker liveness state reported by /health
 ├── logger.ts                  # Structured logging
 ├── db/
 │   ├── schema.ts              # SQLite migrations
@@ -326,6 +327,63 @@ docker run -d \
 ```
 
 The entrypoint restores the SQLite database from S3 on first start (if no local DB exists) and wraps the Bun process with Litestream for continuous replication.
+
+### Health check
+
+`GET /health` on the status API reports whether the **worker** is alive, not
+whether the HTTP server is listening. It answers `200` with
+
+```json
+{
+  "status": "ok",
+  "checks": {
+    "discordGateway": "connected",
+    "roomySubscriptions": "open",
+    "sendRetrySweepAgeMs": 41234,
+    "capacitySweepAgeMs": 123456
+  },
+  "reasons": []
+}
+```
+
+and `503` with the same body shape once any component fails, where `reasons`
+names each one (`discord-gateway: not connected`,
+`send-retry-sweep: stale (last completed 400000ms ago)`, …).
+
+What it covers:
+
+- **Discord gateway** — every shard exists and is connected. `ready` alone is
+  not enough; the shard's own state is read per request, so a dropped gateway
+  fails the check even though the process and its HTTP server keep running.
+- **Roomy sync subscriptions** — every bridged space's stream connection is
+  open (`roomySubscriptions: "open"`). `"idle"` is healthy: with no bridged
+  space there is nothing to keep open.
+- **Send re-offer sweep** — the one-minute queue drain completed within three
+  intervals (3 min). A skipped tick does not count: it means the previous
+  sweep has not settled.
+- **Capacity sweep** — the five-minute capacity refresh completed within three
+  intervals (15 min).
+
+Both sweep ages are recorded by the interval callbacks themselves, and the
+request that builds the report runs on the same event loop. A blocked loop
+therefore cannot report itself alive: the ages keep growing until the report
+turns unhealthy.
+
+What it does **not** cover:
+
+- Per-item delivery. A sweep that ran but failed to re-offer a queued send is
+  counted as a heartbeat; the failure is visible in the logs and in
+  `/sends/failed`, not in `/health`.
+- XRPC correctness, Discord REST health, or the appserver's own health. Those
+  surface as failed sends, logged errors, or a closed subscription.
+- Restarting anything. The health check only reports; the container-level
+  restart is the platform's restart policy (`HEALTHCHECK` makes the container
+  unhealthy, and Docker or the orchestrator restarts it). The deployment must
+  have that policy configured — the repository does not configure Railway.
+
+The image ships a `HEALTHCHECK` that probes the endpoint from inside the
+container every 30 s, with a 120 s start period (READY plus the first one-minute
+sweep) and three retries before the container is marked unhealthy.
 
 ### Data migrations
 
