@@ -17,6 +17,7 @@ const MAPPING_KINDS: Record<MappingKind, true> = {
 	thread: true,
 	user: true,
 	reaction: true,
+	forward: true,
 };
 
 /** Read a mapping kind back out of the database. */

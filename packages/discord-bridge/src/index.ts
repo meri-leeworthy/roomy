@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { createBot, Intents } from "@discordeno/bot";
+import { createBot, Intents, ShardState } from "@discordeno/bot";
 import { startApi } from "./api.ts";
 import { BridgeRepository } from "./db/repository.ts";
 import { type DiscordBotWithCache, getProxyCacheBot } from "./discord/cache.ts";
@@ -33,6 +33,11 @@ import {
 	DISCORD_TOKEN,
 	ENABLE_GUILD_MEMBERS_INTENT,
 } from "./env.ts";
+import {
+	BridgeHealth,
+	CAPACITY_SWEEP_INTERVAL_MS,
+	SEND_RETRY_SWEEP_INTERVAL_MS,
+} from "./health.ts";
 import { createLogger } from "./logger.ts";
 import { initRoomyClient } from "./roomy/client.ts";
 import {
@@ -164,11 +169,6 @@ async function main() {
 	const repo = BridgeRepository.open(BRIDGE_DB_PATH());
 	log.info(`sqlite store opened at ${BRIDGE_DB_PATH()}`);
 
-	log.info("starting api...");
-
-	// Start HTTP API
-	startApi(repo, () => appId);
-
 	// Initialize Roomy client
 	const roomyClient = await initRoomyClient();
 	const spaceManager = new SpaceManager(
@@ -183,10 +183,29 @@ async function main() {
 		APPSERVER_WS_URL(),
 	);
 
-	// Start Discord gateway
-	// bot is assigned immediately after createBot; event handlers fire
-	// asynchronously on gateway events, so the reference is always valid.
+	// The bot object exists before its gateway connects (`bot.start()` below
+	// opens it), and event handlers fire asynchronously on gateway events, so
+	// the reference is always valid once assigned.
 	let bot!: DiscordBotWithCache;
+
+	// The health report reads the gateway's shard states and the sync
+	// subscriptions directly, so it follows a drop without waiting for a
+	// handler to observe it. Sweep timestamps are recorded by the intervals
+	// below, in the `ready` handler.
+	const health = new BridgeHealth({
+		gatewayConnected: () =>
+			bot !== undefined &&
+			bot.gateway.shards.size > 0 &&
+			[...bot.gateway.shards.values()].every(
+				(shard) => shard.state === ShardState.Connected,
+			),
+		subscriptions: () => roomy.subscriptionState(),
+	});
+
+	log.info("starting api...");
+
+	// Start HTTP API
+	startApi(repo, () => appId, health);
 
 	bot = getProxyCacheBot(
 		createBot({
@@ -235,8 +254,11 @@ async function main() {
 							: "capacity: system-message notifications disabled (set SYSTEM_SPACE/SYSTEM_CHANNEL to enable)",
 					);
 
-					// Startup: check every bridged (guild, space) tuple.
+					// Startup: check every bridged (guild, space) tuple. This is
+					// the capacity sweep's first completion, so the probe has a
+					// baseline before the first interval tick.
 					checkAllBridges(repo);
+					health.noteCapacitySweepCompleted();
 
 					// Periodic sweep: every 5 minutes, force-refresh all
 					// bridged tuples so capacity changes are picked up even
@@ -244,10 +266,11 @@ async function main() {
 					setInterval(() => {
 						try {
 							checkAllBridges(repo);
+							health.noteCapacitySweepCompleted();
 						} catch (err) {
 							log.error("Capacity sweep failed", err);
 						}
-					}, 5 * 60 * 1000);
+					}, CAPACITY_SWEEP_INTERVAL_MS);
 
 					// Create adapters and run backfill. The sender is created
 					// first so runBackfill can install it for the
@@ -307,14 +330,19 @@ async function main() {
 
 					// Periodic send re-offer: every minute, re-send queued
 					// Discord→Roomy events whose backoff has elapsed. Ticks
-					// are cheap — the query is indexed and usually empty.
+					// are cheap — the query is indexed and usually empty. Only
+					// a sweep that actually ran records a heartbeat: a skipped
+					// tick means a previous sweep has not settled, which is the
+					// wedge the probe must see.
 					setInterval(async () => {
 						try {
-							await retryQueuedSends(repo, roomy);
+							if (await retryQueuedSends(repo, roomy)) {
+								health.noteSendRetrySweepCompleted();
+							}
 						} catch (err) {
 							log.error("Send retry sweep failed", err);
 						}
-					}, 60 * 1000);
+					}, SEND_RETRY_SWEEP_INTERVAL_MS);
 				},
 
 				async messageCreate(message: MessageProperties) {
