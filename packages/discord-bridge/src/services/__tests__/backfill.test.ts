@@ -22,6 +22,7 @@ import { faker } from "@faker-js/faker";
 import { newUlid } from "@roomy-space/sdk";
 import { BridgeRepository } from "../../db/repository.ts";
 import { startApi } from "../../api.ts";
+import { BridgeHealth } from "../../health.ts";
 import type {
 	DiscordChannelData,
 	DiscordGuildData,
@@ -984,7 +985,14 @@ describe("two-phase backfill", () => {
 			  }
 			| undefined;
 		try {
-			server = startApi(repo, () => "app-id");
+			server = startApi(
+				repo,
+				() => "app-id",
+				new BridgeHealth({
+					gatewayConnected: () => true,
+					subscriptions: () => "idle",
+				}),
+			);
 			const res = await fetch(
 				`http://127.0.0.1:${server.port}/backfill/progress?spaceDid=${encodeURIComponent(SPACE)}`,
 			);

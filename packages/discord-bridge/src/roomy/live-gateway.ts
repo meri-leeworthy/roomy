@@ -11,6 +11,7 @@
 import { type Event, sync, transport } from "@roomy-space/sdk";
 import type { BridgeRepository } from "../db/repository.ts";
 import { BRIDGE_RECONNECT_BASE_MS, BRIDGE_RECONNECT_MAX_MS } from "../env.ts";
+import type { SubscriptionState } from "../health.ts";
 import { createLogger } from "../logger.ts";
 import { reconnectDelayMs } from "../utils/backoff.ts";
 import type {
@@ -266,6 +267,24 @@ export class LiveRoomyGateway implements RoomyGateway {
 					? ` (resuming from idx ${persisted + 1})`
 					: " (full backfill)"),
 		);
+	}
+
+	/**
+	 * Aggregate liveness of the per-space sync subscriptions, as the health
+	 * report reads it. Registered subscriptions are the ones the bridge has
+	 * asked for; a connection missing from `#connections` is still opening (or
+	 * failed to open) and therefore not open.
+	 *
+	 * `idle` when no space is bridged — there is nothing to keep open, and a
+	 * bridge with no bridged spaces is a valid state.
+	 */
+	subscriptionState(): SubscriptionState {
+		if (this.#subscriptions.size === 0) return "idle";
+		for (const spaceDid of this.#subscriptions) {
+			const connection = this.#connections.get(spaceDid);
+			if (connection?.status.state !== "open") return "not-open";
+		}
+		return "open";
 	}
 
 	/**

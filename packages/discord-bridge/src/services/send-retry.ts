@@ -110,19 +110,26 @@ export async function sendEventOrQueue(
  * XRPC timeout, so a full batch outlasts the caller's minute tick; the
  * overlapping sweeps a longer batch would allow re-send the same entry and
  * spend one attempt each for what is a single delivery window.
+ *
+ * Returns whether this call ran a sweep. A call that finds the previous
+ * sweep still in flight returns false: the liveness probe treats a completed
+ * sweep as evidence the event loop is running, and a skip is not one —
+ * otherwise a sweep hung on a never-settling request would keep the probe
+ * green while nothing drains the queue.
  */
 export async function retryQueuedSends(
 	repo: BridgeRepository,
 	roomy: RoomyGateway,
 	now: number = Date.now(),
-): Promise<void> {
+): Promise<boolean> {
 	if (sweepInFlight) {
 		log.warn("Send re-offer sweep skipped: previous sweep still running", {});
-		return;
+		return false;
 	}
 	sweepInFlight = true;
 	try {
 		await sweepQueuedSends(repo, roomy, now);
+		return true;
 	} finally {
 		sweepInFlight = false;
 	}
