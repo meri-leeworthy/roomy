@@ -504,6 +504,10 @@ async function main() {
 
 	// Graceful shutdown
 	let shuttingDown = false;
+	// Non-zero when a fatal cause started the shutdown, so a supervisor reads
+	// the exit as a crash rather than a clean stop. Read at exit time, so a
+	// fatal cause arriving during a signal-driven shutdown still counts.
+	let exitCode = 0;
 	const shutdown = async (signal: string) => {
 		if (shuttingDown) return;
 		shuttingDown = true;
@@ -517,10 +521,25 @@ async function main() {
 
 		repo.close();
 		log.info("shutdown complete");
-		process.exit(0);
+		process.exit(exitCode);
 	};
 	process.on("SIGINT", () => shutdown("SIGINT"));
 	process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+	// A throw or rejection that escapes every handler would otherwise end the
+	// process with nothing in the log to say why. Record it with its stack,
+	// then take the shutdown path: a process in an unknown state must not keep
+	// bridging, but the next occurrence has to leave evidence.
+	process.on("unhandledRejection", (reason) => {
+		log.error("fatal unhandledRejection", reason);
+		exitCode = 1;
+		void shutdown("unhandledRejection");
+	});
+	process.on("uncaughtException", (err) => {
+		log.error("fatal uncaughtException", err);
+		exitCode = 1;
+		void shutdown("uncaughtException");
+	});
 
 	log.info("bridge running");
 }
