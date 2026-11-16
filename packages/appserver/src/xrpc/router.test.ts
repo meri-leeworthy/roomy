@@ -161,6 +161,32 @@ describe("XrpcRouter schema validation", () => {
     expect(await res.json()).toEqual({ anything: 123 });
   });
 });
+describe("XrpcRouter caller abort signal", () => {
+  test("a query handler receives the request's signal", async () => {
+    let received: AbortSignal | undefined;
+    const router = build((r) =>
+      r.query("test.query", {
+        handler: async (_params, _auth, signal) => {
+          received = signal;
+          return { ok: true };
+        },
+      }),
+    );
+
+    const controller = new AbortController();
+    const res = await call(router, "http://x/xrpc/test.query", {
+      signal: controller.signal,
+    });
+    expect(res.status).toBe(200);
+    expect(received).toBeInstanceOf(AbortSignal);
+    expect(received?.aborted).toBe(false);
+
+    // The handler is handed the caller's own signal, so a disconnect while
+    // it is still working reaches it.
+    controller.abort();
+    expect(received?.aborted).toBe(true);
+  });
+});
 
 describe("XrpcRouter authenticated-request observer", () => {
   test("reports the caller's DID for a query and for a procedure", async () => {

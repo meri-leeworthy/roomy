@@ -16,10 +16,16 @@ export interface FrameHeader {
 
 export type QueryParams = Record<string, string | string[] | undefined>;
 
+/**
+ * A query handler. `signal` aborts when the caller's HTTP request goes away
+ * (client disconnect), so a handler that does outbound work can stop it
+ * instead of holding the socket open. Handlers that ignore it behave as
+ * before.
+ */
 export type QueryHandler<
   TParams extends QueryParams = QueryParams,
   TResult = unknown,
-> = (params: TParams, auth: AuthCtx) => Promise<TResult>;
+> = (params: TParams, auth: AuthCtx, signal?: AbortSignal) => Promise<TResult>;
 
 export type SubscriptionHandler<TParams extends QueryParams = QueryParams> = (
   params: TParams,

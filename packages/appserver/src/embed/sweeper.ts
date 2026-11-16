@@ -14,7 +14,7 @@
  * erroring the same URL dozens-to-hundreds of times while the embed service is
  * slow or down. Centralizing avoids all three amplifiers at once:
  *   - Exactly one in-flight fetch per URL (dedup lives in `enricher.ts`).
- *   - Every fetch has a hard timeout (see `FETCH_TIMEOUT_MS`).
+ *   - Every enrichment has one hard deadline (see `EMBED_METADATA_TIMEOUT_MS`).
  *   - Bounded concurrency (see `CONCURRENCY`) — the service can't be flooded.
  *   - A self-healing idle poll catches links detected during backfill or
  *     carried over from a previous session.

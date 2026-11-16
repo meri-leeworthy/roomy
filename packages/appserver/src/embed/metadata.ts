@@ -26,11 +26,22 @@
 // ─── Configuration ──────────────────────────────────────────────────────
 
 /**
- * Hard timeout for a single upstream fetch (page HTML or oEmbed call).
- * Link previews are latency-sensitive (rendered inline under the composer),
- * so we'd rather return nothing than hang the request. Tunable via env.
+ * Default wall-clock budget for ONE whole enrichment: the page fetch and the
+ * oEmbed call share it. Link previews are latency-sensitive (rendered inline
+ * under the composer), so a URL that is slow twice — a slow page and a slow
+ * oEmbed endpoint — still returns within this one figure. The env is read per
+ * call, so a running process picks up a new value without a module reload.
  */
-const FETCH_TIMEOUT_MS = Number(process.env.EMBED_METADATA_TIMEOUT_MS ?? 8000);
+const DEFAULT_TOTAL_BUDGET_MS = 8000;
+
+/**
+ * Default cap (bytes) on how much of a response body a fetch will buffer.
+ * Metadata lives in the head of a document, so a page larger than this still
+ * yields what it announced in its first chunk; the rest of the stream is
+ * cancelled instead of buffered. A drip-feed is bounded by the deadline, not
+ * by this cap.
+ */
+const DEFAULT_MAX_BODY_BYTES = 512 * 1024;
 
 /**
  * Real browser User-Agent. Many sites serve different (og-less) markup to
@@ -44,6 +55,56 @@ const BROWSER_UA =
 
 const ACCEPT_HTML =
   "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+
+// ─── Deadlines and bounded reads ────────────────────────────────────────
+
+/** An abort signal that fires after `ms`, or as soon as `parent` aborts. */
+function startDeadline(
+  parent: AbortSignal | undefined,
+  ms: number,
+): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  const onParentAbort = () => controller.abort(parent?.reason);
+  parent?.addEventListener("abort", onParentAbort, { once: true });
+  if (parent?.aborted) controller.abort(parent.reason);
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", onParentAbort);
+    },
+  };
+}
+
+/**
+ * Read at most `limit` bytes of a response body, decoded as UTF-8. Reading
+ * stops at the cap and the remainder of the stream is cancelled, so an
+ * oversized body cannot be buffered whole and the connection is released.
+ * Callers parse the prefix they got.
+ */
+async function readTextCapped(res: Response, limit: number): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    while (size < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      const room = limit - size;
+      const slice = value.byteLength > room ? value.subarray(0, room) : value;
+      chunks.push(Buffer.from(slice));
+      size += slice.byteLength;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks, size).toString("utf8");
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────
 /**
@@ -75,20 +136,17 @@ export interface PageResult {
 }
 
 /**
- * Fetch a page with a browser UA, redirect following, and a hard timeout.
+ * Fetch a page with a browser UA and redirect following, reading at most
+ * `EMBED_METADATA_MAX_BYTES` of its body. The caller owns the clock: `signal`
+ * is the only deadline, so this fetch cannot outlive the enrichment budget.
  * Unlike {@link fetchLinkMetadata}, this reports the HTTP status even on
  * failure so callers can classify stable 4xx (definitive) vs transient
  * (5xx/429/network) outcomes for retry scheduling.
  */
 export async function fetchPage(
   url: string,
-  signal?: AbortSignal,
+  signal: AbortSignal,
 ): Promise<PageResult> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  const onCallerAbort = () => controller.abort();
-  signal?.addEventListener("abort", onCallerAbort, { once: true });
-
   try {
     const res = await fetch(url, {
       redirect: "follow",
@@ -97,16 +155,16 @@ export async function fetchPage(
         Accept: ACCEPT_HTML,
         "Accept-Language": "en,en-US;q=0.9",
       },
-      signal: controller.signal,
+      signal,
     });
     if (!res.ok) return { status: res.status, html: null, finalUrl: res.url || url };
-    const html = await res.text();
+    const html = await readTextCapped(
+      res,
+      Number(process.env.EMBED_METADATA_MAX_BYTES ?? DEFAULT_MAX_BODY_BYTES),
+    );
     return { status: res.status, html, finalUrl: res.url || url };
   } catch {
     return { status: 0, html: null, finalUrl: url };
-  } finally {
-    clearTimeout(timeoutId);
-    signal?.removeEventListener("abort", onCallerAbort);
   }
 }
 
@@ -216,35 +274,31 @@ interface OEmbedJson {
 
 /**
  * Fetch and parse an oEmbed endpoint for the given page URL. Returns `null`
- * on any failure (non-OK, timeout, non-JSON body).
+ * on any failure (non-OK, timeout, non-JSON body, body over
+ * `EMBED_METADATA_MAX_BYTES`).
  */
 export async function fetchOEmbed(
   endpoint: string,
   url: string,
-  signal?: AbortSignal,
+  signal: AbortSignal,
 ): Promise<OEmbedJson | null> {
-  const target = buildOEmbedUrl(endpoint, url);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  const onCallerAbort = () => controller.abort();
-  signal?.addEventListener("abort", onCallerAbort, { once: true });
-
   try {
-    const res = await fetch(target, {
+    const res = await fetch(buildOEmbedUrl(endpoint, url), {
       headers: {
         "User-Agent": BROWSER_UA,
         Accept: "application/json",
       },
-      signal: controller.signal,
+      signal,
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as OEmbedJson;
+    const body = await readTextCapped(
+      res,
+      Number(process.env.EMBED_METADATA_MAX_BYTES ?? DEFAULT_MAX_BODY_BYTES),
+    );
+    const data = JSON.parse(body) as OEmbedJson;
     return data && typeof data === "object" ? data : null;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeoutId);
-    signal?.removeEventListener("abort", onCallerAbort);
   }
 }
 
@@ -332,6 +386,11 @@ export type ProbeResult =
  * Enrich a URL with link metadata (oEmbed discovery + OpenGraph fallback),
  * returning a classified {@link ProbeResult} so the caller can schedule
  * retries for transient failures while settling definitive no-data URLs.
+ *
+ * One deadline covers the whole enrichment — the page fetch and the oEmbed
+ * call run under the same clock — so the two cannot run back to back for
+ * twice the budget. It also ends the work as soon as `signal` aborts, which
+ * a caller uses to stop fetching when its own request goes away.
  */
 export async function probeLinkMetadata(
   url: string,
@@ -339,28 +398,36 @@ export async function probeLinkMetadata(
 ): Promise<ProbeResult> {
   if (!/^https?:\/\//i.test(url)) return { status: "no-data" };
 
-  const page = await fetchPage(url, signal);
-  if (page.status === 0) return { status: "transient" }; // network/timeout
+  const deadline = startDeadline(
+    signal,
+    Number(process.env.EMBED_METADATA_TIMEOUT_MS ?? DEFAULT_TOTAL_BUDGET_MS),
+  );
+  try {
+    const page = await fetchPage(url, deadline.signal);
+    if (page.status === 0) return { status: "transient" }; // network/timeout
 
-  if (page.status >= 400) {
-    // Stable 4xx (bot-blocked, gone) settle; 429 & 5xx are transient.
-    if (page.status === 429 || page.status >= 500) return { status: "transient" };
-    return { status: "no-data" };
-  }
-
-  const html = page.html ?? "";
-  const og = ogToMetadata(html);
-
-  const endpoint = extractOEmbedEndpoint(html);
-  if (endpoint) {
-    const oembed = await fetchOEmbed(endpoint, page.finalUrl, signal);
-    if (oembed) {
-      // Prefer oEmbed data; fill gaps (e.g. description, og:image) from OG.
-      return { status: "ok", metadata: mergeMetadata(oEmbedToMetadata(oembed), og) };
+    if (page.status >= 400) {
+      // Stable 4xx (bot-blocked, gone) settle; 429 & 5xx are transient.
+      if (page.status === 429 || page.status >= 500) return { status: "transient" };
+      return { status: "no-data" };
     }
-  }
 
-  return isEmpty(og) ? { status: "no-data" } : { status: "ok", metadata: og };
+    const html = page.html ?? "";
+    const og = ogToMetadata(html);
+
+    const endpoint = extractOEmbedEndpoint(html);
+    if (endpoint) {
+      const oembed = await fetchOEmbed(endpoint, page.finalUrl, deadline.signal);
+      if (oembed) {
+        // Prefer oEmbed data; fill gaps (e.g. description, og:image) from OG.
+        return { status: "ok", metadata: mergeMetadata(oEmbedToMetadata(oembed), og) };
+      }
+    }
+
+    return isEmpty(og) ? { status: "no-data" } : { status: "ok", metadata: og };
+  } finally {
+    deadline.dispose();
+  }
 }
 
 /**
