@@ -134,6 +134,26 @@ const dbTimeouts = metrics.counter(
   ["type"],
 );
 
+/**
+ * Attribution for a request that outlived its budget. The rejection's stack
+ * names only the timer that made it, so a record of one would otherwise say
+ * nothing about which worker, DB or space stalled — the caller's frame is not
+ * in the stack regardless of who dropped the promise. `isTransientDbError`
+ * matches on the "Request timed out:" prefix, so the attribution is appended
+ * after the type.
+ */
+function timeoutMessage(
+  req: Omit<WorkerRequest, "id">,
+  route: DbRoute | undefined,
+  worker: string,
+): string {
+  const targetDb = route?.targetDb ?? req.targetDb ?? "events";
+  const spaceDid = route?.spaceDid ?? req.spaceDid;
+  const fields = [`worker=${worker}`, `db=${targetDb}`];
+  if (spaceDid !== undefined) fields.push(`space=${spaceDid}`);
+  return `Request timed out: ${req.type} (${fields.join(", ")})`;
+}
+
 // ─── Request attribution ──────────────────────────────────────────────────
 //
 // A slow request has two possible shapes, and they have opposite fixes:
@@ -192,6 +212,15 @@ const dbQueueDepth = metrics.histogram(
   DB_DEPTH_BUCKETS,
 );
 
+/** Options for a {@link WorkerLink}. */
+export interface WorkerLinkOpts {
+  /**
+   * Budget for one request. A reply that misses it rejects the request; the
+   * worker keeps running it, so a read may be re-issued (see `transient.ts`).
+   */
+  requestTimeoutMs?: number;
+}
+
 /**
  * Owns one Bun.Worker thread and the request/response correlation for it.
  * Multiple `AsyncDatabase` handles can share one link; each handle stamps a
@@ -204,10 +233,16 @@ export class WorkerLink {
   #closed = false;
   /** Label for this link's series, e.g. `space-3`, `global`, `readstate`. */
   #name: string;
+  #requestTimeoutMs: number;
 
-  constructor(workerPath: string, name = "unlabelled") {
+  constructor(
+    workerPath: string,
+    name = "unlabelled",
+    opts: WorkerLinkOpts = {},
+  ) {
     this.#worker = new Worker(workerPath);
     this.#name = name;
+    this.#requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
 
     this.#worker.onmessage = (event: MessageEvent) => {
       const data = event.data as WorkerResponse;
@@ -295,8 +330,8 @@ export class WorkerLink {
     const timeout = setTimeout(() => {
       this.#pending.delete(id);
       dbTimeouts.inc({ type: req.type });
-      reject(new Error(`Request timed out: ${req.type}`));
-    }, REQUEST_TIMEOUT_MS);
+      reject(new Error(timeoutMessage(req, route, this.#name)));
+    }, this.#requestTimeoutMs);
     // Depth BEFORE this request joins the queue: the number of requests the
     // worker already owes a reply to. Recorded here rather than sampled from
     // the scrape, so it survives a stall the scrape never lands inside.

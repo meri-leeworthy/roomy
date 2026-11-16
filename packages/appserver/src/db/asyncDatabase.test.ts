@@ -21,6 +21,7 @@ import type { DbRoute } from "./asyncDatabase.ts";
 import type { WorkerRequest } from "./types.ts";
 
 const WORKER_PATH = join(import.meta.dir, "asyncDatabaseWorker.fixture.ts");
+const NEVER_REPLY_PATH = join(import.meta.dir, "asyncDatabaseNeverReply.fixture.ts");
 
 interface CapturedRecord {
   line: string;
@@ -259,5 +260,44 @@ describe("WorkerLink statement histogram", () => {
       expect(names.every((n) => n === "type" || n === "targetDb" || n === "le"))
         .toBe(true);
     }
+  });
+});
+
+
+describe("WorkerLink request timeout", () => {
+  /** The rejection a request gets when its worker never answers. */
+  async function timeoutOf(
+    req: Omit<WorkerRequest, "id">,
+    route?: DbRoute,
+    name = "readstate",
+  ): Promise<Error> {
+    // A short budget instead of the real 30s one: the fixture worker holds the
+    // request open forever, so the timeout is the only thing that settles it.
+    const link = new WorkerLink(NEVER_REPLY_PATH, name, { requestTimeoutMs: 20 });
+    links.push(link);
+    const settled = await link.send(req, route).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    if (!(settled instanceof Error)) throw new Error("request did not time out");
+    return settled;
+  }
+
+  test("names the worker and DB the timed-out request was routed to", async () => {
+    const err = await timeoutOf({ type: "run", sql: "delete from t" }, { targetDb: "readstate" });
+
+    expect(err.message).toBe("Request timed out: run (worker=readstate, db=readstate)");
+  });
+
+  test("names the space when the route carries one", async () => {
+    const err = await timeoutOf(
+      { type: "run", sql: "delete from t" },
+      { targetDb: "space", spaceDid: "did:plc:wedged" },
+      "space-3",
+    );
+
+    expect(err.message).toBe(
+      "Request timed out: run (worker=space-3, db=space, space=did:plc:wedged)",
+    );
   });
 });

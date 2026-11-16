@@ -19,8 +19,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { closeDb, openDb, openReadStateDb, openSpaceDb } from "../db/db.ts";
+import { AsyncDatabase, WorkerLink } from "../db/asyncDatabase.ts";
 import type { DbLike } from "../db/types.ts";
+import { _setLokiSink } from "../log.ts";
+import type { LokiSink } from "../telemetry/loki.ts";
 import {
   upsertUserThreadActivity,
   refreshThreadActivityOnMessage,
@@ -29,6 +33,7 @@ import {
   isThread,
   purgeStaleThreadActivity,
   purgeStaleThreadBackfill,
+  sweepStaleThreadState,
 } from "./userActiveThreads.ts";
 import { readRoomActivityProjection } from "./roomActivityProjection.ts";
 
@@ -588,5 +593,76 @@ describe("purgeStaleThreadActivity", () => {
       .all<{ thread_id: string }>();
     expect(remaining).toHaveLength(1);
     expect(remaining[0]!.thread_id).toBe(THREAD_B);
+  });
+});
+
+describe("sweepStaleThreadState", () => {
+  const WEDGED_WORKER = join(
+    import.meta.dir,
+    "../db/asyncDatabaseNeverReply.fixture.ts",
+  );
+
+  /** Yield to the event loop; a latent unhandled rejection surfaces first. */
+  const yieldToLoop = () => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setImmediate(resolve);
+    return promise;
+  };
+
+  test("a request timeout is logged, not raised as an unhandled rejection", async () => {
+    // The maintenance timer drops this pass's promise, so a rejection would
+    // reach the process hook and `fatal.ts` exits 1 on it. Reproduced with a
+    // worker that never replies and a short budget, not a 30s wait.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+      process.exit(9); // fail loudly — do not let the run limp on
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    const { promise: logged, resolve: onLogged } = Promise.withResolvers<void>();
+    // The sink hands back the line the logger serialised, so parse it the way a
+    // log consumer would instead of reaching into logger internals.
+    const records: Record<string, unknown>[] = [];
+    const sink: LokiSink = {
+      push: (record) => {
+        const parsed = JSON.parse(record.line) as Record<string, unknown>;
+        records.push(parsed);
+        if (parsed.scope === "maintenance") onLogged();
+      },
+      flush: async () => {},
+      stop: () => {},
+      stats: () => ({ queued: 0, sent: 0, dropped: 0, failed: 0 }),
+    };
+    _setLokiSink(sink);
+
+    const link = new WorkerLink(WEDGED_WORKER, "readstate", {
+      requestTimeoutMs: 20,
+    });
+    const db = new AsyncDatabase(link, { targetDb: "readstate" });
+
+    try {
+      // Dropped exactly as the timer drops it — never awaited.
+      void sweepStaleThreadState(db, Date.now());
+      // The sink fires from the pass's own catch, so this waits on the signal
+      // rather than a duration.
+      await logged;
+      await yieldToLoop();
+      await yieldToLoop();
+    } finally {
+      link.terminate();
+      _setLokiSink(null);
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
+    const maintenance = records.filter((record) => record.scope === "maintenance");
+    expect(maintenance).toHaveLength(1);
+    expect(maintenance[0]!.level).toBe("error");
+    expect(maintenance[0]!.error).toEqual(
+      expect.objectContaining({
+        message: "Request timed out: run (worker=readstate, db=readstate)",
+      }),
+    );
   });
 });
