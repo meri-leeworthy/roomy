@@ -22,7 +22,7 @@ import { Router as InvalidationRouter } from "./invalidation/index.ts";
 import { startEmbedSweeper, stopEmbedSweeper, embedSweeperStats } from "./embed/sweeper.ts";
 import { countPendingLinks } from "./embed/enricher.ts";
 import { openDb, openGlobalDb, openReadStateDb, openSpaceDb, openSpaceDbForEntity, closeDb, poolStats } from "./db/db.ts";
-import { DB_STATEMENT_METRIC, DB_WAIT_METRIC } from "./db/asyncDatabase.ts";
+import { DB_STATEMENT_METRIC, DB_WAIT_METRIC, dbStallStats } from "./db/asyncDatabase.ts";
 import { StreamManager, setStreamManager, _resetStreamManager } from "./streams/StreamManager.ts";
 import { ACTIVE_WINDOW_MS, purgeStaleThreadActivity, purgeStaleThreadBackfill } from "./queries/userActiveThreads.ts";
 import { warmBlockSet } from "./queries/userBlocks.ts";
@@ -134,6 +134,7 @@ import { log } from "./log.ts";
 import { metrics } from "./metrics.ts";
 import { resolveBuildId } from "./telemetry/build.ts";
 import { initTracing, shutdownTracing } from "./telemetry/tracing.ts";
+import { EventLoopLagSampler } from "./telemetry/eventLoopLag.ts";
 import {
   CACHEABLE_NSIDS,
   createQueryCacheFromEnv,
@@ -174,6 +175,11 @@ export interface AppserverOptions {
    *  are deterministic (the cache would skip the handler on the second call).
    *  Also disabled when the `APPSERVER_QUERY_CACHE_ENABLED` env var is `"false"`. */
   disableQueryCache?: boolean;
+  /** Enable the event-loop lag sampler (feeds `roomy_event_loop_delay_seconds`).
+   *  Defaults to on with background workers, off with
+   *  `disableBackgroundWorkers`; also off when `APPSERVER_EVENT_LOOP_LAG_ENABLED`
+   *  is `"false"`. Tests that assert the histogram pass `true`. */
+  eventLoopLag?: boolean;
   /** HappyView profile index service config. When unset, reads from env
    *  (`HAPPYVIEW_ENDPOINT` / `HAPPYVIEW_DID`). When `null`, HappyView is
    *  disabled and profile fetching uses Bluesky only. */
@@ -202,6 +208,10 @@ export interface AppserverHandle {
   /** The query response cache, or undefined when caching is disabled. Exposed
    *  for stats/metrics and for tests to assert hit/miss behaviour. */
   queryCache: QueryCache | undefined;
+  /** The event-loop lag sampler, or undefined when it was not enabled. Exposed
+   *  so a caller can close a window on demand: the sampling interval runs on
+   *  the platform clock, and the readings are what matter. */
+  eventLoopLag: EventLoopLagSampler | undefined;
   /** Stop the server, close DBs, and reset process-wide singletons. */
   close(): Promise<void>;
 }
@@ -927,6 +937,19 @@ export async function createAppserver(
     });
   }
 
+  // ─── Event-loop lag ───────────────────────────────────────────────────
+  // The one signal that separates a host stall from slow SQL: DB work runs on
+  // worker threads, so a loop that was late WHILE workers reported slow
+  // statements was blocked by something outside both. Sampling is a 10 ms
+  // monitor read once a second into `roomy_event_loop_delay_seconds`; the
+  // interval is unref'd, so it never holds a test process open. Off when the
+  // background workers are off (tests), and switchable by env in production.
+  const eventLoopLagEnabled =
+    opts.eventLoopLag ??
+    (backgroundWorkers && process.env.APPSERVER_EVENT_LOOP_LAG_ENABLED !== "false");
+  const eventLoopLag = eventLoopLagEnabled ? new EventLoopLagSampler() : undefined;
+  eventLoopLag?.start();
+
   // ─── XRPC routes ──────────────────────────────────────────────────────
   const authVerifier = opts.authVerifier ?? selectAuthVerifier();
   const syncSubscribeHandler = createSyncSubscribeHandler(
@@ -1241,14 +1264,21 @@ export async function createAppserver(
         // separate a queue build-up from statements that genuinely got slower
         // — a distinction `/metrics` alone leaves to a query author, and one
         // the `[db-slow]` threshold cannot make at all.
+        //
+        // `stalls` carries the statement-stall totals per worker
+        // (`roomy_db_stalls_total` / `roomy_db_stall_seconds_total` on
+        // `/metrics`): one stalled interval reads here as the few workers it
+        // held, not as one warn line per statement inside it.
         const stats = await poolStats();
+        const body = stats ? { enabled: true, ...stats } : { enabled: false };
         return new Response(
           JSON.stringify({
-            ...(stats ? { enabled: true, ...stats } : { enabled: false }),
+            ...body,
             dbLatencySeconds: {
               wait: metrics.histogramSeries(DB_WAIT_METRIC),
               statement: metrics.histogramSeries(DB_STATEMENT_METRIC),
             },
+            stalls: dbStallStats(),
           }),
           { headers: { "content-type": "application/json", ...corsHeaders } },
         );
@@ -1431,6 +1461,7 @@ export async function createAppserver(
     port: server.port ?? port,
     ownDid,
     queryCache,
+    eventLoopLag,
     close(): Promise<void> {
       return stopEmbedSweeper()
         .then(() => stopSearchIndexer())
@@ -1450,6 +1481,10 @@ export async function createAppserver(
           clearInterval(maintenanceTimer);
           clearInterval(metricsTimer);
           clearInterval(proMembersTimer);
+          // Stopped with the other intervals so a closed server leaves no
+          // timer behind (the interval is unref'd, but a leaked one still
+          // samples into a process-wide histogram).
+          eventLoopLag?.stop();
           closeDb();
         } catch (e) {
           log.error("appserver close: closeDb failed", e);
