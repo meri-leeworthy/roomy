@@ -22,6 +22,7 @@ import {
 } from "./streams/reMaterialize.ts";
 import { openDb, poolStats } from "./db/db.ts";
 import { runPendingReadStateMigrationsWithRetry } from "./db/userSpaceMembershipMigration.ts";
+import { BootReadinessTracker } from "./readiness.ts";
 
 // ─── Fatal-exit visibility ─────────────────────────────────────────────────
 // Install before anything that can throw or reject: a boot failure must leave
@@ -32,9 +33,23 @@ import { runPendingReadStateMigrationsWithRetry } from "./db/userSpaceMembership
 installFatalHandlers();
 recordProcessStart();
 
+// ─── Boot readiness ────────────────────────────────────────────────────────
+// The socket binds long before the materialised views are current: the sweep
+// below walks every stream in the event log, and until it finishes a read can
+// be answered from a space that has not caught up. `/health` reports that
+// through this tracker (503 `starting` until the first pass completes), which
+// is the signal a platform health check holds traffic behind.
+const boot = new BootReadinessTracker();
+
 // ─── Server construction ───────────────────────────────────────────────────
 
-const app: AppserverHandle = await createAppserver();
+const app: AppserverHandle = await createAppserver({
+  readiness: () => boot.snapshot(),
+});
+
+// Listening is not readiness: this line exists so the boot's progress is
+// visible in the log even while `/health` still reports `starting`.
+log.info("startup", `appserver listening (DID: ${app.ownDid}, port: ${app.port})`);
 
 // ─── Re-materialize from local events DB ─────────────────────────────────
 // Replay un-materialized events from the local events DB to bring the
@@ -44,11 +59,13 @@ const app: AppserverHandle = await createAppserver();
 // replay only happens after a schema-version wipe (which empties the cursor
 // table). On a normal restart the cursors are current, so this is cheap.
 //
-// Re-materialization is intentionally fire-and-forget: the server is already
-// accepting requests, and materialized data is available immediately for
-// streams that have already been processed. If the events DB is unreachable
-// or empty, the server still serves requests (with whatever materialized
-// state exists).
+// Re-materialization runs after the server is listening (requests are answered
+// from whatever is already materialized, and a stream is usable the moment it
+// is caught up) but the process reports itself ready only when the pass
+// returns: `/health` is 503 until then, so a platform health check routes no
+// traffic into a pool that is mid-sweep. A pass that throws leaves the process
+// not-ready and logs why — the previous instance keeps serving, which is the
+// right outcome for a boot whose event log could not be read.
 //
 // Profile hydration uses the HappyView-first fetcher (HappyView → Bluesky
 // fallback, or Bluesky-only when HappyView is not configured).
@@ -70,10 +87,24 @@ const db = openDb();
 // resumable, so the orchestrator's restart retries it from where it left off.
 await runPendingReadStateMigrationsWithRetry(db);
 
+boot.setPhase("sweeping");
 const poolSize = (await poolStats())?.size;
 const concurrency = poolSize ?? DEFAULT_REMATERIALIZE_CONCURRENCY;
-reMaterializeFromLocalEvents(db, concurrency).catch((err) => {
-  log.error("startup", `re-materialization failed: ${err instanceof Error ? err.message : String(err)}`);
-});
-
-log.info("startup", `appserver ready (DID: ${app.ownDid}, port: ${app.port})`);
+reMaterializeFromLocalEvents(db, concurrency, {
+  onProgress: (progress) => boot.update(progress),
+})
+  .then(() => {
+    boot.markReady();
+    const { elapsed_ms, streams_total } = boot.snapshot();
+    log.info(
+      "startup",
+      `appserver ready (DID: ${app.ownDid}, port: ${app.port}) after ${elapsed_ms}ms: ${streams_total} streams`,
+    );
+  })
+  .catch((err) => {
+    boot.markFailed();
+    log.error(
+      "startup",
+      `re-materialization failed, staying not-ready: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
