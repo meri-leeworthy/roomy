@@ -22,10 +22,12 @@ import type { LinkEmbedMetadata } from "../embed/metadata.ts";
 export const getLinkMetadataHandler: QueryHandler<
   QueryParams,
   LinkEmbedMetadata
-> = async (params: QueryParams) => {
+> = async (params: QueryParams, _auth, signal) => {
   const url = requireString(params, "url");
 
-  const result = await fetchLinkMetadata(url);
+  // Bounded end to end by `fetchLinkMetadata` (one deadline for page +
+  // oEmbed); `signal` ends it earlier when the caller's request goes away.
+  const result = await fetchLinkMetadata(url, signal);
   if (!result) return {};
 
   // Remove null/undefined so the response matches the optional-field lexicon.

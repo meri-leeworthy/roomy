@@ -336,7 +336,11 @@ export class XrpcRouter {
             }
           }
 
-          const result = await route.handler(params as QueryParams, auth);
+          const result = await route.handler(
+            params as QueryParams,
+            auth,
+            req.signal,
+          );
           const validated = route.outputSchema
             ? validateOutputOrThrow(route.outputSchema, result, nsid)
             : result;
