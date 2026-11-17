@@ -1688,8 +1688,17 @@ async function emitEnrichmentInvalidation(
   // The space link index gains the freshly-enriched card for this space.
   signals.push(invalidate("space.roomy.space.getLinks", { spaceId: spaceDid }));
 
+  // Read the router HERE, not only at the early return above: this function
+  // awaits two queries between that guard and this emit, and teardown clears
+  // the singleton synchronously (`stopEmbedSweeper`/`_resetEmbedSweeper`)
+  // while a batch is still in flight. A stop landing inside those awaits
+  // leaves the emit with no router to reach — the invalidation is
+  // best-effort, so it is SKIPPED here rather than thrown, which would abort
+  // the rest of the batch and lose the rows it had already settled.
+  const router = sweeperRouter;
+  if (!router) return;
   statsEnrichmentDiffs += signals.length;
-  sweeperRouter.emit(signals);
+  router.emit(signals);
 }
 
 // ─── Test helpers ───────────────────────────────────────────────────────
