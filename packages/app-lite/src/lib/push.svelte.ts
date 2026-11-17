@@ -253,7 +253,9 @@ export async function subscribeIfAlreadyPermitted(): Promise<PushOutcome | null>
   console.debug("[push:login] subscribeIfAlreadyPermitted starting");
   if (desktopPushSupported()) {
     await resumeDesktopStream();
-    return;
+    // `resumeDesktopStream` reports nothing back and swallows its own
+    // failures, so there is no outcome to return.
+    return null;
   }
   if (nativePushSupported()) {
     const token = lastNativeToken();

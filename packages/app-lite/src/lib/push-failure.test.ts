@@ -66,6 +66,13 @@ const STUBS: Record<string, string> = {
     export async function ensureNativeSubscription() { return { status: "ok" }; }
     export async function clearNativeSubscription() { return { status: "ok" }; }
   `,
+  "test-stub:desktop": `
+    export function desktopPushSupported() { return false; }
+    export function lastDesktopEndpoint() { return null; }
+    export async function resumeDesktopStream() {}
+    export async function ensureDesktopSubscription() { return { status: "ok" }; }
+    export async function clearDesktopSubscription() { return { status: "ok" }; }
+  `,
 };
 
 const RESOLVE: Record<string, string> = {
@@ -73,6 +80,7 @@ const RESOLVE: Record<string, string> = {
   "$lib/auth.svelte": "test-stub:auth",
   "$lib/mutations/push-subscription": "test-stub:registration",
   "$lib/native-push": "test-stub:native",
+  "$lib/desktop-push": "test-stub:desktop",
 };
 
 const PUSH_TS = new URL("./push.svelte.ts", import.meta.url).href;
