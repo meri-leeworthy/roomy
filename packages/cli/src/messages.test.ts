@@ -188,11 +188,13 @@ describe("readMessagePage", () => {
 function fakeMessages() {
   const messages = new Set<string>(["01MSG"]);
   const sent: { events: unknown[] }[] = [];
+  const asked: string[] = [];
   const xrpc = {
     async query(nsid: string, params: { messageId: string }) {
       if (nsid !== "space.roomy.message.getMessage") {
         throw new Error(`unexpected query: ${nsid}`);
       }
+      asked.push(params.messageId);
       if (!messages.has(params.messageId)) {
         const err = new Error(`Entity ${params.messageId} is not a message (no room)`);
         Object.assign(err, { status: 400 });
@@ -218,7 +220,7 @@ function fakeMessages() {
       return {};
     },
   } as never;
-  return { xrpc, sent };
+  return { xrpc, sent, asked };
 }
 
 /** The reply target an event carries, or undefined when it is not a reply. */
@@ -243,6 +245,19 @@ function replyTargetOf(event: unknown): string | undefined {
 }
 
 describe("sendMessage --parent validation", () => {
+  // The shape the server's error log carried for weeks: callers reply "to the
+  // thread" by passing its room id, which the process can classify without a
+  // request — it is the room the message is going into.
+  test("a reply to the room it is posted into costs no request", async () => {
+    const { xrpc, sent, asked } = fakeMessages();
+
+    await expect(
+      sendMessage(xrpc, "space:test", "room:test", "hi", { parent: "room:test" }),
+    ).rejects.toThrow(/not a message id — --parent takes a message/);
+    expect(asked).toHaveLength(0);
+    expect(sent).toHaveLength(0);
+  });
+
   test("a room id is rejected locally, with no sendEvents call", async () => {
     const { xrpc, sent } = fakeMessages();
 
