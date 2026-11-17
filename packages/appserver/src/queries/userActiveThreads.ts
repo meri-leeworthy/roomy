@@ -14,6 +14,7 @@ import type { DbLike } from "../db/types.ts";
 import type { StreamDid, Ulid, UserDid } from "@roomy-space/sdk";
 import { hydrateProfiles } from "./profileStore.ts";
 import { readRoomActivityProjectionFor, type RoomActivitySummary } from "./roomActivityProjection.ts";
+import { log } from "../log.ts";
 
 /** How far back (in ms) to consider threads active. Default: 120 hours. */
 export const ACTIVE_WINDOW_MS = 120 * 60 * 60 * 1000;
@@ -560,8 +561,8 @@ export async function isThread(db: DbLike, roomId: string): Promise<boolean> {
 }
 
 /**
- * Purge stale user_thread_activity rows older than the given timestamp.
- * Should be called periodically (e.g. once per hour) from a background timer.
+ * Purge stale user_thread_activity rows older than the given timestamp. Runs
+ * inside {@link sweepStaleThreadState}, the hourly maintenance pass.
  */
 export async function purgeStaleThreadActivity(
   db: DbLike,
@@ -579,9 +580,8 @@ export async function purgeStaleThreadActivity(
 }
 
 /**
- * Purge thread-backfill markers older than the given timestamp. Called from the
- * same hourly maintenance timer as `purgeStaleThreadActivity`, with the same
- * cutoff.
+ * Purge thread-backfill markers older than the given timestamp. Runs inside the
+ * same maintenance pass as `purgeStaleThreadActivity`, with the same cutoff.
  *
  * A marker records an answer derived from the materialised space, and a replay
  * materialises events without writing activity rows — so a message the user
@@ -598,4 +598,35 @@ export async function purgeStaleThreadBackfill(
     olderThan,
   );
   return result.changes;
+}
+
+/**
+ * One maintenance pass: drop activity rows and backfill markers that have
+ * outlived the activity window. The hourly timer calls this and drops the
+ * promise.
+ *
+ * It never rejects. Both statements are DB writes on the read-state worker,
+ * and a write that outlives its 30s request budget is an expected outcome of a
+ * loaded process, not a reason to end it — a rejection here would reach the
+ * process `unhandledRejection` hook (the timer has nobody to report to) and
+ * `fatal.ts` exits 1 on it. Logged instead, so the failure is on record with
+ * the worker, DB and space the timeout names; the next tick retries.
+ *
+ * Returns the number of activity rows purged, or 0 when the pass failed.
+ */
+export async function sweepStaleThreadState(
+  db: DbLike,
+  olderThan: number,
+): Promise<number> {
+  try {
+    const purged = await purgeStaleThreadActivity(db, olderThan);
+    if (purged > 0) {
+      log.info(`[maintenance] purged ${purged} stale user_thread_activity rows`);
+    }
+    await purgeStaleThreadBackfill(db, olderThan);
+    return purged;
+  } catch (err) {
+    log.error("[maintenance] stale thread sweep failed", err);
+    return 0;
+  }
 }

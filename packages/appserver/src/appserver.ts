@@ -24,7 +24,7 @@ import { countPendingLinks } from "./embed/enricher.ts";
 import { openDb, openGlobalDb, openReadStateDb, openSpaceDb, openSpaceDbForEntity, closeDb, poolStats } from "./db/db.ts";
 import { DB_STATEMENT_METRIC, DB_WAIT_METRIC } from "./db/asyncDatabase.ts";
 import { StreamManager, setStreamManager, _resetStreamManager } from "./streams/StreamManager.ts";
-import { ACTIVE_WINDOW_MS, purgeStaleThreadActivity, purgeStaleThreadBackfill } from "./queries/userActiveThreads.ts";
+import { ACTIVE_WINDOW_MS, sweepStaleThreadState } from "./queries/userActiveThreads.ts";
 import { warmBlockSet } from "./queries/userBlocks.ts";
 import { getConnectionTicketHandler } from "./handlers/space.roomy.auth.getConnectionTicket.ts";
 import { getLoginScopeHandler } from "./handlers/space.roomy.auth.getLoginScope.ts";
@@ -759,14 +759,11 @@ export async function createAppserver(
 
   // ─── Periodic maintenance ────────────────────────────────────────────
   // Purge stale user_thread_activity rows, and thread-backfill markers that
-  // have outlived the activity window, once per hour.
-  const maintenanceTimer = setInterval(async () => {
-    const cutoff = Date.now() - ACTIVE_WINDOW_MS;
-    const purged = await purgeStaleThreadActivity(openReadStateDb(), cutoff);
-    if (purged > 0) {
-      log.info(`[maintenance] purged ${purged} stale user_thread_activity rows`);
-    }
-    await purgeStaleThreadBackfill(openReadStateDb(), cutoff);
+  // have outlived the activity window, once per hour. The pass never rejects
+  // (see `sweepStaleThreadState`): a DB write that misses its request budget
+  // under load is logged, not surfaced as an unhandled rejection.
+  const maintenanceTimer = setInterval(() => {
+    void sweepStaleThreadState(openReadStateDb(), Date.now() - ACTIVE_WINDOW_MS);
   }, 60 * 60 * 1000);
   maintenanceTimer.unref();
 
