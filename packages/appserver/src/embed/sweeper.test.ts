@@ -407,16 +407,25 @@ async function flushSweeper(opts: EmbedSweeperOpts): Promise<void> {
  * (see _setSweepWaitForTest) so the condition is reached deterministically;
  * the turns only give the SQLite worker's round-trips room to resolve.
  *
+ * The budget is a DEADLINE, not a turn count: a turn costs microseconds when
+ * the box is idle and costs the loop no progress at all when it is starved, so
+ * a turn count silently measures CPU contention instead of the condition it is
+ * waiting for. A drain that legitimately takes seconds under load exhausts a
+ * turn budget mid-flight and reports the condition as never having held.
+ *
  * Fails loudly on timeout instead of hanging the suite.
  */
-async function settleUntil(done: () => boolean, maxTurns = 100_000): Promise<void> {
-  for (let i = 0; i < maxTurns; i++) {
+async function settleUntil(done: () => boolean, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     if (done()) return;
     const { promise, resolve } = Promise.withResolvers<void>();
     setImmediate(resolve);
     await promise;
   }
-  throw new Error("settleUntil: condition never held within the turn budget");
+  throw new Error(
+    `settleUntil: condition never held within ${timeoutMs}ms`,
+  );
 }
 
 describe("embed sweeper invalidation room resolution", () => {
@@ -2043,16 +2052,24 @@ describe("embed sweeper cycle pacing (TASK-197)", () => {
 
     const waits: number[] = [];
     const park = Promise.withResolvers<void>();
+    // Resolves when the loop takes its first wait. Awaiting the event the test
+    // is about — rather than polling turns until `waits` is non-empty — is what
+    // makes this independent of how long the drain takes: a turn budget
+    // measures CPU starvation, not the loop's pacing, and a loaded box exhausts
+    // it mid-drain with a wait that was never taken. The test's own timeout is
+    // the bound if the wait never comes.
+    const parked = Promise.withResolvers<number>();
     try {
       await stopEmbedSweeper();
       _setSweepWaitForTest((ms) => {
         waits.push(ms);
+        parked.resolve(ms);
         return park.promise;
       });
       startEmbedSweeper({ globalDb, invalidationRouter: router });
       // Wait for the idle poll: the loop must drain all 8 full batches
       // back-to-back with no wait, and only then park.
-      await settleUntil(() => waits.length > 0);
+      await parked.promise;
 
       const stats = embedSweeperStats();
       // Every link was enriched, and nothing was throttled.
@@ -2066,6 +2083,93 @@ describe("embed sweeper cycle pacing (TASK-197)", () => {
       expect(stats.sweepCycles).toBe(9);
     } finally {
       park.resolve();
+      _setSweepWaitForTest(null);
+      globalThis.fetch = realFetch;
+      await stopEmbedSweeper();
+    }
+    _resetEmbedSweeper();
+  }, { timeout: 30_000 });
+});
+
+describe("a stop landing inside a running sweep batch", () => {
+  test("skips the invalidation instead of throwing, and still settles the row", async () => {
+    // The emit takes the router at its entry guard and reaches for it again
+    // only after two queries. Teardown clears the singleton synchronously, so
+    // a stop landing inside those awaits leaves the emit with nothing to call
+    // — and a throw there aborts the batch, losing the rows it had chosen not
+    // to retry. The invalidation is best-effort: no router attached means
+    // nothing is streamed, not that the batch dies.
+    //
+    // The window is opened deterministically by parking the emit's own embed
+    // lookup (the first global query after the batch's fetch), so the stop is
+    // issued from inside the window rather than raced against the scheduler.
+    const { globalDb, spaceDb } = await freshWorker();
+    const { router, signals } = captureRouter();
+    const url = "https://example.com/stopped-mid-batch";
+    await seedLinkMessageRoom(spaceDb, globalDb, {
+      room: "01KVROOM000000000000000001",
+      message: "01KVMSG00000000000000000001",
+      url,
+    });
+
+    const realFetch = globalThis.fetch;
+    // Armed once the batch's fetch has started: from there, the next
+    // `link_embeds` read on the global handle belongs to the emit.
+    let armed = false;
+    const emitParked = Promise.withResolvers<void>();
+    const emitGate = Promise.withResolvers<void>();
+    const gatedGlobalDb: DbLike = new Proxy(globalDb, {
+      get(target, prop) {
+        if (prop === "query") {
+          return (sql: string) => {
+            const q = target.query(sql);
+            if (!armed || !sql.includes("from link_embeds")) return q;
+            armed = false;
+            return {
+              get: <T,>(...params: unknown[]) => q.get<T>(...params),
+              all: async <T,>(...params: unknown[]) => {
+                emitParked.resolve();
+                await emitGate.promise;
+                return q.all<T>(...params);
+              },
+            };
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as DbLike;
+    globalThis.fetch = ((
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> => {
+      armed = true;
+      return Promise.resolve(
+        new Response(FAKE_HTML, {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        }),
+      );
+    }) as typeof globalThis.fetch;
+
+    try {
+      await stopEmbedSweeper();
+      _startSweeperNoLoop({ globalDb: gatedGlobalDb, invalidationRouter: router });
+      const cycle = sweepCycle(gatedGlobalDb);
+      await emitParked.promise;
+      // Inside the emit's window: past its guard, before its router use.
+      void stopEmbedSweeper();
+      emitGate.resolve();
+
+      const result = await cycle;
+      // The batch ran to completion: it counted the enrichment and settled the
+      // row, both of which happen after the emit.
+      expect(result).toEqual({ full: false, producedOk: true });
+      expect(await countPendingLinks(globalDb)).toBe(0);
+      // And nothing was streamed — the stop had already taken the router away.
+      expect(signals).toEqual([]);
+    } finally {
+      emitGate.resolve();
       _setSweepWaitForTest(null);
       globalThis.fetch = realFetch;
       await stopEmbedSweeper();
