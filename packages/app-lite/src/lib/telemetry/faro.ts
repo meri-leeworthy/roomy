@@ -34,6 +34,7 @@ import type {
   SessionFailureCause,
   SessionFailureDisposition,
 } from "../error-recovery";
+import { telemetryAppVersion } from "./app-meta";
 import { pseudonymiseDid, scrubTelemetryItem } from "./scrub";
 
 let initialized = false;
@@ -84,7 +85,9 @@ export function initFaro(): void {
         url: CONFIG.faroUrl!,
         app: {
           name: "roomy-app-lite",
-          version: __APP_VERSION__,
+          // The build, not the package version: every record then names the
+          // bundle that produced it (see ./app-meta.ts).
+          version: telemetryAppVersion(__BUILD_ID__, __APP_VERSION__),
         },
         // One session spans reloads — a reload is the same visit, so a new
         // session per load would overstate visit count and understate time in
