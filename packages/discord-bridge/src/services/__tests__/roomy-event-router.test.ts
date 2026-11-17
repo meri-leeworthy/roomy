@@ -24,6 +24,10 @@ import { BridgeRepository } from "../../db/repository.ts";
 import { FileDiscordSender } from "../../discord/file-sender.ts";
 import { FileWebhookManager } from "../../discord/file-webhook-manager.ts";
 import type { SendMessageOptions } from "../../discord/sender.ts";
+import {
+	type WebhookInfo,
+	WebhookUnavailableError,
+} from "../../discord/webhook-manager.ts";
 import type { RoomyRoomMessage } from "../../roomy/gateway.ts";
 import { FileProfileResolver } from "../../roomy/file-profile-resolver.ts";
 import { MockRoomyGateway } from "../../roomy/mock-gateway.ts";
@@ -195,7 +199,9 @@ function makeDeleteMessageEvent(options: {
 	} satisfies Event;
 }
 
-function setup(overrides: { discord?: FileDiscordSender } = {}): {
+function setup(
+	overrides: { discord?: FileDiscordSender; webhooks?: FileWebhookManager } = {},
+): {
 	repo: BridgeRepository;
 	roomy: MockRoomyGateway;
 	discord: FileDiscordSender;
@@ -224,7 +230,7 @@ function setup(overrides: { discord?: FileDiscordSender } = {}): {
 		"original content",
 		`wh_${DISCORD_CHANNEL_ID}`,
 	);
-	const webhooks = new FileWebhookManager();
+	const webhooks = overrides.webhooks ?? new FileWebhookManager();
 	const profiles = new FileProfileResolver({
 		[DISCORD_USER_DID]: {
 			name: "Bridged User",
@@ -2566,5 +2572,107 @@ describe("reply quote text helpers", () => {
 			"see <www.example.com> now",
 		);
 		expect(suppressUrlEmbeds("no links here")).toBe("no links here");
+	});
+});
+
+/**
+ * A channel Discord will not give a webhook to: an event that needs one can
+ * never be delivered, so it is dropped with one record naming Discord's status
+ * rather than failing every message that follows.
+ */
+describe("RoomyEventRouter webhook refusal", () => {
+	/** Stands in for a channel whose webhook Discord refused. */
+	class RefusingWebhookManager extends FileWebhookManager {
+		attempts = 0;
+		readonly #permanent: boolean;
+		readonly #status: number;
+
+		constructor(permanent: boolean, status: number) {
+			super();
+			this.#permanent = permanent;
+			this.#status = status;
+		}
+
+		override async ensureWebhook(channelId: string): Promise<WebhookInfo> {
+			this.attempts++;
+			throw new WebhookUnavailableError({
+				channelId,
+				status: this.#status,
+				reason: "the bot lacks Manage Webhooks in this channel",
+				permanent: this.#permanent,
+			});
+		}
+	}
+
+	/** The console spy a test installed, reduced to the calls it recorded. */
+	type LogSink = { mock: { calls: unknown[][] } };
+
+	/** Structured records the router emitted at error level. */
+	function errorRecords(sink: LogSink): Array<Record<string, unknown>> {
+		return sink.mock.calls.flatMap((call: unknown[]) => {
+			try {
+				const rec: unknown = JSON.parse(String(call[0]));
+				return typeof rec === "object" && rec !== null
+					? [rec as Record<string, unknown>]
+					: [];
+			} catch {
+				return [];
+			}
+		});
+	}
+
+	// RER60
+	test("RER60: a permanently refused webhook drops the message with one record carrying the status", async () => {
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const webhooks = new RefusingWebhookManager(true, 403);
+		const { roomy, discord, router } = setup({ webhooks });
+		await router.subscribeToSpace(SPACE_A);
+
+		await roomy.fireEvent(
+			SPACE_A,
+			makeCreateMessageEvent({ id: ROOMY_MESSAGE_ULID, content: "lost" }),
+		);
+
+		// Nothing reached Discord, and the drop is one record, not a throw.
+		expect(discord.sent).toHaveLength(0);
+		const drops = errorRecords(errorSpy).filter(
+			(rec) =>
+				rec.msg ===
+				"Dropped Roomy event: Discord will not create a webhook for its channel",
+		);
+		expect(drops).toHaveLength(1);
+		expect(drops[0]).toMatchObject({
+			action: "send",
+			messageId: ROOMY_MESSAGE_ULID,
+			discordChannelId: DISCORD_CHANNEL_ID,
+			discordStatus: 403,
+			reason: "the bot lacks Manage Webhooks in this channel",
+		});
+		vi.restoreAllMocks();
+	});
+
+	// RER61
+	test("RER61: a transient webhook failure keeps the event for a retry", async () => {
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const webhooks = new RefusingWebhookManager(false, 503);
+		const { roomy, discord, router } = setup({ webhooks });
+		await router.subscribeToSpace(SPACE_A);
+
+		// The gateway freezes its cursor on a throw, so the event replays.
+		await expect(
+			roomy.fireEvent(
+				SPACE_A,
+				makeCreateMessageEvent({ id: ROOMY_MESSAGE_ULID, content: "later" }),
+			),
+		).rejects.toThrow(WebhookUnavailableError);
+
+		expect(discord.sent).toHaveLength(0);
+		const drops = errorRecords(errorSpy).filter(
+			(rec) =>
+				rec.msg ===
+				"Dropped Roomy event: Discord will not create a webhook for its channel",
+		);
+		expect(drops).toHaveLength(0);
+		vi.restoreAllMocks();
 	});
 });
