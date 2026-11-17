@@ -6,6 +6,11 @@ import type {
 } from "../db/repository.ts";
 import { describeDiscordFailure } from "../discord/rest-errors.ts";
 import { createLogger } from "../logger.ts";
+import {
+	formatRateLimit,
+	observeRateLimit,
+	type RateLimitFields,
+} from "../rate-limits.ts";
 import { getCapacityGate } from "../roomy/capacity.ts";
 import type { RoomyGateway } from "../roomy/gateway.ts";
 
@@ -84,7 +89,8 @@ export async function sendEventOrQueue(
 		await roomy.sendEvents(send.spaceDid, send.events);
 		return true;
 	} catch (err) {
-		const error = describe(err);
+		const rateLimit = observeRateLimit(err);
+		const error = describe(err, rateLimit);
 		repo.enqueueFailedSend({
 			spaceDid: send.spaceDid,
 			op: send.op,
@@ -104,6 +110,7 @@ export async function sendEventOrQueue(
 			spaceDid: send.spaceDid,
 			discordId: send.discordId,
 			error,
+			...(rateLimit ?? {}),
 		});
 		return false;
 	}
@@ -293,6 +300,7 @@ async function sweepQueuedSends(
 				},
 			);
 		} catch (err) {
+			const rateLimit = observeRateLimit(err);
 			const failure =
 				entry.direction === "to_discord" ? describeDiscordFailure(err) : null;
 			// Discord answering 4xx (other than 429) will answer the same way
@@ -312,7 +320,7 @@ async function sweepQueuedSends(
 				});
 				continue;
 			}
-			const error = failure ? failure.text : describe(err);
+			const error = failure ? failure.text : describe(err, rateLimit);
 			// The repository is the only writer of `attempts`, and the count it
 			// returns decides the delay and the terminal test alike: one failed
 			// delivery costs exactly one attempt, and no count read before this
@@ -341,6 +349,7 @@ async function sweepQueuedSends(
 									classification: failure.classification,
 								}
 							: {}),
+						...(rateLimit ?? {}),
 					},
 				);
 			} else {
@@ -361,6 +370,7 @@ async function sweepQueuedSends(
 									classification: failure.classification,
 								}
 							: {}),
+						...(rateLimit ?? {}),
 					},
 				);
 			}
@@ -386,8 +396,14 @@ function sweepBackoffMs(attempt: number): number {
 	return Math.min(SWEEP_BASE_MS * 2 ** (attempt - 1), SWEEP_MAX_MS);
 }
 
-function describe(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
+/**
+ * Reduce a failure to the string stored on the queue entry. A 429 carries the
+ * rejecting layer's provenance as a suffix, so a queued row names the layer
+ * that refused it without a log hunt.
+ */
+function describe(err: unknown, rateLimit: RateLimitFields | null): string {
+	const message = err instanceof Error ? err.message : String(err);
+	return rateLimit ? `${message} ${formatRateLimit(rateLimit)}` : message;
 }
 
 /**

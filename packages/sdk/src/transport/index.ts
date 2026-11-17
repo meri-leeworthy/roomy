@@ -20,7 +20,10 @@ export {
    RateLimitError,
    ArbiterProxyError,
    isRateLimitError,
-   getRetryAfterMs,
+  getRetryAfterMs,
+  classifyRateLimitRejection,
+  type RateLimitRejection,
+  type RateLimitRejectionLayer,
 } from "./errors";
 export { withRateLimitRetry, type RateLimitRetryOptions } from "./retry";
 export {
