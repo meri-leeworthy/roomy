@@ -97,6 +97,30 @@ export const SEED_MEMBER_SPACE_ROOM_ID = "01M3C8QTVS0000000000000008";
 export const SEED_MEMBER_SPACE_ROOM_NAME = "member-space-lobby";
 export const SEED_MEMBER_SPACE_MESSAGE_TEXT =
   "seeded message in the member space";
+
+/**
+ * The public space's own member. No spec authenticates as it: the space exists
+ * to be discovered by a reader who belongs to no other, and nobody's joined
+ * space is what keeps it out of every sidebar.
+ */
+export const SEED_PUBLIC_SPACE_OWNER_DID = "did:plc:e2epublicowner0000000000";
+
+/**
+ * Fifth space, publicly joinable and unanswered. Every other seeded space is
+ * either invite-only or already joined by the seeded user, so this is the one
+ * space the Discover Spaces strip can both offer and have an admin answer for.
+ */
+export const SEED_PUBLIC_SPACE_ID = "did:plc:e2epublicspace0000000000";
+export const SEED_PUBLIC_SPACE_NAME = "E2E Public Space";
+export const SEED_PUBLIC_SPACE_DESCRIPTION = "A space anyone can read.";
+/**
+ * The space's avatar, as an ATProto blob reference.
+ */
+export const SEED_PUBLIC_SPACE_AVATAR =
+  "atblob://did:plc:e2epublicspace0000000000/bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy";
+export const SEED_PUBLIC_ROOM_ID = "01M3C8QTVS0000000000000010";
+export const SEED_PUBLIC_ROOM_NAME = "public-lobby";
+
 /**
  * Second DID with membership in the member space, granted admin there. The
  * spec's request interceptor authenticates as it to prove the admin branch

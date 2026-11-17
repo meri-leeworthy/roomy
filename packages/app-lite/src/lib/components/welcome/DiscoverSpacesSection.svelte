@@ -1,9 +1,10 @@
 <script lang="ts">
   /**
-   * Discover Spaces section. Hardcoded for now — surfaces a small set of
-   * spaces the user hasn't joined yet. Uses the cached `getSpaces` query to
-   * exclude spaces the user is already a member of. Each card is dismissable;
-   * dismissed ids are tracked in local state so they disappear (session-only).
+   * Discoverable spaces section. The list is the server's answer to
+   * `getDiscoverableSpaces`, which already excludes spaces that opted out of
+   * being suggested or that are not public to join — the client renders it and
+   * only removes spaces the reader has already joined and cards dismissed in
+   * this session.
    *
    * The strip's frame is `@roomy/design`'s; this wrapper owns what is
    * discoverable and resolves each card's metadata.
@@ -11,11 +12,9 @@
   import DiscoverSpacesSectionShell from "@roomy/design/components/marketing/DiscoverSpacesSection.svelte";
   import DiscoverSpaceCard from "./DiscoverSpaces.svelte";
   import { createSpacesQuery } from "$lib/queries/spaces";
+  import { createDiscoverableSpacesQuery } from "$lib/queries/discoverable-spaces";
 
-  const DISCOVERABLE_SPACES = [
-    "did:plc:4moccs43r5v2xzkynae3xk2u",
-    "did:plc:gnwy2zbm3hu4gfdawzxmpb2s",
-  ];
+  const discoverQuery = createDiscoverableSpacesQuery();
 
   // Cached query of the user's joined spaces. The query refetches on mount
   // (it is a pulled view — see `queries/spaces.ts`), so this costs one request
@@ -34,9 +33,9 @@
   let dismissed = $state<Set<string>>(new Set());
 
   const visible = $derived(
-    DISCOVERABLE_SPACES.filter(
-      (id) => !dismissed.has(id) && !joinedIds.has(id),
-    ),
+    (discoverQuery.data?.spaces ?? [])
+      .map((s) => s.id)
+      .filter((id) => !dismissed.has(id) && !joinedIds.has(id)),
   );
 
   function dismiss(id: string) {

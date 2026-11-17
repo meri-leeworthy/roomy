@@ -11,6 +11,9 @@
         "isMember",
         "roleIds"
       ],
+      "nullable": [
+        "suggestToOthers"
+      ],
       "properties": {
         "hasUnreads": {
           "type": "boolean"
@@ -41,6 +44,9 @@
         },
         "name": {
           "type": "string"
+        },
+        "suggestToOthers": {
+          "type": "boolean"
         }
       }
     },

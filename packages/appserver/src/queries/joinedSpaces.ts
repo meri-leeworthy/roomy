@@ -48,6 +48,13 @@ export interface SpaceRow {
   isMember: boolean;
   isAdmin: boolean;
   roleIds: string[];
+  /**
+   * Whether the space may be suggested to people who are not members: `null`
+   * while no admin has answered (which reads as suggested), `true`/`false`
+   * once answered, and absent when the space has no `comp_space` row — there
+   * is no setting to answer, so no admin prompt to show.
+   */
+  suggestToOthers?: boolean | null;
 }
 
 export interface SelectSpacesOptions {
@@ -99,6 +106,15 @@ export async function selectJoinedSpaces(
       if (row.avatar !== null) space.avatar = row.avatar;
       if (row.description !== null) space.description = row.description;
       if (handle !== null) space.handle = handle;
+      // Three-valued on purpose: `null` (unanswered) is distinct from absent
+      // (no `comp_space` row), so a reader can tell "answer the question" from
+      // "there is nothing to answer here".
+      if (row.comp_space !== null) {
+        space.suggestToOthers =
+          row.comp_space.suggest_to_others === null
+            ? null
+            : row.comp_space.suggest_to_others === 1;
+      }
       return space;
     }),
   );
@@ -122,6 +138,8 @@ async function querySpaceRow(
   description: string | null;
   is_member: number;
   is_admin: number;
+  /** `null` when the space has no `comp_space` row. */
+  comp_space: { suggest_to_others: number | null } | null;
 } | null> {
   const banned = await spaceDb
     .query(
@@ -145,6 +163,9 @@ async function querySpaceRow(
       "select 1 as n from edges where head = ? and tail = ? and label = 'admin' limit 1",
     )
     .get<{ n: number }>([spaceId, userDid]);
+  const compSpace = await spaceDb
+    .query("select suggest_to_others from comp_space where entity = ?")
+    .get<{ suggest_to_others: number | null }>([spaceId]);
 
   return {
     id: spaceId,
@@ -153,6 +174,7 @@ async function querySpaceRow(
     description: info?.description ?? null,
     is_member: member ? 1 : 0,
     is_admin: admin ? 1 : 0,
+    comp_space: compSpace ?? null,
   };
 }
 

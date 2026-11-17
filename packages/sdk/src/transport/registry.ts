@@ -17,6 +17,10 @@ export const QUERY_SCHEMAS = {
     params: queries.getSpaces.Params,
     response: queries.getSpaces.Response,
   },
+  "space.roomy.space.getDiscoverableSpaces": {
+    params: queries.getDiscoverableSpaces.Params,
+    response: queries.getDiscoverableSpaces.Response,
+  },
   "space.roomy.space.getMetadata": {
     params: queries.getSpaceMetadata.Params,
     response: queries.getSpaceMetadata.Response,

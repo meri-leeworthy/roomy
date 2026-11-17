@@ -25,6 +25,7 @@
 import type { Database } from "bun:sqlite";
 import { serializeBlocks } from "@roomy-space/sdk";
 import { openDb } from "../../appserver/src/db/db.ts";
+import { refreshSpaceDiscovery } from "../../appserver/src/queries/spaceDiscovery.ts";
 import {
   readStateDb,
   seedJoinedSpace,
@@ -58,6 +59,13 @@ import {
   SEED_OPEN_SPACE_NAME,
   SEED_OPEN_SPACE_ROOM_ID,
   SEED_OPEN_SPACE_ROOM_NAME,
+  SEED_PUBLIC_ROOM_ID,
+  SEED_PUBLIC_ROOM_NAME,
+  SEED_PUBLIC_SPACE_AVATAR,
+  SEED_PUBLIC_SPACE_DESCRIPTION,
+  SEED_PUBLIC_SPACE_ID,
+  SEED_PUBLIC_SPACE_NAME,
+  SEED_PUBLIC_SPACE_OWNER_DID,
   SEED_ROOM_2_ID,
   SEED_ROOM_2_MESSAGE_TEXT,
   SEED_ROOM_2_NAME,
@@ -605,6 +613,42 @@ export async function seedFixture(appserverOrigin: string): Promise<void> {
     SEED_OPEN_SPACE_MESSAGE_TEXT,
   );
 
+  // ── Public space ──────────────────────────────────────────────────────
+  // The one discoverable space nobody in the fixture has joined: open to public
+  // joins and unanswered, with its own DID and its own admin. It appears in no
+  // viewer's `getSpaces` and changes no existing spec's sidebar. The room is
+  // created through the real write path, like every other room here.
+  seedSpace(db, SEED_PUBLIC_SPACE_ID, SEED_PUBLIC_SPACE_OWNER_DID, {
+    allowPublicJoin: 1,
+  });
+  seedMembership(db, SEED_PUBLIC_SPACE_ID, SEED_PUBLIC_SPACE_OWNER_DID, "admin");
+  await spaceDb(db, SEED_PUBLIC_SPACE_ID).run(
+    "update comp_info set name = ?, description = ?, avatar = ? where entity = ?",
+    [
+      SEED_PUBLIC_SPACE_NAME,
+      SEED_PUBLIC_SPACE_DESCRIPTION,
+      SEED_PUBLIC_SPACE_AVATAR,
+      SEED_PUBLIC_SPACE_ID,
+    ],
+  );
+  await createRoom(
+    appserverOrigin,
+    SEED_PUBLIC_SPACE_ID,
+    SEED_PUBLIC_ROOM_ID,
+    SEED_PUBLIC_ROOM_NAME,
+    SEED_PUBLIC_SPACE_OWNER_DID,
+  );
+
+  // ── Discovery projections ─────────────────────────────────────────────
+  // `getDiscoverableSpaces` answers from the global `space_discovery` table,
+  // which materialisation and the boot sweep maintain. The fixture writes
+  // space rows straight into the DBs, so the same derived rows are written
+  // here. Both spaces are public to join and unanswered, which is what makes
+  // them discoverable; the viewer is a member of the open space, so the
+  // homepage hides that one and shows the public space.
+  for (const spaceId of [SEED_PUBLIC_SPACE_ID, SEED_OPEN_SPACE_ID]) {
+    await refreshSpaceDiscovery(router, spaceId);
+  }
   // ── Feature flags ────────────────────────────────────────────────────
   // `search` gates the navbar search UI and the search routes;
   // `access-settings` gates the user Access settings page and its sidebar
