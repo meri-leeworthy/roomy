@@ -445,6 +445,11 @@ function healSpaceSchema(db: Database): void {
       "alter table comp_space add column suggest_to_others integer check(suggest_to_others in (0, 1))",
     );
   }
+  if (!cols.has("show_join_notices")) {
+    db.exec(
+      "alter table comp_space add column show_join_notices integer check(show_join_notices in (0, 1))",
+    );
+  }
 }
 
 /**

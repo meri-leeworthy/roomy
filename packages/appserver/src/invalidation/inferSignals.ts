@@ -974,16 +974,37 @@ function handleRestoreRoom(event: AppliedEvent): InvalidationEvent[] {
 
 // ─── Space events ───────────────────────────────────────────────────────
 
-function handleUpdateSpaceInfo(event: AppliedEvent): InvalidationEvent[] {
+async function handleUpdateSpaceInfo(
+  event: AppliedEvent,
+  db?: DbLike,
+): Promise<InvalidationEvent[]> {
   const spaceId = event.streamDid;
   // The space's name/avatar/handle renders on that space's row in every
   // member's list. The signal names the space as COVERAGE: the callers whose
   // list went stale are those whose list holds it, so a caller in an unrelated
   // space keeps their entry.
-  return [
+  const signals: InvalidationEvent[] = [
     invalidate("space.roomy.space.getMetadata", { spaceId }),
     evictOnlySpaceList(spaceId),
   ];
+  // The join-notice answer is the one field here that changes what a room's
+  // message page returns. Flipping it must reach a timeline that is already
+  // mounted — clients hold message pages with `staleTime: Infinity` and only
+  // refresh from a frame — so every channel of the space is invalidated. Other
+  // space-info fields render outside the timeline, and a rename must not send
+  // a frame per channel.
+  if (event.details?.showJoinNotices !== undefined) {
+    const rooms = await (db ?? openSpaceDb(spaceId))
+      .query(
+        `select entity as id from comp_room
+          where label = 'space.roomy.channel' and deleted = 0`,
+      )
+      .all<{ id: string }>();
+    for (const room of rooms) {
+      signals.push(invalidate("space.roomy.room.getMessages", { roomId: room.id }));
+    }
+  }
+  return signals;
 }
 
 function handleUpdateSidebar(event: AppliedEvent): InvalidationEvent[] {

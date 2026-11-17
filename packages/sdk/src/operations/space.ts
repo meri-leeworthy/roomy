@@ -25,6 +25,12 @@ export interface CreateDefaultSpaceOptions {
    * space is unanswered and reads as yes; an explicit `false` opts it out.
    */
   suggestToOthers?: boolean;
+  /**
+   * Whether to announce each join with a system message. Left unset the
+   * space is unanswered and shows them, which is what every space did before
+   * the setting existed; an explicit `false` hides them.
+   */
+  showJoinNotices?: boolean;
 }
 
 /**
@@ -98,6 +104,9 @@ export function createDefaultSpaceEvents(
       }),
       ...(options.suggestToOthers !== undefined && {
         suggestToOthers: options.suggestToOthers,
+      }),
+      ...(options.showJoinNotices !== undefined && {
+        showJoinNotices: options.showJoinNotices,
       }),
     },
     // Create lobby channel
@@ -208,6 +217,9 @@ export function updateSpaceInfoEvents(
     }),
     ...(options.suggestToOthers !== undefined && {
       suggestToOthers: options.suggestToOthers,
+    }),
+    ...(options.showJoinNotices !== undefined && {
+      showJoinNotices: options.showJoinNotices,
     }),
   };
 }

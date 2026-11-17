@@ -22,7 +22,15 @@
  * reply, forward), then 3 small batch queries (reactions, image+video+
  * file+link embeds, link embed data) keyed on the page's non-tombstoned IDs,
  * plus one recursive `selectMessages` batch for the forwarded originals.
- * Constant query count, regardless of page size.
+ * One extra read resolves the space's join-notice setting, so the query count
+ * stays constant regardless of page size.
+ *
+ * A space whose admins chose to hide join notices (`updateSpaceInfo`'s
+ * `showJoinNotices: false`) has those rows dropped from every scope here —
+ * the room page and id lookups alike — so neither the page nor a
+ * `#messageDiff` built from it can carry one. Nothing is deleted; the notice
+ * rows stay and reappear when the setting is on or unanswered. See
+ * `JOIN_NOTICE_PREDICATE` for how the notice is recognised.
  *
  * The caller is responsible for authorisation — this helper does not check
  * read access.
@@ -443,6 +451,53 @@ interface BaseRow {
 }
 
 /**
+ * What the SDK materialiser's join notice looks like, as a SQL predicate.
+ *
+ * `space.joinSpace` writes one entity per join: a row in the space's first
+ * channel, an `author` edge whose tail is the space's own DID, and a
+ * `text/markdown` body of exactly `[@<did>](/user/<did>) joined the space.`
+ * Both halves are needed. The author-to-stream edge is what makes it a system
+ * message rather than a member's own message; the body template is what
+ * separates it from the other system message, the room-link notice
+ * (`space.roomy.link.createRoomLink`) that reads `[@<did>](/user/<did>)
+ * created [<room>](<room>?parent=<room>).` and that a reader needs — it is the
+ * only trace in the timeline that a thread or linked room was created. Its
+ * body continues ` created [` after the user link, so it cannot match a
+ * template ending `) joined the space.`; a member writing those words is not
+ * a system author and is excluded by the edge.
+ *
+ * Matching the stored markdown (rather than a marker column) is deliberate:
+ * notices materialised before this setting existed carry the same bytes, so a
+ * space that was never answered keeps them and can be re-read under either
+ * answer. Expects `entities e`, `comp_content cc` and the author edge aliased
+ * `author_e` in scope, which both message queries have.
+ */
+const JOIN_NOTICE_PREDICATE = `(author_e.tail is not null
+          and author_e.tail = e.stream_id
+          and cc.data is not null
+          and cast(cc.data as text) like '[@%/user/%) joined the space.')`;
+
+/**
+ * Whether this space hides join notices, read from its `comp_space` row.
+ * NULL — the admins have not answered — reads as shown, which is what every
+ * space did before the setting existed. The lookup is per read, not cached:
+ * the answer is a read preference an admin can change mid-session, and the
+ * room's metadata invalidation already makes the client re-fetch.
+ */
+async function hidesJoinNotices(db: DbLike, entityId: string): Promise<boolean> {
+  const row = await db
+    .query(
+      `select cs.show_join_notices as value
+         from comp_space cs
+         join entities e on e.stream_id = cs.entity
+        where e.id = ?
+        limit 1`,
+    )
+    .get<{ value: number | null }>(entityId);
+  return row?.value === 0;
+}
+
+/**
  * The timeline key a cursor names: the message's `sort_idx`, or its id when the
  * message was never sorted (system messages such as `joinSpace` and
  * `createRoomLink` materialise without one).
@@ -494,8 +549,18 @@ async function resolveCursorKey(db: DbLike, cursorId: string): Promise<string> {
  * index. The index is explicit because the parameter sits in the select list
  * while `?1` is in the `where`: SQLite binds by index, not by position in the
  * text, so a cursor page binds `roomId, hidden, cursorKey, cursor`.
+ *
+ * `hideJoinNotices` (the space's setting) is the one filter that belongs in
+ * the `where`: a hidden join notice is a row the page should never have
+ * carried, so dropping it before the `limit` fills the page with real
+ * messages and keeps `nextCursor` honest. Unlike a blocked author it needs no
+ * placeholder row — there is nothing to indicate.
  */
-export function roomPageSql(hasCursor: boolean, limit: number): string {
+export function roomPageSql(
+  hasCursor: boolean,
+  limit: number,
+  hideJoinNotices = false,
+): string {
   return `
       select
         e.id as id,
@@ -532,6 +597,7 @@ export function roomPageSql(hasCursor: boolean, limit: number): string {
         on forward_target_room_info.entity = forward_target_entity.room
       where e.room = ?1
         and (cc.entity is not null or forward_e.tail is not null)
+        ${hideJoinNotices ? `and not ${JOIN_NOTICE_PREDICATE}` : ""}
         ${hasCursor
           ? `and (coalesce(e.sort_idx, e.id) < ?3
                   or (coalesce(e.sort_idx, e.id) = ?3 and e.id < ?4))`
@@ -563,17 +629,34 @@ export async function selectMessages(
    * redacted on the same terms as the row that embedded it.
    */
   hidden?: readonly string[],
+  /**
+   * The space's join-notice setting, already resolved. Omitted, it is read
+   * from `comp_space` here once per call. Passed down the forward-original
+   * recursion so an embedded original is filtered on the same terms.
+   */
+  joinNoticesHidden?: boolean,
 ): Promise<{ messages: MessageDto[]; nextCursor: string | null }> {
   const hiddenAuthors = hidden ?? (viewerDid ? [...(await hiddenBy(viewerDid))] : []);
   // One JSON array bound as one parameter, so the statement text stays stable
   // and every row's flag is computed by the same query.
   const hiddenParam = JSON.stringify(hiddenAuthors);
 
+  // The setting is a property of the space the rows live in, and the notice
+  // rows themselves stay: this is a read preference, never a delete.
+  const hideJoinNotices =
+    joinNoticesHidden ??
+    (await hidesJoinNotices(
+      db,
+      scope.kind === "room" ? scope.roomId : scope.ids[0]!,
+    ));
+
   // ── Step 1: pull the base rows ────────────────────────────────────────
   let baseRows: BaseRow[];
   if (scope.kind === "room") {
     const cursorKey = scope.cursor ? await resolveCursorKey(db, scope.cursor) : null;
-    const stmt = db.query(roomPageSql(cursorKey !== null, scope.limit));
+    const stmt = db.query(
+      roomPageSql(cursorKey !== null, scope.limit, hideJoinNotices),
+    );
     baseRows = cursorKey !== null
       ? await stmt.all([scope.roomId, hiddenParam, cursorKey, scope.cursor])
       : await stmt.all([scope.roomId, hiddenParam]);
@@ -622,6 +705,7 @@ export async function selectMessages(
         left join comp_info forward_target_room_info
           on forward_target_room_info.entity = forward_target_entity.room
         where e.id in (${placeholders})
+        ${hideJoinNotices ? `and not ${JOIN_NOTICE_PREDICATE}` : ""}
         `,
       )
       .all([hiddenParam, ...scope.ids]);
@@ -670,6 +754,7 @@ export async function selectMessages(
       viewerDid,
       globalDb,
       hiddenAuthors,
+      hideJoinNotices,
     );
     for (const orig of originals) forwardOriginalDto.set(orig.id, orig);
   }

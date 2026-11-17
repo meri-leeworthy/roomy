@@ -127,6 +127,15 @@ function extractDetails(
     case "space.roomy.room.restoreRoom.v0":
       return { roomId: event["roomId"] };
 
+    // A space-info update carries the join-notice answer when the admin
+    // changed it. That one field changes what a room's message page returns,
+    // so the invalidation handler needs to know whether it was part of this
+    // event (a rename must not cost every channel a refetch).
+    case "space.roomy.space.updateSpaceInfo.v0": {
+      const showJoinNotices = event["showJoinNotices"];
+      return showJoinNotices === undefined ? undefined : { showJoinNotices };
+    }
+
     // Space admin events: target user.
     case "space.roomy.space.addAdmin.v0":
     case "space.roomy.space.removeAdmin.v0":

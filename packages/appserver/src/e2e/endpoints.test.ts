@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { newUlid } from "@roomy-space/sdk";
 import {
+  materializeSpace,
   startAppserver,
   seedSpace,
   seedRoom,
@@ -1351,6 +1352,112 @@ describe("space.roomy.space.sendEvents", () => {
     );
     expect(after.status).toBe(200);
     expect((await after.json()).suggestToOthers).toBe(false);
+  });
+
+  test("updateSpaceInfo hides join notices, and the query stops returning them", async () => {
+    // The whole path: a real joinSpace event materialises the notice, an admin
+    // answers the setting, and the room's page stops carrying it — without
+    // deleting anything and without touching ordinary messages.
+    const ctx = await startAppserver();
+    const { roomId, messageId } = await materializeSpace(ctx, SPACE, USER);
+    const JOINER = "did:plc:e2e-joiner";
+
+    const joinNotice = newUlid();
+    const join = await ctx.authedFetch(JOINER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          spaceId: SPACE,
+          events: [
+            { id: joinNotice, $type: "space.roomy.space.joinSpace.v0" },
+          ],
+        }),
+      },
+    );
+    expect(join.status).toBe(200);
+
+    const page = async () => {
+      const res = await ctx.authedFetch(USER)(
+        `${ctx.baseUrl}/xrpc/space.roomy.room.getMessages?roomId=${roomId}`,
+      );
+      expect(res.status).toBe(200);
+      return (await res.json()) as {
+        messages: Array<{ id: string; content: string; system?: boolean }>;
+      };
+    };
+
+    // Unanswered: the notice renders exactly as it always has.
+    const before = await page();
+    const notice = before.messages.find((m) => m.id === joinNotice);
+    expect(notice?.system).toBe(true);
+    expect(notice?.content).toContain("joined the space.");
+
+    const send = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          spaceId: SPACE,
+          events: [
+            {
+              id: newUlid(),
+              $type: "space.roomy.space.updateSpaceInfo.v0",
+              showJoinNotices: false,
+            },
+          ],
+        }),
+      },
+    );
+    expect(send.status).toBe(200);
+
+    const after = await page();
+    expect(after.messages.some((m) => m.id === joinNotice)).toBe(false);
+    // The room's real messages are untouched.
+    expect(after.messages.some((m) => m.id === messageId)).toBe(true);
+
+    const meta = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.getMetadata?spaceId=${SPACE}`,
+    );
+    expect((await meta.json()).showJoinNotices).toBe(false);
+  });
+
+  test("showJoinNotices is absent while unanswered and true after an explicit yes", async () => {
+    const ctx = await startAppserver();
+    const { db } = ctx;
+    seedSpace(db, SPACE, USER); // show_join_notices NULL (unanswered)
+    seedJoinedSpace(db, USER, SPACE);
+    await spaceDb(db, SPACE).run(
+      "insert or ignore into edges (head, tail, label) values (?, ?, 'admin')",
+      [SPACE, USER],
+    );
+
+    const before = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.getMetadata?spaceId=${SPACE}`,
+    );
+    expect(await before.json()).not.toHaveProperty("showJoinNotices");
+
+    const send = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.sendEvents`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          spaceId: SPACE,
+          events: [
+            {
+              id: newUlid(),
+              $type: "space.roomy.space.updateSpaceInfo.v0",
+              showJoinNotices: true,
+            },
+          ],
+        }),
+      },
+    );
+    expect(send.status).toBe(200);
+    const after = await ctx.authedFetch(USER)(
+      `${ctx.baseUrl}/xrpc/space.roomy.space.getMetadata?spaceId=${SPACE}`,
+    );
+    expect((await after.json()).showJoinNotices).toBe(true);
   });
 });
 
