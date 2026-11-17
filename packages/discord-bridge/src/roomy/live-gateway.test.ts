@@ -74,7 +74,7 @@ function makeMockWS(): typeof WebSocket {
 		};
 		self._open = () => {
 			self.readyState = 1;
-			self.onopen?.(new Event("open"));
+			self.onopen?.(new globalThis.Event("open") as unknown as Event);
 		};
 		self._emitMessage = (data: ArrayBuffer | string) => {
 			self.onmessage?.({ data } as MessageEvent);
@@ -84,7 +84,7 @@ function makeMockWS(): typeof WebSocket {
 			self.onclose?.({ code, reason } as CloseEvent);
 		};
 		self._emitError = () => {
-			self.onerror?.(new Event("error"));
+			self.onerror?.(new globalThis.Event("error") as unknown as Event);
 		};
 		lastSocket = self;
 		sockets.push(self);
@@ -107,7 +107,7 @@ function makeEvent(): Event {
 		id: newUlid(),
 		name: "Test Event",
 		description: "A test event",
-	} as Event;
+	} as unknown as Event;
 }
 
 /**
@@ -163,7 +163,7 @@ describe("LiveRoomyGateway", () => {
 	let repo: BridgeRepository;
 	let gateway: LiveRoomyGateway;
 	let mockXrpc: transport.DirectXrpcClient;
-	let procedure: Mock;
+	let procedure: Mock<(...args: unknown[]) => Promise<unknown>>;
 	let origWebSocket: typeof WebSocket | undefined;
 
 	beforeEach(() => {

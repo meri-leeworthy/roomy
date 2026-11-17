@@ -1,5 +1,6 @@
 import type { BridgeRepository, FailedSend } from "./db/repository.ts";
 import { ATPROTO_BRIDGE_DID, PORT } from "./env.ts";
+import type { HealthReport } from "./health.ts";
 import { createLogger } from "./logger.ts";
 import { isBackfillRunning } from "./services/backfill.ts";
 
@@ -8,9 +9,15 @@ const log = createLogger("api");
 /** A running status API server, as returned by `startApi`. */
 export type ApiServer = Bun.Server<undefined>;
 
+/** The worker liveness the health endpoint reports. */
+export interface HealthSource {
+	report(): HealthReport;
+}
+
 export function startApi(
 	repo: BridgeRepository,
 	getAppId: () => string | undefined,
+	health: HealthSource,
 ): ApiServer {
 	const server = Bun.serve({
 		port: PORT(),
@@ -23,7 +30,7 @@ export function startApi(
 
 			let response: Response;
 			try {
-				response = route(req, url, repo, getAppId);
+				response = route(req, url, repo, getAppId, health);
 			} catch (err) {
 				log.error("API error", err);
 				response = jsonResponse({ error: "Internal server error" }, 500);
@@ -45,8 +52,18 @@ function route(
 	url: URL,
 	repo: BridgeRepository,
 	getAppId: () => string | undefined,
+	health: HealthSource,
 ): Response {
 	switch (url.pathname) {
+		// Liveness of the worker, not of this HTTP server: the report is built
+		// from the gateway/subscription state and from sweep completion times
+		// that only advance while the event loop runs. 503 names every
+		// component that failed so the container's restart is attributable.
+		case "/health": {
+			const report = health.report();
+			return jsonResponse(report, report.status === "ok" ? 200 : 503);
+		}
+
 		case "/info": {
 			const appId = getAppId();
 			if (!appId)

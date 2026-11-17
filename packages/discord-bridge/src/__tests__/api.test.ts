@@ -4,16 +4,28 @@
  * Covers: APIS01–APIS04 — /sends/failed reports the durable failed-send queue,
  * so an operator can see the sends the bridge still owes a space and which it
  * gave up on, and /sends/replay puts an abandoned one back in that queue.
+ * APIS05–APIS08 cover /health: 200 from live state, 503 naming the component
+ * that stopped, served through `startApi` exactly as the container probes it.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { type ApiServer, startApi } from "../api.ts";
 import { BridgeRepository } from "../db/repository.ts";
+import {
+	BridgeHealth,
+	CAPACITY_SWEEP_STALE_MS,
+	SEND_RETRY_SWEEP_STALE_MS,
+	type SubscriptionState,
+} from "../health.ts";
 import { SPACE_A, SPACE_B } from "../services/__tests__/helpers/test-data.ts";
 
 let repo: BridgeRepository;
 let server: ApiServer;
 let origPort: string | undefined;
+/** Liveness sources the /health tests move between reports. */
+let health: BridgeHealth;
+let gatewayConnected: boolean;
+let subscriptions: SubscriptionState;
 
 /** Queue one entry for a space, optionally already abandoned. */
 function queue(spaceDid: string, discordId: string, terminal = false): void {
@@ -78,7 +90,13 @@ beforeEach(() => {
 	// bridge instance.
 	process.env.PORT = "0";
 	repo = BridgeRepository.open(":memory:");
-	server = startApi(repo, () => "app-1");
+	gatewayConnected = true;
+	subscriptions = "idle";
+	health = new BridgeHealth({
+		gatewayConnected: () => gatewayConnected,
+		subscriptions: () => subscriptions,
+	});
+	server = startApi(repo, () => "app-1", health);
 });
 
 afterEach(() => {
@@ -162,5 +180,95 @@ describe("/sends/replay", () => {
 		expect((await replaySend("")).status).toBe(400);
 		expect((await replaySend("?id=abc")).status).toBe(400);
 		expect((await replaySend("?id=1", { method: "GET" })).status).toBe(405);
+	});
+});
+
+/** The /health response body, as the container probe and operators read it. */
+type HealthPayload = {
+	status: "ok" | "unhealthy";
+	checks: {
+		discordGateway: "connected" | "disconnected";
+		roomySubscriptions: SubscriptionState;
+		sendRetrySweepAgeMs: number | null;
+		capacitySweepAgeMs: number | null;
+	};
+	reasons: string[];
+};
+
+async function getHealth(): Promise<{
+	status: number;
+	body: HealthPayload;
+}> {
+	const res = await fetch(`http://127.0.0.1:${server.port}/health`);
+	return { status: res.status, body: (await res.json()) as HealthPayload };
+}
+
+describe("/health", () => {
+	// APIS05
+	test("APIS05: 200 while the gateway, subscriptions and both sweeps are live", async () => {
+		health.noteSendRetrySweepCompleted();
+		health.noteCapacitySweepCompleted();
+
+		const { status, body } = await getHealth();
+
+		expect(status).toBe(200);
+		expect(body.status).toBe("ok");
+		expect(body.reasons).toEqual([]);
+		expect(body.checks.discordGateway).toBe("connected");
+		expect(body.checks.roomySubscriptions).toBe("idle");
+		expect(body.checks.sendRetrySweepAgeMs).toBeLessThan(
+			SEND_RETRY_SWEEP_STALE_MS,
+		);
+		expect(body.checks.capacitySweepAgeMs).toBeLessThan(
+			CAPACITY_SWEEP_STALE_MS,
+		);
+	});
+
+	// APIS06
+	test("APIS06: 503 names a send-retry sweep that stopped firing", async () => {
+		health.noteSendRetrySweepCompleted(
+			Date.now() - SEND_RETRY_SWEEP_STALE_MS - 1_000,
+		);
+		health.noteCapacitySweepCompleted();
+
+		const { status, body } = await getHealth();
+
+		expect(status).toBe(503);
+		expect(body.status).toBe("unhealthy");
+		expect(body.reasons).toHaveLength(1);
+		expect(body.reasons[0]).toContain("send-retry-sweep");
+		// The capacity sweep is still fresh and must not be blamed.
+		expect(body.reasons[0]).not.toContain("capacity-sweep");
+	});
+
+	// APIS07
+	test("APIS07: 503 names a capacity sweep that stopped firing", async () => {
+		health.noteSendRetrySweepCompleted();
+		health.noteCapacitySweepCompleted(
+			Date.now() - CAPACITY_SWEEP_STALE_MS - 1_000,
+		);
+
+		const { status, body } = await getHealth();
+
+		expect(status).toBe(503);
+		expect(body.reasons).toHaveLength(1);
+		expect(body.reasons[0]).toContain("capacity-sweep");
+	});
+
+	// APIS08
+	test("APIS08: 503 names the gateway and a non-open subscription", async () => {
+		health.noteSendRetrySweepCompleted();
+		health.noteCapacitySweepCompleted();
+		gatewayConnected = false;
+		subscriptions = "not-open";
+
+		const { status, body } = await getHealth();
+
+		expect(status).toBe(503);
+		expect(body.checks.discordGateway).toBe("disconnected");
+		expect(body.checks.roomySubscriptions).toBe("not-open");
+		expect(body.reasons).toHaveLength(2);
+		expect(body.reasons.join(" | ")).toContain("discord-gateway");
+		expect(body.reasons.join(" | ")).toContain("roomy-subscriptions");
 	});
 });

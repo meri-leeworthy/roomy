@@ -5,7 +5,7 @@
  * DiscordUserData) matching what the refactored services expect.
  */
 
-import { newUlid } from "@roomy-space/sdk";
+import { newUlid, type Ulid } from "@roomy-space/sdk";
 import type {
 	DiscordAttachmentData,
 	DiscordChannelData,
@@ -28,10 +28,10 @@ export const CATEGORY = "623456789012345678";
 export const CATEGORY_2 = "723456789012345678";
 
 // Generate valid ULID strings for test fixtures.
-export const ROOMY_CHANNEL_ULID = newUlid();
-export const ROOMY_THREAD_ULID = newUlid();
-export const ROOMY_MESSAGE_ULID = newUlid();
-export const ROOMY_MESSAGE_ULID_2 = newUlid();
+export const ROOMY_CHANNEL_ULID: Ulid = newUlid();
+export const ROOMY_THREAD_ULID: Ulid = newUlid();
+export const ROOMY_MESSAGE_ULID: Ulid = newUlid();
+export const ROOMY_MESSAGE_ULID_2: Ulid = newUlid();
 export const USER_ID = "111111111111111111";
 export const USER_ID_2 = "222222222222222222";
 
