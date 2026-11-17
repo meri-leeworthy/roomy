@@ -957,10 +957,30 @@ export const prose: Record<string, EndpointProse> = {
   },
   "space.roomy.admin.getSpaceMembership": {
     description:
-      "Returns the bridge-token capacity picture for one space: every grant, its live Polar-derived capacity, spend state, and the space's maxMembers (Σ valid capacities) vs current member count. The Discord bridge polls this endpoint to decide whether bridging may continue: overLimit (memberCount > maxMembers) means the bridge must halt.",
+      "Returns the bridge-token capacity picture for one space: every grant, its live Polar-derived capacity, spend state, and the bridged guild's member count vs the space's maxMembers (Σ valid capacities). The Discord bridge polls this endpoint to decide whether bridging may continue: overLimit (memberCount > maxMembers) means the bridge must alert and halt at 2x. Two populations are reported and are not interchangeable: `memberCount` is the bridged guild's population, supplied by the caller, and is what capacity, overLimit, and the permanent spend rule are defined against; `spaceMemberCount` is the space's Roomy membership, informational. Bridged Discord participants author as `did:discord:<snowflake>` and hold no member edge, so the Roomy count cannot stand in for the guild's.",
     auth: "Admin allowlist (APPSERVER_ADMIN_DIDS).",
+    params: [
+      { name: "spaceId", type: "string", required: true, description: "Space DID to report on." },
+      { name: "memberCount", type: "integer", required: true, description: "The bridged guild's current member count (≥ 0). Required: without it the caller makes no capacity claim, and the endpoint answers 400 rather than substituting the space's Roomy membership." },
+    ],
+    outputSchema: {
+      type: "object",
+      properties: {
+        spaceDid: { type: "string", description: "The space the picture describes." },
+        memberCount: { type: "number", description: "The bridged guild's population (the `memberCount` param). overLimit and the spend rule derive from it." },
+        spaceMemberCount: { type: "number", optional: true, description: "The space's Roomy membership, from the global `space_stats` aggregate. Absent when the space has never been swept — unknown, not zero. Informational." },
+        maxMembers: { type: "number", description: "Σ live token capacities; spent grants contribute 0." },
+        validTokenCount: { type: "number", description: "Grants with a valid Polar state at read time." },
+        overLimit: { type: "boolean", description: "memberCount > maxMembers — the bridge alerts, and halts at 2x." },
+        tokens: { type: "Array<{ grantorDid, capacity, status, live }>", description: "One entry per grant, with `status: 'pending' | 'spent'`." },
+        stale: { type: "boolean", description: "Any Polar state served from cache because a refresh failed." },
+        checkedAt: { type: "number", description: "Read timestamp (ms)." },
+      },
+    },
     notes: [
       "Per-grant processing (read-time validity): Polar validity check per grantor (300s TTL cache).",
+      "Spend rule: a pending grant is marked spent PERMANENTLY once the guild's member count exceeds 100. A spent grant is never re-granted or revoked.",
+      "400 when `memberCount` is missing, empty, or not a non-negative integer.",
     ],
   },
   "space.roomy.admin.reconcileProMembers": {

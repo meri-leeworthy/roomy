@@ -37,6 +37,7 @@ const MembershipSchema = type({
 	validTokenCount: "number",
 	maxMembers: "number",
 	memberCount: "number",
+	"spaceMemberCount?": "number",
 	overLimit: "boolean",
 	stale: "boolean",
 	checkedAt: "number",
