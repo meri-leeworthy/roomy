@@ -24,6 +24,12 @@
 //                               is /metrics. An empty value leaves the
 //                               collector with nothing to scrape — see the
 //                               `discovery.relabel "appserver"` block.
+//   - ROOMY_METRICS_TOKEN       bearer token for the appserver's /metrics.
+//                               Set the same value on the appserver (which
+//                               then requires it) and here (which sends it as
+//                               `Authorization: Bearer …`). Unset on both
+//                               leaves /metrics open on the private address;
+//                               an empty value sends no header at all.
 //   - ALLOY_ENV                 this collector's environment: the `env`
 //                               label on scraped metrics and on browser
 //                               records. Default `production`; trimmed and
@@ -129,6 +135,13 @@ loki.source.api "apps" {
 // reclaimed, and the build identity stays in the log line and the trace
 // resource where it costs no cardinality.
 //
+// The appserver gates /metrics on ROOMY_METRICS_TOKEN when it is set, and this
+// collector presents the same value. `sys.env` yields "" for an unset
+// variable, and an empty bearer token configures no Authorization header at
+// all — an empty `Bearer ` would be a credential the appserver rejects, so
+// absence on the collector has to mean absence on the wire, not an empty
+// value. The collection below therefore needs no conditional.
+//
 // The relabel stage exists to drop an empty address. The Dockerfile sets
 // APPSERVER_METRICS_URL, so this only fires if someone overrides it with
 // ""; a target with no address would otherwise be reported as `up == 0`
@@ -154,6 +167,9 @@ prometheus.scrape "appserver" {
 	targets      = discovery.relabel.appserver.output
 	metrics_path = "/metrics"
 	forward_to   = [prometheus.remote_write.mimir.receiver]
+	// Set on both the appserver and this collector to the same value; leave it
+	// unset on both and /metrics stays open on the private address.
+	bearer_token = sys.env("ROOMY_METRICS_TOKEN")
 }
 
 // ── OTLP receivers for the app services (4317 gRPC / 4318 HTTP) ──────
