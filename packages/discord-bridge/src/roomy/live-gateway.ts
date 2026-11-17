@@ -24,6 +24,37 @@ import type { SpaceManager } from "./space-manager.ts";
 
 const log = createLogger("live-roomy");
 
+/**
+ * Attempts at persisting a frame cursor before giving up, and the base delay
+ * between them (doubling per attempt). Each attempt already waits up to the
+ * connection's `busy_timeout` (3 s) for the write lock, to which the backoff
+ * adds 300 ms — so a space's frame chain stalls for at most ~9.3 s under
+ * sustained contention, and only while that lock is genuinely unavailable.
+ */
+const CURSOR_WRITE_ATTEMPTS = 3;
+const CURSOR_WRITE_BACKOFF_MS = 100;
+
+/**
+ * True for the SQLite errors a retried write can recover from: the write lock
+ * was held (BUSY) or the connection is inside a conflicting lock (LOCKED).
+ * Bun's `SQLiteError` carries the symbolic name in `code` and the numeric
+ * (possibly extended) code in `errno`; accept either so an extended code such
+ * as SQLITE_BUSY_SNAPSHOT still matches.
+ */
+function isSqliteLockError(err: unknown): boolean {
+	if (typeof err !== "object" || err === null) return false;
+	const { code, errno } = err as { code?: unknown; errno?: unknown };
+	if (typeof code === "string" && /^SQLITE_(BUSY|LOCKED)(_|$)/.test(code)) {
+		return true;
+	}
+	if (typeof errno === "number") {
+		// Mask off the extended-result bits: 5 = BUSY, 6 = LOCKED.
+		const primary = errno & 0xff;
+		return primary === 5 || primary === 6;
+	}
+	return false;
+}
+
 /** Shape of a single event in a #streamEvents frame body. */
 interface StreamEventEntry {
 	idx: number;
@@ -394,7 +425,7 @@ export class LiveRoomyGateway implements RoomyGateway {
 		// between persisting and delivering doesn't permanently lose events
 		// (at-least-once delivery). Per-event errors are logged above and do
 		// not block forward progress.
-		this.#repo.setSpaceCursor(spaceDid, data.cursor);
+		await this.#persistCursor(spaceDid, data.cursor);
 
 		// Only exit the backfill phase once the server signals this frame
 		// completed the backfill.
@@ -441,6 +472,40 @@ export class LiveRoomyGateway implements RoomyGateway {
 			previousSocketMs: trace.previousSocketMs ?? null,
 			firstFrameMs: Date.now() - trace.openedAt,
 		});
+	}
+
+	/**
+	 * Persist a frame's cursor, retrying while the SQLite write lock is held.
+	 *
+	 * The write is bookkeeping for at-least-once delivery, not part of
+	 * delivery: a write that never lands leaves the cursor behind, so the next
+	 * (re)connect backfills from an older position and may re-deliver frames
+	 * already handled. That is the accepted behaviour, so a failed write is
+	 * logged and swallowed — letting it escape the frame handler would end the
+	 * process over a lock held by a burst of concurrent writes.
+	 *
+	 * Retries only lock contention (BUSY/LOCKED); any other error is a real
+	 * fault (closed DB, corrupt file) that a retry cannot fix.
+	 */
+	async #persistCursor(spaceDid: string, cursor: number): Promise<void> {
+		let attempt = 0;
+		for (;;) {
+			attempt++;
+			try {
+				this.#repo.setSpaceCursor(spaceDid, cursor);
+				return;
+			} catch (err) {
+				if (attempt >= CURSOR_WRITE_ATTEMPTS || !isSqliteLockError(err)) {
+					log.error(
+						`Failed to persist stream cursor ${cursor} for ${spaceDid} ` +
+							`after ${attempt} attempt(s); frames may be re-delivered`,
+						err,
+					);
+					return;
+				}
+				await Bun.sleep(CURSOR_WRITE_BACKOFF_MS * 2 ** (attempt - 1));
+			}
+		}
 	}
 
 	async unsubscribe(spaceDid: string): Promise<void> {

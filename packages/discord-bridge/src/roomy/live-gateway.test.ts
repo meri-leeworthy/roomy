@@ -600,6 +600,105 @@ describe("LiveRoomyGateway", () => {
 		expect(errors[0]?.eventIdx).toBe(0);
 	});
 
+	// ─── Cursor write failures ────────────────────────────────────────────
+
+	/**
+	 * A delete-heavy burst can hold SQLite's write lock past `busy_timeout`,
+	 * which makes the UPSERT behind `setSpaceCursor` throw SQLITE_BUSY. The
+	 * frame handler must absorb that: retry, log, leave the cursor behind.
+	 */
+	test("a cursor write that stays locked does not throw out of the frame handler", async () => {
+		const callback = vi.fn() as unknown as RoomyEventCallback;
+		await subscribeAndConnect(SPACE_DID, callback);
+
+		const busy = Object.assign(new Error("database is locked"), {
+			code: "SQLITE_BUSY",
+			errno: 5,
+		});
+		const setCursor = vi
+			.spyOn(repo, "setSpaceCursor")
+			.mockImplementation(() => {
+				throw busy;
+			});
+		// Drive the retry delays off a stubbed sleep: the test asserts the
+		// attempt count and backoff, not a wall-clock duration.
+		const sleep = vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
+		const { promise: gaveUp, resolve: onGaveUp } =
+			Promise.withResolvers<void>();
+		const errorLog = vi.spyOn(console, "error").mockImplementation((line) => {
+			if (String(line).includes("Failed to persist stream cursor")) onGaveUp();
+		});
+
+		try {
+			await emitStreamEvents(
+				SPACE_DID,
+				[{ idx: 0, user: "did:web:test-user", event: makeEvent() }],
+				0,
+			);
+			// Resolves when the gateway gives up and logs the failure.
+			await gaveUp;
+			await flush();
+
+			expect(setCursor).toHaveBeenCalledTimes(3);
+			// Bounded exponential backoff between the attempts.
+			expect(sleep.mock.calls.map((call) => call[0])).toEqual([100, 200]);
+			// The frame's events were delivered regardless.
+			expect(callback).toHaveBeenCalledTimes(1);
+
+			// The frame handler did not reject: the processing chain's own
+			// failure log never fired.
+			const logged = errorLog.mock.calls.map((call) => String(call[0]));
+			expect(
+				logged.some((line) => line.includes("Error processing stream frame")),
+			).toBe(false);
+		} finally {
+			setCursor.mockRestore();
+			sleep.mockRestore();
+		}
+
+		// Once writes succeed again, a later frame advances the cursor.
+		await emitStreamEvents(
+			SPACE_DID,
+			[{ idx: 1, user: "did:web:test-user", event: makeEvent() }],
+			1,
+		);
+		expect(repo.getSpaceCursor(SPACE_DID)).toBe(1);
+		errorLog.mockRestore();
+	});
+
+	/** A failure a retry cannot fix is logged once, without delaying the frame. */
+	test("a non-lock cursor write failure is logged and not retried", async () => {
+		const callback = vi.fn() as unknown as RoomyEventCallback;
+		await subscribeAndConnect(SPACE_DID, callback);
+
+		const setCursor = vi
+			.spyOn(repo, "setSpaceCursor")
+			.mockImplementation(() => {
+				throw new Error("database disk image is malformed");
+			});
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await emitStreamEvents(
+				SPACE_DID,
+				[{ idx: 0, user: "did:web:test-user", event: makeEvent() }],
+				0,
+			);
+
+			expect(setCursor).toHaveBeenCalledTimes(1);
+			const logged = errorLog.mock.calls.map((call) => String(call[0]));
+			expect(
+				logged.some((line) => line.includes("Failed to persist stream cursor")),
+			).toBe(true);
+			expect(
+				logged.some((line) => line.includes("Error processing stream frame")),
+			).toBe(false);
+		} finally {
+			setCursor.mockRestore();
+			errorLog.mockRestore();
+		}
+	});
+
 	// ─── Reconnect backoff (shared circuit breaker) ───────────────────────
 
 	describe("reconnectDelayMs", () => {
