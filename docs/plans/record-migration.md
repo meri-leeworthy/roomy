@@ -1,9 +1,13 @@
 # Record-shaped output and the space record browser
 
-Status: draft for review — 2026-11-06. Nothing here is dispatched or
-implemented; phases 0–4 are unblocked, phase 5 waits on per-repo write
-permissions. Companion: `packages/appserver/docs/plans/replicable-space-workers.md`
-§5 WS3 (the change-record interface this builds on).
+Status: in progress — 2026-11-17. P1 merged (#614, `473f2044`). P2
+implemented, awaiting review (#615). P3 implemented, awaiting review (#616).
+P0's production backfill has not been run: the counts below come from a dev-VM
+copy of the log, so confirm the shape on production before sizing P4.
+**Next: P4, the browser** — dispatchable once P3's endpoints merge; P5 waits on
+per-repo write permissions. Companion:
+`packages/appserver/docs/plans/replicable-space-workers.md` §5 WS3 (the
+change-record interface this builds on).
 
 ## 1. What already exists
 
@@ -63,6 +67,13 @@ is a small admin tool or a per-user surface.
    asserting the whole policy, and one class of case is deliberately unresolved
    (§3 D5).
 4. **No read surface.** No XRPC query returns records, and no UI shows them.
+
+What closes what, as of 2026-11-17: **1 by P1** (`records/foldChanges.ts`), **2
+by P2** (`records/toRecordJson.ts` and the 15 lexicons), **4 by P3** (the
+`space.roomy.admin.getSpaceRecords` family). **3 is open**: the policy is still
+implicit in the adapter, and D1's fold-time resolution is the answer in use
+rather than a table anyone asserts against. D5's "cannot be expressed" list is
+counted by P2's serialiser and reported by P3/P4, not resolved.
 
 ## 3. Decisions to make
 
