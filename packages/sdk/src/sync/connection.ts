@@ -25,6 +25,8 @@
 
 import { decodeFirst } from "@atcute/cbor";
 
+import { SessionGate, isSessionRejected } from "./session-gate";
+
 // ─── Public types ─────────────────────────────────────────────────────────
 
 export type TopicKind = "space" | "room" | "stream" | "mentions";
@@ -56,6 +58,12 @@ export type ConnectionStatus =
   | { state: "open" }
   | { state: "reconnecting"; delayMs: number; attempt: number }
   | { state: "closing" }
+  /**
+   * The session cannot mint tickets, so the reconnect loop is not retrying.
+   * Nothing is scheduled: the loop waits for `sessionGate.recover()` (see
+   * {@link SyncConnectionOptions.sessionGate}), then reconnects.
+   */
+  | { state: "suspended"; reason: "session-rejected" }
   | { state: "closed"; intentional: boolean; code?: number; reason?: string };
 
 export interface CloseEventInfo {
@@ -150,6 +158,22 @@ export interface SyncConnectionOptions {
    * by the time this fires. Not called when the cap is unset.
    */
   onGiveUp?: (info: GiveUpInfo) => void;
+  /**
+   * The session layer's verdict, shared with the connection.
+   *
+   * Pass one when the caller can see the session origin refuse, and accept, a
+   * request. Then a ticket fetch the session origin refused suspends the
+   * reconnect loop instead of retrying into the same refusal — each attempt
+   * would cost one session request and could only learn the session is still
+   * dead — and the loop resumes when the caller calls `recover()` on the
+   * gate. While the gate is marked rejected the connection does not fetch a
+   * ticket at all, including from `connect()`.
+   *
+   * Omit it — or pass `null` — when the caller has no such vantage point: the
+   * connection then keeps its normal backoff on a failed ticket fetch, since
+   * nothing else could tell it when to stop retrying or when to start again.
+   */
+  sessionGate?: SessionGate | null;
   /**
    * Heartbeat configuration. When set, the connection sends a WebSocket
    * protocol-level `ping` frame on an interval and reconnects if no `pong`
@@ -283,6 +307,12 @@ export class SyncConnection {
    */
   #attemptPromise: Promise<void> | null = null;
 
+  /**
+   * The session layer's verdict, or `null` when the caller supplied none (see
+   * {@link SyncConnectionOptions.sessionGate}).
+   */
+  readonly #sessionGate: SessionGate | null;
+
   constructor(opts: SyncConnectionOptions) {
     this.#opts = opts;
     const WS = opts.webSocketImpl ?? (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
@@ -306,6 +336,8 @@ export class SyncConnection {
       // explicit override, never a default-generator outcome.
       return Math.max(1, Math.floor(Math.random() * cap));
     });
+    this.#sessionGate = opts.sessionGate ?? null;
+    this.#sessionGate?.onRecover(() => this.#resumeAfterRecovery());
     this.#configureHeartbeat(opts);
   }
 
@@ -609,6 +641,17 @@ export class SyncConnection {
     // A ticket fetch may still be in flight (no socket yet). Share that
     // attempt rather than starting a rival one that would supersede it.
     if (this.#attemptPromise) return this.#attemptPromise;
+    // The session layer already knows every session request will be refused:
+    // minting a ticket costs one of them, so neither the loop nor a caller's
+    // nudge fetches one until the gate reports the session back.
+    if (this.#sessionGate?.rejected) {
+      // Calling `connect()` is the caller asking for the socket, so this
+      // attempt is not one they walked away from — the recovery signal has to
+      // be able to finish what the call started.
+      this.#intentionalClose = false;
+      this.#suspendOnRejectedSession();
+      return Promise.resolve();
+    }
     // The deferred is created up front (and stored as #failAttempt) so the
     // watchdog can settle this promise even while fetchTicket is hanging —
     // before any socket exists to observe an event on.
@@ -657,6 +700,11 @@ export class SyncConnection {
     } catch (err) {
       this.#log(`Ticket fetch failed: ${describeError(err)}`);
       this.#emitError(err);
+      // The session origin refused the token this ticket would have been
+      // minted with. Retrying cannot change that answer, and each attempt
+      // spends another session request, so record the verdict and let the
+      // reconnect path suspend instead of backing off.
+      if (isSessionRejected(err)) this.#sessionGate?.reject();
       this.#clearConnectTimer();
       if (epoch !== this.#connectEpoch) {
         // A newer attempt has already taken over; it owns the retry, so
@@ -913,6 +961,13 @@ export class SyncConnection {
 
   #handleAbnormalClose(_code: number, _reason: string): void {
     if (this.#intentionalClose) return;
+    // A session the origin has refused fails every attempt the same way. The
+    // loop schedules nothing and waits for the gate's recovery signal, so a
+    // dead session costs no further session requests and no wake-ups.
+    if (this.#sessionGate?.rejected) {
+      this.#suspendOnRejectedSession();
+      return;
+    }
     const attempt = this.#reconnectAttempt;
     this.#reconnectAttempt++;
     // Safety net: don't retry forever. A permanently unreachable
@@ -947,6 +1002,24 @@ export class SyncConnection {
       // on close, and we've already surfaced them via onError.
       this.connect().catch(() => {});
     }, delay);
+  }
+
+  /** Park the loop until the session layer reports the session back. */
+  #suspendOnRejectedSession(): void {
+    if (this.#status.state === "suspended") return;
+    this.#log(
+      "Session rejected; holding the reconnect loop until the session recovers.",
+    );
+    this.#setStatus({ state: "suspended", reason: "session-rejected" });
+  }
+
+  /** The gate's recovery signal: start a fresh attempt from a parked loop. */
+  #resumeAfterRecovery(): void {
+    if (this.#intentionalClose) return;
+    if (this.#status.state !== "suspended") return;
+    this.#reconnectAttempt = 0;
+    this.#log("Session recovered; reconnecting.");
+    void this.connect().catch(() => {});
   }
 
   #setStatus(status: ConnectionStatus): void {

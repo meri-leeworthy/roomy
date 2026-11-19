@@ -22,6 +22,9 @@ export {
   type Unsubscribe,
 } from "./connection";
 
+// The session's verdict on this client, which gates the reconnect loop.
+export { SessionGate, isSessionRejected } from "./session-gate";
+
 // Invalidation router + refcounted topic subscriptions.
 export { SyncRouter, type SyncRouterOptions } from "./router";
 export { TopicManager } from "./topics";

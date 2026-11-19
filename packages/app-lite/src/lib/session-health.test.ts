@@ -40,6 +40,8 @@ interface Harness {
   wrapped: typeof globalThis.fetch;
   escalations: SessionFailure[];
   streaks: number[];
+  /** Requests the wrapper saw the session origin accept. */
+  healthy: number;
   calls: string[];
   answer(next: Reply): void;
 }
@@ -68,6 +70,7 @@ function harness(
   const escalations: SessionFailure[] = [];
   const streaks: number[] = [];
   const calls: string[] = [];
+  let healthy = 0;
   let reply: Reply = { status: 401 };
 
   const fetch: typeof globalThis.fetch = async (input) => {
@@ -88,6 +91,9 @@ function harness(
     storage,
     onExhausted: (failure) => escalations.push(failure),
     onStreak: (streak) => streaks.push(streak),
+    onHealthy: () => {
+      healthy += 1;
+    },
   });
 
   return {
@@ -95,6 +101,9 @@ function harness(
     escalations,
     streaks,
     calls,
+    get healthy() {
+      return healthy;
+    },
     answer(next: Reply) {
       reply = next;
     },
@@ -155,6 +164,27 @@ describe("createSessionAwareFetch", () => {
 
     await request(h);
     assert.equal(h.escalations.length, 1);
+  });
+
+  test("reports an accepted request, and only an accepted one", async () => {
+    const h = harness();
+
+    await request(h);
+    assert.equal(h.healthy, 0, "a rejection is not evidence the session works");
+
+    // A server error says nothing about the session, only about the server.
+    h.answer({ status: 500 });
+    await request(h);
+    assert.equal(h.healthy, 0);
+
+    h.answer({ status: 200 });
+    await request(h);
+    assert.equal(h.healthy, 1);
+
+    // Every accepted request reports itself: a subscriber waits on the signal
+    // and never has to track whether it already heard.
+    await request(h);
+    assert.equal(h.healthy, 2);
   });
 
   test("the count is consecutive, not cumulative", async () => {

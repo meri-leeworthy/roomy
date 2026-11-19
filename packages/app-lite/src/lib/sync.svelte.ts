@@ -11,6 +11,7 @@ import type {
 import { createTanstackCacheAdapter } from "@roomy-space/sdk/browser";
 import type { QueryClient } from "@tanstack/svelte-query";
 import { queryClient } from "./client";
+import { syncSessionGate } from "./session-gate";
 import { px } from "./auth.svelte";
 import { CONFIG } from "./config";
 import { voicePresence } from "./voice/presence.svelte";
@@ -55,6 +56,8 @@ function mapStatus(s: sync.ConnectionStatus): SyncStatus {
     case "reconnecting":
       return { state: "reconnecting", attempt: s.attempt, delayMs: s.delayMs };
     case "closing":
+    // A suspended connection is not retrying: it waits for the session.
+    case "suspended":
     case "closed":
       return { state: "disconnected" };
   }
@@ -122,6 +125,10 @@ export function createSyncContext(deps: {
     connection = new SyncConnection({
       wsUrl: `${wsOrigin.replace(/\/+$/, "")}/xrpc/space.roomy.sync.subscribe`,
       fetchTicket,
+      // Every ticket fetch is a session request. The gate is what stops the
+      // reconnect loop from spending them on a session the origin has already
+      // refused, and what resumes it when the session answers again.
+      sessionGate: syncSessionGate,
       logger: log,
     });
 

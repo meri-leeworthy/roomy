@@ -51,6 +51,9 @@ function mapConnectionStatus(status: ConnectionStatus): ConnectionState {
       return "connected";
     case "closing":
     case "idle":
+    // Suspended is not reconnecting: nothing is scheduled, and it only ends
+    // when the session layer reports the session back.
+    case "suspended":
     case "closed":
       return "disconnected";
   }

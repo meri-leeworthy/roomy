@@ -106,6 +106,16 @@ export interface SessionHealthOptions {
    * next occurrence measurable without reading request spans.
    */
   onStreak?: (streak: number) => void;
+  /**
+   * Called when a request to the session origin comes back with a status that
+   * is not a refusal — the only evidence this client has that the session
+   * works again.
+   *
+   * Anything waiting for the session to recover subscribes here rather than
+   * asking the network on a timer: the request that proves recovery is a
+   * request the app was making anyway.
+   */
+  onHealthy?: () => void;
   /** Base for resolving relative request URLs. Defaults to `location.href`. */
   base?: string;
 }
@@ -246,6 +256,9 @@ export function createSessionAwareFetch(
     runs.set(url.origin, run);
 
     if (status !== 401 && status !== 0) {
+      // An answer that is not a refusal says the token this client holds still
+      // works (a 5xx says nothing about the session, only about the server).
+      if (status >= 200 && status < 400) options.onHealthy?.();
       if (run.count === 0) return;
       run.count = 0;
       run.escalated = false;
