@@ -2,17 +2,17 @@
  * The record kinds the materialiser will read instead of events.
  *
  * `docs/plans/replicable-space-workers.md` §5 WS3 collapses the 47 event
- * types onto 16 record kinds. This file is that collapse as data: for each
+ * types onto 17 record kinds. This file is that collapse as data: for each
  * kind, its collection, what keys it, and the shape of its body. The adapter
  * in `toRecordChanges.ts` maps events onto these; the projection rules (S2 and
  * S3) are written per kind rather than per event.
  *
- * **The NSIDs are provisional.** They are proposed here so the adapter has one
- * stable name per kind; no lexicon JSON is generated from them and nothing
- * outside this directory consumes them. `space.roomy.user.profile` is the one
- * collection that already exists (`lexicons/space/roomy/user/profile.json`);
- * every other entry is a proposal, and `space.roomy.record.*` may win over the
- * area-based names below once the lexicon workstream settles them.
+ * **Each collection has a lexicon.** `lexicons/` holds one record lexicon per
+ * collection below — written from the fold's bodies, validated against them by
+ * `toRecordJson.test.ts` — so an NSID names a published shape rather than a
+ * proposal. `space.roomy.user.profile` is the exception in the other direction:
+ * users' clients already write it, so its lexicon is the one deployed and
+ * `toRecordJson.ts` maps the fold onto it.
  *
  * Three shapes are fixed by the plan and not negotiable here: a room is
  * soft-deleted so `op: delete` is never used for one, a room link is a `parent`
@@ -289,39 +289,54 @@ export interface ReceiverGrant extends OriginGrant {
 }
 
 /**
- * `federationGrant` — everything one receiving space (B) may see of this space
- * (A), as a single record kexed by B: the origin grants are what B may see, and
- * the receiver grants are which of B's members may see it, capped by the origin
- * grant.
+ * `federationGrant` — what one receiving space (B) may see of this space (A),
+ * as a record in A's repo keyed by B.
  *
- * One record per B rather than one per (room, grantee) because the only event
- * that removes grants, `federation.remove`, names B alone — a per-room record
- * could not be deleted by it, and the plan's "one event, two deletes" would
- * become a number of deletes the event cannot determine.
+ * One record per B rather than one per room because the only event that removes
+ * grants, `federation.remove`, names B alone — a per-room record could not be
+ * deleted by it, and the plan's "one event, two deletes" would become a number
+ * of deletes the event cannot determine.
+ *
+ * The receiving space's own decisions are not here: they are
+ * `federationReceiverGrant`, which lives in B's repo because B's admins decide
+ * them in B's log. No order relates the two logs, so a record holding both would
+ * have no fold that could state it.
  */
 export interface FederationGrantRecord {
   readonly federatingSpace: StreamDid;
   readonly origin: readonly OriginGrant[];
-  readonly receiver: readonly ReceiverGrant[];
 }
 
 /**
- * One entry changed. A `null` level clears the entry, so the two setter events
- * are updates to this record whichever way they go.
+ * One room's grant changed. A `null` level clears the entry, so
+ * `setRoomPermission` is an update to this record whichever way it goes.
  */
-export type FederationGrantPatch =
-  | {
-      readonly scope: "origin";
-      readonly room: string;
-      readonly permission: Permission | null;
-    }
-  | {
-      readonly scope: "receiver";
-      readonly room: string;
-      readonly grantee: string;
-      readonly granteeKind: GrantGranteeKind;
-      readonly permission: Permission | null;
-    };
+export interface FederationGrantPatch {
+  readonly room: string;
+  readonly permission: Permission | null;
+}
+
+/**
+ * `federationReceiverGrant` — which of B's members may see which of A's rooms,
+ * as a record in B's repo keyed by A.
+ *
+ * The other half of `federationGrant`: `setReceiverPermission` is sent on B's
+ * stream by an admin of B, so B is the only repo that can hold it. It grants
+ * nothing on its own — each entry is capped by the matching origin grant in A's
+ * record.
+ */
+export interface FederationReceiverGrantRecord {
+  readonly originSpace: StreamDid;
+  readonly receiver: readonly ReceiverGrant[];
+}
+
+/** One grantee's grant on one room changed; `null` clears the entry. */
+export interface FederationReceiverGrantPatch {
+  readonly room: string;
+  readonly grantee: string;
+  readonly granteeKind: GrantGranteeKind;
+  readonly permission: Permission | null;
+}
 
 /**
  * `profile` — a user's profile. `updateProfile` names a `did` that is the
@@ -387,6 +402,7 @@ export interface RecordBodyTypes {
   roomPermission: RoomPermissionRecord;
   federationRequest: FederationRequestRecord;
   federationGrant: FederationGrantRecord;
+  federationReceiverGrant: FederationReceiverGrantRecord;
   profile: ProfileRecord;
   calendarLink: CalendarLinkRecord;
   voiceCall: VoiceCallRecord;
@@ -398,8 +414,8 @@ export interface RecordBodyTypes {
  * nothing.
  *
  * Kinds with no `create` are the singletons — `spaceInfo`, `spaceSidebar`,
- * `calendarLink`, `federationGrant` — whose record exists from the space's
- * beginning, so every write to one is an update.
+ * `calendarLink`, `federationGrant`, `federationReceiverGrant` — whose record
+ * exists from the space's beginning, so every write to one is an update.
  */
 export interface RecordPatchTypes {
   message: MessagePatch;
@@ -415,6 +431,7 @@ export interface RecordPatchTypes {
   roomPermission: RoomPermissionRecord;
   federationRequest: FederationRequestPatch;
   federationGrant: FederationGrantPatch;
+  federationReceiverGrant: FederationReceiverGrantPatch;
   profile: ProfilePatch;
   calendarLink: CalendarLinkRecord;
   voiceCall: VoiceCallPatch;
@@ -422,7 +439,7 @@ export interface RecordPatchTypes {
 
 /** One kind's definition: where it lives and what keys it. */
 export interface RecordKindSpec {
-  /** The collection NSID — provisional except `profile`, which exists. */
+  /** The collection NSID — the id of its lexicon under `lexicons/`. */
   readonly collection: string;
   /**
    * What the rkey is made of, in order; parts are joined with `:`. Empty for a
@@ -483,6 +500,10 @@ export const RECORD_KINDS = {
   federationGrant: {
     collection: "space.roomy.federation.grant",
     rkey: ["federatingSpace"],
+  },
+  federationReceiverGrant: {
+    collection: "space.roomy.federation.receiverGrant",
+    rkey: ["originSpace"],
   },
   profile: {
     collection: "space.roomy.user.profile",

@@ -785,8 +785,9 @@ function lastPerRecord(
  *
  * A record's identity is `(repo, collection, rkey)`, and that is how
  * {@link lastPerRecord} keys it. The projection is per-space, though, so its rows
- * are keyed more coarsely: `profile` and `federationGrant` are the two kinds whose
- * row is selected by repo as well, and everything else is selected by rkey alone.
+ * are keyed more coarsely: `profile` and the two federation grant kinds are the
+ * ones whose row is selected by repo as well, and everything else is selected by
+ * rkey alone.
  * That is the difference `moveMessages` exposes — a message its author created
  * and the space later moved is ONE row written by two repos, which the record
  * model represents as two records until Stage 3 settles where curator actions
@@ -798,7 +799,9 @@ function lastPerRow(
   const last = new Map<string, RecordChange>();
   for (const { change } of changes) {
     const repoScoped =
-      change.kind === "profile" || change.kind === "federationGrant";
+      change.kind === "profile" ||
+      change.kind === "federationGrant" ||
+      change.kind === "federationReceiverGrant";
     last.set(
       repoScoped
         ? `${change.kind}/${change.repo}/${change.rkey}`
@@ -879,18 +882,20 @@ async function projectionHolds(
         [change.repo, change.rkey],
       );
     case "federationGrant":
-      // Either scope: both write rows keyed by the same (origin, receiver) pair.
-      return (
-        (await one(
-          globalDb,
-          "select 1 from federation_room_permissions where space_id = ? and federating_space_did = ?",
-          [change.repo, change.rkey],
-        )) ||
-        (await one(
-          globalDb,
-          "select 1 from federation_receiver_permissions where space_id = ? and federating_space_did = ?",
-          [change.repo, change.rkey],
-        ))
+      // The record is the origin space's, keyed by the receiving space — which
+      // is the projection's `(space_id, federating_space_did)` pair in order.
+      return one(
+        globalDb,
+        "select 1 from federation_room_permissions where space_id = ? and federating_space_did = ?",
+        [change.repo, change.rkey],
+      );
+    case "federationReceiverGrant":
+      // The receiver record is the receiving space's, keyed by the origin
+      // space — so the projection's pair is the change's key and repo, reversed.
+      return one(
+        globalDb,
+        "select 1 from federation_receiver_permissions where space_id = ? and federating_space_did = ?",
+        [change.rkey, change.repo],
       );
     case "profile":
       // The record's repo is the subject, so that is the row's entity.
@@ -924,15 +929,16 @@ describe("the changes describe the projection the materialiser built", () => {
     expect(missing).toEqual([]);
   }, 30_000);
 
-  test("the fixture emits all 16 kinds", async () => {
+  test("the fixture emits all 17 kinds", async () => {
     const { changes } = await buildFixture();
     const kinds = new Set<RecordKind>(changes.map((c) => c.change.kind));
-    expect((kinds as ReadonlySet<string>).size).toBe(16);
+    expect((kinds as ReadonlySet<string>).size).toBe(17);
     expect([...kinds].sort() as string[]).toEqual(
       [
         "ban",
         "calendarLink",
         "federationGrant",
+        "federationReceiverGrant",
         "federationRequest",
         "invite",
         "membership",
@@ -1147,22 +1153,23 @@ describe("the changes describe the projection the materialiser built", () => {
     const originGrant = final.get(`federationGrant/${STREAM}/${RECEIVING}`);
     expect(originGrant?.op).toBe("delete");
 
-    // The receiver grant is the *origin space's* record, keyed by this space:
-    // the event arrives here but the grant it writes belongs there.
-    const receiverGrant = final.get(`federationGrant/${ORIGIN}/${STREAM}`);
-    if (receiverGrant?.kind !== "federationGrant" || receiverGrant.op !== "update") {
-      throw new Error("expected the receiver grant on the origin space");
+    // The receiver grant is this space's own record, keyed by the origin space
+    // the event names: it is decided in this space's log, so this space's repo
+    // holds it — the origin space cannot write it.
+    const receiverGrant = final.get(
+      `federationReceiverGrant/${STREAM}/${ORIGIN}`,
+    );
+    if (
+      receiverGrant?.kind !== "federationReceiverGrant" ||
+      receiverGrant.op !== "update"
+    ) {
+      throw new Error("expected the receiver grant in this space's repo");
     }
-    expect(receiverGrant.repo).toBe(ORIGIN);
-    expect(receiverGrant.record.scope).toBe("receiver");
     const receiverRow = await globalDb
       .query(
         "select room_id, permission from federation_receiver_permissions where space_id = ? and federating_space_did = ?",
       )
       .get<{ room_id: string; permission: string }>(ORIGIN, STREAM);
-    if (receiverGrant.record.scope !== "receiver") {
-      throw new Error("expected a receiver-scoped grant");
-    }
     expect(receiverGrant.record.room).toBe(receiverRow?.room_id ?? "");
 
     // ── profile: the repo is the subject, not the sender ─────────────────

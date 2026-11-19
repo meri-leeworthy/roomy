@@ -1,0 +1,38 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.federation.grant",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "What one receiving space may see of this space: the rooms of this space it is granted access to. One record per receiving space, written to the origin space's repo — the origin space's admins are the ones who decide it.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["federatingSpace", "origin", "createdAt"],
+        "properties": {
+          "federatingSpace": {
+            "type": "string",
+            "format": "did",
+            "description": "The receiving space. The same DID the record key names."
+          },
+          "origin": {
+            "type": "array",
+            "description": "The rooms of this space the receiving space may see. Absent an entry, the room is invisible to it.",
+            "items": {
+              "type": "object",
+              "required": ["room", "permission"],
+              "properties": {
+                "room": {
+                  "type": "string",
+                  "description": "The room: the record key of a `space.roomy.space.room` record."
+                },
+                "permission": { "type": "string", "knownValues": ["read", "readwrite"] }
+              }
+            }
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

@@ -110,7 +110,7 @@ RecordChange {
 }
 ```
 
-Work, in order. The unit is the **record object**, not the event type: 47 event types collapse to 16 record kinds (`message`, `reaction`, `room`, `spaceInfo`, `spaceSidebar`, `membership`, `ban`, `invite`, `role`, `roleGrant`, `roomPermission`, `federationRequest`, `federationGrant`, `profile`, `calendarLink`, `voiceCall`), and each kind gets one create, one update and one delete rule rather than one materialiser per event.
+Work, in order. The unit is the **record object**, not the event type: 47 event types collapse to 17 record kinds (`message`, `reaction`, `room`, `spaceInfo`, `spaceSidebar`, `membership`, `ban`, `invite`, `role`, `roleGrant`, `roomPermission`, `federationRequest`, `federationGrant`, `federationReceiverGrant`, `profile`, `calendarLink`, `voiceCall`), and each kind gets one create, one update and one delete rule rather than one materialiser per event.
 
 1. **Define the record kinds and their keys.** For each kind: its collection NSID, what `rkey` is (the message id, the role id, `<user>/<role>` for a grant), and the record body's fields. This is the lexicon workstream the migration plan §6 calls for, and it is what the adapter maps onto. Four shapes do not survive the move unchanged and are decided here:
 

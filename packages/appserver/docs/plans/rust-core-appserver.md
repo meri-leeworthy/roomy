@@ -416,7 +416,7 @@ Known blind spots, each of which needs a deliberate answer:
    the worker test asserts only `cursor.0 > 0` and `lag == 0`.
 5. **Global coverage is seven hand-picked tables.** Read state, profiles, link
    embeds, mentions, handles, search cursors and leases are outside it.
-6. **The corpus is a happy path.** 45–48 events, 16 record kinds, no duplicate
+6. **The corpus is a happy path.** 45–48 events, 17 record kinds, no duplicate
    delivery, no out-of-order stamp, no malformed record, no replay from a
    mid-batch cursor.
 7. **The XRPC parity fixture is hand-seeded and not reproducible.** It builds

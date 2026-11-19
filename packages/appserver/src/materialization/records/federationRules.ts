@@ -1,12 +1,12 @@
 /**
- * Projection rules for the federation kinds: `federationRequest` and
- * `federationGrant`.
+ * Projection rules for the federation kinds: `federationRequest`,
+ * `federationGrant` and `federationReceiverGrant`.
  *
- * Both live in the global DB — the relationship registry and the origin and
- * receiver grants — because they are cross-space facts: the request arrives on
- * the origin space's stream, while a receiver grant arrives on the receiving
- * space's stream and belongs to the origin space's record. Every statement here
- * is marked `global` rather than left to SQL-text routing.
+ * All three live in the global DB — the relationship registry and the origin and
+ * receiver grants — because they are cross-space facts: the request and the
+ * origin grants arrive on the origin space's stream, while a receiver grant
+ * arrives on the receiving space's stream and names the origin space it caps.
+ * Every statement here is marked `global` rather than left to SQL-text routing.
  *
  * A relationship is never removed from the set: `federation.remove` marks it
  * `removed`, which is why the record's delete is a status update. The decision
@@ -20,6 +20,8 @@ import { global, type RuleContext, type RuleStatement } from "./recordRules.ts";
 
 export type FederationRequestChange = ChangeOf<"federationRequest">;
 export type FederationGrantChange = ChangeOf<"federationGrant">;
+export type FederationReceiverGrantChange =
+  ChangeOf<"federationReceiverGrant">;
 
 /** The statements that apply one `federationRequest` change. */
 export function federationRequestStatements(
@@ -85,14 +87,18 @@ export function federationRequestStatements(
 }
 
 /**
- * The statements that apply one `federationGrant` change. The record's repo is
- * the origin space and its key the receiving space, whichever stream the event
- * arrived on.
+ * The statements that apply one `federationGrant` change: the origin space's
+ * ceiling for a receiving space. The record's repo is the origin space and its
+ * key the receiving space.
  */
 export function federationGrantStatements(
   change: FederationGrantChange,
 ): RuleStatement[] {
   if (change.op === "delete") {
+    // `federation.remove` tears the relationship down, and the projection drops
+    // both halves of what it granted: this space's origin ceiling and the
+    // receiving space's grants against it. The receiver *record* is the
+    // receiving space's own and is not deleted — only its effect here is.
     return [
       global(sql`
         delete from federation_room_permissions
@@ -108,35 +114,68 @@ export function federationGrantStatements(
   }
 
   if (change.op === "create") {
-    // The adapter writes a grant as an update in both directions: a setter
-    // names one room or one grantee, which is a patch, not the whole record.
+    // The adapter writes a grant as an update: a setter names one room, which
+    // is a patch, not the whole record.
     throw new Error("federationGrant rule: a grant is created by an update");
   }
   const patch = change.record;
   const origin = change.repo;
   const receiving = change.rkey;
 
-  if (patch.scope === "origin") {
+  return [
+    global(sql`
+      delete from federation_room_permissions
+      where space_id = ${origin}
+        and federating_space_did = ${receiving}
+        and room_id = ${patch.room}
+    `),
+    ...(patch.permission === null
+      ? []
+      : [
+          global(sql`
+            insert into federation_room_permissions (
+              space_id, federating_space_did, room_id, permission
+            )
+            values (${origin}, ${receiving}, ${patch.room}, ${patch.permission})
+          `),
+        ]),
+  ];
+}
+
+/**
+ * The statements that apply one `federationReceiverGrant` change: which of a
+ * receiving space's members may see which of the origin space's rooms.
+ *
+ * The record's repo is the receiving space (the stream the event arrived on) and
+ * its key the origin space, so the projection's `(space_id,
+ * federating_space_did)` pair is the change's key and repo the other way round
+ * from `federationGrant`.
+ */
+export function federationReceiverGrantStatements(
+  change: FederationReceiverGrantChange,
+): RuleStatement[] {
+  const receiving = change.repo;
+  const origin = change.rkey;
+
+  if (change.op === "delete") {
     return [
       global(sql`
-        delete from federation_room_permissions
+        delete from federation_receiver_permissions
         where space_id = ${origin}
           and federating_space_did = ${receiving}
-          and room_id = ${patch.room}
       `),
-      ...(patch.permission === null
-        ? []
-        : [
-            global(sql`
-              insert into federation_room_permissions (
-                space_id, federating_space_did, room_id, permission
-              )
-              values (${origin}, ${receiving}, ${patch.room}, ${patch.permission})
-            `),
-          ]),
     ];
   }
 
+  if (change.op === "create") {
+    // A receiver grant is set one grantee and one room at a time: the setter
+    // names a single entry, which is a patch, not the whole record.
+    throw new Error(
+      "federationReceiverGrant rule: a grant is created by an update",
+    );
+  }
+
+  const patch = change.record;
   return [
     global(sql`
       delete from federation_receiver_permissions

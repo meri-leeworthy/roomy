@@ -23,6 +23,7 @@ import {
 } from "./membershipRules.ts";
 import {
   federationGrantStatements,
+  federationReceiverGrantStatements,
   federationRequestStatements,
 } from "./federationRules.ts";
 import {
@@ -122,6 +123,8 @@ export function changeStatements(
       return federationRequestStatements(change, ctx);
     case "federationGrant":
       return federationGrantStatements(change);
+    case "federationReceiverGrant":
+      return federationReceiverGrantStatements(change);
     case "profile":
       return profileStatements(change, ctx);
     case "calendarLink":
