@@ -1,11 +1,11 @@
 # Record-shaped output and the space record browser
 
-Status: in progress — 2026-11-17. P1 merged (#614, `473f2044`). P2
-implemented, awaiting review (#615). P3 implemented, awaiting review (#616).
+Status: in progress — 2026-11-19. P1 merged (#614, `473f2044`). P2 in review
+(#615) and **blocked on D7's grant split**. P3 in review (#616), stacked on P2.
 P0's production backfill has not been run: the counts below come from a dev-VM
 copy of the log, so confirm the shape on production before sizing P4.
 **Next: P4, the browser** — dispatchable once P3's endpoints merge; P5 waits on
-per-repo write permissions. Companion:
+permissioned spaces (Dec 2026). Companion:
 `packages/appserver/docs/plans/replicable-space-workers.md` §5 WS3 (the
 change-record interface this builds on).
 
@@ -68,12 +68,13 @@ is a small admin tool or a per-user surface.
    (§3 D5).
 4. **No read surface.** No XRPC query returns records, and no UI shows them.
 
-What closes what, as of 2026-11-17: **1 by P1** (`records/foldChanges.ts`), **2
-by P2** (`records/toRecordJson.ts` and the 15 lexicons), **4 by P3** (the
-`space.roomy.admin.getSpaceRecords` family). **3 is open**: the policy is still
-implicit in the adapter, and D1's fold-time resolution is the answer in use
-rather than a table anyone asserts against. D5's "cannot be expressed" list is
-counted by P2's serialiser and reported by P3/P4, not resolved.
+What closes what, as of 2026-11-19: **1 by P1** (`records/foldChanges.ts`), **2
+by P2** (`records/toRecordJson.ts` and the lexicons — 16 after D7's split),
+**4 by P3** (the `space.roomy.admin.getSpaceRecords` family). **3 is open**: the
+policy is still implicit in the adapter, and D1's fold-time resolution is the
+answer in use rather than a table anyone asserts against. D5's "cannot be
+expressed" list is counted by P2's serialiser and reported by P3/P4, not
+resolved.
 
 ## 3. Decisions to make
 
@@ -124,6 +125,38 @@ space-admin variant can follow once the shape is settled, and needs
 exported. The docs site already authenticates as the user with service auth
 (`packages/docs/src/lib/xrpc.ts`), so the browser needs no new auth path.
 
+**D7 — Federation grants are two records, split by who decided. Decided
+2026-11-19.** The draft modelled one record per receiving space B, living in
+A's repo, holding both what A granted (`origin`) and what B granted
+(`receiver`). That record is rejected: its two halves are decided by two
+different admins in two different logs (`setRoomPermission` is sent on A's
+stream, `setReceiverPermission` on B's), the fold's input is one stream's rows,
+and no order relates the two logs. A is also not the author of B's decisions,
+and under permissioned spaces A cannot write B's repo at all. The split:
+`space.roomy.federation.grant` stays in A's repo, keyed by B, holding `origin`;
+`space.roomy.federation.receiverGrant` lives in B's repo, keyed by A, holding
+`receiver`. One event is one **entry** change, not one record: the fold upserts
+or removes an entry keyed by `room` (origin) or `room`+`grantee`+`granteeKind`
+(receiver), and `permission: null` removes it — the rule the global projection
+already encodes in `federation_room_permissions` and
+`federation_receiver_permissions`. `federation.remove` deletes A's record;
+B's receiver record is left with no ceiling, so it grants nothing, and is
+cleaned on B's next write.
+
+**D8 — Bridged profiles are out of scope. Decided 2026-11-19.** The only writer
+of `space.roomy.user.updateProfile.v0` is the Discord bridge; an ordinary user's
+profile is a `space.roomy.user.profile/self` record their own client writes to
+their own PDS, so it needs no fold entry and no migration. A bridged profile is
+a Discord mirror carrying a `handle` and an `atblob://` avatar, neither of which
+the deployed record has a field for, and its key is the literal `self`, so one
+bridge account cannot hold one per bridged user. The way back: define a
+`space.roomy.user.bridgedProfile` record (subject-keyed, carrying `handle` and a
+blob avatar), have the bridge write those instead of `updateProfile` events, and
+let the profile read path fall back to it. **Until that exists a bridged user's
+profile does not survive a cutover** — a known gap, carried in §6, not a silent
+loss. The `profile` kind stays in the fold as a view of the projection only; it
+is not a publish target.
+
 ## 4. Phases
 
 ### P0 — Backfill and count (hours)
@@ -172,7 +205,8 @@ the records later.
 Acceptance: every folded record validates against its lexicon (add
 `@atproto/lexicon`, already a `@roomy-space/sdk` dependency, to the appserver;
 or expose the SDK's validator), corpus-wide; no record carries a field its
-lexicon does not declare.
+lexicon does not declare. The two grant kinds' lexicons are D7's two records,
+not one record with both arrays.
 
 ### P3 — Endpoints (1–2 days)
 
@@ -201,17 +235,28 @@ Acceptance: drive it in a browser against a local appserver seeded with the
 corpus fixture; a space's records are navigable end to end and the JSON matches
 `dump-space-records.ts` for the same space.
 
-### P5 — Export and publish (blocked)
+### P5 — Publish into permissioned spaces (blocked until Dec 2026)
 
-Not in scope until writes into user repos are possible:
+The target is **permissioned spaces**, not public repos: a space is
+`at://{authority}/space/{type}/{skey}`, the authority's PDS hosts it and decides
+who may read it, and **every writing account holds its own repo in it, on its
+own PDS**. Publication therefore means writing a record into the writer's own
+repo within a space. It needs three things this document does not have yet:
 
-- Space-repo records are writable **today**, provided the one-time migration
-  ran for the space: it leaves a live PDS account and its password on file. A
-  `createRecord` dry run with `validate: true` is the cheapest way to prove the
-  P2 shapes against a real PDS, and it is optional.
-- User-repo records need delegated/permissioned writes. Until then, the export
-  is a per-repo JSONL plus a CAR (add `@atproto/repo`) that an operator can
-  import; blobs need an upload step that turns `$bytes` into a blob ref.
+- **a space-capable PDS and a space credential** — the host issues one in
+  exchange for a delegation token the user's PDS mints. The beta is expected to
+  open this to all Bluesky users in December 2026.
+- **a space dimension in the record model.** A record's address there is
+  `(space, repo DID, collection, rkey)`, and `RecordChange` carries only the
+  repo DID today (§6 Q2).
+- **a blob step** for `$bytes` message attachments and `atblob://` avatars.
+
+Nothing in P0–P4 writes to a PDS: the pipeline is pure and stops at in-memory
+records (`foldChanges`, `dump-space-records`, `toRecordJson`). The space repos
+provisioned by `migrate-spaces-to-pds.ts` — a PDS account per space DID — are a
+transitional shape, not the target. What P5 unblocks is credible exit: a space
+admin moving their space with all its data, then each user's data to their own
+account.
 
 ## 5. Verification
 
@@ -226,8 +271,17 @@ Not in scope until writes into user repos are possible:
 
 1. Does the browser page member repos that belong to other spaces too, or only
    the repos this space's stream touched? (D2 assumes the latter.)
-2. Do we keep the interim repo assignment in the stored feed, or change the
-   adapter so stored rows already carry the folded repo? Changing it is cheap
-   now and expensive after a second consumer exists.
+2. **Where does the space go in `RecordChange`?** Under permissioned spaces a
+   repo DID alone does not address a record — the same DID holds a repo in every
+   space it writes to. Either the type gains a space scope before P5, or the
+   producer carries it per row.
 3. Who owns the "cannot be expressed" list — an admin-only diagnostic, or a
    public per-space report that users can read before migrating?
+4. What is the long-term home of the stored feed's repo assignment? D1 and D7
+   keep the stored rows as they are (the space DID for edits/deletes and for
+   A's grant) and resolve the repo at fold time. Revisit when clients write
+   records directly, because then the row's repo and the record's repo diverge
+   for a different reason.
+5. **Bridged profiles (D8)** — a cutover loses them until
+   `space.roomy.user.bridgedProfile` exists and the bridge writes it. Nothing
+   else in this plan depends on the fix; the gap is what has to be visible.
