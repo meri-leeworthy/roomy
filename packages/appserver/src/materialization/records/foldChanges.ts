@@ -8,17 +8,26 @@
  * the Rust worker and the read endpoint fold the same rows the same way rather
  * than each re-deriving the rules.
  *
- * Three rules, and the feed's own shape supplies the rest:
+ * Four rules, and the feed's own shape supplies the rest:
  *
- *  - **`update` on an absent key creates.** Six kinds never emit `create`
+ *  - **`update` on an absent key creates.** Seven kinds never emit `create`
  *    (`spaceInfo`, `spaceSidebar`, `roomPermission`, `federationGrant`,
- *    `profile`, `calendarLink` — the adapter is stateless and sees one entry),
- *    and `membership` can update without one. A patch applied to nothing is the
- *    record, so the fold does what the projection rules do: upsert.
+ *    `federationReceiverGrant`, `profile`, `calendarLink` — the adapter is
+ *    stateless and sees one entry), and `membership` can update without one. A
+ *    patch applied to nothing is the record, so the fold does what the
+ *    projection rules do: upsert.
  *  - **A patch merges shallowly.** The patch's fields replace the record's at
  *    the top level and nothing recurses: `extensions: null` is a value (the
  *    message kind reads it as "remove all attachments"), not a merge
  *    instruction, and `content` replaces the content it patches.
+ *  - **A grant patch changes one entry.** The two federation grant kinds are
+ *    sets, not fields: `setRoomPermission` names one room and
+ *    `setReceiverPermission` one (room, grantee, granteeKind), so a shallow
+ *    merge would make the second setter replace the first instead of adding to
+ *    it. Their patches upsert or remove an entry of the record's array, keyed
+ *    as {@link ENTRY_PATCHED} says, and a `null` permission removes it. This is
+ *    the rule the projection already encodes in `federation_room_permissions`
+ *    and `federation_receiver_permissions` — a port, not a new judgement.
  *  - **A record's repo is resolved, not stored.** The feed's `repo` for an
  *    `update`/`delete` is the space (the adapter cannot know whose record it
  *    touches). The row carries `actor`, so "the actor's repo holds this record,
@@ -32,6 +41,7 @@
  */
 
 import type { RecordChangeRow } from "../../streams/recordChanges.ts";
+import { RECORD_KINDS } from "./recordKinds.ts";
 
 /** One record the feed currently describes. */
 export interface FoldedRecord {
@@ -50,6 +60,84 @@ export interface FoldedRecord {
   readonly orderStamp: string;
   /** How many changes produced this record, at least one. */
   readonly ops: number;
+}
+
+/**
+ * A kind whose patch changes one entry of an array in the record rather than a
+ * top-level field, and what identifies that entry.
+ *
+ * `keyField` is the record's field the rkey states, synthesised when the fold
+ * begins at a patch: the same derivation `toRecordJson` makes for a membership
+ * whose first change is an admin grant.
+ */
+interface EntryPatch {
+  /** The record field holding the entries. */
+  readonly field: string;
+  /** The patch fields that key one entry. */
+  readonly key: readonly string[];
+  /** The record field the record's rkey is the value of. */
+  readonly keyField: string;
+}
+
+const ENTRY_PATCHED: Readonly<Record<string, EntryPatch>> = {
+  [RECORD_KINDS.federationGrant.collection]: {
+    field: "origin",
+    key: ["room"],
+    keyField: "federatingSpace",
+  },
+  [RECORD_KINDS.federationReceiverGrant.collection]: {
+    field: "receiver",
+    key: ["room", "grantee", "granteeKind"],
+    keyField: "originSpace",
+  },
+};
+
+/** The entry key the given field values name, unambiguous for the same reason the record key is. */
+function entryKey(
+  values: Readonly<Record<string, unknown>>,
+  fields: readonly string[],
+): string | undefined {
+  const parts: string[] = [];
+  for (const field of fields) {
+    const value = values[field];
+    if (typeof value !== "string") return undefined;
+    parts.push(value);
+  }
+  return parts.join("\u0000");
+}
+
+/**
+ * Apply one grant patch: upsert the entry it names, or remove that entry when
+ * the permission is `null`.
+ *
+ * Entries keep their order — a replaced entry stays where it was — so a fold of
+ * the same rows always produces the same body.
+ */
+function applyEntryPatch(
+  base: Readonly<Record<string, unknown>>,
+  patch: Readonly<Record<string, unknown>>,
+  rule: EntryPatch,
+): Readonly<Record<string, unknown>> {
+  const held = base[rule.field];
+  const entries: Readonly<Record<string, unknown>>[] = Array.isArray(held)
+    ? [...(held as Readonly<Record<string, unknown>>[])]
+    : [];
+  const key = entryKey(patch, rule.key);
+
+  if (key !== undefined) {
+    const at = entries.findIndex(
+      (entry) => entryKey(entry, rule.key) === key,
+    );
+    if (patch["permission"] === null) {
+      if (at !== -1) entries.splice(at, 1);
+    } else if (at === -1) {
+      entries.push(patch);
+    } else {
+      entries[at] = { ...entries[at], ...patch };
+    }
+  }
+
+  return { ...base, [rule.field]: entries };
 }
 
 /**
@@ -120,10 +208,24 @@ export function foldChanges(
     }
 
     const body = bodyOf(row);
-    const record =
-      row.op === "update" && current !== undefined
-        ? { ...current.record, ...body }
-        : body;
+    const entryRule = ENTRY_PATCHED[row.collection];
+    let record: Readonly<Record<string, unknown>>;
+    if (row.op !== "update") {
+      record = body;
+    } else if (entryRule === undefined) {
+      record =
+        current !== undefined ? { ...current.record, ...body } : body;
+    } else {
+      // A grant patch names one entry, so the record it applies to is an empty
+      // set when the fold starts at the patch — and it still knows which space
+      // it is about, because the rkey says so.
+      const base =
+        current?.record ?? {
+          [entryRule.keyField]: row.rkey,
+          [entryRule.field]: [],
+        };
+      record = applyEntryPatch(base, body, entryRule);
+    }
 
     records.set(key, {
       repo,

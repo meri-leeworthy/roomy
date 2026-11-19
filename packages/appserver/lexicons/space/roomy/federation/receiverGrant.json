@@ -1,0 +1,46 @@
+{
+  "lexicon": 1,
+  "id": "space.roomy.federation.receiverGrant",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Which of this space's members may see which rooms of the space it federates with. One record per origin space, written to the receiving space's repo — the receiving space's admins are the ones who decide it. Each entry is capped by the matching entry in the origin space's `space.roomy.federation.grant` record, so on its own this record grants nothing.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["originSpace", "receiver", "createdAt"],
+        "properties": {
+          "originSpace": {
+            "type": "string",
+            "format": "did",
+            "description": "The space being federated with. The same DID the record key names."
+          },
+          "receiver": {
+            "type": "array",
+            "description": "The grants, one per room and grantee.",
+            "items": {
+              "type": "object",
+              "required": ["room", "permission", "grantee", "granteeKind"],
+              "properties": {
+                "room": {
+                  "type": "string",
+                  "description": "The room: the record key of a `space.roomy.space.room` record in the origin space."
+                },
+                "permission": { "type": "string", "knownValues": ["read", "readwrite"] },
+                "grantee": {
+                  "type": "string",
+                  "description": "The account or role the grant names, or this space itself for a grant to all of its members."
+                },
+                "granteeKind": {
+                  "type": "string",
+                  "knownValues": ["members", "user", "role"]
+                }
+              }
+            }
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

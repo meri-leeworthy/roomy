@@ -30,6 +30,9 @@ import type { DbLike } from "../../db/types.ts";
 import { snapshotSpaceDb } from "../../streams/rebuildEquality.ts";
 import { applyBatch } from "../applyBatch.ts";
 import type { LoggedEvent } from "../types.ts";
+import { feedRows } from "../../streams/recordChanges.ts";
+import { foldChanges } from "./foldChanges.ts";
+import { RECORD_KINDS } from "./recordKinds.ts";
 import { _withEventPath } from "./toRecordChanges.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -181,22 +184,23 @@ async function globalSnapshot(globalDb: Database): Promise<{
 async function derive(
   entries: LoggedEvent[],
   opts: { eventPath: boolean; isBackfill: boolean },
+  stream: StreamDid = STREAM,
 ): Promise<Derived> {
   const db = freshSpaceDb();
   const globalDb = freshGlobalDb();
   await db.run("insert into entities (id, stream_id, created_at, updated_at) values (?, ?, ?, ?)", [
-    STREAM,
-    STREAM,
+    stream,
+    stream,
     RECEIVED_AT,
     RECEIVED_AT,
   ]);
   await db.run(
       "insert into comp_space (entity, created_at, updated_at) values (?, ?, ?)",
-      [STREAM, RECEIVED_AT, RECEIVED_AT],
+      [stream, RECEIVED_AT, RECEIVED_AT],
     );
 
   const apply = () =>
-    applyBatch(db, STREAM, entries, { isBackfill: opts.isBackfill }, toAsyncDb(globalDb));
+    applyBatch(db, stream, entries, { isBackfill: opts.isBackfill }, toAsyncDb(globalDb));
   const stats = await (opts.eventPath ? _withEventPath(apply) : apply());
 
   expect(stats.failed).toEqual([]);
@@ -307,5 +311,158 @@ describe("the corpus exercises each converted kind's ops", () => {
       space_id: ORIGIN,
       federating_space_did: STREAM,
     });
+  });
+});
+
+/**
+ * The two halves of a grant, in the two logs that decide them.
+ *
+ * `setRoomPermission` is sent on the origin space's stream and
+ * `setReceiverPermission` on the receiving space's. Neither log can state the
+ * other's decisions — no order relates them, and the receiving space's repo is
+ * not writable by the origin space — so each stream's fold has to state exactly
+ * its own record, while the global projection still agrees with the event path
+ * on both.
+ */
+describe("a federated grant, across the two streams that decide it", () => {
+  const ORIGIN_SPACE = StreamDid.assert("did:web:split-origin.example");
+  const RECEIVING_SPACE = StreamDid.assert("did:web:split-receiving.example");
+  const ROOM_ONE = newUlid();
+  const ROOM_TWO = newUlid();
+
+  /** What the origin space's admins decided, in the origin space's log. */
+  function originLog(): LoggedEvent[] {
+    const events = [
+      {
+        $type: "space.roomy.federation.setRoomPermission.v0",
+        id: newUlid(),
+        federatingSpaceDid: RECEIVING_SPACE,
+        roomId: ROOM_ONE,
+        permission: "read",
+      },
+      {
+        $type: "space.roomy.federation.setRoomPermission.v0",
+        id: newUlid(),
+        federatingSpaceDid: RECEIVING_SPACE,
+        roomId: ROOM_TWO,
+        permission: "readwrite",
+      },
+    ] as unknown as Event[];
+    return events.map((event, i) => logged(event, i + 1));
+  }
+
+  /** What the receiving space's admins decided, in its own log. */
+  function receivingLog(): LoggedEvent[] {
+    const events = [
+      {
+        $type: "space.roomy.federation.setReceiverPermission.v0",
+        id: newUlid(),
+        originSpaceId: ORIGIN_SPACE,
+        roomId: ROOM_ONE,
+        grantee: RECEIVING_SPACE,
+        kind: "members",
+        permission: "read",
+      },
+      {
+        $type: "space.roomy.federation.setReceiverPermission.v0",
+        id: newUlid(),
+        originSpaceId: ORIGIN_SPACE,
+        roomId: ROOM_TWO,
+        grantee: USER,
+        kind: "user",
+        permission: "readwrite",
+      },
+    ] as unknown as Event[];
+    return events.map((event, i) => logged(event, i + 1));
+  }
+
+  function fold(entries: LoggedEvent[], stream: StreamDid) {
+    return foldChanges(entries.flatMap((entry) => feedRows(entry, stream)));
+  }
+
+  test("the global projection agrees with the event path on both streams", async () => {
+    for (const [stream, entries] of [
+      [ORIGIN_SPACE, originLog()],
+      [RECEIVING_SPACE, receivingLog()],
+    ] as const) {
+      const eventPath = await derive(entries, {
+        eventPath: true,
+        isBackfill: false,
+      }, stream);
+      const recordPath = await derive(entries, {
+        eventPath: false,
+        isBackfill: false,
+      }, stream);
+
+      expect(recordPath.federations).toEqual(eventPath.federations);
+      expect(recordPath.roomPermissions).toEqual(eventPath.roomPermissions);
+      expect(recordPath.receiverPermissions).toEqual(
+        eventPath.receiverPermissions,
+      );
+    }
+  });
+
+  test("the origin space's fold states every origin grant, keyed by the receiving space", () => {
+    const folded = fold(originLog(), ORIGIN_SPACE);
+
+    expect(folded).toHaveLength(1);
+    expect(folded[0]).toMatchObject({
+      repo: ORIGIN_SPACE,
+      collection: RECORD_KINDS.federationGrant.collection,
+      rkey: RECEIVING_SPACE,
+      ops: 2,
+    });
+    // Both setters are entries of one record: the second does not replace the
+    // first.
+    expect(folded[0]!.record).toEqual({
+      federatingSpace: RECEIVING_SPACE,
+      origin: [
+        { room: ROOM_ONE, permission: "read" },
+        { room: ROOM_TWO, permission: "readwrite" },
+      ],
+    });
+  });
+
+  test("the receiving space's fold states its receiver grants, keyed by the origin space", () => {
+    const folded = fold(receivingLog(), RECEIVING_SPACE);
+
+    expect(folded).toHaveLength(1);
+    expect(folded[0]).toMatchObject({
+      repo: RECEIVING_SPACE,
+      collection: RECORD_KINDS.federationReceiverGrant.collection,
+      rkey: ORIGIN_SPACE,
+      ops: 2,
+    });
+    expect(folded[0]!.record).toEqual({
+      originSpace: ORIGIN_SPACE,
+      receiver: [
+        {
+          room: ROOM_ONE,
+          grantee: RECEIVING_SPACE,
+          granteeKind: "members",
+          permission: "read",
+        },
+        {
+          room: ROOM_TWO,
+          grantee: USER,
+          granteeKind: "user",
+          permission: "readwrite",
+        },
+      ],
+    });
+  });
+
+  test("neither fold states the other space's half", () => {
+    for (const [stream, entries, absent] of [
+      [ORIGIN_SPACE, originLog(), "federationReceiverGrant"],
+      [RECEIVING_SPACE, receivingLog(), "federationGrant"],
+    ] as const) {
+      const collections = fold(entries, stream).map(
+        (record) => record.collection,
+      );
+      expect(collections).not.toContain(
+        RECORD_KINDS[absent].collection,
+      );
+    }
   });
 });

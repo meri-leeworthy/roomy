@@ -198,6 +198,9 @@ const SAMPLES: Readonly<Record<RecordKind, Readonly<Record<string, unknown>>>> =
   federationGrant: {
     federatingSpace: "did:web:receiving.example",
     origin: [{ room: "01M6R8PSB8Z9391DFQBJ77P3A2", permission: "read" }],
+  },
+  federationReceiverGrant: {
+    originSpace: "did:web:origin.example",
     receiver: [
       {
         room: "01M6R8PSB8Z9391DFQBJ77P3A2",
@@ -273,11 +276,9 @@ describe("the corpus, as records", () => {
       expectRecord(kindOf(record.collection), json.record);
     }
 
-    // The one grant the corpus holds is a patch, not the record's grant set —
-    // and it is the only folded record the record model cannot state.
-    expect(flagged).toEqual([
-      `${RECORD_KINDS.federationGrant.collection}/did:web:adapter-fixture.example`,
-    ]);
+    // Both halves of the federation grant are records in their own right, so
+    // nothing the corpus folds is beyond the record model.
+    expect(flagged).toEqual([]);
   });
 
   test("no record carries a field its lexicon does not declare", () => {
@@ -306,21 +307,6 @@ describe("the corpus, as records", () => {
 });
 
 describe("records the record model cannot state", () => {
-  test("a folded grant is flagged rather than bent into a record", () => {
-    const json = toRecordJson(
-      foldedOf("federationGrant", {
-        scope: "receiver",
-        room: "01M6R8PSB8Z9391DFQBJ77P3A2",
-        grantee: "did:web:receiving.example",
-        granteeKind: "members",
-        permission: "read",
-      }),
-    );
-    expect(json.ok).toBe(false);
-    if (json.ok) return;
-    expect(json.reason).toContain("grant patch");
-  });
-
   test("a profile avatar and a bridged handle have no field in the record", () => {
     for (const field of ["avatar", "handle"] as const) {
       const json = toRecordJson(

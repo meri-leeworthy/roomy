@@ -2,7 +2,7 @@
  * The event log → `RecordChange[]` adapter.
  *
  * `docs/plans/replicable-space-workers.md` §5 WS3: 47 event types collapse onto
- * 16 record kinds, and this is where that collapse happens. A kind in
+ * 17 record kinds, and this is where that collapse happens. A kind in
  * {@link CONVERTED_KINDS} is applied by the projection rules; every other kind
  * still runs its SDK materialiser, so both descriptions of the log live in this
  * tree and the tests are what keep them equal.
@@ -143,7 +143,9 @@ export const RECORD_KINDS_FOR_EVENT: Record<EventType, readonly RecordKind[]> = 
   "space.roomy.federation.respond.v0": ["federationRequest"],
   "space.roomy.federation.remove.v0": ["federationRequest", "federationGrant"],
   "space.roomy.federation.setRoomPermission.v0": ["federationGrant"],
-  "space.roomy.federation.setReceiverPermission.v0": ["federationGrant"],
+  "space.roomy.federation.setReceiverPermission.v0": [
+    "federationReceiverGrant",
+  ],
   "space.roomy.voice.callStarted.v0": ["voiceCall"],
   "space.roomy.voice.callJoined.v0": ["voiceCall"],
   "space.roomy.voice.callLeft.v0": ["voiceCall"],
@@ -169,6 +171,7 @@ export const CONVERTED_KINDS: ReadonlySet<RecordKind> = new Set<RecordKind>([
   "roomPermission",
   "federationRequest",
   "federationGrant",
+  "federationReceiverGrant",
   "profile",
   "calendarLink",
   "voiceCall",
@@ -692,8 +695,10 @@ export function toRecordChanges(
       ];
 
     // ── federation ───────────────────────────────────────────────────────
-    // Both records are keyed by the receiving space (B) alone, because the one
-    // event that removes them names B and nothing finer.
+    // One relationship, two grant records: each half is decided in the log it
+    // is sent on, so each lives in the repo of that log — A's origin grants in
+    // A, B's receiver grants in B. Both are keyed by the other space alone,
+    // because the one event that removes a grant names B and nothing finer.
     case "space.roomy.federation.request.v0":
       return [
         created(
@@ -724,7 +729,9 @@ export function toRecordChanges(
         ),
       ];
 
-    // One event, two deletes: the relationship and every grant it created.
+    // One event, two deletes: the relationship and the origin grants it
+    // created. B's receiver record is in B's repo, which A cannot reach, so it
+    // is left behind — with no origin ceiling it grants nothing.
     case "space.roomy.federation.remove.v0":
       return [
         deleted(
@@ -742,10 +749,8 @@ export function toRecordChanges(
       ];
 
     case "space.roomy.federation.setRoomPermission.v0":
-      // A null level clears the origin grant for one channel, so both directions
-      // are updates to the grant record. Both grant events write the same
-      // record, and `federation.remove` deletes it whole — which is why the
-      // record is per receiving space rather than per channel.
+      // Sent on A's stream by an admin of A, and one channel's ceiling changes:
+      // a null level clears it. The record is A's, keyed by B.
       return [
         updated(
           "federationGrant",
@@ -753,7 +758,6 @@ export function toRecordChanges(
           rkey(event.federatingSpaceDid),
           stamp,
           {
-            scope: "origin",
             room: event.roomId,
             permission: event.permission,
           },
@@ -761,16 +765,21 @@ export function toRecordChanges(
       ];
 
     case "space.roomy.federation.setReceiverPermission.v0":
-      // Sent on B's stream, but the grant it writes belongs to the origin space
-      // A — so A is the repo and the stream (B) is part of the key.
+      // Sent on B's stream by an admin of B: the record is B's, keyed by the
+      // origin space it belongs to.
       return [
-        updated("federationGrant", event.originSpaceId, rkey(streamId), stamp, {
-          scope: "receiver",
-          room: event.roomId,
-          grantee: event.grantee,
-          granteeKind: event.kind,
-          permission: event.permission,
-        }),
+        updated(
+          "federationReceiverGrant",
+          space,
+          rkey(event.originSpaceId),
+          stamp,
+          {
+            room: event.roomId,
+            grantee: event.grantee,
+            granteeKind: event.kind,
+            permission: event.permission,
+          },
+        ),
       ];
 
     // ── profile, calendar, voice ─────────────────────────────────────────

@@ -7,7 +7,7 @@
  * place that turns one into an ATProto record, so a reader validating against
  * `lexicons/` and the read endpoint that serves the records agree on the shape.
  *
- * Four rules, and the lexicons carry the rest:
+ * Three rules, and the lexicons carry the rest:
  *
  *  - **`$type` is the collection.** A record's type is the collection it lives
  *    in; the fold's `collection` column is that, so nothing is looked up.
@@ -24,16 +24,12 @@
  *    strings the projection holds. Nothing is inflated and no blob ref is
  *    invented; uploading a blob is a write-path step.
  *
- * Two kinds do not survive that. `federationGrant`'s body is a *patch* — the
- * adapter never writes the whole record, so every fold of one is
- * `{scope, room, grantee, permission}`, and turning that into the record's
- * `origin`/`receiver` arrays needs the projection's per-entry merge, which is
- * fold semantics and not this file's to guess. The folded `profile` body is a
- * projection row, not the `space.roomy.user.profile` record users write to
- * their PDS: `name`/`description` have fields there, while an `atblob://`
- * avatar and a bridged `handle` do not. Both are reported as unexpressible
- * rather than bent into a shape that validates, and the caller counts them —
- * the "cannot be expressed" list plan §3 D5 asks for.
+ * One kind does not survive that. The folded `profile` body is a projection
+ * row, not the `space.roomy.user.profile` record users write to their PDS:
+ * `name`/`description` have fields there, while an `atblob://` avatar and a
+ * bridged `handle` do not. It is reported as unexpressible rather than bent
+ * into a shape that validates, and the caller counts it — the "cannot be
+ * expressed" list plan §3 D5 asks for.
  */
 
 import { decodeTime } from "ulidx";
@@ -98,16 +94,6 @@ export function toRecordJson(folded: FoldedRecord): RecordJson {
   }
 
   switch (kind) {
-    case "federationGrant":
-      // Every fold of one is a patch: the adapter has no create for this kind,
-      // so `origin`/`receiver` were never written. Assembling them means
-      // applying the patch's upsert-per-entry rule, which is the fold's job.
-      return {
-        ok: false,
-        reason:
-          "the fold carries a single-origin grant patch, not the record's grant set",
-      };
-
     case "profile":
       return profileRecord(folded);
 

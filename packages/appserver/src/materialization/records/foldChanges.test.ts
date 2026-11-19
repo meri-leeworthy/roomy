@@ -45,7 +45,11 @@ const EVENTS_SCHEMA_PATH = join(__dirname, "..", "..", "db", "eventsSchema.sql")
 const SPACE = "did:plc:fold-space";
 const AUTHOR = "did:plc:fold-author";
 const ADMIN = "did:plc:fold-admin";
+const RECEIVING = "did:web:fold-receiving.example";
+const ORIGIN_SPACE = "did:web:fold-origin.example";
 const MESSAGE = RECORD_KINDS.message.collection;
+const GRANT = RECORD_KINDS.federationGrant.collection;
+const RECEIVER_GRANT = RECORD_KINDS.federationReceiverGrant.collection;
 
 let seq = 0;
 
@@ -121,6 +125,117 @@ describe("the fold's rules", () => {
     ]);
     // The patch replaces `content`; it does not add `mime` to the old object.
     expect(nested[0]!.record).toEqual({ content: { mime: "b" }, room: "r1" });
+  });
+
+  test("a grant patch adds an entry rather than replacing the set", () => {
+    const records = foldChanges([
+      row(SPACE, GRANT, RECEIVING, "update", {
+        room: "room1",
+        permission: "read",
+      }),
+      row(SPACE, GRANT, RECEIVING, "update", {
+        room: "room2",
+        permission: "readwrite",
+      }),
+    ]);
+
+    // One setter names one room, so the second write is a second entry — not a
+    // second record, and not a replacement of the first.
+    expect(records).toHaveLength(1);
+    expect(records[0]!.record).toEqual({
+      federatingSpace: RECEIVING,
+      origin: [
+        { room: "room1", permission: "read" },
+        { room: "room2", permission: "readwrite" },
+      ],
+    });
+    expect(records[0]!.ops).toBe(2);
+  });
+
+  test("a null permission removes one entry and leaves the rest of the set", () => {
+    const records = foldChanges([
+      row(SPACE, GRANT, RECEIVING, "update", {
+        room: "room1",
+        permission: "read",
+      }),
+      row(SPACE, GRANT, RECEIVING, "update", {
+        room: "room2",
+        permission: "readwrite",
+      }),
+      row(SPACE, GRANT, RECEIVING, "update", {
+        room: "room1",
+        permission: null,
+      }),
+    ]);
+
+    // The record is the entries that remain: the cleared room is gone and the
+    // other one is untouched.
+    expect(records[0]!.record).toEqual({
+      federatingSpace: RECEIVING,
+      origin: [{ room: "room2", permission: "readwrite" }],
+    });
+  });
+
+  test("a re-set entry replaces that entry in place", () => {
+    const records = foldChanges([
+      row(SPACE, GRANT, RECEIVING, "update", {
+        room: "room1",
+        permission: "read",
+      }),
+      row(SPACE, GRANT, RECEIVING, "update", {
+        room: "room2",
+        permission: "read",
+      }),
+      row(SPACE, GRANT, RECEIVING, "update", {
+        room: "room1",
+        permission: "readwrite",
+      }),
+    ]);
+
+    expect(records[0]!.record["origin"]).toEqual([
+      { room: "room1", permission: "readwrite" },
+      { room: "room2", permission: "read" },
+    ]);
+  });
+
+  test("a receiver grant is keyed by room and grantee, in the receiving space's repo", () => {
+    const records = foldChanges([
+      row(SPACE, RECEIVER_GRANT, ORIGIN_SPACE, "update", {
+        room: "room1",
+        grantee: "did:plc:fold-author",
+        granteeKind: "user",
+        permission: "read",
+      }),
+      row(SPACE, RECEIVER_GRANT, ORIGIN_SPACE, "update", {
+        room: "room1",
+        grantee: ADMIN,
+        granteeKind: "role",
+        permission: "readwrite",
+      }),
+      row(SPACE, RECEIVER_GRANT, ORIGIN_SPACE, "update", {
+        room: "room1",
+        grantee: ADMIN,
+        granteeKind: "role",
+        permission: null,
+      }),
+    ]);
+
+    // One record per origin space, in this space's repo — the repo the log the
+    // events arrived on belongs to. The role's grant is cleared; the user's is
+    // not, so the key includes the grantee and the kind, not the room alone.
+    expect(records).toHaveLength(1);
+    expect(records[0]!.repo).toBe(SPACE);
+    expect(records[0]!.record).toEqual({
+      originSpace: ORIGIN_SPACE,
+      receiver: [
+        {
+          room: "room1",
+          grantee: "did:plc:fold-author",
+          granteeKind: "user",
+          permission: "read",
+        },
+      ],
+    });
   });
 
   test("a delete removes the record, and a delete of nothing is nothing", () => {
