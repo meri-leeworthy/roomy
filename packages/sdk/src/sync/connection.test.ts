@@ -12,6 +12,7 @@ import {
   decodeCborFrame,
   type SyncFrame,
 } from "./connection";
+import { SessionGate } from "./session-gate";
 
 // ─── Mock WebSocket ───────────────────────────────────────────────────────
 
@@ -1154,6 +1155,120 @@ describe("SyncConnection — attempt lifecycle edge cases", () => {
       await vi.advanceTimersByTimeAsync(0);
       conn.close();
       await expect(p).rejects.toThrow(/closed/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("SyncConnection — a rejected session stops the reconnect loop", () => {
+  const rejection = () =>
+    Object.assign(new Error("401 Unauthorized"), { status: 401 });
+
+  it("issues no further ticket fetch while the session is rejected", async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = new SessionGate();
+      const fetchTicket = vi.fn().mockRejectedValue(rejection());
+      const reconnectDelay = vi.fn().mockReturnValue(5);
+      const conn = new SyncConnection({
+        fetchTicket,
+        wsUrl: "wss://srv/",
+        webSocketImpl: makeMockWS(),
+        sessionGate: gate,
+        reconnectDelay,
+      });
+      conn.onError(() => {});
+
+      await conn.connect().catch(() => {});
+
+      expect(fetchTicket).toHaveBeenCalledTimes(1);
+      expect(gate.rejected).toBe(true);
+      expect(conn.status.state).toBe("suspended");
+      // Nothing was scheduled: no backoff timer, no attempt counted.
+      expect(reconnectDelay).not.toHaveBeenCalled();
+
+      // A caller nudging the connection buys no session request either, and
+      // no amount of waiting produces one.
+      await conn.connect();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(fetchTicket).toHaveBeenCalledTimes(1);
+      expect(sockets).toHaveLength(0);
+      expect(conn.status.state).toBe("suspended");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes the loop on a session-recovery signal", async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = new SessionGate();
+      const fetchTicket = vi
+        .fn()
+        .mockRejectedValueOnce(rejection())
+        .mockResolvedValue("tkt");
+      const conn = new SyncConnection({
+        fetchTicket,
+        wsUrl: "wss://srv/",
+        webSocketImpl: makeMockWS(),
+        sessionGate: gate,
+        reconnectDelay: () => 5,
+      });
+      conn.onError(() => {});
+
+      await conn.connect().catch(() => {});
+      expect(conn.status.state).toBe("suspended");
+
+      // The session layer saw the session origin answer again.
+      gate.recover();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(fetchTicket).toHaveBeenCalledTimes(2);
+      expect(lastSocket).toBeTruthy();
+      lastSocket!._open();
+      expect(conn.status.state).toBe("open");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the existing backoff for a non-session failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = new SessionGate();
+      const fetchTicket = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error("500 Internal Server Error"), { status: 500 }),
+        )
+        // status 0 is a request that never got a response: the session was
+        // never asked, so it is not a rejection either.
+        .mockRejectedValueOnce(Object.assign(new Error("network"), { status: 0 }))
+        .mockResolvedValue("tkt");
+      const conn = new SyncConnection({
+        fetchTicket,
+        wsUrl: "wss://srv/",
+        webSocketImpl: makeMockWS(),
+        sessionGate: gate,
+        // Distinct delays so each advance fires exactly one retry.
+        reconnectDelay: (attempt: number) => (attempt === 0 ? 5 : 50),
+      });
+      conn.onError(() => {});
+
+      await conn.connect().catch(() => {});
+      expect(gate.rejected).toBe(false);
+      expect(conn.status.state).toBe("reconnecting");
+
+      await vi.advanceTimersByTimeAsync(5);
+      expect(fetchTicket).toHaveBeenCalledTimes(2);
+      expect(gate.rejected).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(50);
+      expect(fetchTicket).toHaveBeenCalledTimes(3);
+      expect(lastSocket).toBeTruthy();
+      lastSocket!._open();
+      expect(conn.status.state).toBe("open");
     } finally {
       vi.useRealTimers();
     }

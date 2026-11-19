@@ -34,6 +34,7 @@ import { scheduleAutoReload, sessionFailureFields } from "./error-recovery";
 import { pxUnauth } from "./client";
 import { clearPersistedCache } from "./client";
 import { openNativeSessionStore } from "./cache-store";
+import { syncSessionGate } from "./session-gate";
 import {
   createSessionAwareFetch,
   resetSessionStreak,
@@ -256,6 +257,9 @@ function sessionFetch(): typeof globalThis.fetch | undefined {
     onExhausted: (failure) => scheduleAutoReload(sessionFailureError(failure)),
     onStreak: (streak) =>
       trackMeasurement("session.consecutive_failures", streak, { origin }),
+    // The same response that ends a run of rejections is the signal the sync
+    // connection waits on to resume minting tickets.
+    onHealthy: () => syncSessionGate?.recover(),
   });
 }
 
