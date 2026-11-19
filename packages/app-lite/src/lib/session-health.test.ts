@@ -13,13 +13,17 @@
  * `node --test --experimental-strip-types`.
  */
 
-import { describe, test } from "node:test";
+import { beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
   SESSION_FAILURE_LIMIT,
   STREAK_TTL_MS,
+  clearSessionTerminals,
   createSessionAwareFetch,
+  isSessionRejected,
+  isSessionTerminal,
+  markSessionTerminal,
   resetSessionStreak,
   sessionFailureError,
   type SessionFailure,
@@ -294,5 +298,96 @@ describe("createSessionAwareFetch", () => {
       url: `${ORIGIN}/xrpc/query`,
     };
     assert.equal(isRecoverableAtprotoError(sessionFailureError(failure)), true);
+  });
+});
+
+describe("isSessionRejected", () => {
+  test("a 401 the session layer raised is a rejection", () => {
+    // The shape `@atproto/xrpc` throws for a rejected `getServiceAuth`: a
+    // status, and no NSID — the session layer was asked for a token, not for a
+    // room.
+    assert.equal(isSessionRejected(Object.assign(new Error("bad token"), { status: 401 })), true);
+    assert.equal(
+      isSessionRejected(
+        Object.assign(new Error("bad token"), { status: 401, errorType: "AuthRequired" }),
+      ),
+      true,
+    );
+  });
+
+  test("an appserver 401 is per-resource authorization, not a dead session", () => {
+    assert.equal(
+      isSessionRejected(
+        Object.assign(new Error("XRPC space.roomy.space.getSpaces failed (401)"), {
+          status: 401,
+          nsid: "space.roomy.space.getSpaces",
+        }),
+      ),
+      false,
+    );
+  });
+
+  test("a 5xx, a network failure and a non-error are not rejections", () => {
+    // Retrying these is how the client learns anything: the session was never
+    // asked, or asked and answered something other than "this token is dead".
+    assert.equal(isSessionRejected(Object.assign(new Error("boom"), { status: 500 })), false);
+    assert.equal(isSessionRejected(Object.assign(new Error("offline"), { status: 0 })), false);
+    assert.equal(isSessionRejected(new Error("boom")), false);
+    assert.equal(isSessionRejected(null), false);
+    assert.equal(isSessionRejected("401"), false);
+  });
+
+  test("the escalation the recovery path raises is a rejection", () => {
+    const failure: SessionFailure = {
+      origin: ORIGIN,
+      count: SESSION_FAILURE_LIMIT,
+      status: 401,
+      url: `${ORIGIN}/xrpc/query`,
+    };
+    assert.equal(isSessionRejected(sessionFailureError(failure)), true);
+  });
+});
+
+describe("terminal query keys", () => {
+  // The marks are module state: every test starts from a clean session.
+  beforeEach(() => clearSessionTerminals());
+
+  const rejection = () => Object.assign(new Error("bad token"), { status: 401 });
+
+  test("a rejection marks the key that earned it, and only that key", () => {
+    markSessionTerminal(rejection(), "space.roomy.space.getSpaces({})");
+    assert.equal(isSessionTerminal("space.roomy.space.getSpaces({})"), true);
+    assert.equal(isSessionTerminal("space.roomy.space.getRooms({})"), false);
+  });
+
+  test("an error that is not a session rejection marks nothing", () => {
+    markSessionTerminal(Object.assign(new Error("boom"), { status: 500 }), "a");
+    markSessionTerminal(Object.assign(new Error("denied"), { status: 401, nsid: "x" }), "b");
+    assert.equal(isSessionTerminal("a"), false);
+    assert.equal(isSessionTerminal("b"), false);
+  });
+
+  test("a response the session origin accepts re-enables every key", async () => {
+    markSessionTerminal(rejection(), "a");
+    markSessionTerminal(rejection(), "b");
+
+    const h = harness();
+    h.answer({ status: 200 });
+    await request(h);
+
+    assert.equal(isSessionTerminal("a"), false);
+    assert.equal(isSessionTerminal("b"), false);
+  });
+
+  test("an answer that is not the session's verdict leaves the marks alone", async () => {
+    // A 403 or a 5xx from the session origin ends the run but says nothing
+    // about the token, so the keys stay closed until one is actually accepted.
+    const h = harness();
+    for (const status of [500, 403, 401]) {
+      markSessionTerminal(rejection(), `key-${status}`);
+      h.answer({ status });
+      await request(h);
+      assert.equal(isSessionTerminal(`key-${status}`), true);
+    }
   });
 });
