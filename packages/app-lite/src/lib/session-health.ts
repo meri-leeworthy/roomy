@@ -36,6 +36,15 @@
  * the session origin resets the count, so a reload that restored a live session
  * clears it before a stray rejection can use it.
  *
+ * **The requests themselves are stopped one layer up.** Counting and
+ * escalation do not stop a tab from spending requests: TanStack answers one
+ * rejected query with `retry: 3` more requests, then one more on every
+ * (re)mount, while the view renders the persisted cache. So the wrapper also
+ * owns the *classification* the query layer needs — `isSessionRejected` names a
+ * rejection, and the terminal marks below remember which query keys already
+ * earned one. `query-policy.ts` consults both from the client's global query
+ * defaults; see `terminalKeys`.
+
  * Client-only, but it touches no browser globals unless it has to, so the
  * counting is exercisable under `node --test`.
  */
@@ -157,6 +166,85 @@ export function resetSessionStreak(
   }
 }
 
+/**
+ * The status a response rejected the session with, or `null` if `err` carries
+ * no status. `@atproto/xrpc` and this repo's own transport both put a number
+ * there; a proxy that stringifies it is still the same rejection.
+ */
+function errorStatus(err: object): number | null {
+  if (!("status" in err)) return null;
+  const status = err.status;
+  if (typeof status === "number") return status;
+  if (typeof status === "string" && /^\d{3}$/.test(status)) return Number(status);
+  return null;
+}
+
+/**
+ * True when `err` is the session origin refusing this client's token.
+ *
+ * The session origin is the only thing that answers a 401 *before* an XRPC
+ * call is made: the query layer reaches it when it asks for a service-auth
+ * token, so the rejection surfaces as an error from `queryFn` carrying a
+ * `status` and no `nsid`. A 401 an appserver XRPC call produced is a different
+ * thing — per-resource authorization, an answer to a question about one room —
+ * and `DirectXrpcClient`'s `toXrpcError` stamps every one of those with the
+ * `nsid` it answered. That field is the discriminator, and the same one
+ * `isRecoverableAtprotoError` uses.
+ *
+ * A `0` (no response at all) is deliberately *not* a rejection here: the
+ * network came back empty, the session was never asked. Retrying it is the
+ * only way to learn anything.
+ */
+export function isSessionRejected(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  // An appserver answer carries the NSID it answered for; the session layer's
+  // rejections have no call to name.
+  if ("nsid" in err && err.nsid != null) return false;
+  return errorStatus(err) === 401;
+}
+
+/**
+ * Query keys whose last request the session origin rejected, by
+ * `Query.queryHash`.
+ *
+ * `createSessionAwareFetch` observes rejections but cannot stop the requests:
+ * the caller that receives one is a TanStack query, whose defaults turn it
+ * into three retries plus one more on every (re)mount. A key marked here has
+ * spent its one request for this session: the global query policy
+ * (`query-policy.ts`) refuses to retry it and to fetch it again on mount until
+ * the mark is cleared.
+ *
+ * The mark is per document and in memory, not persisted. It is cleared by
+ * evidence that the session works — a response the wrapper saw the session
+ * origin accept, or a query that completed (see `clearSessionTerminals`) — so a
+ * reload that came back with a live session re-enables every key before a
+ * component can remount against a mark, while a reload that came back into the
+ * same dead session re-marks each key after one request instead of looping.
+ */
+const terminalKeys = new Set<string>();
+
+/**
+ * Mark `err`'s query key as terminal if `err` is a session rejection, and do
+ * nothing otherwise. This is the `QueryCache`'s `onError`.
+ */
+export function markSessionTerminal(err: unknown, queryHash: string): void {
+  if (!isSessionRejected(err)) return;
+  terminalKeys.add(queryHash);
+}
+
+/** Whether `queryHash` already spent its request on a session this client cannot reach. */
+export function isSessionTerminal(queryHash: string): boolean {
+  return terminalKeys.has(queryHash);
+}
+
+/**
+ * Forget every terminal mark: the session answered, so the keys that stopped
+ * are allowed to ask again. The mark belongs to a session, not to a key.
+ */
+export function clearSessionTerminals(): void {
+  terminalKeys.clear();
+}
+
 /** The URL of a `fetch` input, resolved against `base`; `null` if it is not one. */
 function requestUrl(input: RequestInfo | URL, base?: string): URL | null {
   const raw =
@@ -244,6 +332,13 @@ export function createSessionAwareFetch(
       escalated: false,
     };
     runs.set(url.origin, run);
+
+    // A response the session origin accepted is proof the token behind it
+    // works: the run is over, and the query keys that spent their one request
+    // against the dead session may try again. A 403 or a 5xx is not proof of
+    // anything (the session was never judged), so it ends the run without
+    // clearing the marks.
+    if (status >= 200 && status < 400) clearSessionTerminals();
 
     if (status !== 401 && status !== 0) {
       if (run.count === 0) return;

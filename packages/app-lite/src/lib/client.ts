@@ -11,6 +11,8 @@ import {
   type SnapshotPolicy,
 } from "@roomy-space/sdk/browser";
 import { scheduleAutoReload } from "$lib/error-recovery";
+import { QUERY_DEFAULTS } from "./query-policy";
+import { clearSessionTerminals, markSessionTerminal } from "./session-health";
 import { transport } from "@roomy-space/sdk";
 import { CONFIG } from "./config";
 import {
@@ -54,48 +56,42 @@ export async function pxUnauth(): Promise<
   return unauthXrpc;
 }
 
-// WS is the freshness authority — queries use staleTime: Infinity, with two
-// exceptions noted here so the rule reads correctly at the point it is set.
+// The query defaults themselves — freshness, collection, and the session
+// policy — are `QUERY_DEFAULTS` in `query-policy.ts`, set in one place because
+// thirty query definitions have to agree on them.
 //
-// The exceptions are the two cross-space views, `getActivityFeed` and
-// `getSpaces`: for them the server pushes no frame on a message-driven change
-// (they are evicted from its response cache instead), so each sets
-// `staleTime: 0` to refetch on mount. See `queries/activity-feed.ts` and
-// `queries/spaces.ts`.
-//
-// The refetching that does happen is stale-while-revalidate. A refetch that
-// fails leaves the last value the server sent in place with `status: "error"`
-// alongside it (TanStack's `isRefetchError`), so a view keeps rendering what
-// it has and the views guard their error branch on there being nothing to fall
-// back on. `query-health.ts` reads the same state and drives the stale-data
-// banner.
-//
-// `gcTime` is `Infinity`: an entry nothing observes is not collected, so the
-// next snapshot still holds the rooms the user was not looking at — which are
-// exactly the entries persistence exists to keep. The six `gcTime: 0` call
-// sites (threads/links/search) keep their opt-out: they are collected the
-// moment nothing observes them, and are excluded from the persisted set
-// structurally.
-//
-// The query/mutation cache `onError` callbacks route recoverable ATProto
+// The query/mutation cache callbacks below route recoverable ATProto
 // session/auth errors (expired/revoked tokens, failed service-auth) to the
 // auto-reload recovery in `error-recovery.ts`. Without this, a dead OAuth
 // session leaves every query in an error state with no way to recover —
 // especially in the PWA, where the page cannot be manually refreshed.
+//
+// Reporting a dead session is not the same as stopping it. Recovery reloads at
+// most a few times and then hands off to the login path, while a view that
+// keeps its data keeps remounting — and TanStack answers each of those mounts,
+// and each failed fetch, with another request carrying the same dead token.
+// `query-policy.ts` is the one place that decides otherwise: a session-origin
+// 401 is terminal for the query key that earned it (`markSessionTerminal`), so
+// the key stops retrying and stops fetching on mount until a response the
+// session origin accepts clears the mark.
+//
+// Clearing takes two signals, both of them evidence: the session-aware fetch
+// seeing an accepted response (`session-health.ts`), and a query of *any* key
+// succeeding here — every appserver call first mints a service-auth token from
+// the session, so a query that completed is a session request that was answered.
 const config: QueryClientConfig = {
   queryCache: new QueryCache({
-    onError: (err) => scheduleAutoReload(err),
+    onError: (err, query) => {
+      markSessionTerminal(err, query.queryHash);
+      scheduleAutoReload(err);
+    },
+    onSuccess: () => clearSessionTerminals(),
   }),
   mutationCache: new MutationCache({
     onError: (err) => scheduleAutoReload(err),
   }),
   defaultOptions: {
-    queries: {
-      staleTime: Infinity,
-      gcTime: Infinity,
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-    },
+    queries: QUERY_DEFAULTS,
   },
 };
 
