@@ -285,3 +285,13 @@ account.
 5. **Bridged profiles (D8)** — a cutover loses them until
    `space.roomy.user.bridgedProfile` exists and the bridge writes it. Nothing
    else in this plan depends on the fix; the gap is what has to be visible.
+6. **The Rust mirror does not know D7's second kind.** `crates/space-core` is a
+   full parallel of the TypeScript record module: a closed 16-entry
+   `KIND_NAMES` table (`src/change.rs`), bodies, patches, and per-kind rules
+   (`src/rules/federation.rs`, which holds `origin` and `receiver` on one
+   record). A feed row whose `kind` is `federationReceiverGrant` decodes to
+   `DecodeError::UnknownKind` there — a hard error, not a skip. Nothing in CI
+   catches it: the write-parity fixture
+   (`crates/roomy-ingest/tests/fixtures/writes.json`) carries no grant case at
+   all. Port the split and add grant cases to the fixture before the Rust
+   appserver reads a feed this branch wrote.
